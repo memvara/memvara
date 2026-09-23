@@ -111,10 +111,18 @@ suites — found four defects in code that had never run, all now fixed:
   output side.** Corrected against measured prompt sizes; the procedure and the numbers now
   live in exactly one place, `bench/evalkit.py`'s module docstring.
 
-What a hosted run still cannot do is resume: `run()` issues its calls one at a time with no
-concurrency and no checkpoint, so LOCOMO is a 2–3 hour foreground process that writes
-nothing until it finishes. Slice it with `--shuffle SEED --limit N`, or use the
-`--reader file` dump/answers round trip, which is a resume mechanism that already exists.
+A hosted run can now resume and issue its model calls in parallel. `--checkpoint PATH`
+appends every completed call to a JSONL file as it completes, and a re-run with the same
+path replays those calls instead of paying for them again; `--concurrency N` issues N
+calls at once, with the results and the cost ledger assembled in question order, so the
+report is the same whatever N is. Both live in `bench/evalkit.py` and serve the two
+runners and `demo/harness.py` alike. `demo/harness.py` also gained `--reader
+anthropic|openai`, with the model id, effort, output budget and thinking setting pinned
+by flags and printed under the report's title, and `--corpus-scale N`, which pads the
+authored history with generated tickets that name no value a question is about
+(`demo/distractors.py`), so the token argument can be measured at two sizes rather than
+argued from one. The apparatus for the judged number on this corpus therefore exists in
+full; the run itself is still to be made.
 
 ---
 
@@ -761,16 +769,30 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
 1. **End-to-end answer quality has an apparatus and one non-reproducible run, and no
    benchmark.** `demo/` closed the first half of this: an authored support corpus, twenty
    questions with authored golds, five arms from a no-context floor to a whole-transcript
-   ceiling, and a blinded dump/answer harness. What it does not have is a reader behind an
-   API. The one run used an agent as the reader, so there is no model id, no seed and no
-   temperature to quote, and it cannot be repeated. Two things it did establish are worth
+   ceiling, and a blinded dump/answer harness. It now has a reader behind an API as well
+   — `--reader anthropic|openai`, every parameter pinned and printed under the report's
+   title — but no run has been made with it yet. The one run used an agent as the
+   reader, so there is no model id, no seed and no temperature to quote, and it cannot be
+   repeated. Two things it did establish are worth
    carrying: **at this corpus size the whole-transcript arm scored 100%**, so the memory
    layer's argument here is 5.6× fewer tokens rather than a better answer; and the trap
    metric — the column a before/after claim would rest on — produced **no signal at all**,
    because the reader never gave a superseded value. Still missing on *this* corpus: a
-   hosted reader behind an API, a second corpus size to turn the token argument from a
-   slope into a measurement, and any comparison against mem0 on answers rather than on
-   architecture. A hosted reader has since been run on a different corpus — 0.11.0's
+   run with the hosted reader, at both corpus sizes now that `--corpus-scale` supplies
+   the second.
+
+   The comparison against mem0 **on answers** now has its apparatus but not its run.
+   `--arm-mem0` adds the real `mem0ai` package as a sixth arm, driven by the same oracle
+   `bench/mem0_real.py` uses, so it is handed exactly the facts `memvara_structured` is
+   handed and only architecture differs. What that already shows, without a reader: over
+   the fifteen questions with a superseded value to be wrong with, mem0 asserts that value
+   as a current fact in 13 of 15, and both memvara arms in 0 of 15. That is where a value
+   sits in a prompt, not whether a model was fooled by it, and the second is the number
+   this item is about. `--arm-supermemory` exists too and **has never been run**: it needs
+   an account nobody here has, and the write and search endpoints have no default because
+   the only Supermemory call this repository has ever made is a read. See
+   [`demo/README.md`](../demo/README.md#two-other-systems-as-arms).
+   A hosted reader has since been run on a different corpus — 0.11.0's
    ranked recall, judged on LongMemEval-S through the MemoryBench harness, in
    [`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness)
    — but it says nothing about this authored support scenario, which still needs its own

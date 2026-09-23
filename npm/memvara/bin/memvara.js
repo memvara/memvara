@@ -33,7 +33,7 @@ Options
 
 Credentials, in the order they are looked for:
   1. MEMVARA_API_KEY
-  2. ${CREDENTIALS_PATH}   (written by: memvara-mcp login --project NAME)
+  2. ${CREDENTIALS_PATH}   (written by: memvara-mcp login)
   3. ${OAUTH_PATH}   (written by: npx memvara login)
 
 With none of the three present, the bridge signs you in with a browser on first run.
@@ -117,7 +117,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     } catch (err) {
       process.stderr.write(
         `memvara: sign-in failed: ${err.message}\n` +
-          "  Set MEMVARA_API_KEY instead, or run:  memvara-mcp login --project NAME\n" +
+          "  Set MEMVARA_API_KEY instead, or run:  memvara-mcp login\n" +
           `  which writes ${CREDENTIALS_PATH}.\n`,
       );
       return 2;

@@ -87,11 +87,12 @@ Rather than writing that block by hand:
                      into those clients' skill directories. `--skill-only`
                      skips .mcp.json. `memvara-mcp init --help` for its options.
 
-  memvara-mcp login --project NAME
+  memvara-mcp login
                      Signs in to a memvara-cloud deployment over the device-code
                      flow and writes an API key to ~/.memvara/credentials.json,
-                     for MEMVARA_MODE=cloud. Needs the `cloud` extra. `memvara-mcp
-                     login --help` for its options.
+                     for MEMVARA_MODE=cloud. You choose the project in the
+                     browser. Needs the `cloud` extra. The same flow as
+                     `memvara login`; `memvara-mcp login --help` for its options.
 
 Client configuration:
 

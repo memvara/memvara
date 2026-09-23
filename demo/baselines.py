@@ -202,6 +202,16 @@ class Context:
     #: because the arm builds one store per question and a `warnings.warn` per store is
     #: noise that hides the finding. The harness reports it once, loudly.
     degraded: bool = False
+    #: How the block was read: `"recall"` for the rendering an integration drops into a
+    #: prompt, or `"search"` for a dated question against a hosted deployment, whose
+    #: recall has no time axis — see `demo/hosted.py`. Counted in the report, because a
+    #: row built partly one way and partly the other is two measurements.
+    read: str = "recall"
+    #: Claims the hosted scope held when it was read, or `None` for a local arm. A hosted
+    #: deployment runs its own extractor, possibly after the write returned, so the claim
+    #: tier a hosted `memvara` row was measured on is not known in advance; this is the
+    #: record of what it was.
+    claims_in_scope: int | None = None
 
     @property
     def chars(self) -> int:
@@ -216,6 +226,18 @@ class Context:
 #: What every arm is. Options are keyword-only with defaults so a bare function satisfies
 #: this, and `functools.partial` configures one without a wrapper class.
 Arm = Callable[[Question, Sequence[Turn]], Context]
+
+
+def instant_tag(at: datetime) -> str:
+    """One question instant, as it appears in the name of a store built for it.
+
+    `demo/hosted.py` names a hosted scope with it, and `demo/competitors.py` names both a
+    qdrant collection and a Supermemory container. Spelled once because the format is
+    load-bearing rather than cosmetic: it is the whole of what keeps one instant's store
+    apart from another's, and a caller that wrote it a minute coarser would still look
+    right while quietly sharing a store between two instants.
+    """
+    return f"{at:%Y%m%dT%H%M}"
 
 
 def visible_turns(question: Question, turns: Sequence[Turn]) -> list[Turn]:

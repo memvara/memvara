@@ -92,7 +92,9 @@ four places and three of them drifted.
     export ANTHROPIC_API_KEY=...
     PYTHONPATH=. python3 bench/locomo.py \
         --score answer --reader anthropic --model claude-opus-5 \
+        --effort low --max-tokens 4096 --thinking adaptive \
         --judge llm --context memory --shuffle 7 --limit 200 \
+        --checkpoint results/locomo-memory.checkpoint.jsonl --concurrency 4 \
         --out results/locomo-memory.jsonl
 
 Order of operations, and why each flag is there:
@@ -109,6 +111,13 @@ Order of operations, and why each flag is there:
    `--context full` for the floor and the ceiling; a MEMORY number with neither beside
    it is uninterpretable, which is why all three exist.
 5. `--out PATH` always. The tables are a summary; the JSONL is the run.
+6. **Pin the reader and quote what was pinned.** `--model`, `--effort`, `--max-tokens`
+   and `--thinking` (Anthropic) or `--temperature` and `--sampling-seed` (OpenAI) are
+   printed under the report's title exactly as sent, so the run can be repeated by
+   somebody else. The Anthropic models reject sampling parameters, so none is sent and
+   the header says so; there is no seed to pin on that provider.
+7. `--checkpoint PATH` for any run that costs money, and `--concurrency N` to shorten
+   it. Both are explained below.
 
 **The key.** `ANTHROPIC_API_KEY` for `--reader anthropic`, `OPENAI_API_KEY` for
 `--reader openai`. Both are checked at construction, before the dataset is ingested,
@@ -116,6 +125,23 @@ and the error names the variable and the flag — see `require_key`. That check 
 because `anthropic.Anthropic()` constructs happily without a key and fails on the
 first request, which here is several minutes and one whole ingest later, reading like
 a network fault.
+
+**A server of your own.** `--reader openai` also reads from any server that speaks Chat
+Completions. `--base-url URL` says where, `--api-key-file PATH` reads the bearer key from
+a file at run time (and then `OPENAI_API_KEY` is not consulted at all), and `--extra-body
+JSON` is merged into every request body. The demo's reader is set up this way:
+
+    PYTHONPATH=. python3 demo/harness.py --reader openai --judge llm \
+        --base-url http://100.80.255.55:8888/v1 \
+        --api-key-file ~/.config/memvara/qwen.key \
+        --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_S \
+        --temperature 0 --sampling-seed 7 --max-tokens 512 \
+        --extra-body '{"chat_template_kwargs": {"enable_thinking": false}}'
+
+The base URL and the extra body are printed under the report's title and keyed in the
+checkpoint, because both change the answers; the key file is neither, and it is refused
+if it is missing, empty or readable by other users — see `read_api_key_file`. A
+self-hosted model has no list price, so its tokens are printed with an UNPRICED line.
 
 **There is no key in this repository and none is needed to develop against this
 harness.** `--reader stub` runs the entire pipeline offline; `--reader file` runs it
@@ -166,18 +192,29 @@ table above is for deciding whether to start.
 ## What a run actually takes, and the shape of the risk
 
 Local cost is nothing: ingesting all ten LOCOMO conversations is ~11 s and all 1,986
-retrievals total **4.8 s** (p50 2.4 ms). The wall clock is entirely the API calls, and
-**they are issued one at a time**. There is no concurrency, no checkpoint and no
-resume anywhere in `run()`. At a few seconds per call that is roughly 2–3 hours for
-LOCOMO, doubled with `--judge llm`, as a single foreground process whose partial work
-is not written anywhere until it finishes.
+retrievals total **4.8 s** (p50 2.4 ms). The wall clock is entirely the API calls. By
+default they are issued one at a time, which at a few seconds per call is roughly 2–3
+hours for LOCOMO and double that with `--judge llm`. Two flags change the shape of that
+risk, and a hosted run should carry both:
 
-Two mitigations that need no new machinery. Run it in slices — `--shuffle 7 --limit
-200` is a defensible stratified sample and finishes in twenty minutes. Or use the
-`--reader file` round trip as a resume mechanism: `--dump` once, fill the answers
-JSONL incrementally from whatever is answering, and `--answers` it back; a
-partly-filled file scores what it has and says how much was missing, above the tables
-it damaged.
+* `--checkpoint PATH` appends every completed model call — reader and judge alike — to
+  a JSONL file as it completes, so a run that dies keeps what it paid for. A re-run with
+  the same path replays those calls instead of making them, and the report says how
+  many it replayed. The key covers the reader's pinned settings and the whole prompt, so
+  a changed model, effort, budget or context source starts a fresh set of rows rather
+  than replaying another configuration's answers. See `Checkpoint`.
+* `--concurrency N` issues N model calls at once. Ingestion and retrieval stay
+  sequential, because they touch the store, and results are assembled in question
+  order, so the report is identical whatever N is and only the wall clock moves. See
+  `parallel_map`. The provider SDKs retry a rate limit twice with backoff; a run that
+  still dies on one resumes from its checkpoint.
+
+The two older mitigations still work. Run it in slices — `--shuffle 7 --limit 200` is a
+defensible stratified sample and finishes in twenty minutes — or use the `--reader file`
+round trip, which is a resume mechanism with a person in the loop: `--dump` once, fill
+the answers JSONL incrementally from whatever is answering, and `--answers` it back; a
+partly-filled file scores what it has and says how much was missing, above the tables it
+damaged.
 
 ## These are public benchmarks, and a good score on them proves less than it looks
 
@@ -202,12 +239,14 @@ the other. Quote both or state which one you are quoting.
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import os
 import random
 import re
 import string
+import threading
 import time
 import urllib.request
 from collections import Counter
@@ -834,6 +873,41 @@ def require_key(variable: str, flag: str) -> None:
         )
 
 
+def read_api_key_file(path: str) -> str:
+    """The bearer key in `path`, or a refusal that names the path and never the key.
+
+    For a server whose key lives in a file outside the repository — the demo's reader
+    reads `~/.config/memvara/qwen.key` this way — so that the key is never on a command
+    line, in shell history, in the environment of every child process, or in a report.
+    Read once, at construction, before anything is ingested.
+
+    Refused rather than warned about, and each refusal says what to do:
+
+    * a missing file, because the run would otherwise fail on its first request, after
+      the whole ingest, reading like a network fault;
+    * an empty one, for the same reason;
+    * one that other users can read (any group or other permission bit), because a
+      warning scrolls past and the key has already leaked. This is the rule ssh applies
+      to a private key. Checked on POSIX only: Windows has no such bits to read.
+
+    No message quotes the file's content, even partly. `~` is expanded, because a shell
+    does not expand it inside `--api-key-file=~/...`.
+    """
+    resolved = Path(path).expanduser()
+    if not resolved.is_file():
+        raise SystemExit(f"\n  --api-key-file: {resolved} does not exist. Create it with "
+                         "the server's key on one line, then chmod 600 it.\n")
+    if os.name == "posix" and resolved.stat().st_mode & 0o077:
+        raise SystemExit(f"\n  --api-key-file: {resolved} can be read by other users "
+                         f"(mode {resolved.stat().st_mode & 0o777:o}). Run chmod 600 on "
+                         "it first; a key file anyone else can read is refused.\n")
+    key = resolved.read_text(encoding="utf-8").strip()
+    if not key:
+        raise SystemExit(f"\n  --api-key-file: {resolved} is empty. It should hold the "
+                         "server's key on one line.\n")
+    return key
+
+
 def build_prompt(question: str, context: str, *, asked_on: str | None = None) -> str:
     """The reader's user turn: the question first, then whatever retrieval produced.
 
@@ -974,6 +1048,23 @@ class AnthropicReader:
         require_key("ANTHROPIC_API_KEY", "--reader anthropic")
         return anthropic.Anthropic()
 
+    def settings(self) -> dict[str, Any]:
+        """Every request parameter this reader pins, as the report header prints it and
+        as the checkpoint keys on it. `thinking` is `None` when nothing was sent."""
+        return {"model": self.model, "effort": self.effort, "max_tokens": self.max_tokens,
+                "thinking": dict(self.thinking) if self.thinking is not None else None}
+
+    def spawn(self, model: str | None = None) -> "AnthropicReader":
+        """The same reader, same client and same settings, with the model swapped.
+
+        This is how `--judge-model` builds the judge: a run then has one stated
+        configuration with one line of difference, rather than a judge quietly running
+        at a different effort or output budget from the reader.
+        """
+        return AnthropicReader(model=model or self.model, client=self._client,
+                               effort=self.effort, max_tokens=self.max_tokens,
+                               thinking=self.thinking)
+
     def answer(self, system: str, prompt: str) -> Answer:
         extra = {"thinking": self.thinking} if self.thinking is not None else {}
         response = self._client.messages.create(
@@ -988,7 +1079,37 @@ class AnthropicReader:
 
 
 class OpenAIReader:
-    """Reader backed by Chat Completions, mirroring `memvara/llm/openai.py`'s transport."""
+    """Reader backed by Chat Completions, mirroring `memvara/llm/openai.py`'s transport.
+
+    `seed` is the one sampling parameter of the two providers that pins anything: Chat
+    Completions accepts it as best-effort determinism. It is sent only when given, so a
+    run that did not ask for one is not quietly a seeded run, and the report header
+    prints whichever was the case.
+
+    ## A server of your own
+
+    Any server that speaks Chat Completions works, and the answer-quality demo is run
+    against one: llama.cpp serving a quantized Qwen model on a private network. Three
+    settings make that possible, and each one is printed, keyed and tested for what it
+    does, because each changes either the answers or who can see the run:
+
+    * `base_url` is where every request goes. A different server is a different build of
+      the model, so it is part of `settings()` and of the checkpoint key.
+    * `api_key_file` is where the bearer key is read from, at construction and nowhere
+      else — see `read_api_key_file`. The key is never an attribute, a setting, a header
+      line or a log line; with a file given, `OPENAI_API_KEY` is not consulted at all,
+      so a public OpenAI key cannot be sent to a private server by accident.
+    * `extra_body` is merged into the top level of every request body. llama.cpp reads
+      `chat_template_kwargs` there, and `{"enable_thinking": false}` is what switches a
+      Qwen model's thinking off — a run with it on is a different experiment, so it is
+      printed and keyed like the base URL.
+
+    Both settings appear in `settings()` only when they are set, so an ordinary OpenAI
+    run keeps the checkpoint ids it had before either existed.
+
+    A self-hosted model has no list price, so a run against one prints its tokens and an
+    UNPRICED line under the cost table rather than a dollar figure it could not know.
+    """
 
     is_stub = False
     is_human = False
@@ -999,15 +1120,44 @@ class OpenAIReader:
         client: Any = None,
         max_tokens: int = 1024,
         temperature: float = 0.0,
+        seed: int | None = None,
+        base_url: str | None = None,
+        api_key_file: str | None = None,
+        extra_body: Mapping[str, Any] | None = None,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.seed = seed
+        self.base_url = base_url
+        self.extra_body = dict(extra_body) if extra_body is not None else None
         self.name = f"openai/{model}"
-        self._client = client if client is not None else self._default_client()
+        self._client = (client if client is not None
+                        else self._default_client(base_url, api_key_file))
+
+    def settings(self) -> dict[str, Any]:
+        """See `AnthropicReader.settings`. `seed` is `None` when none was sent; the
+        server and the extra body are present only when set, and the key never is."""
+        out: dict[str, Any] = {"model": self.model, "max_tokens": self.max_tokens,
+                               "temperature": self.temperature, "seed": self.seed}
+        if self.base_url is not None:
+            out["base_url"] = self.base_url
+        if self.extra_body is not None:
+            out["extra_body"] = dict(self.extra_body)
+        return out
+
+    def spawn(self, model: str | None = None) -> "OpenAIReader":
+        """See `AnthropicReader.spawn`. The twin keeps the client, the server and the
+        extra body: a judge that lost the base URL would send every grading prompt,
+        gold answers included, to a different provider."""
+        return OpenAIReader(model=model or self.model, client=self._client,
+                            max_tokens=self.max_tokens, temperature=self.temperature,
+                            seed=self.seed, base_url=self.base_url,
+                            extra_body=self.extra_body)
 
     @staticmethod
-    def _default_client() -> Any:
+    def _default_client(base_url: str | None = None,
+                        api_key_file: str | None = None) -> Any:
         try:
             import openai
         except ImportError as exc:
@@ -1016,10 +1166,19 @@ class OpenAIReader:
                 "Pass client= to inject one, or run with --reader stub to exercise the "
                 "harness offline."
             ) from exc
-        require_key("OPENAI_API_KEY", "--reader openai")
-        return openai.OpenAI()
+        options: dict[str, Any] = {}
+        if base_url is not None:
+            options["base_url"] = base_url
+        if api_key_file is not None:
+            options["api_key"] = read_api_key_file(api_key_file)
+        else:
+            require_key("OPENAI_API_KEY", "--reader openai")
+        return openai.OpenAI(**options)
 
     def answer(self, system: str, prompt: str) -> Answer:
+        extra: dict[str, Any] = {"seed": self.seed} if self.seed is not None else {}
+        if self.extra_body is not None:
+            extra["extra_body"] = dict(self.extra_body)
         response = self._client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
@@ -1028,11 +1187,370 @@ class OpenAIReader:
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
+            **extra,
         )
         choices = _attr(response, "choices") or []
         message = _attr(choices[0], "message") if choices else None
         text = str(_attr(message, "content") or "") if message is not None else ""
         return _usage(response, self.model, text.strip())
+
+
+# --- checkpoint and bounded concurrency for hosted runs ---------------------------
+#
+# A hosted run is wall-clock bound by its model calls, and until this section existed
+# it issued them one at a time and kept every answer in memory until the report
+# printed, so a LOCOMO run that died two hours in had nothing to show for the money.
+# `Checkpoint` and `CheckpointedReader` write every completed call to disk as it
+# completes and replay it on the next run with the same path; `parallel_map` issues a
+# bounded number of calls at once. Both are reader-agnostic — they wrap the stub as
+# readily as a model — which is how the tests rehearse them with no key.
+
+
+def reader_settings(reader: Reader) -> dict[str, Any]:
+    """The request parameters a reader pins, or its name for a reader that pins none.
+
+    The stub, the file reader and a test double have no `settings()`; their name is
+    what identifies the configuration, and it is enough for a checkpoint key.
+    """
+    getter = getattr(reader, "settings", None)
+    return dict(getter()) if callable(getter) else {"reader": reader.name}
+
+
+def call_id(settings: Mapping[str, Any], system: str, prompt: str) -> str:
+    """How a checkpointed call is addressed: a digest of everything that was sent.
+
+    `item_id` hashes the user prompt alone, which is what a blinded dump needs (the
+    answerer must not be able to tell arms apart by id) and not what a checkpoint
+    needs. The same prompt under a different system prompt, or sent to a different
+    model at a different effort, is a different call, and replaying one as the other
+    would score an answer nobody asked for. So the key covers the reader's pinned
+    settings as well, and a run whose `--model` or `--effort` changed never replays the
+    previous configuration's answers: it starts a fresh set of rows in the same file,
+    and `checkpoint_note` says so when that happens.
+    """
+    blob = (json.dumps(settings, sort_keys=True, default=str) + "\x00" + system
+            + "\x00" + prompt)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+#: The `Answer` fields a checkpoint row carries besides `answer`, its text.
+_CHECKPOINT_FIELDS = ("model", "input_tokens", "output_tokens", "cache_read_tokens",
+                      "cache_write_tokens", "stop_reason")
+
+
+class Checkpoint:
+    """Every completed model call of a run, one JSON line each, appended as it completes.
+
+    Appended and closed per call rather than written at the end, because what matters
+    is what survives a crash: a run killed after its 900th answer leaves 900 answers on
+    disk, and a re-run with the same path replays them instead of paying again.
+
+    Loading tolerates what a crash produces. A torn last line is skipped and counted in
+    `unreadable` — refusing the whole file would throw away every answer it holds at
+    exactly the moment they are needed — and the report says how many calls will be
+    repeated because of it. An id that appears twice keeps its first row: the only way
+    to get one is two identical prompts answered in the same run under concurrency, so
+    there is no intent to recover, unlike a duplicate in a `FileReader` answers file.
+
+    `resumed`, `repeated` and `misses` count what the readers wrapped around this file
+    asked of it, so one note covers a reader and the judge spawned from it. A hit is
+    `resumed` when the row was on disk before this run started, and `repeated` when the
+    row was written earlier in this same run: two arms giving the byte-identical answer
+    to one question put the byte-identical grading call to the judge, and the second
+    reuses the first's verdict rather than paying for a second, possibly different, one.
+    The report says which kind of hit it counted, because "replayed 120 calls" on a run
+    that never died would otherwise read as a resume.
+    """
+
+    def __init__(self, path: str | os.PathLike[str]) -> None:
+        self.path = Path(path)
+        self._rows: dict[str, Answer] = {}
+        self._lock = threading.Lock()
+        #: Keys a caller has claimed and not yet stored, each with the event that other
+        #: callers wait on. See `begin`.
+        self._inflight: dict[str, threading.Event] = {}
+        self.unreadable = 0
+        self.resumed = 0
+        self.repeated = 0
+        self.misses = 0
+        if self.path.exists():
+            for line in self.path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                    key = str(row["id"])
+                    answer = Answer(
+                        text=str(row.get("answer") or ""),
+                        model=str(row.get("model") or "stub"),
+                        input_tokens=int(row.get("input_tokens") or 0),
+                        output_tokens=int(row.get("output_tokens") or 0),
+                        cache_read_tokens=int(row.get("cache_read_tokens") or 0),
+                        cache_write_tokens=int(row.get("cache_write_tokens") or 0),
+                        stop_reason=str(row.get("stop_reason") or ""),
+                    )
+                except (ValueError, KeyError, TypeError):
+                    self.unreadable += 1
+                    continue
+                self._rows.setdefault(key, answer)
+        #: The keys the file held when this process opened it, and how many.
+        self.on_disk = frozenset(self._rows)
+        self.loaded = len(self.on_disk)
+
+    def __len__(self) -> int:
+        return len(self._rows)
+
+    @property
+    def hits(self) -> int:
+        return self.resumed + self.repeated
+
+    def get(self, key: str) -> Answer | None:
+        return self._rows.get(key)
+
+    def begin(self, key: str) -> tuple[Answer | None, bool]:
+        """Look `key` up and, on a miss, say whether this caller owns the call.
+
+        Returns `(answer, mine)`. An answer means a hit. `mine` is true when no other
+        caller is already making this call, and the caller that gets it must finish with
+        `put` or `abandon`; false means somebody else is making it, and the caller should
+        `wait` and look again.
+
+        This exists because looking up and deciding to pay have to be one step. Under
+        `--concurrency N` two threads can put the byte-identical prompt to the reader at
+        once — two arms whose contexts produced the same grading call, most often — and
+        with a plain `get` both miss, both pay, and the checkpoint records one row and two
+        misses. The duplicate is a real model call on a real invoice, and nothing in the
+        report distinguishes it from a genuine miss.
+        """
+        with self._lock:
+            row = self._rows.get(key)
+            if row is not None:
+                return row, False
+            if key not in self._inflight:
+                self._inflight[key] = threading.Event()
+                return None, True
+            return None, False
+
+    def wait(self, key: str, timeout: float | None = None) -> None:
+        """Block until whoever claimed `key` stores it or gives it up."""
+        with self._lock:
+            event = self._inflight.get(key)
+        if event is not None:
+            event.wait(timeout)
+
+    def abandon(self, key: str) -> None:
+        """Give up a claim whose call raised, so a waiter retries instead of hanging."""
+        self._release(key)
+
+    def _release(self, key: str) -> None:
+        with self._lock:
+            event = self._inflight.pop(key, None)
+        if event is not None:
+            event.set()
+
+    def put(self, key: str, answer: Answer) -> None:
+        with self._lock:
+            if key in self._rows:
+                self._release_locked(key)
+                return
+            self._rows[key] = answer
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as out:
+                out.write(json.dumps(
+                    {"id": key, "answer": answer.text,
+                     **{name: getattr(answer, name) for name in _CHECKPOINT_FIELDS}},
+                    ensure_ascii=False) + "\n")
+            self._release_locked(key)
+
+    def _release_locked(self, key: str) -> None:
+        """`_release`, for a caller that already holds the lock."""
+        event = self._inflight.pop(key, None)
+        if event is not None:
+            event.set()
+
+    def count(self, key: str, hit: bool) -> None:
+        with self._lock:
+            if not hit:
+                self.misses += 1
+            elif key in self.on_disk:
+                self.resumed += 1
+            else:
+                self.repeated += 1
+
+
+class CheckpointedReader:
+    """A reader that replays what its checkpoint holds and records what it does not.
+
+    Wraps any reader — a model, the stub, a test double — and addresses each call by
+    `call_id` over the inner reader's pinned settings, the system prompt and the user
+    prompt. A hit comes back with the tokens and the stop reason it was stored with, so
+    a resumed run's ledger prices the whole run rather than the part this process paid
+    for, and a truncation that happened last time is still counted this time. The
+    report prints how many calls were replayed beside the total, so this invocation's
+    own spend is recoverable from it.
+
+    `is_stub`, `is_human`, `name` and `model` are the inner reader's: the report's
+    banners and the ledger's prices are decided by what answered, not by the wrapper.
+    """
+
+    def __init__(self, inner: Reader, checkpoint: Checkpoint) -> None:
+        self.inner = inner
+        self.checkpoint = checkpoint
+        self.name = inner.name
+        # `getattr` with a default, as every reader of these flags in this module does:
+        # a test double declares only the flags it needs.
+        self.is_stub = bool(getattr(inner, "is_stub", False))
+        self.is_human = bool(getattr(inner, "is_human", False))
+        self._settings = reader_settings(inner)
+
+    @property
+    def model(self) -> str:
+        return str(getattr(self.inner, "model", "stub"))
+
+    def settings(self) -> dict[str, Any]:
+        return dict(self._settings)
+
+    def spawn(self, model: str | None = None) -> "CheckpointedReader":
+        """The inner reader's twin, sharing this checkpoint. See `AnthropicReader.spawn`."""
+        return CheckpointedReader(self.inner.spawn(model), self.checkpoint)
+
+    def answer(self, system: str, prompt: str) -> Answer:
+        """The stored answer for this call, or the inner reader's, stored as it returns.
+
+        The loop is what makes one call per key true under `--concurrency N`. `begin`
+        hands exactly one caller the right to make the call; anybody else waits and then
+        looks again, and finds the row the first caller stored — counted as a hit, which
+        is what it is. A call that raises is abandoned rather than left claimed, so the
+        waiters retry instead of blocking until the run is killed.
+        """
+        key = call_id(self._settings, system, prompt)
+        while True:
+            stored, mine = self.checkpoint.begin(key)
+            if stored is not None:
+                self.checkpoint.count(key, hit=True)
+                return stored
+            if mine:
+                try:
+                    out = self.inner.answer(system, prompt)
+                except BaseException:
+                    self.checkpoint.abandon(key)
+                    raise
+                self.checkpoint.put(key, out)
+                self.checkpoint.count(key, hit=False)
+                return out
+            self.checkpoint.wait(key)
+
+
+def checkpoint_note(reader: Reader) -> str:
+    """What the checkpoint replayed, for the report. `""` for a reader without one."""
+    if not isinstance(reader, CheckpointedReader):
+        return ""
+    cp = reader.checkpoint
+    asked = cp.hits + cp.misses
+    kinds = []
+    if cp.resumed:
+        kinds.append(f"{cp.resumed:,} from rows already on disk")
+    if cp.repeated:
+        kinds.append(f"{cp.repeated:,} repeats of a call made earlier in this run, "
+                     "which reused its answer")
+    lines = [f"  checkpoint {cp.path}: replayed {cp.hits:,} of {asked:,} model calls"
+             + (f" ({'; '.join(kinds)})" if kinds else "")
+             + f"; the file holds {len(cp):,} rows."]
+    if cp.unreadable:
+        lines.append(f"  {cp.unreadable:,} unreadable line(s) in it were skipped — a run "
+                     "killed mid-write leaves one — and those calls were made again.")
+    if cp.loaded and asked and not cp.resumed:
+        lines.append(
+            f"  NONE of the {cp.loaded:,} rows already in the file matched this run. The "
+            "key covers the\n  reader's model, effort, output budget and thinking "
+            "setting and the whole prompt, so a\n  changed --model, --effort, "
+            "--max-tokens, --thinking, --k, --max-chars or --context starts\n  a fresh "
+            "set of rows; the earlier ones are still in the file, untouched.")
+    return "\n".join(lines)
+
+
+def parallel_map(fn: Callable[[Any], Any], items: Iterable[Any], *,
+                 concurrency: int = 1) -> list[Any]:
+    """Apply `fn` to every item, at most `concurrency` at a time, results in input order.
+
+    At `concurrency` 1 — the default, and the whole of the offline path — this is a
+    plain loop on the calling thread, so the stub run stays byte-for-byte the run it was
+    before this function existed. Above 1 it is a thread pool, which is the right shape
+    for calls that spend their time waiting on a provider.
+
+    Results come back in input order whatever order they finished in, because the
+    caller pairs them with questions by position. The first exception is re-raised after
+    the calls already in flight have finished — their checkpoint rows are the reason to
+    let them — and the calls still queued are cancelled rather than started.
+    """
+    todo = list(items)
+    if concurrency <= 1:
+        return [fn(item) for item in todo]
+    results: list[Any] = [None] * len(todo)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
+    try:
+        futures = {pool.submit(fn, item): index for index, item in enumerate(todo)}
+        for future in concurrent.futures.as_completed(futures):
+            results[futures[future]] = future.result()
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    return results
+
+
+def score_in_order(fn: Callable[[Any], tuple[Any, Sequence[tuple[str, Answer]]]],
+                   items: Iterable[Any], *, ledger: TokenLedger,
+                   concurrency: int = 1) -> list[Any]:
+    """Run `fn` over `items`, `concurrency` at a time, and bill its calls in item order.
+
+    `fn` returns `(result, calls)`, where `calls` is what the reader and the judge
+    returned for that item as `(role, Answer)` pairs. They are recorded into `ledger`
+    here — on the calling thread, in item order — rather than inside `fn`, because that
+    is what keeps the ledger, and with it the cost block and the truncation counts,
+    identical whatever the concurrency was. Every runner's answer loop is this function
+    around its own `finish_one`.
+    """
+    results = []
+    for result, calls in parallel_map(fn, items, concurrency=concurrency):
+        for role, answer in calls:
+            ledger.record(role, answer)
+        results.append(result)
+    return results
+
+
+def reader_settings_lines(reader: Reader, *, sampling_note: bool = True) -> list[str]:
+    """The pinned request parameters, rendered for a report header.
+
+    Empty for a reader that pins none (the stub, the file reader). For the Anthropic
+    reader it also says that no sampling parameter was sent, because a reader of the
+    report would otherwise wonder which temperature produced the number, and the answer
+    — the current models reject `temperature`, `top_p` and `top_k` outright — is not
+    something a header can leave to be inferred from an absence. `sampling_note=False`
+    drops that line, for a judge printed under a reader that already carries it.
+    """
+    inner = reader.inner if isinstance(reader, CheckpointedReader) else reader
+    if not callable(getattr(inner, "settings", None)):
+        return []
+    parts = []
+    for key, value in reader_settings(inner).items():
+        if value is None:
+            parts.append(f"{key}=not sent" + (" (the model's own default)"
+                                               if key == "thinking" else ""))
+        elif isinstance(value, dict):
+            parts.append(f"{key}={json.dumps(value, sort_keys=True)}")
+        else:
+            parts.append(f"{key}={value}")
+    lines = ["    " + "  ".join(parts)]
+    if sampling_note and isinstance(inner, AnthropicReader):
+        lines.append("    temperature, top_p, top_k: not accepted by this model family, "
+                     "so none was sent and\n    there is no sampling seed to pin; "
+                     "re-runs will differ, and the sample size is printed")
+    return lines
+
+
+def run_settings_block(reader: Reader) -> str:
+    """The header lines a hosted run is quoted with, or `""` for a reader with none."""
+    lines = reader_settings_lines(reader)
+    return "\n".join([f"  reader {reader.name}:", *lines]) if lines else ""
 
 
 # --- judges ---------------------------------------------------------------------
@@ -1142,20 +1660,27 @@ class Price:
     cache_write_multiplier: float = 1.25
 
 
-#: Published list prices, per million tokens, as of 2026-06-24. These drift; a run that
-#: matters should re-check them. A model missing from this table is *not* free — it is
-#: reported as unpriced, and its tokens still appear in the token totals.
+#: Published list prices, per million tokens, checked against
+#: https://platform.claude.com/docs/en/about-claude/pricing on the date in
+#: `PRICES_AS_OF`. These drift; a run that matters should re-check them. A model
+#: missing from this table is *not* free — it is reported as unpriced, and its tokens
+#: still appear in the token totals.
+#:
+#: `claude-sonnet-5` was listed here at $3 / $15, the rise that was announced for
+#: 1 September 2026. That rise was cancelled and the launch price of $2 / $10 is the
+#: standard price, which the pricing page says in as many words; the row was corrected
+#: on 2026-09-13.
 PRICES: dict[str, Price] = {
     "claude-fable-5": Price(10.00, 50.00),
     "claude-opus-5": Price(5.00, 25.00),
     "claude-opus-4-8": Price(5.00, 25.00),
     "claude-opus-4-7": Price(5.00, 25.00),
-    "claude-sonnet-5": Price(3.00, 15.00),
+    "claude-sonnet-5": Price(2.00, 10.00),
     "claude-sonnet-4-6": Price(3.00, 15.00),
     "claude-haiku-4-5": Price(1.00, 5.00),
     "stub": Price(0.0, 0.0),
 }
-PRICES_AS_OF = "2026-06-24"
+PRICES_AS_OF = "2026-09-13"
 
 
 #: Stop reasons that mean the model finished saying what it meant to say. Everything
@@ -2318,9 +2843,7 @@ def add_common_arguments(parser: Any) -> None:
     parser.add_argument("--dump-seed", type=int, default=20260809,
                         help="--reader file: shuffle seed for the dump, recorded in the "
                              "key file so the order is recoverable afterwards")
-    parser.add_argument("--model", default=None, help="reader model id")
-    parser.add_argument("--effort", default="low",
-                        help="Anthropic reader effort (low|medium|high|xhigh|max)")
+    add_reader_arguments(parser)
     parser.add_argument("--judge", default="none",
                         choices=["none", "containment", "llm"])
     parser.add_argument("--judge-model", default=None,
@@ -2365,18 +2888,148 @@ def add_common_arguments(parser: Any) -> None:
     parser.add_argument("--out", default=None, help="write per-question JSONL here")
 
 
+def add_reader_arguments(parser: Any) -> None:
+    """The flags that pin a hosted reader, shared by the runners and `demo/harness.py`.
+
+    One definition, so a number from the demo and a number from a runner are quoted
+    with the same vocabulary. Every one of these is printed in the report header by
+    `run_settings_block`, which is what makes a hosted run reproducible and quotable:
+    a number with no model id, output budget or thinking setting beside it cannot be
+    repeated by anyone, including the person who produced it.
+    """
+    parser.add_argument("--model", default=None, help="reader model id")
+    parser.add_argument("--effort", default="low",
+                        help="Anthropic reader effort (low|medium|high|xhigh|max)")
+    parser.add_argument("--max-tokens", type=int, default=None, metavar="N",
+                        help="reader output budget; the reader's own default when "
+                             "omitted (4096 Anthropic, 1024 OpenAI). On a model that "
+                             "thinks, thinking and the answer share it")
+    parser.add_argument("--thinking", default="default",
+                        choices=["default", "adaptive", "disabled"],
+                        help="Anthropic reader: default sends no thinking field and the "
+                             "model applies its own default; adaptive and disabled send "
+                             "that setting explicitly. Printed in the report header")
+    parser.add_argument("--temperature", type=float, default=None,
+                        help="OpenAI reader sampling temperature (default 0.0). The "
+                             "Anthropic models reject sampling parameters, so none is "
+                             "sent there")
+    parser.add_argument("--sampling-seed", type=int, default=None, metavar="SEED",
+                        help="OpenAI reader seed, sent only when given: best-effort "
+                             "determinism on that provider. The Anthropic API has no "
+                             "equivalent")
+    # The three that point `--reader openai` at a server of your own. Printed in the
+    # header and keyed in the checkpoint, except the key, which is neither.
+    parser.add_argument("--base-url", default=None, metavar="URL",
+                        help="OpenAI reader: send requests to this OpenAI-compatible "
+                             "server instead of OpenAI's, e.g. http://host:8888/v1")
+    parser.add_argument("--api-key-file", default=None, metavar="PATH",
+                        help="OpenAI reader: read the bearer key from this file (mode "
+                             "600) at run time. Never printed; OPENAI_API_KEY is not "
+                             "consulted when this is given")
+    parser.add_argument("--extra-body", default=None, metavar="JSON",
+                        help="OpenAI reader: a JSON object merged into every request "
+                             "body, e.g. '{\"chat_template_kwargs\": "
+                             "{\"enable_thinking\": false}}'. Printed in the header")
+    parser.add_argument("--concurrency", type=int, default=1, metavar="N",
+                        help="model calls in flight at once, reader and judge alike. "
+                             "1, the default, issues them one at a time on the calling "
+                             "thread")
+    parser.add_argument("--checkpoint", default=None, metavar="PATH",
+                        help="append every completed model call to this JSONL as it "
+                             "completes; a re-run with the same path replays those "
+                             "calls instead of paying for them again")
+
+
+#: What `--thinking` sends. `default` sends nothing, which is the honest reading of
+#: "we did not configure this": the model applies its own default, and the header
+#: prints that nothing was sent rather than guessing what the default was.
+THINKING_SETTINGS: dict[str, Mapping[str, Any] | None] = {
+    "default": None,
+    "adaptive": {"type": "adaptive"},
+    "disabled": {"type": "disabled"},
+}
+
+
+def parse_extra_body(raw: str | None) -> dict[str, Any] | None:
+    """`--extra-body`'s JSON, as the object it has to be, or a refusal naming the flag.
+
+    An object and nothing else, because the SDK merges it key by key into the top level
+    of the request body; a list or a string there is not a malformed setting the server
+    would reject, it is one the SDK would fail on mid-run.
+    """
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError as exc:
+        raise SystemExit(f"--extra-body is not JSON: {exc}. Pass an object, for example "
+                         '\'{"chat_template_kwargs": {"enable_thinking": false}}\'.') \
+            from exc
+    if not isinstance(value, dict):
+        raise SystemExit("--extra-body must be a JSON object, whose keys are merged into "
+                         f"every request body; got {type(value).__name__}.")
+    return value
+
+
+def hosted_reader(provider: str, args: Any, *,
+                  default_model: str = "claude-opus-5") -> Reader:
+    """An API reader built from the `add_reader_arguments` flags.
+
+    A flag left at `None` means the reader's own default, so a run that did not pass
+    `--max-tokens` still prints the value it ran with rather than "default".
+    """
+    pinned = {name: value for name, value in (
+        ("max_tokens", getattr(args, "max_tokens", None)),
+    ) if value is not None}
+    base_url = getattr(args, "base_url", None)
+    api_key_file = getattr(args, "api_key_file", None)
+    extra_body = getattr(args, "extra_body", None)
+    if provider == "anthropic":
+        # Refused rather than ignored: a run whose command line names a server of its
+        # own and which then answers from Anthropic's would be quoted as the first.
+        given = [flag for flag, value in (("--base-url", base_url),
+                                          ("--api-key-file", api_key_file),
+                                          ("--extra-body", extra_body)) if value]
+        if given:
+            raise SystemExit(f"{', '.join(given)} apply to --reader openai, which is the "
+                             "reader an OpenAI-compatible server of your own uses.")
+        return AnthropicReader(
+            model=args.model or default_model, effort=args.effort,
+            thinking=THINKING_SETTINGS[getattr(args, "thinking", "default")], **pinned)
+    if provider == "openai":
+        temperature = getattr(args, "temperature", None)
+        if temperature is not None:
+            pinned["temperature"] = temperature
+        return OpenAIReader(model=args.model or "gpt-4.1",
+                            seed=getattr(args, "sampling_seed", None),
+                            base_url=base_url, api_key_file=api_key_file,
+                            extra_body=parse_extra_body(extra_body), **pinned)
+    raise SystemExit(f"--reader {provider} is not a hosted reader; use anthropic or openai")
+
+
 def build_reader(args: Any, *, default_model: str = "claude-opus-5",
                  system_label: str = "memvara") -> Reader:
+    checkpoint = getattr(args, "checkpoint", None)
     # `--reader file` outranks `--dry-run`, because the fixture is the cheapest way to
     # rehearse a dump before pointing one at 1,986 real questions.
     if args.reader == "file":
+        # The round trip is its own resume mechanism, and neither flag can apply to it:
+        # a checkpoint around a dump-mode reader would store its empty placeholder
+        # answers and replay them over the real ones next time, and the answerer is a
+        # person, so there is nothing for a pool to issue at once.
+        if checkpoint:
+            raise SystemExit("--checkpoint cannot be used with --reader file: the dump "
+                             "and answers files already are the resume mechanism.")
+        if getattr(args, "concurrency", 1) > 1:
+            raise SystemExit("--concurrency does nothing with --reader file: the "
+                             "answerer is a person or an agent outside this process.")
         return FileReader(dump=args.dump, answers=args.answers, seed=args.dump_seed,
                           system_label=system_label)
-    if args.dry_run or args.reader == "stub":
-        return StubReader()
-    if args.reader == "anthropic":
-        return AnthropicReader(model=args.model or default_model, effort=args.effort)
-    return OpenAIReader(model=args.model or "gpt-4.1")
+    reader = (StubReader() if args.dry_run or args.reader == "stub"
+              else hosted_reader(args.reader, args, default_model=default_model))
+    if checkpoint:
+        return CheckpointedReader(reader, Checkpoint(checkpoint))
+    return reader
 
 
 #: The embedder every published number was produced with. Pinned rather than
@@ -2518,8 +3171,16 @@ def build_judge(args: Any, reader: Reader) -> Judge | None:
             "--judge llm needs a real reader: pass --reader anthropic or --reader "
             "openai, or use --judge containment for the offline string-match judge."
         )
-    if args.judge_model and args.reader == "anthropic":
-        return LLMJudge(AnthropicReader(model=args.judge_model, effort=args.effort))
+    if args.judge_model:
+        # The reader's twin with the model swapped, so the judge runs at the reader's
+        # effort, output budget and thinking setting, on the reader's provider, and the
+        # run states one configuration. It used to be a bare `AnthropicReader` carrying
+        # only the effort, and only when the reader was Anthropic.
+        spawn = getattr(reader, "spawn", None)
+        if spawn is None:
+            raise SystemExit("--judge-model needs an API reader: pass --reader "
+                             "anthropic or --reader openai.")
+        return LLMJudge(spawn(args.judge_model))
     return LLMJudge(reader)
 
 

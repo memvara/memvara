@@ -806,9 +806,10 @@ def test_every_tool_the_skill_names_is_one_the_server_serves() -> None:
 def test_the_usage_names_a_command_that_exists() -> None:
     """The help text is what a user retypes, so it has to name the real console script.
 
-    It said `memvara init`, and there is no `memvara` command — `[project.scripts]`
-    declares `memvara-mcp` and nothing else, so anyone copying the first line of the
-    usage got "command not found" at the one moment they were following instructions.
+    It said `memvara init`, and `memvara init` does not exist — `init` is a subcommand
+    of `memvara-mcp` alone, and the `memvara` script carries only `login`, `logout` and
+    `whoami` — so anyone copying the first line of the usage got an error at the one
+    moment they were following instructions.
     The same class as a README naming an unexported symbol: prose that resolves to
     nothing, invisible to every test that only compares the string against itself.
 

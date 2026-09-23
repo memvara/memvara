@@ -1189,7 +1189,10 @@ tells the customer the right thing. [`demo/`](../demo/) is the apparatus for tha
 
 ```
 demo/scenario.py    64 turns of one customer's support history, and 20 questions
+demo/distractors.py generated tickets that scale the history without moving any fact
 demo/baselines.py   five context-building arms
+demo/hosted.py      the two memvara arms against a memvara-cloud project
+demo/competitors.py two more arms, mem0 and Supermemory, off unless asked for
 demo/harness.py     a blinded dump/answer round trip over those arms, and the scoring
 ```
 
@@ -1231,10 +1234,98 @@ and comes out the same on every run:
   full_transcript           9803      10263          2451              60.8 / 60.8
   naive_rag                 2329       2846           582              12.0 / 60.8
   memvara                   2074       2489           519              12.0 / 60.8
-  memvara_structured        1721       2151           430              12.0 / 60.8
+  memvara_structured        1772       2241           443              12.0 / 60.8
 ```
 
-`~tokens` is characters ÷ 4, an estimate and not a tokenizer.
+`~tokens` is characters ÷ 4, an estimate and not a tokenizer. The `memvara_structured`
+row grew from 1,721 to 1,772 characters when the arm moved to `recall(valid_at=)`; the
+agent run below was made at the earlier size.
+
+### The hosted run, which is the measurement
+
+```bash
+export ANTHROPIC_API_KEY=...
+PYTHONPATH=. python3 demo/harness.py --reader anthropic --judge llm \
+    --model claude-opus-5 --effort low --max-tokens 4096 --thinking adaptive \
+    --checkpoint runs/hosted.checkpoint.jsonl --concurrency 4 --out runs/hosted.jsonl
+```
+
+The same arms and questions, with a model behind an API as the reader and a second call
+to it as the judge. The model id, effort, output budget and thinking setting are printed
+under the report's title exactly as sent, the cost is priced from the usage the provider
+reported, and answers that never finished are counted apart from wrong ones.
+`--checkpoint` makes the run resumable and `--concurrency` shortens it;
+[`demo/README.md`](../demo/README.md) has every flag. No run with it has been recorded
+yet: the scores below are the agent run.
+
+### The second corpus size
+
+The token argument is a slope — retrieval context flat in corpus length, transcript
+context linear — and the authored corpus is one point on it. `--corpus-scale 10` pads the
+history with generated support tickets (`demo/distractors.py`) that never name a value a
+question is about, so the questions, golds and traps are unchanged and only the haystack
+grows. At that scale, deterministically:
+
+```
+  arm                 mean chars  max chars  mean ~tokens  items used / turns seen
+  ------------------  ----------  ---------  ------------  -----------------------
+  none                         0          0             0              0.0 / 607.5
+  full_transcript          92053      96897         23013            607.5 / 607.5
+  naive_rag                 1891       2838           473             12.0 / 607.5
+  memvara                   1596       2424           399             12.0 / 607.5
+  memvara_structured        1530       2204           383             12.0 / 607.5
+```
+
+The transcript arm grows 9.4× while the three retrieval arms stay under their cap.
+Whether they still surface the evidence among ten times more turns is the hosted run's
+question at this scale, and that run has not been made yet.
+[`demo/README.md`](../demo/README.md#two-corpus-sizes) has the constraints the generated
+turns are tested against.
+
+### The memvara arms against the hosted service
+
+`--memory hosted` points the two memvara arms at a memvara-cloud project, through the
+client a customer uses, so the run can measure the service rather than the library alone.
+The other three arms use no store and are unchanged. It writes to a project made for it:
+the credentials file is refused if it is the machine's default one, holds the same key, or
+names the same project.
+
+Two differences are not incidental and are printed above the report's tables. A hosted
+project cannot be sent the support schema, so the arm closes single-valued slots itself
+rather than relying on a declared cardinality, and the built-in vocabulary files `plan`
+under its alias `goal`. And `POST /v1/recall` has no time axis, so the four dated questions
+are read with `search(valid_at=)` and rendered by the library's own recall renderer.
+Extraction and the episode cap are the deployment's, so each context records how many
+claims its scope held when it was read.
+[`demo/README.md`](../demo/README.md#the-memvara-arms-against-the-hosted-service) has the
+whole of it.
+
+### Two other systems, as arms
+
+`--arm-mem0` and `--arm-supermemory` add a competitor arm each. Both are off by default
+and each needs something a fresh checkout does not have, so neither can affect the offline
+run.
+
+**mem0** needs only the package (`pip install mem0ai`). It is driven by the oracle
+`bench/mem0_real.py` uses, so it receives exactly the ground-truth facts
+`memvara_structured` receives, with perfect extraction recall — better than any real model
+— which leaves architecture as the only thing that differs. mem0 2.x's add path emits only
+`ADD`, so a value that moves is held beside the value that replaced it.
+
+Measured on the authored corpus with mem0ai 2.1.0, over the fifteen questions whose answer
+has a superseded value to be wrong with, mem0 asserts that superseded value as a current
+fact in **13 of 15**; both memvara arms assert it in **0 of 15** and carry it only under
+the episode header, which tells the reader those lines are things that were said and are
+unverified. That is a statement about where a value appears in a prompt, not about whether
+a reader was fooled — no model was asked. The judged comparison is the missing half and is
+[item 1 of what is still missing](ROADMAP.md#what-is-still-missing).
+
+**Supermemory** needs an account, which this repository does not have. The only endpoint
+anything here has ever called is `POST /v3/documents/list`, in the importer, and it is a
+read; an arm has to write a corpus and query it. So the arm ships with no default write or
+search path and refuses without them rather than guessing, and it refuses without an
+explicit container tag so that a run cannot land in whatever space an account defaults to.
+**No Supermemory number is published in this repository**, because nobody here has run it.
 
 ### The scores, and everything that makes them less than they look
 

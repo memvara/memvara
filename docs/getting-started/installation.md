@@ -72,7 +72,7 @@ bare install stays a two-package install.
 | `openai` | `pip install 'memvara[openai]'` | `OpenAILLM` — the same, on OpenAI |
 | `local-embed` | `pip install 'memvara[local-embed]'` | A real sentence-transformers embedder, run locally |
 | `rerank` | `pip install 'memvara[rerank]'` | The cross-encoder reranker |
-| `cloud` | `pip install 'memvara[cloud]'` | `Memvara(api_key=…)` against a hosted deployment, and `memvara-mcp login` |
+| `cloud` | `pip install 'memvara[cloud]'` | `Memvara(api_key=…)` against a hosted deployment, and the `memvara login`, `logout` and `whoami` commands |
 | `langchain` | `pip install 'memvara[langchain]'` | The LangChain retriever and chat-message-history adapters |
 | `llama-index` | `pip install 'memvara[llama-index]'` | The LlamaIndex retriever |
 | `langgraph` | `pip install 'memvara[langgraph]'` | The LangGraph `BaseStore` adapter |

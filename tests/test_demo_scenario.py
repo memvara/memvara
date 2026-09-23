@@ -20,6 +20,7 @@ this file pins the parts of it that a plausible future edit would break silently
 from __future__ import annotations
 
 import dataclasses
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -689,3 +690,150 @@ def test_every_question_names_the_turn_its_answer_came_from():
                 continue
             visible = [t for t in turns_containing(needle) if t.at <= q.asked_at]
             assert visible, f"{q.id}: {label} evidence {needle!r} is not in the history"
+
+
+# --- the scaled corpus ------------------------------------------------------------
+#
+# `demo/distractors.py` pads the authored history with generated support tickets so the
+# token argument can be measured at two sizes rather than argued from one. These pin the
+# properties the larger corpus has to keep for its numbers to be comparable with the
+# authored one: it is deterministic and exactly the factor longer, its instants are unique
+# and inside the authored window, no generated turn names the value of any fact a
+# question is about, and the re-surfacing that makes the authored corpus adversarial is
+# untouched.
+
+from demo.distractors import scale_conversation, scaled_conversation  # noqa: E402
+
+#: Everything a distractor turn may not contain, written by hand from the scenario's own
+#: values rather than imported, for the reason the constants at the top of this file
+#: give. Fragments are matched case-insensitively as substrings; words too common to ban
+#: as substrings ("locally" contains "call") are bounded.
+FORBIDDEN_IN_DISTRACTORS = [re.compile(pattern, re.IGNORECASE) for pattern in (
+    # The two addresses, by every fragment a reader would recognise them by.
+    "coldharbour", "lewes", r"\bbn7\b", "bramble", "ditchling", "westmeston", r"\bbn6\b",
+    # The serials, including the dead node's.
+    r"\bhx2\b", r"\bhx7\b", "4419", "8802", "6120",
+    # The mobile numbers.
+    "07700", r"900\s*118", r"900\s*811",
+    # The two plan names.
+    r"\bpro\b", r"\bhome\b",
+    # The contact channels, in every spelling the corpus or a reader would use.
+    r"\be-?mails?\b", r"\bphones?\b", r"\bmobiles?\b", r"\bsms\b",
+    r"\btexts?\b|\btexted\b|\btexting\b",
+    r"\bcalls?\b|\bcalled\b|\bcalling\b|\bcallbacks?\b", r"\bring\b|\brang\b",
+    # The controls, which the authored corpus states exactly once.
+    r"\bwray\b", r"\b14th\b|\bfourteenth\b",
+    # The two things the corpus leaves unstated: money, and the card on file.
+    "£", r"\bprices?\b", r"\bcards?\b",
+)]
+
+#: The moving values, as word-bounded patterns: "Pro" as a substring would match
+#: "Profile", which is a word a support ticket about the app is allowed to use.
+MOVING_VALUES = [re.compile(r"\b" + re.escape(value) + r"\b") for value in (
+    OLD_ADDRESS, NEW_ADDRESS, WRONG_SERIAL, SERIAL, WRONG_MOBILE, MOBILE, "Pro", "Home")]
+
+
+def distractors(factor: int = 10) -> list[Turn]:
+    authored = set(conversation())
+    return [t for t in scaled_conversation(factor) if t not in authored]
+
+
+def test_scale_one_is_the_authored_corpus_untouched():
+    """`--corpus-scale 1` is the default, and the default has to be the corpus every
+    recorded number was produced on: not an equal one, the same one."""
+    assert scaled_conversation(1) == conversation()
+    assert scale_conversation(conversation(), 1) == conversation()
+
+
+def test_the_scaled_corpus_is_deterministic_and_exactly_the_factor_longer():
+    """Ten times the turns, the same every time, with every authored turn still in it.
+
+    Determinism is the scenario contract, since everything downstream compares runs to
+    each other, and the factor has to be exact so the size table's "turns seen" can be
+    quoted as ten times rather than about ten times.
+    """
+    scaled = scaled_conversation(10)
+    assert scaled == scaled_conversation(10)
+    assert len(scaled) == 10 * len(conversation())
+    assert set(conversation()) <= set(scaled)
+    assert len(distractors(10)) == 9 * len(conversation())
+
+
+def test_scaled_turns_are_chronological_with_unique_instants_inside_the_authored_window():
+    """A generated turn on an authored instant would leave the order of the two
+    undefined, and one outside the window would change how `asked_at` slices the
+    history, so both are ruled out rather than merely unlikely."""
+    scaled = scaled_conversation(10)
+    instants = [t.at for t in scaled]
+    assert instants == sorted(instants)
+    assert len(set(instants)) == len(instants)
+    first, last = conversation()[0].at, conversation()[-1].at
+    assert all(first <= t.at <= last for t in scaled)
+
+
+def test_no_distractor_turn_names_a_value_a_question_is_about():
+    """The constraint that keeps the trap metric meaningful at the larger size.
+
+    The authored corpus states every superseded value later and more often than the
+    value that replaced it, and a generated turn that repeated either would move that
+    balance and change what a trapped answer means. So no address, plan name, serial,
+    mobile number or contact channel, old or new, and none of the money or the card the
+    corpus deliberately leaves unstated. A distractor may still name a fact's topic —
+    tiers, invoices, a parcel — which is what makes it compete for a retrieval slot.
+    """
+    for turn in distractors(10):
+        for pattern in FORBIDDEN_IN_DISTRACTORS:
+            assert not pattern.search(turn.text), (pattern.pattern, turn.text)
+
+
+def test_the_re_surfacing_property_is_untouched_by_scaling():
+    """Every turn that mentions a moving value is an authored one, so the last mention of
+    each superseded value — the thing that makes the corpus adversarial — is the same
+    turn at every scale, and no value gained or lost a mention."""
+    scaled = scaled_conversation(10)
+    for pattern in MOVING_VALUES:
+        authored = [t for t in conversation() if pattern.search(t.text)]
+        assert authored, pattern.pattern
+        assert [t for t in scaled if pattern.search(t.text)] == authored, pattern.pattern
+
+
+def test_every_scaled_turn_is_unique_text_so_the_memory_arms_keep_all_of_them():
+    """`Memvara.add()` returns the existing episode for a hash-identical repeat, and the
+    hash covers the role and the text, not the instant. A repeated turn would leave the
+    two memvara arms holding fewer turns than `full_transcript`, and the arms would no
+    longer be reading the same haystack."""
+    scaled = scaled_conversation(10)
+    assert len({(t.role, t.text) for t in scaled}) == len(scaled)
+
+
+def test_distractor_tickets_read_as_support_conversations_the_customer_opens():
+    """The shape test the authored corpus passes, applied to the scaled one.
+
+    Tickets are opened by the customer and the speakers alternate within one, and no
+    generated ticket sits close enough to an authored one to merge with it under the
+    six-hour rule that separates tickets — which is what would happen if a generated
+    turn landed on an authored day, and would break the alternation the authored corpus
+    guarantees.
+    """
+    scaled = scaled_conversation(10)
+    assert sum(len(t.text) for t in scaled) / len(scaled) >= 100
+    assert all(t.role in ROLES and t.text.strip() for t in scaled)
+    tickets: list[list[Turn]] = [[scaled[0]]]
+    for previous, turn in zip(scaled, scaled[1:]):
+        if (turn.at - previous.at).total_seconds() < 6 * 3600:
+            tickets[-1].append(turn)
+        else:
+            tickets.append([turn])
+    authored = set(conversation())
+    assert len(tickets) > 100
+    for ticket in tickets:
+        assert ticket[0].role == "user"
+        assert all(a.role != b.role for a, b in zip(ticket, ticket[1:]))
+        assert len({t in authored for t in ticket}) == 1, "a generated ticket merged with " \
+                                                          "an authored one"
+
+
+def test_scaling_refuses_a_factor_below_one():
+    """Zero turns is not a corpus, and a negative factor is not a request."""
+    with pytest.raises(ValueError):
+        scale_conversation(conversation(), 0)

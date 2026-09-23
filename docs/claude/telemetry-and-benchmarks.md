@@ -20,13 +20,17 @@ answer quality with no error, no exception and nothing in any log.
 - Comparison and cost: `bench/compare.py`, `bench/mem0_real.py`, `bench/baseline.py`,
   `bench/extract_cost.py`, `bench/perf.py`, `bench/evalkit.py`.
 - Against a hosted store: `bench/hosted.py`.
-- End-to-end answer quality: `demo/harness.py`, `demo/scenario.py`, `demo/baselines.py`,
-  with recorded runs under `demo/runs/`.
+- End-to-end answer quality: `demo/harness.py`, `demo/scenario.py`, `demo/distractors.py`
+  (the second corpus size), `demo/baselines.py`, `demo/hosted.py` (the two memvara
+  arms against a hosted deployment, under `--memory hosted`), and `demo/competitors.py`
+  (mem0 and Supermemory as arms, under `--arm-mem0` and `--arm-supermemory`, both off by
+  default), with recorded runs under `demo/runs/`.
 - The public benchmark others can enter: `benchmarks/agent_memory/`, with its own
   `benchmarks/agent_memory/README.md` and adapters under
   `benchmarks/agent_memory/adapters/`.
 - Tests: `tests/test_telemetry.py`, `tests/test_bench_eval.py`, `tests/test_bench_hosted.py`,
   `tests/test_agent_memory_bench.py`, `tests/test_demo.py`, `tests/test_demo_scenario.py`,
+  `tests/test_demo_hosted.py`, `tests/test_demo_competitors.py`,
   `tests/test_plugin_recall_bench.py`.
 - Documentation: [BENCHMARKS.md](../BENCHMARKS.md) is the results document — every number,
   what it measures, and what it does not.
@@ -48,8 +52,10 @@ project in its first week.
 
 The benchmark scripts under `bench/` are run by hand and write their numbers into
 [BENCHMARKS.md](../BENCHMARKS.md) alongside the caveats that make each number less than it
-looks. `demo/harness.py` is the end-to-end run: an authored corpus, an agent reading the
-memory block, and a scored answer file. `benchmarks/agent_memory/` is different in kind — it
+looks. `demo/harness.py` is the end-to-end run: an authored corpus, a reader — a model
+behind an API with its parameters pinned, or an agent through a blinded round trip —
+reading the memory block, and a scored answer file. `benchmarks/agent_memory/` is
+different in kind — it
 is written to be entered by somebody adding their own memory system, so it has adapters, a
 contributor guide and a CLI rather than a script per corpus.
 

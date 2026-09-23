@@ -385,20 +385,30 @@ def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None,
                   read_w_graph=w_graph, read_w_temporal=w_temporal)
 
 
-def answer_one(
+@dataclass(slots=True)
+class Pending:
+    """One question with its context retrieved and its prompt built, awaiting a reader.
+
+    See `bench/locomo.py`'s `Pending`: the store is touched only while these are built,
+    which is what lets the model calls that follow run `concurrency` at a time.
+    """
+
+    item: Instance
+    context: str
+    prompt: str
+    retrieval_ms: float
+
+
+def prepare_one(
     mem: Any,
     item: Instance,
     *,
-    reader: ek.Reader,
-    judge: ek.Judge | None,
-    ledger: ek.TokenLedger,
     budget: ek.RetrievalBudget,
     source: ek.ContextSource,
     read_stats: ek.RetrievalStats,
-    stem: Callable[[str], str] | None,
     anchor: bool = True,
-) -> ek.QuestionResult:
-    """One question answered from memory.
+) -> Pending:
+    """Retrieve and build the prompt for one question. Sequential: it reads the store.
 
     `anchor` hands the question's day to retrieval as `valid_at` (`Instance.anchor`), the
     same day the reader's prompt is told it is. Until it did, retrieval ran with the wall
@@ -412,8 +422,25 @@ def answer_one(
                                     valid_at=item.anchor if anchor else None)
     read_stats.record(ms, len(context), hits, len(haystack))
     prompt = ek.build_prompt(item.question, context, asked_on=item.asked_on_raw or None)
-    out = reader.answer(SYSTEM, prompt)
-    ledger.record("reader", out)
+    return Pending(item=item, context=context, prompt=prompt, retrieval_ms=ms)
+
+
+def finish_one(
+    pending: Pending,
+    *,
+    reader: ek.Reader,
+    judge: ek.Judge | None,
+    stem: Callable[[str], str] | None,
+) -> tuple[ek.QuestionResult, list[tuple[str, ek.Answer]]]:
+    """Answer and score one prepared question. May run in a pool; shares nothing.
+
+    The reader's and the judge's `Answer` come back beside the result rather than being
+    billed here, so `ek.score_in_order` can record them in question order on the calling
+    thread and the ledger comes out identical whatever the concurrency was.
+    """
+    item = pending.item
+    out = reader.answer(SYSTEM, pending.prompt)
+    calls = [("reader", out)]
 
     result = ek.QuestionResult(
         qid=item.qid,
@@ -426,19 +453,19 @@ def answer_one(
         exact=ek.exact_match(out.text, item.answer, stem),
         is_abstention=item.is_abstention,
         did_abstain=ek.abstained(out.text, ek.ABSTENTION_MARKERS),
-        context_chars=len(context),
-        retrieval_ms=ms,
+        context_chars=len(pending.context),
+        retrieval_ms=pending.retrieval_ms,
     )
     if judge is not None:
         ok, verdict = judge.judge(item.question, item.answer, out.text, result.category)
-        ledger.record("judge", verdict)
+        calls.append(("judge", verdict))
         result.judged = ok
     elif item.is_abstention:
         # With no judge there is still one thing worth scoring without a model: whether
         # an unanswerable question was declined. Answerable accuracy stays unscored
         # rather than being faked from overlap.
         result.judged = result.did_abstain
-    return result
+    return result, calls
 
 
 def run(
@@ -458,8 +485,16 @@ def run(
     reranker: Any = None,
     rerank_top_n: int = 0,
     anchor: bool = True,
+    concurrency: int = 1,
 ) -> tuple[list[ek.QuestionResult], ek.IngestStats, ek.RetrievalStats, ek.TokenLedger]:
-    """The answer pipeline, on the same read-path configuration as `run_retrieval`.
+    """The answer pipeline, on the same read-path configuration as `run_retrieval`, in
+    two phases.
+
+    Every haystack is ingested and every question's context retrieved first, one at a
+    time, because those touch a store; then the model calls are made `concurrency` at a
+    time and billed in question order (`ek.score_in_order`). At the default of 1 nothing
+    runs on another thread. Resuming a run that died is the reader's job, not this
+    function's: wrap it in `ek.CheckpointedReader`, which `--checkpoint` does.
 
     `w_temporal` and `anchor` are parameters here for the reason `embedder` and
     `reranker` are on `locomo.run`: `--w-temporal` was accepted on this path and reached
@@ -467,7 +502,8 @@ def run(
     """
     budget = budget or ek.RetrievalBudget()
     ledger = ledger or ek.TokenLedger()
-    totals, read_stats, results = ek.IngestStats(), ek.RetrievalStats(), []
+    totals, read_stats = ek.IngestStats(), ek.RetrievalStats()
+    pending: list[Pending] = []
 
     if share_store:
         shared = build_memory("shared", budget, llm, embedder=embedder,
@@ -491,27 +527,27 @@ def run(
                     fresh.append(turns)
                 totals.merge(ek.ingest(shared, fresh))
             for item in items:
-                results.append(answer_one(
-                    shared, item, reader=reader, judge=judge, ledger=ledger,
-                    budget=budget, source=source, read_stats=read_stats, stem=stem,
-                    anchor=anchor))
+                pending.append(prepare_one(shared, item, budget=budget, source=source,
+                                           read_stats=read_stats, anchor=anchor))
         finally:
             shared.close()
-        return results, totals, read_stats, ledger
+    else:
+        for item in items:
+            mem = build_memory(item.qid, budget, llm, embedder=embedder,
+                               w_graph=w_graph, w_temporal=w_temporal,
+                               reranker=reranker, rerank_top_n=rerank_top_n)
+            try:
+                stats = ek.ingest(mem, item.sessions)
+                stats.undated_turns = item.undated
+                totals.merge(stats)
+                pending.append(prepare_one(mem, item, budget=budget, source=source,
+                                           read_stats=read_stats, anchor=anchor))
+            finally:
+                mem.close()
 
-    for item in items:
-        mem = build_memory(item.qid, budget, llm, embedder=embedder,
-                           w_graph=w_graph, w_temporal=w_temporal, reranker=reranker,
-                           rerank_top_n=rerank_top_n)
-        try:
-            stats = ek.ingest(mem, item.sessions)
-            stats.undated_turns = item.undated
-            totals.merge(stats)
-            results.append(answer_one(
-                mem, item, reader=reader, judge=judge, ledger=ledger, budget=budget,
-                source=source, read_stats=read_stats, stem=stem, anchor=anchor))
-        finally:
-            mem.close()
+    results = ek.score_in_order(
+        lambda entry: finish_one(entry, reader=reader, judge=judge, stem=stem),
+        pending, ledger=ledger, concurrency=concurrency)
     return results, totals, read_stats, ledger
 
 
@@ -530,7 +566,7 @@ def score_one(
 
     Both reads get the question's day as `valid_at` when `anchor` is set — the budgeted
     one the report charges and the deeper one the curve is drawn from — so the curve and
-    the context come from retrievals that ran under the same clock. See `answer_one`.
+    the context come from retrievals that ran under the same clock. See `prepare_one`.
     """
     haystack = item.haystack
     at = item.anchor if anchor else None
@@ -676,6 +712,11 @@ def report(
         f"  reader={reader.name}  judge={judge.name if judge else 'none'}  "
         f"context={source.value}  k={budget.k}  max_chars={budget.max_chars}  "
         f"store={'shared' if share_store else 'per-question'}",
+        # The pinned reader parameters and the checkpoint's replay count, present only
+        # when there is a model or a checkpoint to describe, so a stub run's report is
+        # the report it always was.
+        *[line for line in (ek.run_settings_block(reader), ek.checkpoint_note(reader))
+          if line],
         "",
         ek.render_table(["question type", "n", "judged correct", "F1", "BLEU-1"], rows)
         if rows else "  no questions in this slice",
@@ -828,7 +869,7 @@ def main(argv: Sequence[str] | None = None,
         ledger=ek.build_ledger(args, reader), stem=ek.build_stemmer(args),
         share_store=args.share_store, embedder=embedder, w_graph=args.w_graph,
         w_temporal=args.w_temporal, reranker=reranker, rerank_top_n=args.rerank,
-        anchor=not args.no_anchor,
+        anchor=not args.no_anchor, concurrency=args.concurrency,
     )
     if getattr(reader, "dumping", False):
         # No answers exist yet, so every result is empty. Printing the table would

@@ -41,7 +41,10 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import re
+import sys
 import textwrap
+import types
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1348,19 +1351,25 @@ def test_two_ingest_orders_produce_the_same_context():
 
 
 def test_the_offline_cli_is_one_command_and_says_what_it_is_not(monkeypatch, capsys):
-    """`--reader stub`, end to end, and both banners it has to carry.
+    """`--reader stub`, end to end, and the banner it has to carry.
 
     The stub's accuracy column is a property of the corpus and a bag-of-words matcher, so
     the run has to disown it in the same breath it prints it. `evalkit.stub_caveat` says
-    that much and ends by naming a flag that exists in `bench/` and not here, which is why
-    the harness appends its own line.
+    that much and ends by naming the flag that measures answers, `--reader anthropic`,
+    which this harness now has — so the line it used to append, saying that flag did
+    not exist here, must be gone: a banner that names a way out that does not exist is
+    worse than none, and one that denies a way out that does exist is worse again.
     """
     _install_stub_scenario(monkeypatch)
     assert hz.main(["--reader", "stub"]) == 0
     printed = capsys.readouterr().out
     assert "five-arm answer quality, blinded" in printed
     assert "THE READER IS A STUB" in printed
-    assert "`--reader file`" in printed
+    assert "Re-run with --reader anthropic" in printed
+    assert "There is no `--reader anthropic` here" not in printed
+    # Nothing a stub has no answer for: no pinned parameters, no cost block.
+    assert "reader stub:" not in printed
+    assert "total: $" not in printed
 
 
 def test_the_offline_cli_writes_the_per_question_rows_too(tmp_path, monkeypatch, capsys):
@@ -1384,6 +1393,298 @@ def test_the_file_reader_still_refuses_to_run_without_a_dump(monkeypatch, capsys
         hz.main([])
     assert exc.value.code == 2
     assert "--dump is required" in capsys.readouterr().err
+
+
+# --- the harness: a model behind an API as the reader -------------------------------
+#
+# The half of the roadmap item the stub and the file round trip could not close: a reader
+# behind an API, with everything that decides its answers pinned by a flag and printed
+# under the report's title, so the number can be repeated. These run against a fake SDK
+# module installed into `sys.modules`, the way `tests/test_bench_eval.py` does it, so no
+# key, no network and no `anthropic` package are needed — that package is not installed in
+# the environment these tests were written in.
+
+
+class _FakeAnthropicClient:
+    """A Messages-shaped client that answers from the prompt, so a run is deterministic
+    under any concurrency: the reply is the gold when the context carries it, and an
+    abstention otherwise. `stops` scripts a stop reason per call, in call order."""
+
+    def __init__(self, stops: list[str] | None = None):
+        self.messages = self
+        self.calls: list[dict] = []
+        self.stops = list(stops or [])
+        self._lock = __import__("threading").Lock()
+
+    def create(self, **kwargs):
+        with self._lock:
+            self.calls.append(kwargs)
+            stop = self.stops.pop(0) if self.stops else "end_turn"
+        prompt = kwargs["messages"][0]["content"]
+        # The judge asks "Reference answer: X / Response to grade: Y"; say yes when the
+        # response contains the reference, which is what a real grader would do here.
+        if "Response to grade:" in prompt:
+            reference = prompt.split("Reference answer: ")[1].split("\n")[0]
+            response = prompt.split("Response to grade: ")[1]
+            text = "yes" if reference.lower() in response.lower() else "no"
+        else:
+            context = prompt.partition(ek.CONTEXT_MARKER)[2]
+            text = "Seattle" if "Seattle" in context else "I don't know."
+        if stop == "refusal":
+            text = ""
+        return types.SimpleNamespace(
+            content=[{"type": "text", "text": text}], stop_reason=stop,
+            usage={"input_tokens": 100, "output_tokens": 5})
+
+
+def _install_fake_anthropic(monkeypatch, client: _FakeAnthropicClient) -> None:
+    sdk = types.ModuleType("anthropic")
+    sdk.Anthropic = lambda: client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", sdk)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+
+def test_a_hosted_reader_runs_every_arm_in_one_process_and_prints_what_was_pinned(
+        tmp_path, monkeypatch, capsys):
+    """`--reader anthropic` is the measurement, and the report has to make it quotable.
+
+    Under the title: the model id, the effort, the output budget and the thinking
+    setting exactly as sent; a line saying that no sampling parameter was sent, because
+    this model family rejects them; which arm is the floor and which the ceiling, since
+    a memory score without both beside it is uninterpretable; and the cost block from the
+    ledger, priced from the usage the provider reported.
+    """
+    _install_stub_scenario(monkeypatch)
+    client = _FakeAnthropicClient()
+    _install_fake_anthropic(monkeypatch, client)
+    out = tmp_path / "rows.jsonl"
+    assert hz.main(["--reader", "anthropic", "--model", "claude-opus-5", "--effort",
+                    "low", "--max-tokens", "4096", "--thinking", "adaptive",
+                    "--out", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "reader anthropic/claude-opus-5:" in printed
+    assert "model=claude-opus-5" in printed and "effort=low" in printed
+    assert "max_tokens=4096" in printed and 'thinking={"type": "adaptive"}' in printed
+    assert "not accepted by this model family" in printed
+    assert "floor: none" in printed
+    assert "ceiling: full_transcript" in printed
+    assert "measurement: naive_rag, memvara, memvara_structured" in printed
+    assert "claude-opus-5" in printed and "total: $" in printed
+    assert "THE READER IS A STUB" not in printed
+    # Every arm was answered by the model, and what it was sent is what the flags said.
+    assert len(client.calls) == len(bl.ARMS) * len(QUESTIONS)
+    assert all(c["model"] == "claude-opus-5" and c["max_tokens"] == 4096
+               and c["thinking"] == {"type": "adaptive"}
+               and c["output_config"] == {"effort": "low"} for c in client.calls)
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert {r["arm"] for r in rows} == set(bl.ARMS)
+    assert all(r["stop_reason"] == "end_turn" for r in rows)
+
+
+def test_a_hosted_run_counts_a_truncation_and_a_refusal_apart_from_a_wrong_answer(
+        tmp_path, monkeypatch, capsys):
+    """A `max_tokens` stop and a `refusal` both arrive as a short or empty string and
+    score 0.0. Averaged in silently they read as a memory layer that surfaced bad
+    evidence; counted and printed they read as what they are — a budget that was too
+    small, or a classifier that declined — and the per-question rows say which item."""
+    _install_stub_scenario(monkeypatch)
+    _install_fake_anthropic(monkeypatch, _FakeAnthropicClient(stops=["max_tokens",
+                                                                      "refusal"]))
+    out = tmp_path / "rows.jsonl"
+    assert hz.main(["--reader", "anthropic", "--out", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "ANSWERS THAT NEVER FINISHED" in printed
+    assert "1 reader call(s) stopped on 'max_tokens'" in printed
+    assert "1 reader call(s) stopped on 'refusal'" in printed
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert sorted(r["stop_reason"] for r in rows if r["stop_reason"] != "end_turn") == [
+        "max_tokens", "refusal"]
+    refused = [r for r in rows if r["stop_reason"] == "refusal"]
+    assert refused[0]["answer"] == "" and not refused[0]["correct"]
+
+
+def test_a_hosted_run_resumes_from_its_checkpoint_and_scores_identically(
+        tmp_path, monkeypatch, capsys):
+    """Run once with a checkpoint; run again with a client that would answer nothing.
+
+    The second run must score exactly what the first did, from the file, without one
+    model call — the property that turns a run which dies at item 90 of 100 into a run
+    that finishes on the next invocation for the price of ten answers.
+    """
+    _install_stub_scenario(monkeypatch)
+    first_client = _FakeAnthropicClient()
+    _install_fake_anthropic(monkeypatch, first_client)
+    checkpoint = tmp_path / "checkpoint.jsonl"
+    first_out = tmp_path / "first.jsonl"
+    assert hz.main(["--reader", "anthropic", "--checkpoint", str(checkpoint),
+                    "--out", str(first_out)]) == 0
+    first = capsys.readouterr().out
+    calls = len(first_client.calls)
+    assert f"replayed 0 of {calls}" in first
+    assert len(checkpoint.read_text(encoding="utf-8").splitlines()) == calls
+
+    second_client = _FakeAnthropicClient(stops=["refusal"] * calls)
+    _install_fake_anthropic(monkeypatch, second_client)
+    second_out = tmp_path / "second.jsonl"
+    assert hz.main(["--reader", "anthropic", "--checkpoint", str(checkpoint),
+                    "--out", str(second_out)]) == 0
+    second = capsys.readouterr().out
+    assert second_client.calls == []
+    assert f"replayed {calls} of {calls}" in second
+    assert first_out.read_text(encoding="utf-8") == second_out.read_text(encoding="utf-8")
+
+
+def test_a_hosted_run_at_concurrency_four_scores_what_it_scores_one_at_a_time(
+        monkeypatch):
+    """Concurrency may move the wall clock and nothing else: the rows, their order, and
+    the rendered report — ledger included — are identical, or a number produced under
+    `--concurrency 8` is not the number produced without it."""
+    _install_stub_scenario(monkeypatch)
+    _install_fake_anthropic(monkeypatch, _FakeAnthropicClient())
+    reader = ek.AnthropicReader(client=_FakeAnthropicClient())
+    judge = ek.LLMJudge(reader.spawn())
+    serial = hz.in_process(QUESTIONS, CONVERSATION, reader=reader, judge=judge)
+    pooled = hz.in_process(QUESTIONS, CONVERSATION, reader=reader, judge=judge,
+                           concurrency=4)
+    assert [vars(r) for r in serial.scored] == [vars(r) for r in pooled.scored]
+    assert serial.report() == pooled.report()
+    assert serial.ledger is not None and serial.ledger.rows() == pooled.ledger.rows()
+    assert serial.ledger.by_role["reader"]["claude-opus-5"].calls == (
+        len(bl.ARMS) * len(QUESTIONS))
+
+
+def test_the_model_judge_is_the_readers_twin_on_the_readers_own_provider(monkeypatch,
+                                                                         capsys):
+    """`--judge llm --judge-model X` grades with the reader's provider and settings and
+    the model swapped, so one run states one configuration. An OpenAI reader therefore
+    gets an OpenAI judge, which the Anthropic-only judge builder could not give it."""
+    _install_stub_scenario(monkeypatch)
+
+    class _FakeOpenAIClient:
+        def __init__(self):
+            self.chat = types.SimpleNamespace(completions=self)
+            self.calls: list[dict] = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"choices": [{"message": {"content": "yes"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+
+    client = _FakeOpenAIClient()
+    sdk = types.ModuleType("openai")
+    sdk.OpenAI = lambda: client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", sdk)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    assert hz.main(["--reader", "openai", "--model", "gpt-4.1", "--sampling-seed", "11",
+                    "--judge", "llm", "--judge-model", "gpt-4.1-mini"]) == 0
+    printed = capsys.readouterr().out
+    assert "reader openai/gpt-4.1:" in printed and "seed=11" in printed
+    assert "judge llm-judge/openai/gpt-4.1-mini" in printed
+    models = {c["model"] for c in client.calls}
+    assert models == {"gpt-4.1", "gpt-4.1-mini"}
+    assert all(c["seed"] == 11 for c in client.calls)
+    judged = [c for c in client.calls if c["model"] == "gpt-4.1-mini"]
+    # One correctness call per answered item, plus one trap call per item with a trap.
+    assert len(judged) == len(bl.ARMS) * (len(QUESTIONS)
+                                          + sum(q.trap is not None for q in QUESTIONS))
+
+
+def test_the_llm_judge_is_billed_as_the_judge_beside_the_reader():
+    """Two roles in the ledger, so the report can say what the grading cost."""
+    reader = ek.AnthropicReader(client=_FakeAnthropicClient())
+    run = hz.in_process(QUESTIONS, CONVERSATION, reader=reader,
+                        judge=ek.LLMJudge(reader.spawn()), arms={"none": bl.none})
+    assert run.ledger is not None
+    assert set(run.ledger.by_role) == {"reader", "judge"}
+    assert run.ledger.by_role["reader"]["claude-opus-5"].calls == len(QUESTIONS)
+
+
+def test_checkpoint_and_concurrency_are_refused_beside_the_file_reader(tmp_path,
+                                                                        monkeypatch,
+                                                                        capsys):
+    """The round trip is its own resume mechanism and its answerer is a person: a
+    checkpoint would store the dump's empty placeholders and a pool has nothing to
+    issue. Refused with the flag named, rather than accepted and ignored."""
+    _install_stub_scenario(monkeypatch)
+    for flags in (["--checkpoint", str(tmp_path / "c.jsonl")], ["--concurrency", "3"]):
+        with pytest.raises(SystemExit) as exc:
+            hz.main(["--reader", "file", "--dump", str(tmp_path / "d.jsonl"), *flags])
+        assert exc.value.code == 2
+        assert flags[0] in capsys.readouterr().err
+
+
+# --- the harness: two corpus sizes ------------------------------------------------------
+#
+# `demo/distractors.py` pads a conversation with generated support tickets so the token
+# argument — retrieval context flat in corpus length, transcript context linear in it —
+# can be measured at two sizes instead of argued from one. The scenario-level properties
+# of the generated turns are pinned in `tests/test_demo_scenario.py`; these tests cover
+# the generator on the fixture corpus and the flag that reaches it.
+
+
+def test_scaling_a_fixture_corpus_pads_inside_its_own_window_and_is_deterministic():
+    """`scale_conversation` works on any dated conversation, which is what lets these
+    tests run on the fixture rather than the real corpus. The padding stays inside the
+    input's own first-to-last window and comes out the same twice; factor 1 is the input
+    itself, which is what makes the default a no-op."""
+    from demo.distractors import scale_conversation
+
+    scaled = scale_conversation(CONVERSATION, 3)
+    assert scaled == scale_conversation(CONVERSATION, 3)
+    assert len(scaled) == 3 * len(CONVERSATION)
+    assert all(CONVERSATION[0].at <= t.at <= CONVERSATION[-1].at for t in scaled)
+    assert [t.at for t in scaled] == sorted(t.at for t in scaled)
+    assert scale_conversation(CONVERSATION, 1) == list(CONVERSATION)
+
+
+def test_the_corpus_scale_flag_grows_only_the_haystack(monkeypatch, capsys, tmp_path):
+    """Same questions, same golds, same arms; only the history the arms see is longer.
+
+    The report says so in its header at any scale but 1, and at 1 — the default — it says
+    nothing, so the offline run's report is byte-identical to what it was before the flag
+    existed. The transcript arm's context grows on every question; the three retrieval
+    arms stay under their cap, which is the whole shape of the argument being measured.
+    """
+    _install_stub_scenario(monkeypatch)
+    small, large = tmp_path / "small.jsonl", tmp_path / "large.jsonl"
+    assert hz.main(["--reader", "stub", "--out", str(small)]) == 0
+    assert "corpus:" not in capsys.readouterr().out
+    assert hz.main(["--reader", "stub", "--corpus-scale", "3", "--out", str(large)]) == 0
+    printed = capsys.readouterr().out
+    assert "corpus: scale 3" in printed and f"{3 * len(CONVERSATION)} turns" in printed
+
+    def rows(path):
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    assert [(r["arm"], r["qid"], r["gold"]) for r in rows(small)] == [
+        (r["arm"], r["qid"], r["gold"]) for r in rows(large)]
+    by_arm = lambda path, arm: [r["context_chars"] for r in rows(path) if r["arm"] == arm]  # noqa: E731
+    assert all(big > little for little, big in
+               zip(by_arm(small, "full_transcript"), by_arm(large, "full_transcript")))
+    for arm in ("naive_rag", "memvara", "memvara_structured"):
+        assert all(chars <= bl.MAX_CONTEXT_CHARS for chars in by_arm(large, arm))
+
+
+def test_a_corpus_scale_below_one_is_refused(monkeypatch, capsys):
+    """Zero would be an empty history and a report full of abstentions that read as a
+    finding; the flag names itself in the refusal."""
+    _install_stub_scenario(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        hz.main(["--reader", "stub", "--corpus-scale", "0"])
+    assert exc.value.code == 2
+    assert "--corpus-scale" in capsys.readouterr().err
+
+
+def test_a_narrowed_run_without_the_floor_and_the_ceiling_says_so_in_the_header():
+    """A programmatic caller can drop arms. The header then names what is missing,
+    because the roadmap's rule is that a memory score is uninterpretable without the
+    floor and the ceiling beside it, and a report that silently omitted them would be
+    read as if they were there."""
+    reader = ek.AnthropicReader(client=_FakeAnthropicClient())
+    run = hz.in_process(QUESTIONS, CONVERSATION, reader=reader,
+                        judge=ek.ContainmentJudge(), arms={"memvara": bl.memvara})
+    text = run.report(arms={"memvara": bl.memvara})
+    assert "NO FLOOR ARM" in text and "NO CEILING ARM" in text
 
 
 # --- the answer key, checked against the library and no reader --------------------
@@ -1780,3 +2081,146 @@ def _statements(fn) -> int:
         body = body[1:]
     return sum(1 for top in body for node in ast.walk(top)
                if isinstance(node, ast.stmt))
+
+
+# --- the judge, when the reader cannot be its twin --------------------------------
+
+
+def _replayed(printed: str) -> tuple[int, int]:
+    """The checkpoint note's "replayed X of Y model calls", as numbers."""
+    found = re.search(r"replayed ([\d,]+) of ([\d,]+) model calls", printed)
+    assert found, f"no checkpoint note in:\n{printed}"
+    return int(found.group(1).replace(",", "")), int(found.group(2).replace(",", ""))
+
+
+def test_a_checkpointed_stub_run_checkpoints_its_judge_calls_too(tmp_path, monkeypatch,
+                                                                 capsys):
+    """`--reader stub --judge llm --checkpoint PATH` must store the grading calls.
+
+    The stub answers offline and costs nothing, so with `--judge llm` the *judge* is the
+    only thing the run pays for. The reader cannot be the judge's twin here — a stub has
+    no provider — so one is built beside it, and it was being built without the run's
+    checkpoint. The grading calls were then neither written nor replayed: a resumed run
+    paid for every one of them again, which is the opposite of what `Checkpoint`
+    documents for a reader and its judge alike. Nothing in the report said so, because
+    the note counts what the checkpoint was asked for and it was never asked.
+
+    Checked by running twice with a second client that would answer nothing: the second
+    run must make no call at all and still score exactly what the first scored.
+    """
+    _install_stub_scenario(monkeypatch)
+    first_client = _FakeAnthropicClient()
+    _install_fake_anthropic(monkeypatch, first_client)
+    checkpoint = tmp_path / "judged.jsonl"
+    first_out = tmp_path / "first.jsonl"
+    assert hz.main(["--reader", "stub", "--judge", "llm", "--checkpoint", str(checkpoint),
+                    "--out", str(first_out)]) == 0
+    first = capsys.readouterr().out
+    calls = len(first_client.calls)
+    assert calls, "the judge made no call, so this test proves nothing"
+    # Rows on disk are one per distinct grading call; the note counts every ask, which is
+    # larger, because two arms that gave the same answer ask the judge the same question
+    # and the second reuses the first's verdict. Those in-run repeats are hits too, so
+    # the thing that says nothing was resumed is the absence of the on-disk kind.
+    _, asked = _replayed(first)
+    assert asked >= calls
+    assert "from rows already on disk" not in first
+    # The file holds the stub's own answers as well, under model "stub"; the rows that
+    # matter here are the graded ones, and there must be exactly one per call the judge
+    # actually made. Before the fix there were none of them at all.
+    rows = [json.loads(line) for line
+            in checkpoint.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len([row for row in rows if row["model"] != "stub"]) == calls
+
+    second_client = _FakeAnthropicClient(stops=["refusal"] * calls)
+    _install_fake_anthropic(monkeypatch, second_client)
+    second_out = tmp_path / "second.jsonl"
+    assert hz.main(["--reader", "stub", "--judge", "llm", "--checkpoint", str(checkpoint),
+                    "--out", str(second_out)]) == 0
+    second = capsys.readouterr().out
+    assert second_client.calls == [], "a stored grading call was paid for again"
+    assert _replayed(second) == (asked, asked)
+    assert "from rows already on disk" in second
+    assert first_out.read_text(encoding="utf-8") == second_out.read_text(encoding="utf-8")
+
+
+def test_the_stub_report_says_what_its_checkpoint_replayed(tmp_path, monkeypatch,
+                                                           capsys):
+    """A rehearsal that prints nothing about what it replayed cannot be checked.
+
+    `run_header` returns nothing for a stub, because a stub has no parameters to pin and
+    the offline report is held byte-identical. The checkpoint note is the one thing a
+    stub run does have to say, and a stub run with a checkpoint is exactly how the
+    checkpoint is rehearsed before a paid run is pointed at it.
+    """
+    _install_stub_scenario(monkeypatch)
+    checkpoint = tmp_path / "rehearsal.jsonl"
+    assert hz.main(["--reader", "stub", "--checkpoint", str(checkpoint)]) == 0
+    first = capsys.readouterr().out
+    assert str(checkpoint) in first and "replayed 0 of" in first
+
+    assert hz.main(["--reader", "stub", "--checkpoint", str(checkpoint)]) == 0
+    second = capsys.readouterr().out
+    assert "checkpoint" in second and "replayed 0 of" not in second
+
+
+def test_the_plain_stub_report_still_says_nothing_about_a_checkpoint(monkeypatch,
+                                                                    capsys):
+    """The byte-identical offline report, which the note must not disturb.
+
+    `test_the_offline_run_is_identical_twice` pins the stub report, and the note was
+    added to the one branch that used to return an empty string unconditionally. A stub
+    run with no checkpoint has to come out exactly as it did before.
+    """
+    _install_stub_scenario(monkeypatch)
+    assert hz.main(["--reader", "stub"]) == 0
+    assert "checkpoint" not in capsys.readouterr().out
+
+
+def test_the_file_round_trips_judge_can_use_a_server_of_your_own(tmp_path, monkeypatch,
+                                                                 capsys):
+    """`--reader file --judge llm` with the OpenAI-only flags must not be a refusal.
+
+    The reader is a person, so the judge is a model of its own, and the provider it was
+    built on used to be Anthropic whatever the command line said. `hosted_reader` refuses
+    `--base-url`, `--api-key-file` and `--extra-body` on the Anthropic path — rightly,
+    since an Anthropic reader cannot honour them — so the combination died with a
+    `SystemExit`. That combination is the one judged run available to somebody with no
+    paid key: a blinded round trip answered by hand, graded by the server they already
+    run. The provider now follows the flags.
+    """
+    _install_stub_scenario(monkeypatch)
+
+    class _FakeOpenAIClient:
+        def __init__(self) -> None:
+            self.chat = types.SimpleNamespace(completions=self)
+            self.calls: list[dict] = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"choices": [{"message": {"content": "yes"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+
+    client = _FakeOpenAIClient()
+    sdk = types.ModuleType("openai")
+    sdk.OpenAI = lambda **kw: client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", sdk)
+    key_file = tmp_path / "key"
+    key_file.write_text("sk-local\n", encoding="utf-8")
+    key_file.chmod(0o600)
+
+    dump_path = tmp_path / "dump.jsonl"
+    assert hz.main(["--reader", "file", "--dump", str(dump_path)]) == 0
+    capsys.readouterr()
+    items = hz.plan(QUESTIONS, CONVERSATION)
+    answers = _answer_file(tmp_path, items,
+                           {f"{i.arm}/{i.qid}": "Home." for i in items})
+
+    assert hz.main(["--reader", "file", "--dump", str(dump_path), "--answers",
+                    str(answers), "--judge", "llm", "--judge-model", "qwen-local",
+                    "--base-url", "http://127.0.0.1:8888/v1",
+                    "--api-key-file", str(key_file)]) == 0
+    printed = capsys.readouterr().out
+    assert "judge llm-judge/openai/qwen-local" in printed
+    assert client.calls, "the judge made no call"
+    assert {c["model"] for c in client.calls} == {"qwen-local"}

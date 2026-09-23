@@ -9,6 +9,89 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`demo/harness.py` can put a model behind an API in the reader's seat.** `--reader
+  anthropic` and `--reader openai` answer every arm's questions in one process, with the
+  model id, effort, output budget and thinking setting (Anthropic) or temperature and seed
+  (OpenAI) pinned by flags and printed under the report's title, so a run can be repeated
+  by somebody else. `--judge llm` grades with the reader's twin on the same provider. The
+  report names the floor and the ceiling arm beside the memory arms, prices the run from
+  the usage the provider reported, and counts truncated and refused answers apart from
+  wrong ones; each per-question row carries the reader's `stop_reason`. The stub run's
+  report is unchanged apart from a banner that had become false.
+- **Hosted benchmark runs resume and run in parallel.** `--checkpoint PATH` appends every
+  completed model call to a JSONL file as it completes, and a re-run with the same path
+  replays those calls instead of paying for them again; `--concurrency N` issues N calls
+  at once, with the results and the cost ledger assembled in question order, so the report
+  is identical whatever N is. Both flags are shared by `bench/locomo.py`,
+  `bench/longmemeval.py` and `demo/harness.py`, and every flag that pins a reader is now
+  defined once, in `evalkit.add_reader_arguments`.
+- **The demo has a second corpus size.** `--corpus-scale N` on `demo/harness.py` pads
+  the authored history with generated support tickets (`demo/distractors.py`) that name
+  no value a question is about, so the token argument — retrieval context flat in corpus
+  length, transcript context linear — can be measured at two sizes rather than argued
+  from one. At scale 10 the transcript arm's context is 9.4× larger and the three
+  retrieval arms stay under their cap. Scale 1, the default, is the authored corpus
+  untouched, and every generated turn is unique text so the memvara arms hold the same
+  haystack as the transcript arm.
+
+- **`demo/harness.py --memory hosted` runs the two memvara arms against a memvara-cloud
+  project**, through the same client a customer uses, so the answer-quality run can
+  measure the hosted service and not only the library. Every other arm is unchanged.
+  `--hosted-credentials PATH` refuses the machine's default credentials file, any file
+  holding the same key, and any file for the same project, because a run writes thousands
+  of turns that nothing here can take back. A hosted project cannot be sent the support
+  schema, so the arm closes single-valued slots itself, and `POST /v1/recall` has no time
+  axis, so a dated question is read with `search(valid_at=)` and rendered by the library's
+  own recall renderer. Both, and the fact that the built-in vocabulary files `plan` under
+  `goal`, are printed above the report's tables. Scopes are written once per run, arm,
+  corpus size and question instant and recorded in a manifest, so a repeat run with the
+  same `--hosted-run-id` re-reads them instead of writing them again.
+- **The report splits the trapped rate by which clock closed.** A table per arm and
+  closure sits beside the per-kind one, and every row of the per-question JSONL carries
+  `closure`. One trapped percentage merged "served a value that expired" with "served a
+  value that was never true", which are opposite failures and the distinction the library
+  is built on.
+- **`--reader openai` reads from an OpenAI-compatible server of your own.** `--base-url`
+  sends every request there, `--api-key-file PATH` reads the bearer key from a file at run
+  time instead of `OPENAI_API_KEY`, and `--extra-body JSON` is merged into every request
+  body, which is where llama.cpp reads `chat_template_kwargs`. Shared by
+  `bench/locomo.py`, `bench/longmemeval.py` and `demo/harness.py`. The base URL and the
+  extra body are printed under the report's title and keyed in the checkpoint, and an
+  LLM judge spawned from the reader goes to the same server; the key is never printed,
+  and a key file that is missing, empty or readable by other users is refused before
+  anything is ingested. `--base-url` and the other two beside `--reader anthropic` are
+  refused rather than ignored.
+- **A `memvara` command: `memvara login`, `memvara logout` and `memvara whoami`.**
+  `pip install 'memvara[cloud]'` then `memvara login` signs this machine in to a hosted
+  deployment; `whoami` prints the project, the key's non-secret id, its privilege and its
+  expiry, and never the key; `logout` deletes the credentials file and says the key stays
+  valid until it is revoked in the console. `python3 -m memvara` runs the same command.
+  All three take `--credentials PATH`, which is how one machine holds keys for two
+  projects: the default `~/.memvara/credentials.json` is what `MEMVARA_MODE=cloud`,
+  `Memvara.connect()` and the npm bridge read, so writing a second project's key there
+  would move every one of them into that project. `memvara.remote.creds` gains
+  `read_credentials_file(path)`, the one reader of that file's format.
+- **Two other memory systems can be run as arms of the answer-quality demo.**
+  `--arm-mem0` and `--arm-supermemory` add a competitor arm each (`demo/competitors.py`).
+  Both are off by default and each is refused, while the arms are being built, if what it
+  needs is missing, so neither can affect the offline run. mem0 needs only `pip install
+  mem0ai`: the arm drives the real package with the oracle `bench/mem0_real.py` uses, so
+  it is handed exactly the ground-truth facts the `memvara_structured` arm is handed and
+  architecture is the only thing left to differ. Measured with mem0ai 2.1.0 over the
+  fifteen questions that have a superseded value to be wrong with, mem0 asserts that value
+  as a current fact in 13 of them and both memvara arms in none, which is where a value
+  sits in a prompt rather than whether a reader was fooled by it. Supermemory needs an
+  account: it refuses without a key, without a container tag of its own, and without the
+  write and search paths, which have **no default** because the only Supermemory endpoint
+  this repository has ever called is the importer's read, and one refusal names everything
+  that is missing rather than one thing per run. The tag it is given is a prefix — the arm
+  writes one container per question instant, because the harness does not ask questions in
+  `asked_at` order and a shared container would let an April question read August turns.
+  No Supermemory number is published anywhere here, because nobody has run it. The
+  report's title now counts the arms that ran instead of always saying five.
+
 ### Changed
 
 - **The LongMemEval harness now hands each question's day to retrieval, so the temporal
@@ -29,6 +112,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   LongMemEval's answer path and applied by neither. LOCOMO questions carry no date, so
   that runner has no anchor to pass and says so in its report. The library is unchanged;
   `w_temporal` still ships at `0.0`.
+
+- **`memvara-mcp login` no longer requires `--project`, and refuses a project name.** The
+  hosted console's authorize route takes a project id or no project at all, because it
+  has no session to resolve a name against, and it answered `--project NAME` — the
+  spelling this command's usage printed — with 400 `bad_request`. With no `--project` the
+  person approving the sign-in in the browser chooses from the projects they hold. A value
+  that is not a project id is refused before a browser opens. Messages from the flow now
+  name whichever command was typed, `memvara login` or `memvara-mcp login`.
 
 ### Fixed
 
@@ -66,6 +157,34 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `docs/BENCHMARKS.md` carries every cell. `bench/anchoring.py` ingests through the same
   path, so its three `anchored + graph leg` rows were re-measured on the same day and
   moved by about a point, to 55.0, 54.8 and 55.0; the other six rows did not move.
+
+- **`claude-sonnet-5` is priced at $2 / $10 per million tokens in `bench/evalkit.py`'s
+  price table**, not $3 / $15. The rise announced for 1 September 2026 was cancelled and
+  the launch price is the standard one, so a cost printed for a Sonnet 5 run was half
+  again too high.
+- **`--judge-model` builds the judge from the reader** — the same provider, effort,
+  output budget and thinking setting with only the model swapped — instead of a bare
+  Anthropic reader carrying the effort alone, and it now works with `--reader openai`,
+  where the flag used to be accepted and ignored. See `docs/UPGRADING.md`.
+- **A checkpoint charges an identical call once, even when two threads ask at the same
+  moment.** Looking the key up and deciding to pay were two steps with nothing between
+  them, so under `--concurrency N` two threads putting the byte-identical prompt both
+  missed and both paid. That is not a corner case: two arms that answered a question the
+  same way produce the same grading call. One caller now claims the call and the others
+  wait for its result, and a call that raises gives the claim up rather than stranding
+  them.
+- **A checkpointed run stores its judge's calls when the reader is the stub or a file.**
+  `--reader stub --judge llm --checkpoint PATH` wrote none of the grading calls, so a
+  resumed run paid for every one of them again — and with a stub reader the judge is the
+  only thing the run pays for. The judge built beside such a reader now shares the run's
+  checkpoint, and a stub run prints the checkpoint note it had been leaving out, which is
+  what makes a rehearsal of the checkpoint checkable.
+- **`--reader file --judge llm` can grade with an OpenAI-compatible server of your own.**
+  The judge was built on Anthropic whatever the command line said, so passing
+  `--base-url`, `--api-key-file` or `--extra-body` beside it was refused outright — and a
+  blinded round trip answered by hand and graded by a server you already run is the one
+  judged configuration available without a paid key. The judge's provider now follows
+  those flags.
 
 ## [0.14.0] — 2026-09-14
 

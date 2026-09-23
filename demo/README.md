@@ -6,20 +6,27 @@ reading memvara's output tells the customer the right thing. `docs/ROADMAP.md` h
 that as the first item under *What is still missing* since it was written, and this
 directory is the corpus, the arms and the harness for closing it.
 
-It closes the *apparatus* half. The half still open is a reader behind an API: the one run
-recorded below used an agent as the reader, which makes it a sanity check and not a
-benchmark. [What one run produced](#what-one-run-produced) is specific about the
-difference.
+The apparatus is complete: the corpus, the five arms, a blinded round trip for a person or
+an agent, a reader behind an API with every parameter pinned and printed, a second
+corpus size ([Two corpus sizes](#two-corpus-sizes)), and two other memory systems that can
+be run as arms beside them ([Two other systems, as arms](#two-other-systems-as-arms)). The
+one run recorded below still used an agent as the reader, which makes it a sanity check and
+not a benchmark; [What one run produced](#what-one-run-produced) is specific about the
+difference, and a run with the hosted reader at both sizes is the next thing to record.
 
 ```
 demo/scenario.py    the support history and the question set
+demo/distractors.py generated tickets that scale the history without moving any fact
 demo/baselines.py   the five context-building arms, and the structured integration
+demo/hosted.py      the two memvara arms against a memvara-cloud project
+demo/competitors.py mem0 and Supermemory as arms, neither on unless asked for
 demo/harness.py     the blinded run over those arms, and the scoring
 ```
 
-`scenario.py` is pure data with no dependencies. `from demo import conversation, questions`
-costs nothing and cannot fail; `demo.baselines` and `demo.harness` are imported by name
-because they pull in numpy and the bench helpers.
+`scenario.py` and `distractors.py` are pure data with no dependencies. `from demo import
+conversation, questions, scaled_conversation` costs nothing and cannot fail;
+`demo.baselines` and `demo.harness` are imported by name because they pull in numpy and
+the bench helpers.
 
 ```bash
 PYTHONPATH=. python3 demo/harness.py --reader stub          # offline, one command
@@ -36,7 +43,61 @@ common with the question; it cannot reason, cannot read a date and cannot combin
 turns. What its `correct` and `trapped` columns describe is the corpus and the arms. The
 run prints that above its own table, twice.
 
-Measuring answers needs a reader, and a reader is not in this process:
+Measuring answers needs a reader. The one that makes the run reproducible is a model
+behind an API:
+
+```bash
+export ANTHROPIC_API_KEY=...            # or OPENAI_API_KEY, with --reader openai
+PYTHONPATH=. python3 demo/harness.py --reader anthropic --judge llm \
+    --model claude-opus-5 --effort low --max-tokens 4096 --thinking adaptive \
+    --checkpoint runs/hosted.checkpoint.jsonl --concurrency 4 --out runs/hosted.jsonl
+```
+
+That is the whole run in one process: every arm, every question, answered by the model
+and graded by a second call to it. Everything that decides an answer is pinned by a flag
+and printed under the report's title exactly as it was sent, which is what makes the
+number quotable and the run repeatable:
+
+* `--model`, `--effort`, `--max-tokens` and `--thinking` on `--reader anthropic`.
+  `--thinking default` sends no thinking field and the model applies its own default;
+  `adaptive` and `disabled` send that setting explicitly. On a model that thinks, thinking
+  and the answer share `--max-tokens`, which is why the default is 4096 rather than the
+  few dozen tokens an answer needs. The Anthropic models reject `temperature`, `top_p` and
+  `top_k`, so nothing is sampled, the header says so, and there is no seed to pin: two
+  runs will differ, and the per-question rows in `--out` are the unit to compare.
+* `--model`, `--max-tokens`, `--temperature` and `--sampling-seed` on `--reader openai`.
+  The seed is sent only when given, and the header prints whichever was the case.
+* `--base-url`, `--api-key-file` and `--extra-body` point `--reader openai` at a server of
+  your own that speaks Chat Completions. The base URL and the extra body are printed and
+  keyed in the checkpoint, because a different server or `{"chat_template_kwargs":
+  {"enable_thinking": false}}` changes the answers. The key is read from the file at run
+  time and appears nowhere; the file is refused if other users can read it.
+* `--judge llm` grades with the reader's twin: the same provider and the same parameters,
+  with `--judge-model` swapped in when given. `--judge containment`, the default, is free
+  and wrong in the known directions the report lists under its tables.
+* `--checkpoint PATH` appends every completed model call to a JSONL file as it completes.
+  A run that dies resumes on the next invocation with the same path and pays only for
+  what it lost; the header says how many calls were replayed. The key covers the pinned
+  settings and the whole prompt, so a changed flag starts a fresh set of rows rather than
+  replaying another configuration's answers.
+* `--concurrency N` issues N model calls at once. Rows come back in item order and the
+  cost ledger is billed in item order, so the report is identical whatever N is.
+
+The report carries the floor (`none`) and the ceiling (`full_transcript`) beside the three
+memory arms and names which is which in its header, because a memory score without both
+beside it is uninterpretable. Under the tables it prints what the run cost, from the usage
+the provider reported, and counts the answers that never finished — a `max_tokens`
+truncation or a `refusal` — apart from wrong answers, because both arrive as a short or
+empty string and would otherwise be averaged in as a memory layer that surfaced bad
+evidence. Each row of `--out` carries the reader's `stop_reason` for the same reason.
+
+The provider's SDK has to be installed: `pip install 'memvara[anthropic]'` or
+`pip install 'memvara[openai]'`. Neither is a dependency of the library, and the whole
+harness runs without them under `--reader stub`.
+
+A person or an agent can be the reader instead, through a blinded round trip. Its number
+is a sanity check rather than a measurement — there is no model id, seed or temperature
+to quote beside it — and it is the configuration the one recorded run used:
 
 ```bash
 PYTHONPATH=. python3 demo/harness.py --dump runs/demo.jsonl
@@ -394,6 +455,220 @@ case, because `recall()` had no `valid_at=`; it no longer needs to, so it does n
 
 ---
 
+## Two corpus sizes
+
+The claim the size table makes — retrieval context is flat in corpus length while
+transcript context is linear — is a slope, and the authored corpus is one point on it.
+The second point is the same corpus scaled: `demo/distractors.py` pads the sixty-four
+authored turns with generated support tickets for the same customer and product, and
+`--corpus-scale N` on `demo/harness.py` runs any reader over the padded history. The
+questions, the golds, the `asked_at` cutoffs and `SUPPORT_FACTS` are untouched; only the
+haystack grows. Scale 1, the default, is the authored corpus itself.
+
+```bash
+PYTHONPATH=. python3 demo/harness.py --reader stub --corpus-scale 10
+```
+
+What a generated turn may say is the whole design, and it is tested rather than promised.
+A distractor never names the value of any fact a question is about, old or new — no
+address, plan name, serial, mobile number or contact channel — nor the money or the card
+the corpus leaves unstated, nor the two controls. Repeating a superseded value would move
+the balance the authored corpus was built on (the old address is named nine times to the
+new one's three, and last) and change what a trapped answer means. A distractor may name a
+fact's *topic* without its value — which subscription tiers exist, where an invoice
+appears, whether someone has to be in for a parcel — and several do on purpose, because
+topic words are what a retriever matches on, and those tickets compete with the authored
+turns for the twelve slots a retrieval arm has. Every generated turn is unique text,
+because `Memvara.add()` returns the existing episode for a repeat and the memvara arms
+would otherwise hold fewer turns than `full_transcript`. Tickets land on days with no
+authored turn, at 06:00 or 22:00, inside the authored window, so the cutoffs slice them
+as they slice the authored turns and the corpus keeps its shape.
+`tests/test_demo_scenario.py` pins all of this against a hand-written list of the
+forbidden strings rather than against anything the module exports.
+
+At scale 10 the size table is this, and like the table above it is deterministic:
+
+```
+  arm                 mean chars  max chars  mean ~tokens  items used / turns seen
+  ------------------  ----------  ---------  ------------  -----------------------
+  none                         0          0             0              0.0 / 607.5
+  full_transcript          92053      96897         23013            607.5 / 607.5
+  naive_rag                 1891       2838           473             12.0 / 607.5
+  memvara                   1596       2424           399             12.0 / 607.5
+  memvara_structured        1530       2204           383             12.0 / 607.5
+```
+
+The transcript arm grows 9.4× (9,803 to 92,053 characters; the authored turns are longer
+than the generated ones, so ten times the turns is not quite ten times the text). The
+three retrieval arms stay under `MAX_CONTEXT_CHARS` by construction and come out a little
+*shorter*, because the twelve slots now fill with generated turns that are shorter than
+the authored ones. Whether they still surface the evidence among ten times more turns is
+what the hosted run at this scale measures; the stub cannot say.
+
+`memvara_structured` deserves one more sentence. Its claims come from the desk's own
+fields (`SUPPORT_FACTS`), not from the transcript, so at every scale its claim tier is
+identical and only its episode tail faces more competition. That is the product's thesis
+stated as an experiment: structured facts plus retrieval should hold as the history grows,
+while an arm that has only the transcript to work from has more to lose.
+
+---
+
+## The memvara arms against the hosted service
+
+By default both memvara arms use a store inside the process. `--memory hosted` points them
+at a memvara-cloud project instead, through the same client a customer uses
+(`memvara.remote`), so a run can measure the hosted service rather than the library alone.
+Every other arm is unchanged: `none`, `full_transcript` and `naive_rag` use no store at all.
+
+```bash
+memvara login --credentials ~/.memvara/demo-credentials.json   # choose the demo's project
+PYTHONPATH=. python3 demo/harness.py --reader stub --memory hosted \
+    --hosted-credentials ~/.memvara/demo-credentials.json --hosted-run-id 2026-09-16a
+```
+
+**It writes to a project of its own, and refuses to do otherwise.** A run writes a few
+thousand turns, which no code here can take back, so `--hosted-credentials` refuses the
+default credentials file, any file holding the same key as it or as `MEMVARA_API_KEY`, and
+any file for the same project. Make a separate project in the console and sign in to it
+with `memvara login --credentials PATH`.
+
+Three things differ from the local arms, and the report prints them above its tables
+rather than leaving them to be noticed:
+
+* **The schema cannot be sent.** A hosted project's predicate vocabulary is the
+  deployment's, so `plan` and the two addresses are not single-valued there. The arm
+  closes a single-valued slot itself — `forget(close="ended")` at the instant the new value
+  begins — before writing the new one, which is the explicit form of what the declared
+  cardinality does locally. `tests/test_demo_hosted.py` checks every slot at every question
+  instant against the local structured arm, which has the schema.
+* **`plan` is filed under `goal`.** The built-in vocabulary resolves `plan` as an alias of
+  `goal`, so that is where the plan history lands. Reads by slot resolve the alias and the
+  prompt carries each claim's own sentence, so the reader sees the same words; anything
+  keyed on the predicate name does not. The report names the fold.
+* **Dated questions are read differently.** `POST /v1/recall` has no time axis, so the four
+  questions carrying `about` are read with `search(valid_at=)` and rendered by the
+  library's own recall renderer — byte-identical to local `recall(valid_at=)` on the same
+  store, which a test pins. The report counts how many contexts were read that way.
+
+Extraction and the episode cap are the deployment's: it runs its own extractor over the
+turns the `memvara` arm writes, on its own schedule, and its own limit on how many turns a
+read returns, where the local arm sets `read_max_episodes=k`. So each context records how
+many claims its scope held when it was read, and the report prints the range.
+
+**Scopes, and repeating a run.** One scope per run, arm, corpus size and question instant —
+eighteen of the twenty questions share an `asked_at`, so a run writes three scopes per arm
+rather than twenty. `Manifest` records each scope as `started` then `complete` in
+`demo/runs/<run id>.hosted.jsonl`. Reusing `--hosted-run-id` reads the finished scopes
+without writing them again, which is how the noise-floor repeat measures the reader twice
+over the same stored contexts. A scope left `started` by a run that died is refused, because
+replaying the fact table into it would close values at instants they were never closed at;
+start again with a new run id.
+
+---
+
+## Two other systems, as arms
+
+The five arms are controls and memvara. Neither of the two below is on unless you ask for
+it, and each needs something a fresh checkout does not have, which is why they live in
+`demo/competitors.py` rather than in `ARMS`: an arm that cannot run on a clean machine must
+not be able to break the offline run that CI depends on.
+
+```bash
+PYTHONPATH=. python3 demo/harness.py --reader stub --arm-mem0
+```
+
+### mem0
+
+Needs the package and nothing else — `pip install mem0ai`, no key, no network. The arm is
+driven by the oracle `bench/mem0_real.py` uses: a perfect extractor in mem0's own shape
+that emits the ground-truth fact for the turn being added. So mem0 is given exactly the
+facts `memvara_structured` is given, with complete extraction recall and no
+hallucinations. That is better than any real model manages, and it is deliberate. Anything
+mem0 gets wrong here, it gets wrong because of how it is built.
+
+What it is built like is the point. mem0 2.x's add path emits only `ADD` — its extraction
+prompt says so in as many words — so a new value is linked to the one it contradicts
+rather than retiring it, and both stay live. The arm holds both, and a reader asked which
+plan the account is on today sees the old one and the new one with nothing to choose on.
+
+Measured on the authored corpus with mem0ai 2.1.0, over the fifteen questions whose answer
+has a superseded value to be wrong with:
+
+| arm | asserts the superseded value as fact | carries it only as a quoted excerpt |
+| --- | --- | --- |
+| `mem0` | 13 / 15 | 0 / 15 |
+| `memvara` | 0 / 15 | 12 / 15 |
+| `memvara_structured` | 0 / 15 | 10 / 15 |
+
+Read that carefully, because it is narrower than it looks. It says where a value appears,
+not whether a reader was fooled by it — no model was asked. Both systems put the old value
+in front of the reader; the difference is that mem0 puts it in the block of asserted
+memories, while memvara puts it only under the episode header, which says in the prompt
+that these are things that were said and are unverified. `full_transcript` and `naive_rag`
+have no asserted-fact block at all — every line they carry is a dated quotation — so the
+column does not apply to them and they are left out rather than given a misleading zero.
+
+**The judged comparison is still missing**, and this arm is what it was waiting on. See
+[What is still missing](../docs/ROADMAP.md#what-is-still-missing).
+
+Two things found by running it, both of which cost an afternoon and neither of which is
+visible by reading mem0:
+
+* The oracle must be handed the current turn by the caller. mem0's additive prompt embeds
+  the last k messages, so an oracle that looks for known turns in the prompt re-extracts
+  every earlier turn in the window; and `messages[-1]["content"]` is the whole rendered
+  prompt rather than the turn, so keying on that stores nothing at all. Both failures are
+  silent, and one of them flatters memvara.
+* `on_disk: False` does not make qdrant in-memory. mem0 hands it a default storage folder
+  and qdrant locks it, so the second store a process builds dies with "already accessed by
+  another instance". `"path": ":memory:"` is the spelling that means no folder.
+
+### Supermemory
+
+Needs an account, and this repository does not have one. What it knows about Supermemory
+is one endpoint: `memvara/compat/supermemory_import.py` reads `POST /v3/documents/list`,
+which lists documents that already exist. An arm has to write a corpus and then query it,
+and neither of those calls has ever been made from here.
+
+So the arm ships with **no default write path and no default search path**. Both are
+settings with no value, and turning the arm on without them is refused, with the reason.
+A default that looked plausible would be a guess that reads like a documented fact, and
+the next person to quote it would have no way to tell which it was. Anyone with an account
+can supply the two paths from Supermemory's own documentation and run the arm.
+
+It also refuses without an explicit container tag. A run writes one document per visible
+turn — six hundred at `--corpus-scale 10` — into an account this code cannot clean up
+afterwards. `demo/hosted.py` refuses this machine's own memvara credentials for the same
+reason and at the same moment: before anything is sent.
+
+The tag you give is a prefix, not the container: the arm writes one container per question
+instant, `<tag>-<instant>`. That is not tidiness. The harness asks questions in the order
+the scenario lists them, which is not `asked_at` order — the eight August questions come
+first and the April one is ninth — so a single container would already hold the whole
+history by the time the April question searched it. Measured with a shared container, that
+question could match 64 documents instead of the 32 turns it was allowed to see, 32 of them
+dated after it was asked and some of them nearly four months later. It would also write
+every overlapping turn twice. `demo/hosted.py` splits hosted scopes by instant for the
+same reason.
+
+```bash
+PYTHONPATH=. python3 demo/harness.py --reader stub --arm-supermemory \
+    --supermemory-key-file ~/.config/memvara/supermemory.key \
+    --supermemory-container memvara-demo-2026-09 \
+    --supermemory-ingest-path <from their docs> \
+    --supermemory-search-path <from their docs>
+```
+
+The key is read from the file at run time and is never printed, logged or put on a command
+line. Requests go through the importer's own injectable `fetch`, `(url, key, body) ->
+payload`, rather than a second HTTP client written for the demo.
+
+**No Supermemory number is published anywhere in this repository**, because nobody here
+has run the arm. That is the honest state and it is recorded here rather than filled in
+with something plausible.
+
+---
+
 ## What one run produced
 
 Context size is deterministic and comes out the same every time. This is real output from
@@ -406,10 +681,13 @@ Context size is deterministic and comes out the same every time. This is real ou
   full_transcript           9803      10263          2451              60.8 / 60.8
   naive_rag                 2329       2846           582              12.0 / 60.8
   memvara                   2074       2489           519              12.0 / 60.8
-  memvara_structured        1721       2151           430              12.0 / 60.8
+  memvara_structured        1772       2241           443              12.0 / 60.8
 ```
 
 `~tokens` is `chars // 4`, an estimate and not a tokenizer — `CHARS_PER_TOKEN` says so.
+The `memvara_structured` row grew from 1,721 to 1,772 characters when the arm moved to
+`recall(valid_at=)`, whose dated header is part of what it renders; the agent run below
+was made at the earlier size.
 `naive_rag` retrieved every visible turn on **0 of 20** questions, so it is a retrieval arm
 throughout rather than `full_transcript` in a different order; the harness prints a warning
 when that stops being true.

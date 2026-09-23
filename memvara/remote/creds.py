@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Mapping
 
 from ..server.config import CREDENTIALS_PATH, DEFAULT_SERVER_URL
 
-__all__ = ["MissingCredential", "resolve", "CREDENTIALS_PATH"]
+__all__ = ["MissingCredential", "read_credentials_file", "resolve", "CREDENTIALS_PATH"]
 
 
 class MissingCredential(RuntimeError):
@@ -25,15 +26,41 @@ def _clean(value: str | None) -> str | None:
     return value.strip() if value and value.strip() else None
 
 
-def _from_file() -> str | None:
-    """The key `memvara-mcp login` wrote, or None. A malformed file is None rather than
-    an exception: the caller's next stop is the same "run login" message either way."""
+def read_credentials_file(path: str | os.PathLike[str]) -> dict[str, str]:
+    """What a login wrote to one credentials file, or an empty mapping.
+
+    Every way a file can fail to be a usable credential — missing, unreadable, not JSON,
+    holding no `api_key` — comes back as `{}` rather than an exception, because each
+    caller does the same thing with all of them: say "not signed in" and name the command
+    that fixes it. Returning `{}` for a file that exists but holds no key is deliberate:
+    a credential without a key is not a partial credential, it is not one.
+
+    One function rather than one per caller. `resolve()` reads the default file,
+    `memvara whoami` and `memvara logout` read whichever file they were given, and
+    `demo/harness.py`'s hosted arms read the demo's own — and three readers of one
+    format are three chances to disagree about what an unreadable file means.
+
+    Only the string fields a login writes are returned: `api_key`, `project` and
+    `server_url`. Anything else in the file is somebody else's and is left alone.
+    """
     try:
-        body = json.loads(CREDENTIALS_PATH.read_text())
+        body = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
-    key = body.get("api_key") if isinstance(body, dict) else None
-    return _clean(key if isinstance(key, str) else None)
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    found: dict[str, str] = {}
+    for name in ("api_key", "project", "server_url"):
+        raw = body.get(name)
+        value = _clean(raw) if isinstance(raw, str) else None
+        if value is not None:
+            found[name] = value
+    return found if "api_key" in found else {}
+
+
+def _from_file() -> str | None:
+    """The key `memvara login` wrote to the default file, or None."""
+    return read_credentials_file(CREDENTIALS_PATH).get("api_key")
 
 
 def resolve(api_key: str | None, base_url: str | None,

@@ -1,11 +1,21 @@
-"""`memvara-mcp login` — trade a device code for an API key, without a password to type.
+"""`memvara login` — trade a device code for an API key, without a password to type.
+
+Two console scripts reach this one function: `memvara login`, which is the command a
+person runs, and `memvara-mcp login`, which is the same flow under the older name and is
+kept working. `prog` below is which of the two was typed, and every message uses it.
 
 This is the client half of the contract `config.py`'s module docstring names on the other
 side: `POST /api/auth/device/authorize` mints a `device_code` (a secret, kept only here and
 on the server's digest) and a `user_code` (short, meant for a human to read or click), a
-browser tab lets a signed-in person approve or deny the project named at authorize time,
-and this process polls `POST /api/auth/device/token` until that decision lands. RFC 8628 is
-the shape of all three steps; nothing here invents a new one.
+browser tab lets a signed-in person approve or deny the sign-in, and this process polls
+`POST /api/auth/device/token` until that decision lands. RFC 8628 is the shape of all
+three steps; nothing here invents a new one.
+
+**Which project the key is for is usually not decided here.** The authorize route is
+unauthenticated, so it has no session and no organization, and it therefore takes a
+project *id* or no project at all rather than a name. With no project named the grant is
+unbound and the person approving it in the browser chooses from the projects they hold,
+which is both the smaller surface and the easier command to type.
 
 Two ways the "click and it just works" experience degrades, on purpose rather than by
 accident:
@@ -32,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -68,22 +79,36 @@ _MAX_WAIT_SECONDS = 900
 _CSRF_HEADERS = {"X-Memvara-CSRF": "cli"}
 
 LOGIN_USAGE = f"""\
-memvara-mcp login — sign in to a memvara-cloud deployment and store an API key.
+memvara login — sign in to a memvara-cloud deployment and store an API key.
 
 Opens a browser to approve this device, then polls until the key is issued. Nothing to
 type unless the browser cannot be opened automatically, in which case the code to enter
 is printed here.
 
-  --project NAME  which project to request a key for. Required — a device asking for
-                  credentials has to say what it wants them scoped to.
+  --project ID    which project to issue the key for, as the project's id. Optional, and
+                  leaving it out is the better call: the request then names no project
+                  at all and the person approving it in the browser picks from the
+                  projects they hold. A project *name* is refused, here and by the
+                  server, because this request has no session to resolve a name against.
   --server URL    the memvara-cloud deployment to sign in to. Default: MEMVARA_SERVER_URL
                   if this shell has one, otherwise {_DEFAULT_SERVER_URL!r}.
+  --credentials PATH
+                  where to write the key. Default ~/.memvara/credentials.json, which is
+                  the file everything else reads. Name another one to hold a key for a
+                  second project without moving every other caller into it.
 
-On success, writes the api key to ~/.memvara/credentials.json, mode 0600. Run this once
-per project per machine; MEMVARA_MODE=cloud picks the file up automatically after that.
+On success, writes the api key to that file, mode 0600. Run this once per project per
+machine; MEMVARA_MODE=cloud picks the default file up automatically after that.
 """
 
-_OPTIONS = ("--project", "--server")
+_OPTIONS = ("--project", "--server", "--credentials")
+
+#: A project id, as the authorize route requires it. Anything else is a name or a slug,
+#: which that route refuses 400 — it is unauthenticated, so it has no organization to
+#: resolve a name against and will not guess across every organization on the
+#: deployment. Checked here so the refusal arrives before a browser opens.
+_UUID = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                   r"[0-9a-fA-F]{12}\Z")
 
 
 class _Usage(Exception):
@@ -154,9 +179,12 @@ def _bind_loopback_listener() -> HTTPServer | None:
     return server
 
 
-def _authorize(client: Any, server_url: str, project: str,
+def _authorize(client: Any, server_url: str, project: str | None,
               redirect_uri: str | None) -> _Authorization:
-    body: dict[str, str] = {"project": project}
+    # No `project` key at all when none was given, rather than a null or an empty string.
+    # The route reads the field's presence as "this caller has chosen a project", and an
+    # empty value is a 400 rather than the unbound grant that was meant.
+    body: dict[str, str] = {} if project is None else {"project": project}
     if redirect_uri is not None:
         body["redirect_uri"] = redirect_uri
     response = client.post(f"{server_url}/api/auth/device/authorize", json=body)
@@ -212,8 +240,17 @@ def _poll_once(client: Any, server_url: str, device_code: str) -> dict[str, Any]
         raise _LoginFailed(_server_error(response, "answer a poll")) from exc
 
 
-def _write_credentials(*, api_key: str, project: str, server_url: str) -> Path:
-    _CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _write_credentials(*, api_key: str, project: str, server_url: str,
+                       path: Path | None = None) -> Path:
+    """Write the key, mode 0600, to `path` or to the default credentials file.
+
+    `path` is what `--credentials` sets, and it is the whole of how one machine holds a
+    key for two projects. The default file is the one `MEMVARA_MODE=cloud`, the npm
+    bridge and `Memvara.connect()` all read, so writing a second project's key there does
+    not add a credential — it moves every one of those callers into that project.
+    """
+    path = _CREDENTIALS_PATH if path is None else path
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "api_key": api_key,
         "project": project,
@@ -223,15 +260,22 @@ def _write_credentials(*, api_key: str, project: str, server_url: str) -> Path:
     # Written new and chmod'd before any content lands, rather than chmod'd after: a
     # process that dies between write and chmod would otherwise leave a plaintext key
     # world-readable for however long the gap lasted.
-    _CREDENTIALS_PATH.touch(mode=0o600, exist_ok=True)
-    os.chmod(_CREDENTIALS_PATH, 0o600)
-    _CREDENTIALS_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    return _CREDENTIALS_PATH
+    path.touch(mode=0o600, exist_ok=True)
+    os.chmod(path, 0o600)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 def login(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
-         stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
-    """Run the device-code flow to completion. Returns an exit status."""
+         stdout: TextIO | None = None, stderr: TextIO | None = None,
+         prog: str = "memvara-mcp login") -> int:
+    """Run the device-code flow to completion. Returns an exit status.
+
+    `prog` is the command the person actually typed, and every message this flow prints
+    uses it. Two console scripts reach this one function — `memvara login` and
+    `memvara-mcp login` — and a failure that tells somebody to re-run the other one is a
+    message they have to translate before they can act on it.
+    """
     env = os.environ if env is None else env
     out = sys.stdout if stdout is None else stdout
     err = sys.stderr if stderr is None else stderr
@@ -243,13 +287,18 @@ def login(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
     try:
         options = _parse(argv)
         project = options.get("--project")
-        if not project:
-            raise _Usage("login needs --project, naming which project to request a key "
-                         "for.")
+        if project is not None and not _UUID.match(project):
+            raise _Usage(
+                f"--project takes a project id (a uuid), and {project!r} is not one. "
+                "Omit --project: the sign-in then names no project at all, and you pick "
+                "one in the browser from the projects you hold. A project's id is in "
+                "the console, on that project's own settings page.")
+        credentials = Path(options["--credentials"]) if "--credentials" in options \
+            else None
         server_url = (options.get("--server") or env.get("MEMVARA_SERVER_URL") or "").strip() \
             or _DEFAULT_SERVER_URL
     except _Usage as exc:
-        print(f"memvara-mcp login: {exc}\n\n{LOGIN_USAGE}", file=err)
+        print(f"{prog}: {exc}\n\n{LOGIN_USAGE}", file=err)
         return 2
 
     # Imported here, not at module scope: this file belongs to the `cloud` extra and the
@@ -269,13 +318,15 @@ def login(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
             try:
                 authorization = _authorize(client, server_url, project, redirect_uri)
             except httpx.HTTPError as exc:
-                print(f"memvara-mcp login: could not reach {server_url}: {exc}", file=err)
+                print(f"{prog}: could not reach {server_url}: {exc}", file=err)
                 return 1
             except _LoginFailed as exc:
-                print(f"memvara-mcp login: {exc}", file=err)
+                print(f"{prog}: {exc}", file=err)
                 return 1
 
-            print(f"memvara-mcp login — {project} on {server_url}", file=out)
+            named = ("the project you choose in the browser" if project is None
+                     else project)
+            print(f"{prog} — {named} on {server_url}", file=out)
             print("", file=out)
             opened = False
             try:
@@ -292,23 +343,26 @@ def login(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
             print("Waiting for approval...", file=out)
             out.flush()
 
-            return _poll(client, out, err, server_url=server_url, project=project,
-                        authorization=authorization, listener=listener)
+            return _poll(client, out, err, server_url=server_url,
+                        authorization=authorization, listener=listener,
+                        credentials=credentials, prog=prog)
     finally:
         if listener is not None:
             listener.server_close()
 
 
-def _poll(client: Any, out: TextIO, err: TextIO, *, server_url: str, project: str,
-         authorization: _Authorization, listener: HTTPServer | None) -> int:
+def _poll(client: Any, out: TextIO, err: TextIO, *, server_url: str,
+         authorization: _Authorization, listener: HTTPServer | None,
+         credentials: Path | None = None,
+         prog: str = "memvara-mcp login") -> int:
     interval = max(authorization.interval, 1)
     deadline = time.monotonic() + min(authorization.expires_in, _MAX_WAIT_SECONDS)
     redirect_hint_used = False
 
     while True:
         if time.monotonic() >= deadline:
-            print("memvara-mcp login: timed out waiting for approval. Run "
-                 "\"memvara-mcp login\" again.", file=err)
+            print(f"{prog}: timed out waiting for approval. Run "
+                 f"\"{prog}\" again.", file=err)
             return 1
 
         # A caught redirect is a hint to poll right away instead of sleeping out the full
@@ -323,18 +377,28 @@ def _poll(client: Any, out: TextIO, err: TextIO, *, server_url: str, project: st
         try:
             result = _poll_once(client, server_url, authorization.device_code)
         except _LoginFailed as exc:
-            print(f"\nmemvara-mcp login: {exc}", file=err)
+            print(f"\n{prog}: {exc}", file=err)
             return 1
         status = result.get("status")
         error = result.get("error")
 
         if status == "approved":
             path = _write_credentials(api_key=result["api_key"], project=result["project"],
-                                     server_url=server_url)
-            print(f"\nSigned in. Wrote {path} (privilege: {result.get('privilege')}).",
-                 file=out)
-            print("Set MEMVARA_MODE=cloud (MEMVARA_DB is not needed in that mode) and "
-                 "this key is picked up automatically.", file=out)
+                                     server_url=server_url, path=credentials)
+            print(f"\nSigned in to project {result['project']}. Wrote {path} "
+                 f"(privilege: {result.get('privilege')}).", file=out)
+            if credentials is None:
+                print("Set MEMVARA_MODE=cloud (MEMVARA_DB is not needed in that mode) "
+                     "and this key is picked up automatically.", file=out)
+            else:
+                # A key outside the default file is picked up by nothing on its own, and
+                # somebody who asked for one has a caller in mind that has to be told
+                # where it is. Saying so here is cheaper than the silence that follows a
+                # run which quietly used the other project's key.
+                print("Nothing reads this file on its own, because it is not the "
+                     "default one. Point whatever needs it at this path — "
+                     "\"memvara whoami --credentials PATH\" is the check that it "
+                     "works.", file=out)
             return 0
         if error == "authorization_pending":
             time.sleep(0 if redirect_hint_used else interval)
@@ -345,12 +409,10 @@ def _poll(client: Any, out: TextIO, err: TextIO, *, server_url: str, project: st
             time.sleep(interval)
             continue
         if error == "access_denied":
-            print("\nmemvara-mcp login: denied in the browser.", file=err)
+            print(f"\n{prog}: denied in the browser.", file=err)
             return 1
         if error == "expired_token":
-            print("\nmemvara-mcp login: this device code expired. Run \"memvara-mcp "
-                 "login\" again.", file=err)
+            print(f"\n{prog}: this device code expired. Run \"{prog}\" again.", file=err)
             return 1
-        print(f"\nmemvara-mcp login: unexpected response from the server: {result}",
-             file=err)
+        print(f"\n{prog}: unexpected response from the server: {result}", file=err)
         return 1

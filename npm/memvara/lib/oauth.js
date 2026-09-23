@@ -150,7 +150,7 @@ async function login({ serverUrl, userAgent, stderr = process.stderr }) {
     if (!meta.registration_endpoint) {
       throw new Error(
         `${serverUrl} advertises no registration_endpoint, so this client cannot register ` +
-          "itself. Set MEMVARA_API_KEY instead, or run: memvara-mcp login --project NAME",
+          "itself. Set MEMVARA_API_KEY instead, or run: memvara-mcp login",
       );
     }
     const registered = await json(
