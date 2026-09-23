@@ -45,7 +45,8 @@ Two things worth knowing before relying on it:
 * **It runs on the default executor**, which is shared with every other `to_thread` in
   the process and holds `min(32, cpu_count + 4)` threads. A burst of writes larger than
   that queues behind itself; `loop.set_default_executor(...)` is the knob if that
-  matters.
+  matters. `search()` and `recall()` are the exception: they can wait on a model call
+  for seconds, so they run on their own pool of `READ_THREADS` threads (see `_read`).
 
 Constructing the `Memvara` is left to the caller, and synchronously, on purpose: opening
 the store and loading an embedding model is blocking work that belongs in application
@@ -64,18 +65,54 @@ startup, not hidden inside the first `await`.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import partial
 from typing import Any, Callable, Collection, Literal, Mapping, Sequence, overload
 
 from .core import (Memvara, Messages, ScopedMemvara, _approx_tokens, _check_k,
                    _profile_since)
 from .embed import Embedder
 from .retrieve import Path, Retrieved
+from .select import PLAIN_READ
 from .write.reconcile import MergeReport
-from .types import (Answer, Claim, Delta, Episode, ErasureProof, ForgetPreview,
-                    ForgetResult, Link, MemoryType, Profile, Provenance, RecallResult,
-                    Result, Scope, WriteReceipt)
+from .types import (Answer, Claim, DeleteResult, Delta, Document, DocumentStatus,
+                    Episode, ErasureProof, ForgetPreview, ForgetResult, Link, MemoryType,
+                    Page, Profile, Provenance, RecallResult, Result, Scope, WriteReceipt)
+
+
+#: How many `search()` and `recall()` calls may run at once across every `AsyncMemvara`
+#: in the process. See `_read`.
+READ_THREADS = 8
+
+_reads: ThreadPoolExecutor | None = None
+_reads_lock = threading.Lock()
+
+
+async def _read(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run a read on its own bounded pool, not on the loop's default executor.
+
+    A `search()` or `recall()` can wait up to 10 seconds on the query rewrite's model
+    call, and 10 more on a synthesis, before it reads anything. On the shared default
+    executor, a burst of such reads would hold every thread and stall unrelated
+    `to_thread` work in the process. This pool is separate and bounded at
+    `READ_THREADS`, so a burst of reads queues behind itself instead. Splitting a read
+    into awaited steps was the other option; it would need an async `Chat` protocol,
+    which this library does not have, and would still block a thread on the model call.
+    The context is copied, as `asyncio.to_thread` does.
+    """
+    global _reads
+    with _reads_lock:
+        if _reads is None:
+            _reads = ThreadPoolExecutor(max_workers=READ_THREADS,
+                                        thread_name_prefix="memvara-read")
+        pool = _reads
+    context = contextvars.copy_context()
+    return await asyncio.get_running_loop().run_in_executor(
+        pool, partial(context.run, fn, *args, **kwargs))
 
 
 async def _nothing() -> list[Result]:
@@ -229,6 +266,70 @@ class AsyncMemvara:
         """See `Memvara.prove_erased`."""
         return await asyncio.to_thread(self.memvara.prove_erased, claim_id)
 
+    async def add_document(self, content: str | bytes | None = None, *,
+                           url: str | None = None, custom_id: str | None = None,
+                           title: str | None = None, filepath: str | None = None,
+                           mime: str | None = None, meta: Mapping[str, Any] | None = None,
+                           extract: bool = True, tenant=None, user=None, agent=None,
+                           session=None) -> Document:
+        """See `Memvara.add_document`."""
+        return await asyncio.to_thread(
+            self.memvara.add_document, content, url=url, custom_id=custom_id,
+            title=title, filepath=filepath, mime=mime, meta=meta, extract=extract,
+            tenant=tenant, user=user, agent=agent, session=session)
+
+    async def get_document(self, id_or_custom_id: str, *, tenant=None, user=None,
+                           agent=None, session=None) -> Document | None:
+        """See `Memvara.get_document`."""
+        return await asyncio.to_thread(
+            self.memvara.get_document, id_or_custom_id, tenant=tenant, user=user,
+            agent=agent, session=session)
+
+    async def list_documents(self, *, filepath_prefix: str | None = None,
+                             status: str | None = None, limit: int = 50,
+                             cursor: str | None = None, tenant=None, user=None,
+                             agent=None, session=None) -> Page[Document]:
+        """See `Memvara.list_documents`."""
+        return await asyncio.to_thread(
+            self.memvara.list_documents, filepath_prefix=filepath_prefix, status=status,
+            limit=limit, cursor=cursor, tenant=tenant, user=user, agent=agent,
+            session=session)
+
+    async def update_document(self, id_or_custom_id: str, *,
+                              content: str | bytes | None = None,
+                              title: str | None = None,
+                              meta: Mapping[str, Any] | None = None,
+                              filepath: str | None = None, mime: str | None = None,
+                              extract: bool = True, tenant=None, user=None, agent=None,
+                              session=None) -> Document:
+        """See `Memvara.update_document`."""
+        return await asyncio.to_thread(
+            self.memvara.update_document, id_or_custom_id, content=content, title=title,
+            meta=meta, filepath=filepath, mime=mime, extract=extract, tenant=tenant,
+            user=user, agent=agent, session=session)
+
+    async def delete_document(self, id_or_custom_id: str, *, tenant=None, user=None,
+                              agent=None, session=None) -> DeleteResult:
+        """See `Memvara.delete_document` — erases the document's text."""
+        return await asyncio.to_thread(
+            self.memvara.delete_document, id_or_custom_id, tenant=tenant, user=user,
+            agent=agent, session=session)
+
+    async def delete_documents(self, ids_or_custom_ids: Sequence[str], *, tenant=None,
+                               user=None, agent=None,
+                               session=None) -> list[DeleteResult]:
+        """See `Memvara.delete_documents`."""
+        return await asyncio.to_thread(
+            self.memvara.delete_documents, ids_or_custom_ids, tenant=tenant, user=user,
+            agent=agent, session=session)
+
+    async def document_status(self, id_or_custom_id: str, *, tenant=None, user=None,
+                              agent=None, session=None) -> DocumentStatus:
+        """See `Memvara.document_status`."""
+        return await asyncio.to_thread(
+            self.memvara.document_status, id_or_custom_id, tenant=tenant, user=user,
+            agent=agent, session=session)
+
     async def purge(self, *, tenant=None, user=None, agent=None,
                     session=None) -> dict[str, int]:
         """See `Memvara.purge` — irreversible."""
@@ -250,6 +351,7 @@ class AsyncMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      tenant=..., user=..., agent=..., session=...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
@@ -261,6 +363,7 @@ class AsyncMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      tenant=..., user=..., agent=..., session=...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
@@ -272,6 +375,7 @@ class AsyncMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      tenant=..., user=..., agent=..., session=...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
@@ -282,6 +386,7 @@ class AsyncMemvara:
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True,
                      tenant=None, user=None, agent=None, session=None,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
@@ -289,10 +394,11 @@ class AsyncMemvara:
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False) -> list[Any]:
-        """See `Memvara.search`. Encodes the query, so it belongs off the loop too."""
-        return await asyncio.to_thread(
+        """See `Memvara.search`. Runs on the read pool; see `_read`."""
+        return await _read(
             self.memvara.search, query, k=k, min_score=min_score, anchored=anchored,
             ranked=ranked,
+            query_rewrite=query_rewrite,
             tenant=tenant,
             user=user, agent=agent, session=session, as_of=as_of, valid_at=valid_at,
             known_at=known_at, states=states,
@@ -305,6 +411,7 @@ class AsyncMemvara:
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ..., synthesize: bool = ...,
                      header: str | None = ..., tenant=..., user=..., agent=...,
                      session=..., memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -316,6 +423,7 @@ class AsyncMemvara:
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ..., synthesize: bool = ...,
                      header: str | None = ..., tenant=..., user=..., agent=...,
                      session=..., memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -327,6 +435,7 @@ class AsyncMemvara:
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ..., synthesize: bool = ...,
                      header: str | None = ..., tenant=..., user=..., agent=...,
                      session=..., memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -337,6 +446,7 @@ class AsyncMemvara:
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True, synthesize: bool = False,
                      header: str | None = None, tenant=None, user=None, agent=None,
                      session=None, memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False,
@@ -347,10 +457,11 @@ class AsyncMemvara:
                      counter: Callable[[str], int] = _approx_tokens,
                      valid_at: datetime | None = None,
                      with_ids: bool = False) -> Any:
-        """See `Memvara.recall`."""
-        return await asyncio.to_thread(
+        """See `Memvara.recall`. Runs on the read pool; see `_read`."""
+        return await _read(
             self.memvara.recall, query, k=k, min_score=min_score, anchored=anchored,
             ranked=ranked,
+            query_rewrite=query_rewrite, synthesize=synthesize,
             header=header,
             tenant=tenant, user=user, agent=agent, session=session,
             memory_types=memory_types, include_episodes=include_episodes,
@@ -399,7 +510,8 @@ class AsyncMemvara:
         at = _profile_since(since)
 
         def search() -> list[Result]:
-            return mem.search(query or "", k=k, **scope_kw)
+            # A plain read, as in `Memvara.profile`.
+            return mem.search(query or "", k=k, **PLAIN_READ, **scope_kw)
 
         live, then, hits = await asyncio.gather(
             asyncio.to_thread(mem.get_all, states=["live"], **scope_kw),
@@ -687,6 +799,44 @@ class AsyncScopedMemvara:
     async def prove_erased(self, claim_id: str) -> "ErasureProof":
         return await self._amem.prove_erased(claim_id)
 
+    async def add_document(self, content: str | bytes | None = None, *,
+                           url: str | None = None, custom_id: str | None = None,
+                           title: str | None = None, filepath: str | None = None,
+                           mime: str | None = None, meta: Mapping[str, Any] | None = None,
+                           extract: bool = True) -> Document:
+        return await self._amem.add_document(
+            content, url=url, custom_id=custom_id, title=title, filepath=filepath,
+            mime=mime, meta=meta, extract=extract, **self._kw)
+
+    async def get_document(self, id_or_custom_id: str) -> Document | None:
+        return await self._amem.get_document(id_or_custom_id, **self._kw)
+
+    async def list_documents(self, *, filepath_prefix: str | None = None,
+                             status: str | None = None, limit: int = 50,
+                             cursor: str | None = None) -> Page[Document]:
+        return await self._amem.list_documents(
+            filepath_prefix=filepath_prefix, status=status, limit=limit, cursor=cursor,
+            **self._kw)
+
+    async def update_document(self, id_or_custom_id: str, *,
+                              content: str | bytes | None = None,
+                              title: str | None = None,
+                              meta: Mapping[str, Any] | None = None,
+                              filepath: str | None = None, mime: str | None = None,
+                              extract: bool = True) -> Document:
+        return await self._amem.update_document(
+            id_or_custom_id, content=content, title=title, meta=meta, filepath=filepath,
+            mime=mime, extract=extract, **self._kw)
+
+    async def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        return await self._amem.delete_document(id_or_custom_id, **self._kw)
+
+    async def delete_documents(self, ids_or_custom_ids: Sequence[str]) -> list[DeleteResult]:
+        return await self._amem.delete_documents(ids_or_custom_ids, **self._kw)
+
+    async def document_status(self, id_or_custom_id: str) -> DocumentStatus:
+        return await self._amem.document_status(id_or_custom_id, **self._kw)
+
     async def supersede(self, old_claim_id: str, new_claim: Claim, *,
                         at: datetime | None = None,
                         sources: Sequence[str | Episode] | None = None,
@@ -709,6 +859,7 @@ class AsyncScopedMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -719,6 +870,7 @@ class AsyncScopedMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -729,6 +881,7 @@ class AsyncScopedMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -738,6 +891,7 @@ class AsyncScopedMemvara:
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
@@ -746,6 +900,7 @@ class AsyncScopedMemvara:
                      include_episodes: bool = False) -> list[Any]:
         return await self._amem.search(
             query, k=k, min_score=min_score, anchored=anchored, ranked=ranked,
+            query_rewrite=query_rewrite,
             as_of=as_of, valid_at=valid_at,
             known_at=known_at, states=states,
             include_invalidated=include_invalidated,
@@ -755,6 +910,7 @@ class AsyncScopedMemvara:
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ..., synthesize: bool = ...,
                      header: str | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -766,6 +922,7 @@ class AsyncScopedMemvara:
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ..., synthesize: bool = ...,
                      header: str | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -777,6 +934,7 @@ class AsyncScopedMemvara:
     @overload
     async def recall(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ..., synthesize: bool = ...,
                      header: str | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      include_episodes: bool = ..., episode_header: str | None = ...,
@@ -787,6 +945,7 @@ class AsyncScopedMemvara:
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True, synthesize: bool = False,
                      header: str | None = None,
                      memory_types: Sequence[MemoryType] | None = None,
                      include_episodes: bool = False,
@@ -799,6 +958,7 @@ class AsyncScopedMemvara:
                      with_ids: bool = False) -> Any:
         return await self._amem.recall(
             query, k=k, min_score=min_score, anchored=anchored, ranked=ranked,
+            query_rewrite=query_rewrite, synthesize=synthesize,
             header=header,
             memory_types=memory_types,
             include_episodes=include_episodes, episode_header=episode_header,

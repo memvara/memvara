@@ -30,17 +30,17 @@ from ..core import _check_k
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import Path, Retrieved
 from ..types import (
-    Answer, Claim, Delta, Episode, ForgetPreview, ForgetResult, Link, MemoryType,
-    Profile, Provenance, Result, Scope, SearchResults, WriteReceipt, closure,
-    closure_reason, link_relation, refuse_self_link,
+    Answer, Claim, DeleteResult, Delta, Document, DocumentStatus, Episode,
+    ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
+    Scope, SearchResults, WriteReceipt, closure, closure_reason, link_relation,
+    one_source, refuse_self_link,
 )
 from . import hydrate
-from .api import (PROJECT_HEADER, _as_local_refusal, _hit, _iso, _refuse_project_meta,
-                  _sent, _states,
-                  _type, _types)
+from .api import (PROJECT_HEADER, _as_local_refusal, _document_body, _document_path, _hit,
+                  _iso, _refuse_project_meta, _sent, _states, _type, _types)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
-from .errors import Conflict, NotFound, refuse_project_purge
+from .errors import Conflict, InvalidRequest, NotFound, refuse_project_purge
 
 
 class AsyncRemoteMemvara:
@@ -105,6 +105,24 @@ class AsyncRemoteMemvara:
         if project is not None:
             kw["headers"] = {PROJECT_HEADER: project}
         return await self._http.request(method, path, **kw)
+
+    async def _read(self, path: str, body: dict[str, Any]) -> Any:
+        """POST one read, retrying once without `query_rewrite` for an older deployment.
+
+        `query_rewrite` is sent only as `false`, when the caller opted out. A deployment
+        from before the field refuses it as unknown (422), and such a deployment never
+        rewrites a query, so the opt-out already holds there: the read is sent again
+        without the field. A 422 for any other reason fails the second time as well and
+        is raised. `synthesize` gets no retry, because an older deployment cannot write
+        the summary the caller asked for, and saying so is the honest answer.
+        """
+        try:
+            return await self._request("POST", path, params=self._params(), json=body)
+        except InvalidRequest:
+            if body.get("query_rewrite") is not False:
+                raise
+            body = {k: v for k, v in body.items() if k != "query_rewrite"}
+            return await self._request("POST", path, params=self._params(), json=body)
 
     def _params(self, **extra: Any) -> dict[str, Any]:
         scope = self.default_scope
@@ -177,6 +195,7 @@ class AsyncRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -187,6 +206,7 @@ class AsyncRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -197,6 +217,7 @@ class AsyncRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -206,26 +227,30 @@ class AsyncRemoteMemvara:
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False) -> list[Any]:
-        body = await self._request(
-            "POST", "/v1/search", params=self._params(),
-            json=_sent({"query": query, "k": k, "min_score": min_score,
+        body = await self._read(
+            "/v1/search",
+            body=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
+                        "query_rewrite": None if query_rewrite else False,
                         "as_of": _iso(as_of), "valid_at": _iso(valid_at),
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
         return SearchResults([_hit(h) for h in body["results"]],
-                             selection=hydrate.selection(body.get("selection")))
+                             selection=hydrate.selection(body.get("selection")),
+                             rewrite=hydrate.rewrite(body.get("rewrite")))
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True, synthesize: bool = False,
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False,
                      budget: int | None = None,
@@ -240,10 +265,12 @@ class AsyncRemoteMemvara:
                 "recall(valid_at=...) is not available against a hosted deployment: "
                 "POST /v1/recall has no time axis. Use search(valid_at=...) and render "
                 "your own block.")
-        body = await self._request(
-            "POST", "/v1/recall", params=self._params(),
-            json=_sent({"query": query, "k": k, "min_score": min_score,
+        body = await self._read(
+            "/v1/recall",
+            body=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
+                        "query_rewrite": None if query_rewrite else False,
+                        "synthesize": synthesize or None,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
         return str(body["text"])
@@ -524,6 +551,71 @@ class AsyncRemoteMemvara:
             body["predicate"] = predicate
         return bool(await self._end(body))
 
+    # -- documents -----------------------------------------------------------
+
+    async def add_document(self, content: str | bytes | None = None, *,
+                           url: str | None = None, custom_id: str | None = None,
+                           title: str | None = None, filepath: str | None = None,
+                           mime: str | None = None, meta: Mapping[str, Any] | None = None,
+                           extract: bool = True) -> Document:
+        """See `RemoteMemvara.add_document`."""
+        one_source(content, url)
+        body = _document_body(self.redactor, self._redact, content, url=url,
+                              custom_id=custom_id, title=title, filepath=filepath,
+                              mime=mime, meta=meta, extract=extract)
+        return hydrate.document(await self._request(
+            "POST", "/v1/documents", params=self._params(), json=body, write=True))
+
+    async def get_document(self, id_or_custom_id: str) -> Document | None:
+        try:
+            return hydrate.document(await self._request(
+                "GET", _document_path(id_or_custom_id), params=self._params()))
+        except NotFound:
+            return None
+
+    async def list_documents(self, *, filepath_prefix: str | None = None,
+                             status: str | None = None, limit: int = 50,
+                             cursor: str | None = None) -> Page[Document]:
+        return hydrate.document_page(await self._request(
+            "GET", "/v1/documents",
+            params=self._params(filepath_prefix=filepath_prefix, status=status,
+                                limit=limit, cursor=cursor)))
+
+    async def update_document(self, id_or_custom_id: str, *,
+                              content: str | bytes | None = None,
+                              title: str | None = None,
+                              meta: Mapping[str, Any] | None = None,
+                              filepath: str | None = None, mime: str | None = None,
+                              extract: bool = True) -> Document:
+        body = _document_body(self.redactor, self._redact, content, title=title,
+                              filepath=filepath, mime=mime, meta=meta, extract=extract)
+        try:
+            return hydrate.document(await self._request(
+                "PATCH", _document_path(id_or_custom_id), params=self._params(),
+                json=body, write=True))
+        except NotFound:
+            raise KeyError(f"no document {id_or_custom_id!r} is visible here") from None
+
+    async def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        try:
+            return hydrate.delete_result(await self._request(
+                "DELETE", _document_path(id_or_custom_id), params=self._params(),
+                write=True))
+        except NotFound:
+            return DeleteResult(id=id_or_custom_id, deleted=False)
+
+    async def delete_documents(self, ids_or_custom_ids: Sequence[str]) -> list[DeleteResult]:
+        body = await self._request("POST", "/v1/documents/delete", params=self._params(),
+                                   json={"ids": list(ids_or_custom_ids)}, write=True)
+        return [hydrate.delete_result(r) for r in body["results"]]
+
+    async def document_status(self, id_or_custom_id: str) -> DocumentStatus:
+        try:
+            return hydrate.document_status(await self._request(
+                "GET", _document_path(id_or_custom_id, "/status"), params=self._params()))
+        except NotFound:
+            raise KeyError(f"no document {id_or_custom_id!r} is visible here") from None
+
     # -- erasure -------------------------------------------------------------
 
     async def erase(self, claim_id: str, *, sources: bool = False) -> bool:
@@ -603,6 +695,7 @@ class AsyncScopedRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -613,6 +706,7 @@ class AsyncScopedRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -623,6 +717,7 @@ class AsyncScopedRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -632,6 +727,7 @@ class AsyncScopedRemoteMemvara:
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
@@ -640,6 +736,7 @@ class AsyncScopedRemoteMemvara:
                      include_episodes: bool = False) -> list[Any]:
         return await self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
                                       anchored=anchored, ranked=ranked,
+                                      query_rewrite=query_rewrite,
                                       valid_at=valid_at, known_at=known_at,
                                       states=states,
                                       include_invalidated=include_invalidated,
@@ -648,12 +745,14 @@ class AsyncScopedRemoteMemvara:
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True, synthesize: bool = False,
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False,
                      budget: int | None = None,
                      valid_at: datetime | None = None) -> str:
         return await self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
                                       ranked=ranked,
+                                      query_rewrite=query_rewrite, synthesize=synthesize,
                                       memory_types=memory_types,
                                       include_episodes=include_episodes,
                                       budget=budget, valid_at=valid_at)
@@ -779,6 +878,43 @@ class AsyncScopedRemoteMemvara:
 
     async def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return await self._mem.erase(claim_id, sources=sources)
+
+    async def add_document(self, content: str | bytes | None = None, *,
+                           url: str | None = None, custom_id: str | None = None,
+                           title: str | None = None, filepath: str | None = None,
+                           mime: str | None = None, meta: Mapping[str, Any] | None = None,
+                           extract: bool = True) -> Document:
+        return await self._mem.add_document(
+            content, url=url, custom_id=custom_id, title=title, filepath=filepath,
+            mime=mime, meta=meta, extract=extract)
+
+    async def get_document(self, id_or_custom_id: str) -> Document | None:
+        return await self._mem.get_document(id_or_custom_id)
+
+    async def list_documents(self, *, filepath_prefix: str | None = None,
+                             status: str | None = None, limit: int = 50,
+                             cursor: str | None = None) -> Page[Document]:
+        return await self._mem.list_documents(filepath_prefix=filepath_prefix,
+                                              status=status, limit=limit, cursor=cursor)
+
+    async def update_document(self, id_or_custom_id: str, *,
+                              content: str | bytes | None = None,
+                              title: str | None = None,
+                              meta: Mapping[str, Any] | None = None,
+                              filepath: str | None = None, mime: str | None = None,
+                              extract: bool = True) -> Document:
+        return await self._mem.update_document(
+            id_or_custom_id, content=content, title=title, meta=meta, filepath=filepath,
+            mime=mime, extract=extract)
+
+    async def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        return await self._mem.delete_document(id_or_custom_id)
+
+    async def delete_documents(self, ids_or_custom_ids: Sequence[str]) -> list[DeleteResult]:
+        return await self._mem.delete_documents(ids_or_custom_ids)
+
+    async def document_status(self, id_or_custom_id: str) -> DocumentStatus:
+        return await self._mem.document_status(id_or_custom_id)
 
     async def purge(self, *, confirm_tenant: str | None = None) -> dict[str, int]:
         return await self._mem.purge(confirm_tenant=confirm_tenant)

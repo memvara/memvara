@@ -28,6 +28,113 @@ so in the code, because that is what the call does.
 
 ---
 
+## A `Memvara` with a chat-capable `llm=` now calls it on every read, and `MemoryAPI` gained `query_rewrite` and `synthesize`
+
+### What changed
+
+**If you configured `llm=` only for extraction, every read now makes a model call too.**
+`search()` and `recall()` gained `query_rewrite: bool = True`, and `recall()` gained
+`synthesize: bool = False`. When `llm=` is a backend that implements `Chat`, which
+`OpenAILLM` and `AnthropicLLM` both do, every `search()` and every `recall()` now sends one
+request to that model before retrieving anything, on your key, and waits up to 10 seconds
+for it. It then runs up to four retrievals instead of one, and may read the store at a
+`valid_at` taken from the question's dates. Before this, such a store called its model
+only on writes and on `ranked=True` reads.
+
+What that costs, measured on this change: the extra retrieval work took a read from a
+median of 5.6 ms to 21.0 ms (200 reads, `k=10`, turns included, a local store of 1,000
+claims and 1,000 turns, `HashingEmbedder`, a model stub that answers instantly, Python
+3.13 on macOS). The model call itself comes on top of that, is billed by your provider,
+and was not measured here because no key was available; it is at most the 10-second
+deadline, after which the plain read is served. `retrieval.rewrite_ms` records it on
+every call once you configure `telemetry=`.
+
+To switch it off for every read, pass `query_rewrite=False` to `Memvara(...)`, or set
+`MEMVARA_FEATURE_QUERY_REWRITE=0` on a server. To keep one read model-free, pass
+`query_rewrite=False` to that call, or `**memvara.select.PLAIN_READ`.
+
+Nothing changes for a store opened with the default `NullLLM`, or with any backend that
+cannot chat: no read calls a model, and `.rewrite.outcome` reports `unconfigured`.
+
+`MemoryAPI`, the protocol the MCP tools are written against, declares `query_rewrite` on
+`search` and `recall`, and `synthesize` on `recall`. The tools pass both on every call.
+
+### How you find your instances
+
+**A store opened with a model.** Search your code for `Memvara(` with `llm=OpenAILLM`,
+`llm=AnthropicLLM`, or a backend of your own that has a `chat` method. If you need reads
+to stay model-free, for cost, latency, or a benchmark whose numbers were measured without
+a rewrite, pass `query_rewrite=False` to the constructor. On a server, set
+`MEMVARA_FEATURE_QUERY_REWRITE=0`.
+
+**A benchmark or test that counts model calls.** A fake backend with a `chat` method now
+receives rewrite calls on reads, with the system prompt
+`memvara.select.stages.REWRITE_SYSTEM`. Pass `**PLAIN_READ` (or `query_rewrite=False`)
+where the count should stay as it was. The benchmark harnesses in `bench/` and the demo
+already do.
+
+**A `recall(synthesize=True)` block you parse.** A block without a summary starts with
+`(summary not written — <outcome>.)`, and for a fallback the reason follows the outcome,
+as in `(summary not written — fallback: timeout.)`.
+
+**An `AsyncMemvara` under heavy read load.** `search()` and `recall()` now run on their
+own pool of `memvara.aio.READ_THREADS` (8) threads instead of the loop's default executor,
+so a read waiting on a model cannot hold a thread other `to_thread` work needs. A burst of
+more than eight reads queues.
+
+**A class of your own used as `ToolContext.memory`.** Search your code for `ToolContext(`
+or `MemoryAPI`. Its `search` needs `query_rewrite`, and its `recall` needs `query_rewrite`
+and `synthesize`, or the tools raise `TypeError: unexpected keyword argument`.
+`ScopedMemvara` and `ScopedRemoteMemvara` already take them.
+
+---
+
+## The schema is version 14, four MCP tools are new, and deleting a document erases its text
+
+### What changed
+
+`SCHEMA_VERSION` moves from 13 to 14. The migration adds two tables: `documents`, one row
+per stored document, and `document_chunks`, one row per chunk, each naming the episode
+the chunk was stored as. Nothing is copied into them, because no earlier version stored a
+document. As with every schema bump, a file opened by this build is refused by an older
+build rather than written to. Take a copy first if you may need to go back.
+
+`Episode.hash` now mixes in `meta["document_id"]` when an episode has one. Only document
+chunks carry that key, so the hash of every episode you already have is unchanged.
+
+The MCP server serves twenty-two tools instead of eighteen: `memory_add_document`,
+`memory_get_document`, `memory_list_documents` and `memory_delete_document` are new, and
+the `documents` feature switch hides all four. `memory_delete_document` is the first
+tool that erases stored text. What it erases is one document's own chunks; it erases no
+memory, and a memory whose only source was the document is retired with the reason
+"source document deleted".
+
+### Who this changes, and in which direction
+
+**If you implement `Store` yourself**, nine document methods are new: `put_document`,
+`get_document`, `find_document`, `list_documents`, `document_chunks`,
+`put_document_chunks`, `delete_document`, `claims_citing_any` and `erase_episodes`. They
+are optional as a group, and a store that implements them sets the class attribute
+`holds_documents = True`; without it `add_document()` and the methods beside it raise
+`NotImplementedError` naming your store, and nothing else changes. An episode a document
+still lists must survive `erase_episode` and `erase_claim(sources=True)`, or a document
+can lose part of its text behind its own back.
+
+**If you compare `purge()` output against a fixed set of keys**, add `documents` and
+`document_chunks`. `erase_claim()` keeps its four keys.
+
+**If you use `SalienceGate` directly**, an episode with `meta["document_id"]` now passes
+the role check whatever its role, and one that also has `meta["extract"] = False` is
+refused with the reason `document_not_extracted`.
+
+**If you serve MCP to a model with a fixed tool budget**, set
+`MEMVARA_FEATURE_DOCUMENTS=0` to keep the list at eighteen.
+
+**If you list a store's episodes**, document chunks appear among them with
+`role="system"` and `meta["document_id"]` set. Filter on that key to leave them out.
+
+---
+
 ## One feature switch is now off by default: `extraction_chunks`
 
 ### What changed

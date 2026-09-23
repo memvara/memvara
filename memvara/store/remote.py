@@ -48,7 +48,8 @@ import numpy as np
 
 from ..remote.client import HttpClient
 from ..remote.errors import refuse_project_purge
-from ..types import Claim, Derivation, Episode, Link, MemoryType, Scope
+from ..types import (Claim, Derivation, Document, DocumentChunk, Episode, Link, MemoryType,
+                     Scope)
 
 if TYPE_CHECKING:
     import httpx
@@ -423,6 +424,52 @@ class RemoteStore:
             method="claim_links",
             why="Links are read through the facade's scope-checked route, which drops a "
                 "link whose far end the credential cannot see. Use RemoteMemvara.links()."))
+
+    # --- documents: the facade serves them, not this class ------------------
+
+    #: Every document method below is a stub that raises, so this store does not hold
+    #: documents, and `Memvara` refuses them with that reason rather than meeting a stub.
+    holds_documents = False
+
+    @staticmethod
+    def _no_documents(method: str) -> str:
+        return _NO_ENDPOINT.format(
+            method=method,
+            why="Documents are written and read through the facade's /v1/documents "
+                "routes, which chunk, scope-check and extract server-side; there is no "
+                "route that writes a document row or a chunk row as given. Use "
+                "RemoteMemvara.add_document() and the methods beside it.")
+
+    def put_document(self, doc: Document) -> None:
+        raise NotImplementedError(self._no_documents("put_document"))
+
+    def get_document(self, tenant: str, document_id: str) -> Document | None:
+        raise NotImplementedError(self._no_documents("get_document"))
+
+    def find_document(self, scope: Scope, custom_id: str) -> Document | None:
+        raise NotImplementedError(self._no_documents("find_document"))
+
+    def list_documents(self, scopes: Sequence[Scope], *,
+                       filepath_prefix: str | None = None, status: str | None = None,
+                       limit: int = 50,
+                       after: tuple[datetime, str] | None = None) -> list[Document]:
+        raise NotImplementedError(self._no_documents("list_documents"))
+
+    def document_chunks(self, tenant: str, document_id: str) -> list[DocumentChunk]:
+        raise NotImplementedError(self._no_documents("document_chunks"))
+
+    def put_document_chunks(self, tenant: str, document_id: str,
+                            chunks: Sequence[DocumentChunk]) -> None:
+        raise NotImplementedError(self._no_documents("put_document_chunks"))
+
+    def delete_document(self, tenant: str, document_id: str) -> int:
+        raise NotImplementedError(self._no_documents("delete_document"))
+
+    def claims_citing_any(self, tenant: str, episode_ids: Sequence[str]) -> list[Claim]:
+        raise NotImplementedError(self._no_documents("claims_citing_any"))
+
+    def erase_episodes(self, episode_ids: Sequence[str], *, cited: bool = False) -> int:
+        raise NotImplementedError(self._no_documents("erase_episodes"))
 
     def invalidate(self, claim_id: str, at: datetime, by: str | None) -> None:
         raise NotImplementedError(_NO_ENDPOINT.format(

@@ -38,15 +38,14 @@ to this class itself.
 from __future__ import annotations
 
 import re
-import time
-from contextlib import contextmanager
 from datetime import datetime
-from typing import Iterator, Sequence
+from typing import Sequence
 
 from ..llm import _shape
 from ..llm.base import Chat, Usage
 from ..types import utcnow
 from .base import Candidate, Selected, SelectorRefused
+from .chat import ChatFailed, ChatStage
 
 #: Byte-identical to `local/compress/extract.py`'s `SYSTEM` — the prompt the 182-question
 #: measurement ran against. A drift here is a silent change to a measured thing, so
@@ -140,28 +139,15 @@ def _parse_reply(text: str, candidates: Sequence[Candidate]) -> list[Selected]:
             for i, c in enumerate(candidates) if i in spans]
 
 
-class ModelSelector:
+class ModelSelector(ChatStage):
     """A `Selector` backed by a `Chat` implementation. See the module docstring."""
 
     def __init__(self, llm: Chat, *, top_n: int = 40, timeout: float = 10.0) -> None:
-        if not isinstance(llm, Chat):
-            raise TypeError(
-                "ModelSelector needs a backend with .chat() — OpenAILLM or "
-                "AnthropicLLM (pip install 'memvara[openai]' or 'memvara[anthropic]'), "
-                f"not {type(llm).__name__}. NullLLM has no model to consult."
-            )
-        self._llm = llm
+        super().__init__(llm, timeout=timeout)
         #: How many of the reranked candidates the caller should hand to `select()`.
         #: Read by the caller (`hybrid.py`'s ranked stage), not applied inside
         #: `select()` itself — this class processes whatever list it is given.
         self.top_n = top_n
-        self.timeout = timeout
-
-    @contextmanager
-    def admit(self) -> Iterator[None]:
-        """Never refuses. The cap this protocol exists to bound belongs to a wrapper
-        held around this class — the hosted service's — not to this class itself."""
-        yield
 
     def select(self, question: str, candidates: Sequence[Candidate], *,
                asked_on: datetime | None = None,
@@ -170,27 +156,16 @@ class ModelSelector:
             return []  # nothing to ask about, and a call we should not pay for
         asked_on = asked_on if asked_on is not None else utcnow()
         prompt = _prompt(question, candidates, asked_on)
-        deadline = time.monotonic() + self.timeout
         try:
-            text = self._llm.chat(
-                SYSTEM, prompt, json_object=True,
-                max_completion_tokens=MAX_COMPLETION_TOKENS,
-                timeout=self.timeout, usage=usage)
-        except Exception as exc:
-            status = getattr(exc, "status_code", None)
-            if status in (401, 403):
-                raise SelectorRefused("key_rejected", status) from exc
-            if time.monotonic() > deadline:
-                # The backend's own timeout fired before ours did — an SDK-level
-                # exception (e.g. an `APITimeoutError`), not Python's builtin
-                # `TimeoutError`, so it would otherwise propagate as `exc` unchanged
-                # and be counted as `reason=error` rather than `reason=timeout`. The
-                # module docstring's "or the call failed, after the deadline" is this
-                # branch: billed either way, so it counts as a timeout either way.
-                raise TimeoutError("selector call failed after its deadline") from exc
-            raise
-        if time.monotonic() > deadline:
-            # The call succeeded, but not within the deadline. Billed either way — see
-            # the module docstring.
-            raise TimeoutError("selector reply arrived after its deadline")
+            text = self._call(SYSTEM, prompt, MAX_COMPLETION_TOKENS, usage)
+        except ChatFailed as failed:
+            # This class's contract is exceptions, not outcomes: `hybrid.py`'s ranked
+            # stage sorts them. A rejected key and a timeout get their own types; any
+            # other failure propagates as the exception the backend raised.
+            if failed.outcome == "key_rejected":
+                raise SelectorRefused("key_rejected", failed.status) from failed.__cause__
+            if failed.reason == "timeout":
+                raise TimeoutError("selector call ended after its deadline") from failed
+            assert failed.__cause__ is not None  # every other failure is a raised call
+            raise failed.__cause__ from None
         return _parse_reply(text, candidates)

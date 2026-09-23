@@ -126,6 +126,7 @@ import evalkit as ek
 
 from memvara import Memvara, NullLLM
 from memvara.embed import embedder_name
+from memvara.select import PLAIN_READ
 
 QUESTION_TYPES = (
     "single-session-user",
@@ -379,10 +380,13 @@ def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None,
     # is 0 when no reranker was given, because a stage that does not exist has no window.
     window = (rerank_top_n or 20) if reranker is not None else 0
     episodes = max(read_k or budget.k, window)
+    # `query_rewrite=False`: an extraction model that can chat would otherwise also
+    # rewrite every question, and the numbers this harness reports were measured without
+    # a rewrite. Measuring the rewrite is its own run, not a side effect of `--llm`.
     return Memvara(user=user, llm=llm if llm is not None else NullLLM(),
                   embedder=embedder, read_max_episodes=episodes,
                   read_reranker=reranker, read_rerank_top_n=window or 20,
-                  read_w_graph=w_graph, read_w_temporal=w_temporal)
+                  read_w_graph=w_graph, read_w_temporal=w_temporal, **PLAIN_READ)
 
 
 @dataclass(slots=True)

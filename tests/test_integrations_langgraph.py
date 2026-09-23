@@ -1287,3 +1287,28 @@ def test_the_adapter_imports_with_numpy_alone():
     importlib.reload(lg)
     assert "langgraph" not in sys.modules
     assert np.__name__ == "numpy"
+
+
+def test_a_ranked_store_search_never_rewrites_the_query(clock, monkeypatch):
+    """`_rank` doubles its budget until the page is proven complete, and that proof needs
+    every pass to rank the same way. A model rewrite per pass would break it and cost a
+    call per pass, so the store's search is a plain read even on a `Memvara` whose model
+    would rewrite an ordinary `search()`."""
+    from memvara.select import QueryRewriter
+
+    class Chat:
+        calls = 0
+
+        def chat(self, system, prompt, **kw):
+            Chat.calls += 1
+            return '{"queries": ["x"], "date_range": null}'
+
+    install(monkeypatch)
+    m = Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice",
+                read_rewriter=QueryRewriter(Chat()))
+    store = lg.MemvaraStore(m, user="alice", clock=clock)
+    store.put(NS, "m1", {"city": "Berlin", "food": "pizza"})
+    page = store.search(NS, query="food")
+    assert [i.key for i in page] == ["m1"]
+    assert Chat.calls == 0
+    m.close()

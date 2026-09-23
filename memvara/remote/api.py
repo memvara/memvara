@@ -30,25 +30,28 @@ its per-table counts as evidence inside the erasure response itself.
 """
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager, nullcontext
 from copy import copy
 from datetime import datetime
-from typing import Any, Collection, Iterator, Literal, Mapping, Sequence, overload
+from typing import Any, Callable, Collection, Iterator, Literal, Mapping, Sequence, overload
+from urllib.parse import quote
 
 from ..confirm import ConfirmationRefused
 from ..core import _check_k
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import EpisodeResult, Path, Retrieved
 from ..types import (
-    Answer, Claim, Delta, Episode, ForgetPreview, ForgetResult, Link, MemoryType,
-    Profile, Provenance, Result, Scope, SearchResults, WriteReceipt, closure,
-    closure_reason, link_relation, refuse_self_link,
+    Answer, Claim, DeleteResult, Delta, Document, DocumentStatus, Episode,
+    ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
+    Scope, SearchResults, WriteReceipt, closure, closure_reason, link_relation,
+    one_source, refuse_self_link,
 )
 from ..types import PROJECT_META, PROJECT_META_REFUSAL
 from . import hydrate
 from .client import DEFAULT_TIMEOUT, HttpClient
 from .creds import resolve
-from .errors import Conflict, NotFound, refuse_project_purge
+from .errors import Conflict, InvalidRequest, NotFound, refuse_project_purge
 
 
 #: The header that carries the bound project to the deployment. The deployment reads it
@@ -137,6 +140,45 @@ def _sent(body: dict[str, Any]) -> dict[str, Any]:
     different request from omitting it, and omitting is the one that means "unset".
     """
     return {k: v for k, v in body.items() if v is not None}
+
+
+def _document_path(ref: str, tail: str = "") -> str:
+    """`/v1/documents/{ref}`, with the reference escaped whole.
+
+    A `custom_id` is the caller's own string and may hold a `/`, a `?` or a `#`; left
+    unescaped, `docs/handbook` would address a different route.
+    """
+    return f"/v1/documents/{quote(ref, safe='')}{tail}"
+
+
+def _document_body(redactor: Redactor | None,
+                   redact: Callable[[str | None, str], str | None],
+                   content: str | bytes | None, *, title: str | None,
+                   filepath: str | None, mime: str | None,
+                   meta: Mapping[str, Any] | None, extract: bool,
+                   url: str | None = None, custom_id: str | None = None) -> dict[str, Any]:
+    """The JSON body of `POST /v1/documents` and `PATCH /v1/documents/{id}`, for both
+    clients, with unset fields left out.
+
+    Text travels as `content` and the title as `title`, both redacted here, before they
+    leave the process. Bytes travel as `content_base64`, and are refused when a redactor
+    is configured: nothing here can read a PDF or an image to redact it, and sending it
+    unredacted would be the one thing a redactor is configured to prevent. Extract the
+    text first and pass a `str`.
+    """
+    body: dict[str, Any] = {
+        "url": url, "custom_id": custom_id, "title": redact(title, EPISODE),
+        "filepath": filepath, "mime": mime,
+        "metadata": None if meta is None else dict(meta), "extract": extract}
+    if isinstance(content, str):
+        body["content"] = redact(content, EPISODE)
+    elif content is not None:
+        if redactor is not None:
+            raise ValueError(
+                "a redactor is configured, and bytes cannot be redacted before they "
+                "leave this process. Extract the text yourself and pass it as a str.")
+        body["content_base64"] = base64.b64encode(content).decode("ascii")
+    return _sent(body)
 
 
 def tenant_of(answer: object) -> str | None:
@@ -245,6 +287,24 @@ class RemoteMemvara:
         if project is not None:
             kw["headers"] = {PROJECT_HEADER: project}
         return self._http.request(method, path, **kw)
+
+    def _read(self, path: str, body: dict[str, Any]) -> Any:
+        """POST one read, retrying once without `query_rewrite` for an older deployment.
+
+        `query_rewrite` is sent only as `false`, when the caller opted out. A deployment
+        from before the field refuses it as unknown (422), and such a deployment never
+        rewrites a query, so the opt-out already holds there: the read is sent again
+        without the field. A 422 for any other reason fails the second time as well and
+        is raised. `synthesize` gets no retry, because an older deployment cannot write
+        the summary the caller asked for, and saying so is the honest answer.
+        """
+        try:
+            return self._request("POST", path, params=self._params(), json=body)
+        except InvalidRequest:
+            if body.get("query_rewrite") is not False:
+                raise
+            body = {k: v for k, v in body.items() if k != "query_rewrite"}
+            return self._request("POST", path, params=self._params(), json=body)
 
     def _params(self, **extra: Any) -> dict[str, Any]:
         """Scope on every call, plus whatever this call adds. `None` values are dropped
@@ -396,6 +456,7 @@ class RemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -405,6 +466,7 @@ class RemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -414,6 +476,7 @@ class RemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -422,6 +485,7 @@ class RemoteMemvara:
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
+               query_rewrite: bool = True,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -439,21 +503,31 @@ class RemoteMemvara:
         one refusal `ranked` inherits from `anchored`, its precedent. The return value is
         always a `SearchResults`, whose `.selection` is read off the response body's
         `selection` and is `None` against a plain read or a server that sends none.
+
+        `query_rewrite` is on by default, and the deployment decides whether it runs,
+        with its own per-organisation key. So the field is sent only as `false`, when the
+        caller opts out. A deployment from before the field refuses it (422) and never
+        rewrites anyway, so the read is sent again without it (see `_read`). `.rewrite`
+        is read off the response body's `rewrite` and is `None` when the deployment
+        sends none.
         """
-        body = self._request(
-            "POST", "/v1/search", params=self._params(),
-            json=_sent({"query": query, "k": k, "min_score": min_score,
+        body = self._read(
+            "/v1/search",
+            body=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
+                        "query_rewrite": None if query_rewrite else False,
                         "as_of": _iso(as_of), "valid_at": _iso(valid_at),
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
         return SearchResults([_hit(h) for h in body["results"]],
-                             selection=hydrate.selection(body.get("selection")))
+                             selection=hydrate.selection(body.get("selection")),
+                             rewrite=hydrate.rewrite(body.get("rewrite")))
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
+               query_rewrite: bool = True, synthesize: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None,
                valid_at: datetime | None = None) -> str:
@@ -480,6 +554,12 @@ class RemoteMemvara:
         renders into `text` when the model did not actually rank the read is the only
         signal this surface carries — a caller who needs `RecallResult.selection`
         structurally reads `RecallResponse.selection` off `/v1/recall` directly.
+
+        `query_rewrite` is sent only as `false`, as on `search`. `synthesize` is sent only
+        when set, so a deployment from before the field refuses it rather than returning
+        a block with no summary and nothing to say why. The summary, or the line saying
+        why there is none, arrives inside `text`; `RecallResponse.synthesis` carries the
+        outcome for a caller reading `/v1/recall` directly.
         """
         if budget is not None:
             raise ValueError(
@@ -491,10 +571,12 @@ class RemoteMemvara:
                 "recall(valid_at=...) is not available against a hosted deployment: "
                 "POST /v1/recall has no time axis. Use search(valid_at=...) and render "
                 "your own block.")
-        body = self._request(
-            "POST", "/v1/recall", params=self._params(),
-            json=_sent({"query": query, "k": k, "min_score": min_score,
+        body = self._read(
+            "/v1/recall",
+            body=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
+                        "query_rewrite": None if query_rewrite else False,
+                        "synthesize": synthesize or None,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
         return str(body["text"])
@@ -951,6 +1033,87 @@ class RemoteMemvara:
             body["predicate"] = predicate
         return bool(self._end(body))
 
+    # -- documents -----------------------------------------------------------
+
+    def add_document(self, content: str | bytes | None = None, *, url: str | None = None,
+                     custom_id: str | None = None, title: str | None = None,
+                     filepath: str | None = None, mime: str | None = None,
+                     meta: Mapping[str, Any] | None = None,
+                     extract: bool = True) -> Document:
+        """`POST /v1/documents`: store a document, or update the one with this
+        `custom_id` in this scope. See `Memvara.add_document` for what happens to it.
+
+        A `str` and the title are redacted here before they are sent. `bytes` are sent
+        base64-encoded, and refused when a redactor is configured. A `url` is fetched by
+        the deployment, so its content never passes through this process.
+        """
+        one_source(content, url)
+        body = _document_body(self.redactor, self._redact, content, url=url,
+                              custom_id=custom_id, title=title, filepath=filepath,
+                              mime=mime, meta=meta, extract=extract)
+        return hydrate.document(self._request("POST", "/v1/documents",
+                                              params=self._params(), json=body,
+                                              write=True))
+
+    def get_document(self, id_or_custom_id: str) -> Document | None:
+        """`GET /v1/documents/{id}`: one document by id or `custom_id`, or `None` for
+        one that is missing or not visible to this credential alike."""
+        try:
+            return hydrate.document(self._request(
+                "GET", _document_path(id_or_custom_id), params=self._params()))
+        except NotFound:
+            return None
+
+    def list_documents(self, *, filepath_prefix: str | None = None,
+                       status: str | None = None, limit: int = 50,
+                       cursor: str | None = None) -> Page[Document]:
+        """`GET /v1/documents`: one page, newest first. Pass `next_cursor` back as
+        `cursor` for the next page."""
+        return hydrate.document_page(self._request(
+            "GET", "/v1/documents",
+            params=self._params(filepath_prefix=filepath_prefix, status=status,
+                                limit=limit, cursor=cursor)))
+
+    def update_document(self, id_or_custom_id: str, *, content: str | bytes | None = None,
+                        title: str | None = None, meta: Mapping[str, Any] | None = None,
+                        filepath: str | None = None, mime: str | None = None,
+                        extract: bool = True) -> Document:
+        """`PATCH /v1/documents/{id}`: change what is given, keep the rest. `KeyError`
+        for a document that is missing or not visible, as `Memvara.update_document`."""
+        body = _document_body(self.redactor, self._redact, content, title=title,
+                              filepath=filepath, mime=mime, meta=meta, extract=extract)
+        try:
+            return hydrate.document(self._request(
+                "PATCH", _document_path(id_or_custom_id), params=self._params(),
+                json=body, write=True))
+        except NotFound:
+            raise KeyError(f"no document {id_or_custom_id!r} is visible here") from None
+
+    def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        """`DELETE /v1/documents/{id}`: erase the document's text and retire the
+        memories it was the only source of. See `Memvara.delete_document`."""
+        try:
+            return hydrate.delete_result(self._request(
+                "DELETE", _document_path(id_or_custom_id), params=self._params(),
+                write=True))
+        except NotFound:
+            return DeleteResult(id=id_or_custom_id, deleted=False)
+
+    def delete_documents(self, ids_or_custom_ids: Sequence[str]) -> list[DeleteResult]:
+        """`POST /v1/documents/delete`: `delete_document` for each id, in order."""
+        body = self._request("POST", "/v1/documents/delete", params=self._params(),
+                             json={"ids": list(ids_or_custom_ids)}, write=True)
+        return [hydrate.delete_result(r) for r in body["results"]]
+
+    def document_status(self, id_or_custom_id: str) -> DocumentStatus:
+        """`GET /v1/documents/{id}/status`. `KeyError` for a document that is missing or
+        not visible."""
+        try:
+            return hydrate.document_status(self._request(
+                "GET", _document_path(id_or_custom_id, "/status"), params=self._params()))
+        except NotFound:
+            raise KeyError(f"no document {id_or_custom_id!r} is visible here") from None
+
     # -- erasure -------------------------------------------------------------
 
     def erase(self, claim_id: str, *, sources: bool = False) -> bool:
@@ -1091,6 +1254,7 @@ class ScopedRemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -1100,6 +1264,7 @@ class ScopedRemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -1109,6 +1274,7 @@ class ScopedRemoteMemvara:
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
+               query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
@@ -1117,6 +1283,7 @@ class ScopedRemoteMemvara:
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
+               query_rewrite: bool = True,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -1125,6 +1292,7 @@ class ScopedRemoteMemvara:
                include_episodes: bool = False) -> list[Any]:
         return self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
                                 anchored=anchored, ranked=ranked,
+                                query_rewrite=query_rewrite,
                                 valid_at=valid_at, known_at=known_at, states=states,
                                 include_invalidated=include_invalidated,
                                 memory_types=memory_types,
@@ -1132,11 +1300,13 @@ class ScopedRemoteMemvara:
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
+               query_rewrite: bool = True, synthesize: bool = False,
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None,
                valid_at: datetime | None = None) -> str:
         return self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
                                 ranked=ranked,
+                                query_rewrite=query_rewrite, synthesize=synthesize,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes, budget=budget,
                                 valid_at=valid_at)
@@ -1258,6 +1428,41 @@ class ScopedRemoteMemvara:
 
     def erase(self, claim_id: str, *, sources: bool = False) -> bool:
         return self._mem.erase(claim_id, sources=sources)
+
+    def add_document(self, content: str | bytes | None = None, *, url: str | None = None,
+                     custom_id: str | None = None, title: str | None = None,
+                     filepath: str | None = None, mime: str | None = None,
+                     meta: Mapping[str, Any] | None = None,
+                     extract: bool = True) -> Document:
+        return self._mem.add_document(content, url=url, custom_id=custom_id, title=title,
+                                      filepath=filepath, mime=mime, meta=meta,
+                                      extract=extract)
+
+    def get_document(self, id_or_custom_id: str) -> Document | None:
+        return self._mem.get_document(id_or_custom_id)
+
+    def list_documents(self, *, filepath_prefix: str | None = None,
+                       status: str | None = None, limit: int = 50,
+                       cursor: str | None = None) -> Page[Document]:
+        return self._mem.list_documents(filepath_prefix=filepath_prefix, status=status,
+                                        limit=limit, cursor=cursor)
+
+    def update_document(self, id_or_custom_id: str, *, content: str | bytes | None = None,
+                        title: str | None = None, meta: Mapping[str, Any] | None = None,
+                        filepath: str | None = None, mime: str | None = None,
+                        extract: bool = True) -> Document:
+        return self._mem.update_document(id_or_custom_id, content=content, title=title,
+                                         meta=meta, filepath=filepath, mime=mime,
+                                         extract=extract)
+
+    def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        return self._mem.delete_document(id_or_custom_id)
+
+    def delete_documents(self, ids_or_custom_ids: Sequence[str]) -> list[DeleteResult]:
+        return self._mem.delete_documents(ids_or_custom_ids)
+
+    def document_status(self, id_or_custom_id: str) -> DocumentStatus:
+        return self._mem.document_status(id_or_custom_id)
 
     def purge(self, *, confirm_tenant: str | None = None) -> dict[str, int]:
         return self._mem.purge(confirm_tenant=confirm_tenant)

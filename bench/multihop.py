@@ -84,6 +84,7 @@ from memvara.retrieve import HybridRetriever                # noqa: E402
 from memvara.schema import (                                # noqa: E402
     BUILTIN_PREDICATES, PredicateRegistry, PredicateSpec,
 )
+from memvara.select import PLAIN_READ  # noqa: E402
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
@@ -248,7 +249,7 @@ def evaluate(mem: Memvara, questions, *, k: int, graph: HybridRetriever,
         ("search", "search+graph", "search+graph!", "search x2", "traverse",
          "traverse+min_hops", "traverse+both", "linked"), 0)
     for question, seed, gold, hops, preds in questions:
-        results = mem.search(question, k=k, as_of=T0)
+        results = mem.search(question, k=k, as_of=T0, **PLAIN_READ)
         if any(gold in f"{r.claim.subject} {r.claim.object}" for r in results):
             hits["search"] += 1
 
@@ -257,13 +258,13 @@ def evaluate(mem: Memvara, questions, *, k: int, graph: HybridRetriever,
         # knows the seed entity can do with `neighborhood()` — the seed here comes from
         # the head of the fused list, which is the `linked` row's handicap paid inside
         # the retriever instead of by the caller.
-        fused = graph.search(question, mem.default_scope, k=k, as_of=T0)
+        fused = graph.search(question, mem.default_scope, k=k, as_of=T0, **PLAIN_READ)
         if any(gold in f"{r.claim.subject} {r.claim.object}" for r in fused):
             hits["search+graph"] += 1
 
         # The same again with the intent gate off, so the gate's cost is a number rather
         # than an argument. Nothing else differs between the two readers.
-        raw = ungated.search(question, mem.default_scope, k=k, as_of=T0)
+        raw = ungated.search(question, mem.default_scope, k=k, as_of=T0, **PLAIN_READ)
         if any(gold in f"{r.claim.subject} {r.claim.object}" for r in raw):
             hits["search+graph!"] += 1
 
@@ -272,7 +273,7 @@ def evaluate(mem: Memvara, questions, *, k: int, graph: HybridRetriever,
         # traversal's k paths.
         second = []
         for first in results[:1]:
-            second = mem.search(f"{first.claim.object} {question}", k=k, as_of=T0)
+            second = mem.search(f"{first.claim.object} {question}", k=k, as_of=T0, **PLAIN_READ)
         if any(gold in f"{r.claim.subject} {r.claim.object}"
                for r in list(results) + list(second)):
             hits["search x2"] += 1
@@ -364,14 +365,14 @@ def interleaving() -> None:
     mem.remember("Dana Novak", "works_at", "Kovac Labs", recorded_at=T0)
     mem.remember("Petrov Foundry", "headquartered_in", "Bergen", recorded_at=T0)
 
-    step_one = mem.search("Where does Dana Novak work?", k=5)
+    step_one = mem.search("Where does Dana Novak work?", k=5, **PLAIN_READ)
     employer = next((r.claim.object for r in step_one if "Kovac" in r.claim.object), None)
 
     # The interleaved write: Dana changed jobs, and the old employer was acquired.
     mem.remember("Dana Novak", "works_at", "Petrov Foundry")
     mem.remember("Kovac Labs", "acquired_by", "Ahmed Systems")
 
-    step_two = mem.search(f"{employer}", k=5)
+    step_two = mem.search(f"{employer}", k=5, **PLAIN_READ)
     chained = any("Ahmed Systems" in r.claim.object for r in step_two)
 
     walked_now = mem.paths_between("Dana Novak", "Ahmed Systems", depth=3)
@@ -424,7 +425,8 @@ def latency(sizes: list[int]) -> None:
                                                            "headquartered_in"]))
             run("paths_between depth=3",
                 lambda s, t: mem.paths_between(s, t, depth=3, k=3, as_of=T0))
-            run("search k=10 (for scale)", lambda s, _t: mem.search(s, k=10, as_of=T0))
+            run("search k=10 (for scale)",
+                lambda s, _t: mem.search(s, k=10, as_of=T0, **PLAIN_READ))
             mem.close()
 
 

@@ -88,6 +88,7 @@ from demo.baselines import Context, Question, Turn, Write
 from memvara import HashingEmbedder, Memvara, NullLLM
 from memvara.retrieve import EpisodeResult
 from memvara.schema import PredicateRegistry
+from memvara.select import PLAIN_READ
 
 __all__ = ["HostedCredential", "HostedMemvara", "Manifest",
            "apply_facts_hosted", "connect", "load_demo_credential", "render_dated"]
@@ -446,7 +447,8 @@ class HostedMemvara:
                 k: int = bl.DEFAULT_K, max_chars: int = bl.MAX_CONTEXT_CHARS) -> Context:
         """The shipped defaults over the service: turns in, `recall()` out."""
         scoped = self._prepared("memvara", question, turns)
-        text = bl.clip(scoped.recall(question.text, k=k, include_episodes=True), max_chars)
+        text = bl.clip(scoped.recall(question.text, k=k, include_episodes=True,
+                                     **PLAIN_READ), max_chars)
         return Context(arm="memvara", text=text,
                        turns_visible=len(bl.visible_turns(question, turns)),
                        items_used=bl.count_entries(text), read="recall",
@@ -460,10 +462,12 @@ class HostedMemvara:
         docstring."""
         scoped = self._prepared("memvara_structured", question, turns)
         if question.about is None:
-            block, read = scoped.recall(question.text, k=k, include_episodes=True), "recall"
+            block = scoped.recall(question.text, k=k, include_episodes=True,
+                                  **PLAIN_READ)
+            read = "recall"
         else:
             block = render_dated(scoped.search(question.text, k=k, valid_at=question.about,
-                                               include_episodes=True), question.about)
+                                               include_episodes=True, **PLAIN_READ), question.about)
             read = "search"
         text = bl.clip(block, max_chars)
         return Context(arm="memvara_structured", text=text,

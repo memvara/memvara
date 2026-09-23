@@ -62,6 +62,7 @@ from memvara import Memvara                                   # noqa: E402
 from memvara.entities import entity_key, key_words            # noqa: E402
 from memvara.retrieve.anchor import query_tokens              # noqa: E402
 from memvara.retrieve.hybrid import HybridRetriever           # noqa: E402
+from memvara.select import PLAIN_READ  # noqa: E402
 
 #: The depths `twowiki.py` reports, so the two arms can be read side by side.
 DEPTHS = (5, 12, 25)
@@ -182,11 +183,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # every question differently on every pass and a re-run differs from the
                 # published table with no code change behind it.
                 found = sum(tw._found(rdr.search(s.question, scope, k=k, now=tw.NOW,
-                                                 anchored=anchored), s)[0]
+                                                 anchored=anchored, **PLAIN_READ), s)[0]
                             for s in scored)
                 silent = sum(1 for s in unheard
                              if not rdr.search(s.question, scope, k=k, now=tw.NOW,
-                                               anchored=anchored))
+                                               anchored=anchored, **PLAIN_READ))
                 rows.append((name, k, f"{found / len(scored) * 100:.1f}%",
                              f"{silent / len(unheard) * 100:.1f}%"))
     finally:

@@ -41,8 +41,9 @@ from typing import (TYPE_CHECKING, Any, Collection, Literal, Mapping, Protocol, 
                     runtime_checkable)
 
 from ..retrieve import Path
-from ..types import (Answer, Claim, Delta, ForgetPreview, ForgetResult, Link, MemoryType,
-                     Profile, Provenance, Result, Scope, WriteReceipt)
+from ..types import (Answer, Claim, DeleteResult, Delta, Document, ForgetPreview,
+                     ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
+                     Scope, WriteReceipt)
 
 __all__ = ["MemoryAPI"]
 
@@ -73,7 +74,7 @@ class MemoryAPI(Protocol):
     # -- reading -------------------------------------------------------------
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
-               anchored: bool = False,
+               anchored: bool = False, query_rewrite: bool = True,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -90,6 +91,7 @@ class MemoryAPI(Protocol):
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
+               query_rewrite: bool = True, synthesize: bool = False,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
                budget: int | None = None,
@@ -112,6 +114,11 @@ class MemoryAPI(Protocol):
         not take it (`server/tools.py`, "The MCP door" in the design spec): `_search`
         pins `include_episodes` to `False`, which a ranked call refuses outright, so a
         `ranked` argument on that tool would be one that always raises.
+
+        `query_rewrite` is declared here and on `search`, and `synthesize` here only,
+        because those are the tools that take them. `ScopedRemoteMemvara` sends each only
+        when it differs from its default, so a deployment from before the fields sees the
+        request it always saw.
         """
 
     def get(self, claim_id: str) -> Claim | None: ...
@@ -186,6 +193,26 @@ class MemoryAPI(Protocol):
              by: str = "api") -> Link:
         """Record a typed link. There is no `links` member beside it: `memory_why` reads
         a claim's links off `why().links`, so no tool calls `links` directly."""
+
+    # -- documents -----------------------------------------------------------
+
+    def add_document(self, content: str | bytes | None = None, *, url: str | None = None,
+                     custom_id: str | None = None, title: str | None = None,
+                     filepath: str | None = None, mime: str | None = None,
+                     meta: Mapping[str, Any] | None = None,
+                     extract: bool = True) -> Document:
+        """Store a document, or update the one with this `custom_id` in this scope."""
+
+    def get_document(self, id_or_custom_id: str) -> Document | None: ...
+
+    def list_documents(self, *, filepath_prefix: str | None = None,
+                       status: str | None = None, limit: int = 50,
+                       cursor: str | None = None) -> Page[Document]: ...
+
+    def delete_document(self, id_or_custom_id: str) -> DeleteResult:
+        """Erase a document's text and retire the memories it was the only source of.
+        `update_document`, `delete_documents` and `document_status` are not declared,
+        because no tool calls them."""
 
     # -- reporting -----------------------------------------------------------
 

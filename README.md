@@ -151,7 +151,7 @@ MEMVARA_DB=~/memory.db memvara-mcp
 memvara-mcp init --agent claude
 ```
 
-JSON-RPC 2.0 over stdio, eighteen tools, no SDK dependency. Claude Code, Claude Desktop,
+JSON-RPC 2.0 over stdio, twenty-two tools, no SDK dependency. Claude Code, Claude Desktop,
 Cursor, VS Code, Windsurf and Zed each have their own one-liner at
 [memvara.dev/docs/self-hosted](https://memvara.dev/docs/self-hosted).
 [MCP](https://github.com/memvara/memvara/blob/main/docs/integrations/mcp.md) ·
@@ -490,7 +490,7 @@ afterwards:**
 |---|---|---|
 | **ended** | The world changed. It was true, and then it wasn't. | a superseding write, or `forget(close="ended")` |
 | **retired** | The record was wrong. It was never true. | `forget()`, `delete()` — the default |
-| **erased** | The text itself is gone. Not recoverable. | `erase()`, `purge()` |
+| **erased** | The text itself is gone. Not recoverable. | `erase()`, `purge()`, and `delete_document()` for a document's own text |
 
 *Served a value that expired* and *served a value that was never true* are one column apart
 and are not the same finding. Only the third deletes anything.
@@ -535,14 +535,27 @@ flowchart TD
     B -.-> O
 ```
 
-The write path and the read path meet only at the store, and **nothing on the read path
-calls a model by default** — not even the optional reranker, which is a cross-encoder
-rather than a generative model. The one opt-in exception is `search(ranked=True)` against
-a retriever configured with a `read_selector`: one chat call per read, on the customer's
-own key, naming which of the reranked turns actually bear on the question. See
-`memvara.select`. That call sees the user's turns unless the question asks what the
-assistant said; a store whose two roles are two people sets `read_route_roles=False` so
-neither person's turns are cut before the model sees them. History and provenance are
+The write path and the read path meet only at the store. **With the default `NullLLM`,
+nothing on the read path calls a model** — not even the optional reranker, which is a
+cross-encoder rather than a generative model. Scoring, contradiction handling, decay and
+time travel never call one in any configuration. A model is called on a read only through
+three named stages, each on your own chat backend, each with a 10-second deadline, and each
+reporting on the result whether it ran, so a failure serves the ordinary read instead:
+
+- **Query rewrite**, on by default when `llm=` is a backend that can chat
+  (`OpenAILLM`, `AnthropicLLM`). One call before retrieval asks for up to three other
+  phrasings of the query and the dates it names. Every phrasing is searched and the lists
+  are fused, and the dates become `valid_at` unless you passed `valid_at` yourself. Pass
+  `query_rewrite=False` to a read, or to the constructor, to turn it off.
+- **Synthesis**, when you call `recall(synthesize=True)`. One call writes a short summary
+  of the recalled notes and puts it above them; every note is still returned.
+- **Model ranking**, when you call `search(ranked=True)` against a retriever configured
+  with a `read_selector`. One call names which of the reranked turns actually bear on the
+  question. That call sees the user's turns unless the question asks what the assistant
+  said; a store whose two roles are two people sets `read_route_roles=False` so neither
+  person's turns are cut before the model sees them.
+
+See `memvara.select`. History and provenance are
 not a separate subsystem: they fall out of the store keeping intervals and supersession
 pointers instead of overwriting rows.
 
@@ -641,6 +654,20 @@ They compose: **RAG answers from the corpus, memory supplies the state the corpu
 know.** *"What is our refund window for this customer's plan?"* is two questions — which
 plan they are on (one slot, one current value, with a history) and what the policy says for
 that plan (a passage from a document).
+
+**It can also hold the documents themselves.** `add_document()` stores a policy, a README
+or a set of meeting notes whole and splits it into passages of about 1,000 characters,
+which `recall(include_episodes=True)` returns beside the facts. Give it a `custom_id` and
+adding the same document again updates it, keeping every passage that did not change.
+Deleting it erases its text and retires, rather than erases, any memory that came only
+from it. That is a home for the documents one agent works with, not a retrieval system
+for a large corpus: the vector index is exact and in-process.
+
+```python
+mem.add_document(open("policies/refunds.md").read(), custom_id="policies/refunds.md",
+                 filepath="policies/refunds.md", mime="text/markdown")
+print(mem.recall("how long do refunds take?", include_episodes=True))
+```
 
 Memvara ships retriever adapters for LangChain and LlamaIndex, so in an existing pipeline
 it can be one more retriever rather than a separate call.

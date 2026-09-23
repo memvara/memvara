@@ -66,7 +66,16 @@ what an AI agent actually needs to read:
 
 Memvara does store the original source text — as **episodes**, the messages a fact was
 extracted from — and you can retrieve that verbatim text alongside the facts it produced.
-But that's a home for *evidence supporting a fact*, not a general-purpose document store.
+
+It can also store documents. `add_document()` keeps a policy, a runbook or a set of notes
+whole: it splits the text into passages of about 1,000 characters at sentence boundaries,
+and returns those passages next to the facts when you ask for them. Nothing is turned into
+triples, so the paragraph stays a paragraph. Adding the same document again with the same
+`custom_id` updates it and keeps every passage that did not change. Deleting it erases its
+text, and any fact that came only from that document is retired rather than erased.
+
+That makes Memvara a good home for the documents one agent or one team works with. A
+corpus of a hundred thousand documents is still a job for a dedicated document index.
 
 ## Using both together
 

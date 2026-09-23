@@ -176,6 +176,27 @@ user the steps and let them see where you got it; a conclusion with the middle
 removed is something they have to take on trust, and the middle is the part
 they can correct.
 
+**A document or a fact.** When they hand you something they want kept whole — a
+spec, a runbook, a README, notes from a meeting — store it as a document, so later
+questions get its own sentences back. When they tell you one thing about
+themselves or their work, write the fact. A document is not a way to avoid
+deciding: if a line inside it is something you will need as a fact next week,
+write that fact as well. Give the document a stable name of your own, such as its
+path, so a newer version sent later replaces the old one instead of sitting
+beside it.
+
+Deleting a document is different from every other removal here. Its text is
+erased and cannot be brought back. The notes that came only from it are retired,
+not erased, so the record of what was believed stays. Before you delete, say which
+of those two they are getting, and when they only want a newer version, send the
+document again rather than deleting it.
+
+A summary at the top of a recall block is there because you asked for one. It
+is a model's reading of the notes under it, not a note. When the two differ,
+answer from the notes. Never store the summary with `memory_remember`: that
+files a paraphrase as though somebody had said it, and the next session cannot
+tell the difference.
+
 ## Other jobs
 
 | They asked | Open |
@@ -192,6 +213,6 @@ lookup and nothing about the two people. Report it as such. "I have no record
 tying them together" is true; "they have no connection" is a claim about the
 world that no memory tool can support.
 
-`memory_forget` is not erasure. Real deletion is an operator action on the
-console or REST, and is deliberately not a tool. Never say you deleted data if
-you only retired a claim.
+`memory_forget` is not erasure. Erasing a memory is an operator action on the
+console or REST, and is deliberately not a tool; the only text a tool erases is
+a stored document's own. Never say you deleted data if you only retired a claim.

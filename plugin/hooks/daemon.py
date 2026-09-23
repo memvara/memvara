@@ -268,6 +268,11 @@ class Daemon:
 
 def main() -> int:
     store = open_store()
+    # The warm-up is a plain read: it exists to pay connection costs, not a model call.
+    # `open_store()` returns the library's own `Memvara` or `RemoteMemvara`, which take
+    # `query_rewrite`; the stdlib hosted client below does not, and the hosted server
+    # decides for itself.
+    plain_read: dict = {"query_rewrite": False}
     if store is None:
         # No library, or no local store. On a paste-the-URL hosted install that is the
         # normal state, not a broken one, so fall through to the stdlib HTTP client
@@ -275,6 +280,7 @@ def main() -> int:
         from lib.hosted import open_hosted
 
         store = open_hosted()
+        plain_read = {}
     if store is None:
         # Nothing to serve at all. Exiting is correct: a daemon with no backend would
         # accept connections and answer every one with silence, which is indistinguishable
@@ -284,7 +290,7 @@ def main() -> int:
         # Pay the first-query costs -- imports, page cache, TLS handshake -- before any
         # prompt is waiting on them. For hosted this is the handshake that turns a 609ms
         # first call into a 177ms one.
-        store.recall("warm", k=1)
+        store.recall("warm", k=1, **plain_read)
     except Exception:
         pass
     return Daemon(socket_path(store_key()), store).run()

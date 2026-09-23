@@ -5,7 +5,10 @@ against exactly these signatures, so treat them as fixed. Everything here is alr
 importable from the foundation modules:
 
 - `memvara/types.py` — `Claim`, `Episode`, `Scope`, `Result`, `Explanation`, `WriteReceipt`,
-  `MemoryType`, `Derivation`, `utcnow()`, `content_hash()`
+  `MemoryType`, `Derivation`, `utcnow()`, `content_hash()`, and for documents `Document`,
+  `DocumentChunk`, `DocumentStatus`, `DeleteResult`, `Page`
+- `memvara/documents/` — `split()` and `normalise()`, the retrieval chunker, and
+  `DocumentService`, which the document methods on `Memvara` delegate to
 - `memvara/compat/supermemory_import.py` — `import_supermemory`, `SupermemoryReceipt`
 - `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`
 - `memvara/store/` — `Store` and `SQLStore` protocols, `SQLiteStore`, `STATES`,
@@ -31,26 +34,60 @@ for.
 holds somewhere and not everywhere, and the eighth invariant exists because one of them
 was being read as holding further than it does.
 
-1. **Deterministic paths never call an LLM.**
+1. **Deterministic stages never call a model, and the read path calls one only through
+   three named stages.**
 
-   > **Claim.** Deduplication, contradiction resolution, ranking, decay and time travel
-   > are pure functions of stored state.
-   > **Scope.** The library, by default. Only `extract()` and `resolve_predicate()` may
-   > touch a model, and both are on the write path. Nothing on the read path calls one
-   > unless the caller opts in — a reranker is a cross-encoder rather than a generative
-   > model, and it is off by default; `search(ranked=True)` against a retriever
-   > configured with a `read_selector` (`memvara.select`) is the one opt-in exception, one
-   > chat call per read, on the caller's own key, over the turns of the role the question
-   > asks about (`retrieve.intent.routed_role`, model-free; `read_route_roles=False` hands
-   > it both roles), and it changes nothing about a plain read.
-   > **Sketch.** `NullLLM` is the default `llm=`, so the shipped configuration has no
-   > model to call; `Reconciler` and `Consolidator` take no `llm` parameter at all, and
-   > `HybridRetriever` takes one only as `selector=`, which is `None` by default and
-   > consulted only on a call that passes `ranked=True`.
+   > **Claim.** Deterministic stages (deduplication, contradiction resolution, ranking,
+   > decay, time travel) never call a model. The read path may call one only through the
+   > named stages `ranked`, `query_rewrite` and `synthesis`, each with a recorded outcome
+   > and a model-free fallback.
+   > **Scope.** The library. On the write path, only `extract()` and
+   > `resolve_predicate()` may touch a model. On the read path, a reranker is a
+   > cross-encoder rather than a generative model, and it is off by default. The three
+   > model stages are: `search(ranked=True)` against a retriever configured with a
+   > `read_selector` (`memvara.select`), one chat call per read over the turns of the
+   > role the question asks about (`retrieve.intent.routed_role`, model-free;
+   > `read_route_roles=False` hands it both roles); `query_rewrite`, one chat call before
+   > retrieval that returns up to three other phrasings and an optional date range; and
+   > `synthesis`, one chat call after `recall(synthesize=True)` has rendered its notes.
+   > Each runs on the caller's own chat backend with a 10-second deadline, records its
+   > outcome (`applied`, `fallback`, `key_rejected`, `disabled`, `unconfigured`) on the
+   > result, and serves the plain read on every outcome but `applied`. The model's
+   > answer never changes what is stored and never reaches a deterministic stage: a
+   > rewrite chooses which queries and which `valid_at` the ordinary pipeline runs with,
+   > and a synthesis is text placed above notes that are still returned in full.
+   > **Sketch.** `NullLLM` is the default `llm=` and cannot chat, so the shipped
+   > configuration has no model to call on either path. `Reconciler` and `Consolidator`
+   > take no `llm` parameter at all. `HybridRetriever` takes a model only as `selector=`
+   > and `rewriter=`, both `None` by default; `Memvara` builds a `QueryRewriter` and a
+   > `Synthesizer` (`memvara.select.stages`) only when its `llm=` implements `Chat`.
+   > `query_rewrite=False` and `synthesis=False` on the constructor are the switches,
+   > and `search(query_rewrite=False)` is the per-call opt-out; `memvara.select.PLAIN_READ`
+   > spells it for the reads inside this repository that must stay deterministic.
    > **Measured.** `bench/mem0_real.py`: 2 write-path LLM calls against mem0's 105 on the
    > same 105-turn transcript, and **identical final state on every run** where mem0's
    > differs. `tests/test_packaging.py::test_nothing_but_numpy_is_imported_while_the_
    > package_is_being_imported` holds the import side.
+   > `tests/test_read_stages.py::test_the_default_read_path_makes_no_model_call_without_a_chat_backend`
+   > holds the read side: with a backend that cannot chat, `search()` and
+   > `recall(synthesize=True)` make zero model calls.
+   > `tests/test_read_stages.py::test_a_model_is_reached_only_from_the_places_invariant_1_names`
+   > lists every call in the package that can reach a model and fails on a new one, and
+   > `test_every_read_in_this_repository_says_whether_it_may_call_a_model` fails on a
+   > `search()` or `recall()` call that does not say whether it may rewrite. No
+   > measurement of answer quality with the two new stages exists yet.
+
+   **What changed on 2026-09-23.** Until then this invariant said that nothing on the read
+   path calls a model unless the caller opts in, and `ranked=True` was the one opt-in.
+   The phase 2 parity design
+   (`docs/superpowers/specs/2026-09-23-parity-phase-2-documents-and-retrieval-design.md`,
+   §4.5) added query rewrite and synthesis, and made query rewrite **on by default**
+   whenever the configured `llm=` can chat. So a caller who configured an extraction
+   model now pays one read-path model call per `search()` and `recall()` unless they
+   pass `query_rewrite=False`. What did not change is the part the measurement above
+   stands on: the stages that decide what is stored, what contradicts what, and how
+   results are ordered are still pure functions of stored state, and a store opened
+   with the default `NullLLM` still makes no model call anywhere.
 
 2. **Unknown predicates default to `Cardinality.MANY`.** Wrongly retiring a true fact is
    worse than keeping two competing ones. The default is deliberate and stays; what
@@ -133,7 +170,11 @@ was being read as holding further than it does.
    > **Claim.** No engine write deletes a row, and no write closes both clocks.
    > **Scope.** The *engine*. `erase()`, `purge()` and `reset()` delete, on purpose and by
    > name, and they are the caller's decision rather than the engine's — see invariant 8's
-   > neighbour below and `Memvara.prove_erased`.
+   > neighbour below and `Memvara.prove_erased`. `delete_document()` is the fourth: it
+   > erases one document's text, and it deletes no claim row, because a claim whose only
+   > source was the document is retired (see *Documents* under `memvara/store/`). A
+   > re-ingest by `custom_id` erases the text of the chunks the new version no longer
+   > has, under the same rule.
    > **Sketch.** `close_out` is the single place any claim ends and takes one `Closure`;
    > `Claim.state` derives `live`/`ended`/`retired` from which column is set.
    > **Measured.** `bench/compare.py`: **0 stale values left live** against 7 for a
@@ -145,7 +186,10 @@ was being read as holding further than it does.
    > **Claim.** `sources` holds the episode ids the claim came from, and `derivation`
    > reflects how it was produced.
    > **Scope.** Claims the engine writes. A `Claim` a caller constructs by hand and hands
-   > to `remember()` carries what the caller put in it.
+   > to `remember()` carries what the caller put in it. Deleting a document removes its
+   > erased episodes from `sources`, so a claim whose only source was the document ends
+   > with none; it is retired in the same write, and its closure reason, "source document
+   > deleted", is what `why()` shows in place of the source.
    > **Sketch.** `FastExtractor._claim` and the LLM tier both stamp `sources=[ep.id]` and
    > a `Derivation`; `claim_sources` indexes the reverse direction so `why()` is a lookup.
    > **Measured.** Not measured — there is no number here to produce.
@@ -730,6 +774,15 @@ the `limit` turns closest to the anchor, nearest first, and `retrieve/temporal.p
 their timestamps into an absolute [0, 1] closeness. The anchor is `valid_at`, else
 `known_at`, else now — **given, never parsed**, because a date parser on the read path is
 a second extractor answering a question the caller who wrote `valid_at=` already answered.
+
+That rule still holds for this leg: `temporal.py` reads only the instant it is handed and
+never looks at the words of the question. Since 2026-09-23 there is a model-backed way to
+get an instant out of the words, and it sits in front of this leg rather than inside it.
+`query_rewrite` (invariant 1, `memvara.select.stages`) asks a model for the date range a
+question refers to, and `HybridRetriever.search` turns the range's last second into the
+read's `valid_at`, which then anchors this leg like any caller's `valid_at`. A `valid_at`
+or `as_of` the caller passed always wins over the model's range, and without a chat
+backend nothing is parsed at all.
 
 Episodes and not claims: a claim carries a predicate-keyed half-life, which knows what raw
 proximity cannot — whether a fact from 2019 is stale. A `born_in` from 2019 is as current
@@ -1350,6 +1403,102 @@ clock only: `known_at` drops a link recorded after it.
 
 `Memvara.links(claim_id)` returns both directions, and leaves out a link whose far end
 the caller cannot see, because the link would otherwise disclose that id.
+
+### Documents
+
+Schema 14 adds two tables. `documents` holds one row per document, keyed on `(tenant,
+id)`: `custom_id`, the scope both as its five parts and as `scope_key`, `title`,
+`filepath`, `source_uri`, `mime`, `content_hash` (blake2b-16 of the normalised text),
+`status` (`queued`, `extracting`, `done`, `stored` or `failed`, enforced by a `CHECK`),
+`error`, `meta`, `created_at` and `updated_at`. A unique index on `(tenant, scope_key,
+custom_id)` makes a caller's own id unique per scope. `document_chunks` holds one row per
+chunk, keyed on `(tenant, document_id, position)`, with the chunk's `hash` and the
+`episode_id` it was stored as. It holds no text: the text lives only in the episode, and
+`document_chunks()` reads it through `episode_id`, so there is no second copy for an
+erasure to miss. A read counts a document's chunks with one aggregate join.
+
+**A chunk is an episode.** Each one is written as a `role="system"` episode with
+`meta["document_id"]` set, so the episode text index, the episode vectors and
+`search(include_episodes=True)` serve documents with no second index, and `why()` on a
+claim extracted from a document quotes the chunk.
+
+**What `episodes.hash` holds.** For an ordinary turn, as before: blake2b-16 of the scope
+key, the role and the text. For a document chunk, the episode whose `meta` has a
+`document_id`, the document id is mixed in as a fourth part. Without it, the same
+paragraph in two documents would hash alike, exact-repeat detection would store it once,
+and deleting either document would erase text the other still holds. No stored hash
+changes on upgrade, because no episode before schema 14 carries the key. The column is a
+dedupe key, not a digest of the text alone: two rows with the same text can differ in it.
+
+**Chunking** (`memvara/documents/chunk.py`) splits the normalised text into runs of whole
+sentences of at most 1,000 characters, each preceded by up to 150 characters repeated
+from the end of the chunk before. A sentence is cut only when it is longer than a chunk
+on its own. Cut points are chosen first, from the sentences alone: a sentence whose own
+digest falls below a threshold proportional to its length (one every 600 characters on
+average), at least 300 characters after the previous cut point. A chunk ends at each cut
+point, and also before a sentence that would take it over 1,000 characters; such a forced
+split moves no cut point. So an edit usually changes the chunks it touches and the one
+after it. Measured over 400 single-sentence insertions, one per paragraph of ten
+27,000-character documents of generated prose: 390 changed at most two chunks, 9 changed
+three and 1 changed four. With the 300-character minimum counted from the start of the
+chunk instead, 24 changed three or four. `Memvara(retrieval_chunks=False)` stores a
+document as one chunk.
+
+**Re-ingest matches chunks by content, not position.** `add_document` with a `custom_id`
+that already exists at the same scope, and `update_document` with new content, chunk the
+new text and match each chunk to an unused old chunk with the same `hash`. A match keeps
+its episode, vector and citations, and only its position changes. An unmatched chunk
+becomes a new episode. An old chunk with no match is released the way a delete releases
+every chunk (next paragraph). The lookup of the `custom_id` and the rows it decides
+between are written in one `batch()`, so two concurrent adds of one id cannot both miss
+the lookup; indexing and extraction run after that transaction, so no model call holds
+the write lock.
+
+**Delete erases text and retires memory.** `delete_document` finds every claim citing
+one of the document's episodes with one `claims_citing_any` query. A claim whose every
+source is among them is retired first, with the closure reason `"source document
+deleted"`; a claim with another source keeps it. Both lose the erased episodes from
+`sources`. Then the document row and its chunk rows are deleted and the episodes erased
+with one `erase_episodes` call, all in one `batch()`. **A chunk episode belongs to its
+document**: while a document lists it, `erase_episode`, `erase_episodes` and
+`erase_claim(sources=True)` keep it, whatever `cited` says, so no erasure path leaves a
+document reporting a digest and a chunk count its text no longer has. `purge` deletes the
+scope's documents and their chunk rows and counts both, as `documents` and
+`document_chunks`, beside its four other keys.
+
+**Extraction and status.** A document is written `queued` and becomes `extracting` while
+`WritePipeline.reextract` reads its new chunks. The salience gate accepts a chunk
+whatever its role; the fast path does not run on one, because it reads first-person
+sentences as the user's own and runs only on user turns, so facts come from the model
+tier. The outcome is `done` when every chunk has been read, `failed` with an `error`
+when extraction raised or was deferred, or `stored` when a chunk was kept unread because
+the call passed `extract=False`. Such a chunk carries `meta["extract"] = False`, which
+the gate refuses, so a later `reextract()` sweep keeps the choice. Adding a `failed` or
+`stored` document again with extraction on reads the kept chunks no claim cites yet, and
+clears their mark. The chunks are stored and indexed before extraction runs, so a
+document in any state is stored and searchable.
+
+**Content that is not plain text** — a URL, `bytes`, HTML or any non-text mime — is handed
+to `memvara.ingest.extract`, with the instance's `url_fetcher` (the MCP server passes
+`ServerConfig.url_fetcher()`, which carries `MEMVARA_NAT64_PREFIXES`; unset, ingestion uses
+its own `SafeFetcher`), its `llm` for images, audio and video, and its `ingest_urls` and
+`ingest_media` switches as `allow_urls` and `allow_media`. The document store fetches
+nothing itself. An `IngestError` is raised before anything is written. `update_document` reads new content under the `mime` it is given,
+otherwise under the stored type for text, otherwise with none so ingestion detects it. A
+configured redactor runs over the whole text and the title before chunking, so every
+stored digest is of redacted text.
+
+`list_documents` filters by scope, `filepath_prefix` (compared with `substr`, so `%` and
+`_` match only themselves) and `status` in the same statement as its `LIMIT`, per
+invariant 7, and pages on `(created_at, id)` newest first.
+
+The nine store methods (`put_document`, `get_document`, `find_document`,
+`list_documents`, `document_chunks`, `put_document_chunks`, `delete_document`,
+`claims_citing_any`, `erase_episodes`) are optional as a group, and a store that has them
+says so with `holds_documents = True`, which is what `Memvara` asks; see `OMITTABLE`.
+`RemoteStore` has each as a stub that raises and names the `RemoteMemvara` method to use,
+because the facade chunks, scope-checks and extracts server-side; it sets the marker to
+false, so `Memvara(store=RemoteStore(...)).add_document()` is refused with that advice.
 
 ### Erasure removes the bytes, not just the rows
 

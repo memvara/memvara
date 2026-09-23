@@ -1,7 +1,7 @@
 # MCP
 
 Memvara speaks the Model Context Protocol, so an agent that supports MCP gets memory as
-eighteen tools without you writing any code. **There are three ways to reach them, and
+twenty-two tools without you writing any code. **There are three ways to reach them, and
 picking the right one takes one question.**
 
 | You want | Use | Setup |
@@ -69,11 +69,21 @@ derivation off.
 
 `MEMVARA_READ_ONLY=1` hides every tool that writes. `MEMVARA_FEATURE_PROFILE=0` hides the
 profile tool listed below, `MEMVARA_FEATURE_FORGET_MATCHING=0` hides the two `_matching`
-tools, `MEMVARA_FEATURE_LINKS=0` hides the link tool, and `MEMVARA_FEATURE_END_REASON=0`
-removes the `reason` and `until_reason` arguments from every tool that has them.
+tools, `MEMVARA_FEATURE_LINKS=0` hides the link tool, `MEMVARA_FEATURE_DOCUMENTS=0`
+hides the four document tools, and `MEMVARA_FEATURE_END_REASON=0` removes the `reason`
+and `until_reason` arguments from every tool that has them.
+`MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0` makes a local server store each document as one
+chunk instead of passages of about 1,000 characters.
 `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` (off by default) makes the extraction model read a
 turn over 6,000 characters in pieces, one call per piece. A feature marked (off by default)
 stays off until its variable says `1`; every other feature is on until its variable says `0`.
+
+With `MEMVARA_LLM` set to a model, the search and recall tools also ask that model for a
+few other phrasings of each query and for the dates it names, before searching. That is one
+model call of up to 10 seconds per read; a failed call serves the ordinary search.
+`MEMVARA_FEATURE_QUERY_REWRITE=0` turns it off. The recall tool can also put a model's
+summary above its notes when called with `synthesize`, and `MEMVARA_FEATURE_SYNTHESIS=0`
+removes that argument. With `MEMVARA_LLM=none`, which is the default, neither happens.
 
 `MEMVARA_ANCHORED=1` makes the three read tools answer only from memories the question is
 demonstrably about, so a question about an entity this store has never heard of returns
@@ -83,7 +93,7 @@ what lets an anchored read still reach a fact the question reaches only through 
 one. Both ship off; [`docs/DEPLOY.md`](../DEPLOY.md#choosing-how-this-server-reads) has the
 measurements and the case for each.
 
-## The eighteen tools
+## The twenty-two tools
 
 | Tool | What it does |
 |---|---|
@@ -105,6 +115,10 @@ measurements and the case for each.
 | `memory_history` | Every value one fact has ever held, with when each began and any reason it was closed |
 | `memory_why` | Why one claim is believed: the turns it came from, what extracted it, the facts it is linked to, and any reason it was closed |
 | `memory_stats` | What this server is bound to, how much it holds, and whether it can extract |
+| `memory_add_document` | Store a whole document, split into passages that `memory_recall` with `include_episodes` returns. Sending it again with the same `custom_id` updates it |
+| `memory_get_document` | One stored document's record: title, file path, chunk count and processing status |
+| `memory_list_documents` | The stored documents, newest first, filtered by file path prefix or status, a page at a time |
+| `memory_delete_document` | Erase one document's text. A memory whose only source was the document is **retired**, not erased |
 
 `tests/test_docs.py` pins that list against `memvara/server/tools.py` — every name, once,
 in the order the server declares them — so a tool added or renamed fails the suite rather

@@ -1,4 +1,4 @@
-r"""The eighteen tools, their descriptions, and how a stored memory is rendered back.
+r"""The twenty-two tools, their descriptions, and how a stored memory is rendered back.
 
 Four things in here are load-bearing and easy to mistake for boilerplate.
 
@@ -19,12 +19,18 @@ metadata is written in are neutralised *inside* it, so nothing the store contain
 appear to be output of this server — not on the line after a claim, and not on the tail of
 the claim's own.
 
-**No tool erases anything.** `consolidate`, `purge` and `reset` are deliberately absent.
+**No tool erases a memory.** `consolidate`, `purge` and `reset` are deliberately absent.
 The first is an operator action that an agent, given it, will call in a loop; the other
 two are irreversible erasure, which must not be one tool call away from a model that
 misread "forget that" as "delete everything". `memory_forget` retires and `memory_end`
 closes out a fact that stopped being true; both stay visible to `memory_history`, and
 neither removes anything from disk.
+
+`memory_delete_document` is the one tool that erases stored text, and what it erases is
+narrow: one document's own chunks, which the caller put there as a document and names by
+id. It erases no memory. A memory whose only source was that document is retired with
+the reason "source document deleted", so it stays visible to `memory_history` and
+`memory_why`, and a memory with another source keeps it.
 
 **Valid time is the caller's; transaction time is never offered.** `memory_remember`
 takes `true_since` and `true_until` — when the fact began and stopped being true in the
@@ -71,15 +77,17 @@ from ..core import PROFILE_WINDOW, Memvara, ScopedMemvara, is_derived, standing_
 # lines below: it is the store's own spelling rule, and a copy of it here would be a
 # second implementation that can disagree about whether a fold happened.
 from ..schema import _slugify
-from ..select import SelectorBusy
-from ..types import (LINK_RELATIONS, REASON_CHARS, Accumulation, Claim, Closure, Collapse,
-                     Dispute, ForgetPreview, MemoryType, Retype, Row, WriteReceipt,
-                     closure_reason, closure_reasons, utcnow)
+from ..select import Rewrite, SelectorBusy
+from ..types import (CUSTOM_ID_CHARS, DOCUMENT_STATES, LINK_RELATIONS, REASON_CHARS,
+                     Accumulation, Claim, Closure, Collapse, DeleteResult, Dispute, Document,
+                     ForgetPreview, MemoryType, RecallResult, Retype, Row, SearchResults,
+                     WriteReceipt, closure_reason, closure_reasons, utcnow)
 from .memory_api import MemoryAPI
 from .validate import ToolError, validate
 
-__all__ = ["TOOLS", "Tool", "ToolContext", "ToolError", "anchoring_by_default",
-           "safe_detail", "safe_line", "without_reasons"]
+__all__ = ["FEATURE_ARGUMENTS", "TOOLS", "Tool", "ToolContext", "ToolError",
+           "anchoring_by_default", "safe_detail", "safe_line", "without_arguments",
+           "without_reasons"]
 
 #: Framing for any block of stored claims. `Memvara.recall` applies its own; this is for
 #: the tools that render results themselves. It names the text below it as data, which
@@ -267,10 +275,26 @@ def without_reasons(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
     validator as an unknown argument. Reasons already stored are still shown by
     `memory_history` and `memory_why`, because they are records, not a feature.
     """
+    return without_arguments(tools, _REASON_ARGUMENTS)
+
+
+#: The arguments that belong to a feature switch, for the features that own arguments
+#: rather than a tool. A server started with one of these features off does not offer
+#: its arguments, and a call that still sends one is refused as an unknown argument.
+FEATURE_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
+    "end_reason": _REASON_ARGUMENTS,
+    "query_rewrite": ("query_rewrite",),
+    "synthesis": ("synthesize",),
+}
+
+
+def without_arguments(tools: "tuple[Tool, ...]",
+                      names: Sequence[str]) -> "tuple[Tool, ...]":
+    """The same tools with every argument in `names` removed from their schemas."""
     return tuple(
         replace(tool, properties={k: v for k, v in tool.properties.items()
-                                  if k not in _REASON_ARGUMENTS})
-        if set(_REASON_ARGUMENTS) & set(tool.properties) else tool
+                                  if k not in names})
+        if set(names) & set(tool.properties) else tool
         for tool in tools)
 
 
@@ -398,6 +422,42 @@ _RANKED = {
         "which of those happened — the ranking was not skipped silently. When the "
         "server's ranked reads are already at capacity, the call fails and asks you to "
         "retry in a few seconds; that failure costs nothing and is worth one retry."
+    ),
+}
+
+#: `memory_search` and `memory_recall`. Removed from both schemas when the server runs
+#: with `MEMVARA_FEATURE_QUERY_REWRITE=0`; see `FEATURE_ARGUMENTS`.
+_QUERY_REWRITE = {
+    "type": "boolean",
+    "default": True,
+    "description": (
+        "Before searching, ask a model, on this server's own key, for up to three other "
+        "ways to phrase the query and for the dates the query refers to, then search "
+        "every phrasing and merge the results. The dates become valid_at unless you "
+        "passed valid_at or as_of yourself, which always win. Default true. It is one "
+        "model call of up to 10 seconds, and it runs only on a server with a model "
+        "configured. On any other server, or when the call fails or times out, the "
+        "ordinary search of your exact query runs instead, so nothing is lost. Set it "
+        "false when the read must match your exact words, for example to check whether "
+        "one particular phrase was stored."
+    ),
+}
+
+#: `memory_recall` only. Removed from its schema when the server runs with
+#: `MEMVARA_FEATURE_SYNTHESIS=0`; see `FEATURE_ARGUMENTS`.
+_SYNTHESIZE = {
+    "type": "boolean",
+    "default": False,
+    "description": (
+        "Also ask a model, on this server's own key, to write a short summary of the "
+        "notes, and put it above them. Every note is still returned below the summary, "
+        "and the notes are the record: where the two differ, trust the notes. Default "
+        "false. Set it when the notes are many or disagree and a summary would save you "
+        "work; it is one more model call of up to 10 seconds. When the server has no "
+        "model configured, the operator has switched summaries off, the provider "
+        "rejected the key, or the call failed or timed out, the block starts with a "
+        "line saying the summary was not written and why. With a budget, the notes are "
+        "fitted first and the summary is left out when it does not fit beside them."
     ),
 }
 
@@ -577,6 +637,38 @@ def _no_match(query: str, day: str | None = None) -> str:
     )
 
 
+def _rewrite_day(rewrite: Rewrite | None) -> str | None:
+    """The day a rewrite dated this read to, as `YYYY-MM-DD`, or `None` if it did not.
+
+    Only a complete range counts, the rule `_rewrite_line` follows, so a no-match reply
+    and a match reply name the same day for the same read.
+    """
+    if (rewrite is None or rewrite.valid_at is None or rewrite.date_from is None
+            or rewrite.date_to is None):
+        return None
+    return rewrite.date_to.isoformat()
+
+
+def _rewrite_line(rewrite: Rewrite | None) -> str | None:
+    """What a query rewrite added to a `memory_search` read, or `None` if it added nothing.
+
+    The phrasings are a model's words, so they are flattened like stored text. They go
+    on their own line, before the rows, so a caller can see why a row that shares no
+    words with its query was returned.
+    """
+    if rewrite is None or rewrite.outcome != "applied":
+        return None
+    parts = []
+    if rewrite.queries:
+        parts.append("Also searched as: " +
+                     "; ".join(repr(safe_line(q)) for q in rewrite.queries) + ".")
+    # All three or no sentence: a range with a missing end is not one a reader can check.
+    if _rewrite_day(rewrite) is not None:
+        parts.append(f"The query names {rewrite.date_from} to {rewrite.date_to}, so "
+                     f"this is as things were on {rewrite.date_to}.")
+    return " ".join(parts) or None
+
+
 def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
     as_of, valid_at = args.get("as_of"), args.get("valid_at")
     # `time_axes` refuses this combination too, with a good message — but as a bare
@@ -590,7 +682,7 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
             "at once. Send valid_at alone for what is true of that date as far as we "
             "know today, which is what a question about the past usually means; send "
             "as_of alone for what this system believed on that date.")
-    results = ctx.memory.search(
+    results = cast(SearchResults, ctx.memory.search(
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
@@ -599,11 +691,16 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
         as_of=_timestamp(as_of, "memory_search.as_of") if as_of is not None else None,
         valid_at=(_timestamp(valid_at, "memory_search.valid_at")
                   if valid_at is not None else None),
-    )
+        # Absent from the schema when the feature is switched off, and then off here.
+        query_rewrite=bool(args.get("query_rewrite", False)),
+    ))
     if not results:
-        return _no_match(args["query"])
+        return _no_match(args["query"], day=_rewrite_day(results.rewrite))
     when = _when(as_of, valid_at)
     lines = [f"{len(results)} match(es){when}. {STORED_HEADER}"]
+    rewritten = _rewrite_line(results.rewrite)
+    if rewritten is not None:
+        lines.append(rewritten)
     # Metadata first, stored text last: the untrusted span then ends the line and cannot
     # be followed by anything it could impersonate. That settles what comes *after* a
     # claim; `safe_line` has to settle what a claim can carry *inside* it, or the payload
@@ -621,16 +718,16 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
     # that frames them as data, with no scores and no JSON, which is precisely the shape
     # an MCP text result should have. Reformatting it here would only weaken the framing.
     #
-    # And called *without* `with_ids=True`, which is a decision and not an oversight —
-    # the next reader is asked not to "fix" it. `recall()` will hand back the ids of the
-    # claims it rendered, and this tool's whole pitch, the sentence a model reads before
-    # choosing it, is numbered plain-text notes with nothing to filter out. An id on
-    # every line is precisely the retrieval metadata that pitch promises is absent, so
-    # adding one would degrade the thing the tool is for, and it would buy nothing: an
-    # agent that needs a handle on a memory — to explain it, correct it, retire it — is
-    # sent to `memory_search`, which is the id-bearing tool and says so. `with_ids`
-    # stays a library API, for a programmatic caller that renders its own prompt and
-    # then has to cite it.
+    # And no claim id is ever put in the reply, which is a decision and not an oversight
+    # — the next reader is asked not to "fix" it. `recall(with_ids=True)` hands back the
+    # ids of the claims it rendered, and this tool's whole pitch, the sentence a model
+    # reads before choosing it, is numbered plain-text notes with nothing to filter out.
+    # An id on every line is precisely the retrieval metadata that pitch promises is
+    # absent, so adding one would degrade the thing the tool is for, and it would buy
+    # nothing: an agent that needs a handle on a memory — to explain it, correct it,
+    # retire it — is sent to `memory_search`, which is the id-bearing tool and says so.
+    # A local store is still asked for its `RecallResult` below, for its `rewrite`
+    # only; its `text` is the same string and its ids are dropped.
     # `valid_at` only, never `as_of`. Both are on `memory_search`; here the block goes
     # into a prompt, and `as_of` rewinds belief as well as the world, so a record
     # retired since that day would be rendered as a fact. `valid_at` is what we believe
@@ -646,18 +743,28 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "were on that day as far as we know now, or call memory_search with as_of "
             "to inspect what was believed then.")
     valid_at = args.get("valid_at")
+    # A local store is asked for its `RecallResult`, whose `text` is byte for byte the
+    # string above, so that a block that came back empty can say which day a query
+    # rewrite dated it to. No id reaches the reply; only `.text` and `.rewrite` are read.
+    # A hosted deployment renders its own block and reports no rewrite on this surface.
+    extra: dict[str, Any] = {"with_ids": True} if isinstance(ctx.memory, ScopedMemvara) else {}
     try:
-        text = ctx.memory.recall(
+        block = ctx.memory.recall(
             args["query"],
             k=args["k"],
             min_score=args["min_score"],
             anchored=bool(args.get("anchored", False)),
             ranked=bool(args.get("ranked", False)),
+            # Both are absent from the schema when their feature is switched off, and
+            # then off here.
+            query_rewrite=bool(args.get("query_rewrite", False)),
+            synthesize=bool(args.get("synthesize", False)),
             memory_types=_memory_types(args.get("memory_types")),
             budget=args.get("budget"),
             include_episodes=bool(args.get("include_episodes", False)),
             valid_at=(_timestamp(valid_at, "memory_recall.valid_at")
                       if valid_at is not None else None),
+            **extra,
         )
     except SelectorBusy as exc:
         # The one ranked-read outcome that is not served at all (see `memvara.select`):
@@ -667,7 +774,11 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "memvara's ranked reads are at capacity right now. Retry in a few seconds, "
             "or call memory_recall again without ranked for an ordinary read."
         ) from exc
-    return text or _no_match(args["query"], day=valid_at)
+    if isinstance(block, RecallResult):
+        text, day = block.text, valid_at or _rewrite_day(block.rewrite)
+    else:
+        text, day = block, valid_at
+    return text or _no_match(args["query"], day=day)
 
 
 #: The bracket field saying a machine derived the row: one more metadata token beside
@@ -2028,6 +2139,104 @@ def _stats(ctx: ToolContext, _args: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# -- documents ---------------------------------------------------------------
+
+#: The most documents one `memory_list_documents` page shows. Lower than the library's
+#: ceiling because every row is replayed into a context window.
+_DOCUMENT_PAGE = 100
+
+
+def _document_lines(doc: Document) -> list[str]:
+    """One document's record, every caller-supplied string flattened.
+
+    The title, path, custom id and metadata are text somebody else wrote, replayed into a
+    model's context, so they go through `safe_line` like a stored claim does.
+    """
+    lines = [f"document {doc.id}: {doc.status}, {doc.chunks} chunk(s)"]
+    if doc.error:
+        lines.append(f"error: {safe_detail(doc.error)}")
+    for label, value in (("custom_id", doc.custom_id), ("title", doc.title),
+                         ("filepath", doc.filepath), ("source", doc.source_uri)):
+        if value:
+            lines.append(f"{label}: {_clip(value)}")
+    lines.append(f"mime: {_clip(doc.mime)}")
+    if doc.meta:
+        lines.append("metadata: " + ", ".join(f"{_clip(str(k), 64)}={_clip(str(v), 120)}"
+                                              for k, v in sorted(doc.meta.items())))
+    lines.append(f"stored: {_stamp(doc.created_at)}, updated: {_stamp(doc.updated_at)}")
+    return lines
+
+
+def _add_document(ctx: ToolContext, args: dict[str, Any]) -> str:
+    try:
+        doc = ctx.memory.add_document(
+            args.get("content"), url=args.get("url"), custom_id=args.get("custom_id"),
+            title=args.get("title"), filepath=args.get("filepath"), mime=args.get("mime"),
+            meta=args.get("metadata"))
+    except (TypeError, NotImplementedError, ValueError) as exc:
+        # Neither or both of content and url, no ingestion support for a URL or a
+        # non-text type, or an argument the store refuses. Each message says what to
+        # send instead, which is the thing a model can act on.
+        raise ToolError(f"Nothing stored: {safe_detail(exc)}") from None
+    tail = ("Its chunks are searchable now: memory_recall with include_episodes true "
+            "returns passages from it.")
+    if doc.status == "failed":
+        tail = ("It is stored and its chunks are searchable, but reading facts from it "
+                "failed; the error above says why.")
+    return "\n".join(["Stored."] + _document_lines(doc) + [tail])
+
+
+def _get_document(ctx: ToolContext, args: dict[str, Any]) -> str:
+    doc = ctx.memory.get_document(args["id"])
+    if doc is None:
+        return ("No document with that id or custom_id is visible here. "
+                "memory_list_documents shows the ones that are.")
+    return "\n".join(_document_lines(doc))
+
+
+def _list_documents(ctx: ToolContext, args: dict[str, Any]) -> str:
+    try:
+        page = ctx.memory.list_documents(filepath_prefix=args.get("filepath_prefix"),
+                                         status=args.get("status"), limit=args["limit"],
+                                         cursor=args.get("cursor"))
+    except ValueError as exc:
+        # A cursor this server never issued.
+        raise ToolError(safe_detail(exc)) from None
+    if not page.items:
+        return "No documents are stored here" + (
+            " that match those filters." if args.get("filepath_prefix") or
+            args.get("status") else ".")
+    lines = [f"{len(page.items)} document(s), newest first:"]
+    for doc in page.items:
+        name = doc.title or doc.custom_id or doc.filepath or "(untitled)"
+        path = f" — {_clip(doc.filepath, 120)}" if doc.filepath else ""
+        lines.append(f"- {doc.id} [{doc.status}, {doc.chunks} chunk(s)] "
+                     f"{_clip(name, 120)}{path}")
+    if page.next_cursor is not None:
+        lines.append(f"More documents: call again with cursor {page.next_cursor!r}.")
+    return "\n".join(lines)
+
+
+def _delete_result(result: DeleteResult) -> str:
+    if not result.deleted:
+        return ("Nothing deleted: no document with that id or custom_id is visible here. "
+                "memory_list_documents shows the ones that are.")
+    lines = [f"Deleted document {result.id}: its text is erased ({result.chunks} "
+             "chunk(s)). No memory was erased."]
+    if result.retired:
+        lines.append(f"Retired {len(result.retired)} memory(ies) whose only source was "
+                     "this document, with the reason 'source document deleted': "
+                     + ", ".join(result.retired))
+    if result.unlinked:
+        lines.append(f"{len(result.unlinked)} memory(ies) also had another source and "
+                     "keep it: " + ", ".join(result.unlinked))
+    return "\n".join(lines)
+
+
+def _delete_document(ctx: ToolContext, args: dict[str, Any]) -> str:
+    return _delete_result(ctx.memory.delete_document(args["id"]))
+
+
 # -- the registry ------------------------------------------------------------
 
 TOOLS: tuple[Tool, ...] = (
@@ -2038,8 +2247,10 @@ TOOLS: tuple[Tool, ...] = (
             "answer. Call it at the START of a turn whenever the reply could depend on "
             "something the user told you earlier — their name, where they live or work, "
             "how they like things done, a decision they already made, a preference, a "
-            "constraint. Call it speculatively; it is cheap and local, and involves no "
-            "model unless you set ranked on a server with a selector. Returns "
+            "constraint. Call it speculatively; it is cheap. It calls a model only on a "
+            "server that has one configured: there it rewrites the query into a few "
+            "other phrasings before searching (query_rewrite), and ranked and "
+            "synthesize each add one more call when you set them. Returns "
             "numbered plain-text notes, ready to read as context, with no scores or JSON "
             "to filter out. An empty result means nothing is stored, not that you should "
             "try again. Prefer this over memory_search whenever the goal is to answer "
@@ -2116,6 +2327,8 @@ TOOLS: tuple[Tool, ...] = (
             "min_score": _MIN_SCORE,
             "anchored": _ANCHORED,
             "ranked": _RANKED,
+            "query_rewrite": _QUERY_REWRITE,
+            "synthesize": _SYNTHESIZE,
             "memory_types": _MEMORY_TYPES_FILTER,
         },
         required=("query",),
@@ -2148,6 +2361,7 @@ TOOLS: tuple[Tool, ...] = (
             },
             "min_score": _MIN_SCORE,
             "anchored": _ANCHORED,
+            "query_rewrite": _QUERY_REWRITE,
             "memory_types": _MEMORY_TYPES_FILTER,
             "as_of": {
                 "type": "string",
@@ -2866,6 +3080,162 @@ TOOLS: tuple[Tool, ...] = (
         properties={},
         required=(),
         handler=_stats,
+    ),
+    Tool(
+        name="memory_add_document",
+        description=(
+            "Store a whole document so passages from it can be found later: a policy, a "
+            "README, meeting notes, a specification, a web page. Call it when the user "
+            "hands you a document or a link and wants it kept, or asks you to remember "
+            "what a file says. Do not use it for one fact the user tells you "
+            "(memory_remember) or for the conversation itself (memory_add). Pass exactly "
+            "one of content, the text itself, or url, a page for the server to fetch. "
+            "The text is split into chunks of about 1,000 characters at sentence "
+            "boundaries; memory_recall with include_episodes true returns passages from "
+            "it. Give custom_id, your own stable name such as the file path or the URL, "
+            "whenever the same document may be sent again: adding a document whose "
+            "custom_id already exists here updates that document instead of storing a "
+            "second copy, and every unchanged chunk, with any memory that cites it, "
+            "stays as it was. The server fetches a url itself and refuses one on a "
+            "private network; HTML and PDF are read to text; an image, audio or video "
+            "needs a model that reads media. Anything the server cannot read, or has "
+            "switched off, is refused with a code and the reason, and nothing is "
+            "stored. Facts in the document are extracted and cite the passage "
+            "they came from, when this server has an extraction model. The result gives "
+            "the document id and its status: 'done', or 'failed' with the reason, in "
+            "which case the document is still stored and searchable, and sending it "
+            "again retries what was not read."
+        ),
+        properties={
+            "content": {
+                "type": "string",
+                "description": "The document's text. Omit it when passing url.",
+            },
+            "url": {
+                "type": "string",
+                "description": (
+                    "An http or https address for the server to fetch the document "
+                    "from. Omit it when passing content."),
+            },
+            "custom_id": {
+                "type": "string",
+                "maxLength": CUSTOM_ID_CHARS,
+                "description": (
+                    "Your own stable name for the document, unique in this scope, such "
+                    "as its file path or URL. Sending it again with new content updates "
+                    "the stored document."),
+            },
+            "title": {"type": "string", "description": "A title to show in listings."},
+            "filepath": {
+                "type": "string",
+                "description": (
+                    "Where the document lives, as a '/'-separated path, e.g. "
+                    "'policies/refunds.md'. memory_list_documents can filter by it."),
+            },
+            "mime": {
+                "type": "string",
+                "description": (
+                    "The content type, e.g. 'text/markdown'. Leave it out for plain "
+                    "text."),
+            },
+            "metadata": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": (
+                    "Your own labels for the document, as string values, e.g. "
+                    "{\"team\": \"support\"}. Stored with it and shown by "
+                    "memory_get_document."),
+            },
+        },
+        required=(),
+        handler=_add_document,
+        writes=True,
+        feature="documents",
+    ),
+    Tool(
+        name="memory_get_document",
+        description=(
+            "Show one stored document's record: its title, file path, where it came "
+            "from, how many chunks it is stored as, and its processing status, which is "
+            "'queued', 'extracting', 'done', 'stored' (kept without reading it for "
+            "facts), or 'failed' with the reason. Call it when you "
+            "need to check that a document you added was stored, or to look a document "
+            "up by the custom_id you gave it. It does not return the text: memory_recall "
+            "with "
+            "include_episodes true returns passages from it."
+        ),
+        properties={
+            "id": {
+                "type": "string",
+                "description": (
+                    "The document id from memory_add_document or memory_list_documents "
+                    "('doc_...'), or the custom_id it was stored with."),
+            },
+        },
+        required=("id",),
+        handler=_get_document,
+        feature="documents",
+    ),
+    Tool(
+        name="memory_list_documents",
+        description=(
+            "List the documents stored here, newest first, with each one's id, status, "
+            "chunk count, title and file path. Call it when the user asks which "
+            "documents you have, or to find a document's id before reading or deleting "
+            "it. filepath_prefix keeps only the documents whose file path starts with "
+            "it, so 'policies/' lists that folder; status keeps one processing state. "
+            "Results come a page at a time: when a page ends with a cursor, pass it back "
+            "as cursor to get the next page."
+        ),
+        properties={
+            "filepath_prefix": {
+                "type": "string",
+                "description": "Keep documents whose file path starts with this text.",
+            },
+            "status": {
+                "type": "string", "enum": list(DOCUMENT_STATES),
+                "description": "Keep documents in this processing state.",
+            },
+            "limit": {
+                "type": "integer", "minimum": 1, "maximum": _DOCUMENT_PAGE, "default": 20,
+                "description": f"Documents per page, at most {_DOCUMENT_PAGE}.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "The cursor the previous page ended with.",
+            },
+        },
+        required=(),
+        handler=_list_documents,
+        feature="documents",
+    ),
+    Tool(
+        name="memory_delete_document",
+        description=(
+            "Delete one stored document. Call it when the user asks you to remove a "
+            "document or says it is obsolete and should not be used any more. This "
+            "erases the document's text: its chunks are removed from disk and cannot be "
+            "searched or restored. It erases no memory. A memory whose only source was "
+            "this document is retired, so it stops answering and memory_history and "
+            "memory_why still show it with the reason 'source document deleted'; a "
+            "memory that also came from somewhere else keeps that other source. To "
+            "replace a document with a newer version, do not delete it: call "
+            "memory_add_document again with the same custom_id, which keeps what did not "
+            "change."
+        ),
+        properties={
+            "id": {
+                "type": "string",
+                "description": (
+                    "The document id from memory_list_documents ('doc_...'), or the "
+                    "custom_id it was stored with."),
+            },
+        },
+        required=("id",),
+        handler=_delete_document,
+        writes=True,
+        destructive=True,
+        feature="documents",
     ),
 )
 

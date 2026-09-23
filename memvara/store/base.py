@@ -20,13 +20,13 @@ below the facade sees it. See `memvara.types.time_axes`.
 from __future__ import annotations
 
 from datetime import datetime
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from typing import (TYPE_CHECKING, Any, Collection, Iterable, Literal, Protocol, Sequence,
                     runtime_checkable)
 
 import numpy as np
 
-from ..types import Claim, Episode, Link, Scope
+from ..types import Claim, Document, DocumentChunk, Episode, Link, Scope
 
 if TYPE_CHECKING:
     # Only for annotations: a `Store` implementation should not have to import
@@ -318,6 +318,18 @@ def bulk_claims(store: "Store", claim_ids: Sequence[str]) -> dict[str, Claim]:
             if (claim := store.get_claim(cid)) is not None}
 
 
+def transaction(store: object) -> AbstractContextManager[Any]:
+    """`store.batch()` where the store has one, and a context that does nothing where it
+    does not.
+
+    The one spelling of "run this in one transaction if the store can", for the callers
+    that must also work with a store predating `batch()`. A store without it commits
+    each statement, which is correct and slower.
+    """
+    batch = getattr(store, "batch", None)
+    return batch() if batch is not None else nullcontext()
+
+
 #: Members a backend may leave out, and what it costs to leave each one out.
 #:
 #: `Store` is `@runtime_checkable`, and `isinstance` on a Protocol is **all or nothing**:
@@ -352,6 +364,22 @@ OMITTABLE: dict[str, str] = {
     "put_link": "Memvara.link() raises NotImplementedError naming the store, rather "
                 "than reporting a link it did not keep.",
     "claim_links": "links() and why().links report no links. Nothing else reads them.",
+    # The nine document members are one capability, and a store that has it says so
+    # with `holds_documents = True`; `Memvara` asks that marker rather than the methods,
+    # because `RemoteStore` has every method as a stub that raises.
+    "put_document": "the document methods on Memvara raise NotImplementedError naming "
+                    "the store. Every other read and write is unaffected.",
+    "get_document": "as put_document.",
+    "find_document": "as put_document.",
+    "list_documents": "as put_document.",
+    "document_chunks": "as put_document.",
+    "put_document_chunks": "as put_document.",
+    "delete_document": "as put_document.",
+    "holds_documents": "read as false: the document methods on Memvara raise "
+                       "NotImplementedError naming the store.",
+    "claims_citing_any": "as put_document; deleting a document asks it about every chunk "
+                         "at once.",
+    "erase_episodes": "as put_document; deleting a document erases its chunks with it.",
     "count_competing": "the write receipt's accumulation report falls back to "
                        "len(competing_claims()), and read-side shadowing uses it only "
                        "when occupied_slots is missing too.",
@@ -363,6 +391,12 @@ OMITTABLE: dict[str, str] = {
 
 @runtime_checkable
 class Store(Protocol):
+    #: True on a store that implements the document methods below. `Memvara` asks this
+    #: rather than whether the methods exist, because a store can have them as stubs
+    #: that raise, as `RemoteStore` does. Optional, and read as false when absent; see
+    #: `OMITTABLE`.
+    holds_documents: bool = False
+
     # --- episodes ---------------------------------------------------------
     def add_episode(self, ep: Episode) -> None: ...
     def get_episode(self, episode_id: str) -> Episode | None: ...
@@ -464,6 +498,14 @@ class Store(Protocol):
 
         No liveness filter: a retired claim was still extracted from that turn. Callers
         that want only live claims say so.
+        """
+        ...
+
+    def claims_citing_any(self, tenant: str, episode_ids: Sequence[str]) -> list[Claim]:
+        """Every claim that cites at least one of these turns, each once, oldest first.
+
+        `claims_citing` over a set in one query rather than one per turn. Optional, as
+        part of the document capability; see `OMITTABLE`.
         """
         ...
 
@@ -765,6 +807,17 @@ class Store(Protocol):
 
         A bound `scope.project` limits the erasure to that project. A store that cannot
         express the project must refuse rather than erase more than was asked.
+
+        Returns per-table counts: the four keys `erase_claim` shares (`claims`,
+        `episodes`, `embeddings`, `entities`), and, from a store that holds documents,
+        `documents` and `document_chunks` as well, because a purge erases those rows too.
+        """
+        ...
+
+    def erase_episodes(self, episode_ids: Sequence[str], *, cited: bool = False) -> int:
+        """`erase_episode` over many turns in one transaction. Returns how many went.
+
+        Optional, as part of the document capability; see `OMITTABLE`.
         """
         ...
 
@@ -835,8 +888,9 @@ class Store(Protocol):
 
     def erase_claim(self, claim_id: str, *, sources: bool = False) -> dict[str, int]:
         """Irreversibly erase one claim — row, text index, vector. Returns per-table
-        counts, the same four keys `purge` returns: `claims`, `episodes`, `embeddings`,
-        `entities`.
+        counts under the four keys `purge` also returns: `claims`, `episodes`,
+        `embeddings`, `entities`. `purge` adds two document keys this has no use for,
+        because erasing a claim never removes a document.
 
         **The same shape as `purge` because it is the same kind of answer.** Both are
         erasure paths and both are asked to evidence what they erased; this one used to
@@ -889,6 +943,65 @@ class Store(Protocol):
 
         Optional, like `put_link`. A store without it has no links to report, and
         `Memvara.links` and `why()` report none.
+        """
+        ...
+
+    # --- documents --------------------------------------------------------
+    def put_document(self, doc: "Document") -> None:
+        """Insert or replace one document row, keyed on `(scope.tenant, id)`.
+
+        The row describes the text and does not hold it. The text is held as chunks,
+        written by `put_document_chunks`, each naming the episode it was stored as.
+        `doc.chunks` is ignored here; a read counts the chunk rows instead.
+
+        Optional, together with the other six document members. A store without them
+        cannot hold documents, and `Memvara.add_document` raises `NotImplementedError`
+        naming the store.
+        """
+        ...
+
+    def get_document(self, tenant: str, document_id: str) -> "Document | None":
+        """One document by id, with `chunks` counted, or `None`. No scope check: the
+        caller authorizes, as `get_claim` leaves it to `Memvara.get`."""
+        ...
+
+    def find_document(self, scope: Scope, custom_id: str) -> "Document | None":
+        """The document with this caller-supplied id at exactly this scope, or `None`.
+
+        Exactly this scope and not its ancestors, because a `custom_id` is unique per
+        scope: two scopes may each hold a document called `handbook`, and they are two
+        documents.
+        """
+        ...
+
+    def list_documents(self, scopes: Sequence[Scope], *,
+                       filepath_prefix: str | None = None, status: str | None = None,
+                       limit: int = 50,
+                       after: "tuple[datetime, str] | None" = None) -> list["Document"]:
+        """Documents written at any of `scopes`, newest first, at most `limit`.
+
+        The filters run in the same query as the limit (invariant 7). `after` is the
+        `(created_at, id)` of the last document on the previous page, and the listing
+        continues strictly after it in the same order.
+        """
+        ...
+
+    def document_chunks(self, tenant: str, document_id: str) -> list["DocumentChunk"]:
+        """Every chunk of one document, in position order."""
+        ...
+
+    def put_document_chunks(self, tenant: str, document_id: str,
+                            chunks: Sequence["DocumentChunk"]) -> None:
+        """Replace every chunk row of one document with `chunks`."""
+        ...
+
+    def delete_document(self, tenant: str, document_id: str) -> int:
+        """Delete one document row and all its chunk rows. Returns how many chunk rows
+        were deleted.
+
+        It leaves the chunk episodes alone. `Memvara.delete_document` erases those
+        through `erase_episode`, after it has retired the claims whose only sources they
+        were.
         """
         ...
 

@@ -101,18 +101,20 @@ class FakeScoped:
         return self.mem.history(subject, predicate)
 
     def recall(self, query: str, *, k: int = 8, include_episodes: bool = False,
-               valid_at: datetime | None = None) -> str:
+               valid_at: datetime | None = None, query_rewrite: bool = True) -> str:
         if valid_at is not None:
             raise ValueError("recall(valid_at=...) is not available against a hosted "
                              "deployment")
         self.owner.calls.append(("recall", self.user, None))
-        return self.mem.recall(query, k=k, include_episodes=include_episodes)
+        return self.mem.recall(query, k=k, include_episodes=include_episodes,
+                               query_rewrite=query_rewrite)
 
     def search(self, query: str, *, k: int = 10, valid_at: datetime | None = None,
-               include_episodes: bool = False) -> Any:
+               include_episodes: bool = False, query_rewrite: bool = True) -> Any:
         self.owner.calls.append(("search", self.user, valid_at))
         return self.mem.search(query, k=k, valid_at=valid_at,
-                               include_episodes=include_episodes)
+                               include_episodes=include_episodes,
+                               query_rewrite=query_rewrite)
 
     def count(self) -> int:
         return len(self.mem.get_all())

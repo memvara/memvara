@@ -113,6 +113,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Sequence, cast
 
 from ..compat import NOTE_PREDICATE, ensure_note_predicate
+from ..select import PLAIN_READ
 from ..types import Claim, Result, content_hash, utcnow
 from ._common import IntegrationError, bind, require, scope_kw
 
@@ -743,8 +744,10 @@ class _Store:
             return scores, True, 0
         budget = min(self.max_scan, need * self.oversample)
         while True:
+            # A plain read: the doubling below proves a page complete only if every
+            # pass ranks the same way, and a model rewrite per pass would not.
             results = cast("list[Result]", self.memory.search(
-                query, k=budget, min_score=self.min_score, **self._kw))
+                query, k=budget, min_score=self.min_score, **PLAIN_READ, **self._kw))
             scores = {}
             for result in results:
                 blob = self._blob_of(result.claim)

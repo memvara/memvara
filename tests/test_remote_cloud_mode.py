@@ -523,3 +523,27 @@ def test_hydrate_reads_the_closed_vocabulary_count_and_defaults_it_for_an_older_
             "deferred": False}
     assert hydrate.receipt(wire).unregistered == 0
     assert hydrate.receipt({**wire, "unregistered": 3}).unregistered == 3
+
+
+def test_an_empty_hosted_recall_is_a_no_match_reply(deployment):
+    """Against a hosted deployment `memory_recall` reads the rendered string, since
+    `POST /v1/recall` returns no rewrite record; an empty block still becomes the
+    tool's no-match reply, with no day named."""
+    import json
+
+    import httpx
+
+    client = build_memvara(_cloud())
+    client._http._client._transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"text": "", "empty": True}))
+    server = MemvaraMCPServer(client, user="alice")
+    try:
+        line = server.handle_line(json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "memory_recall", "arguments": {"query": "what plan"}}}))
+        body = json.loads(line)["result"]
+        assert body["isError"] is False
+        text = body["content"][0]["text"]
+        assert text.startswith("No stored memory matched 'what plan'.")
+    finally:
+        server.close()

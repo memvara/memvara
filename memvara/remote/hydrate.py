@@ -38,16 +38,19 @@ from datetime import datetime
 from typing import Any
 
 from ..retrieve.traverse import Edge, Path
-from ..select.base import Selection
+from ..select.base import Rewrite, Selection
+from ..select.stages import parse_day
 from ..types import (
-    LAST_OBSERVED, SALIENCE_BASE, Answer, Claim, Delta, Derivation, Episode,
-    Explanation, ForgetPreview, ForgetResult, Link, MemoryType, Profile, Provenance,
-    Reading, Result, Row, Scope, WriteReceipt, closure, link_relation,
+    DOCUMENT_STATES, LAST_OBSERVED, SALIENCE_BASE, Answer, Claim, DeleteResult, Delta,
+    Derivation, Document, DocumentState, DocumentStatus, Episode, Explanation,
+    ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Reading,
+    Result, Row, Scope, WriteReceipt, closure, link_relation,
 )
 
 __all__ = ["claim", "episode", "result", "explanation", "receipt", "provenance",
            "reading", "answer", "delta", "profile", "edge", "path", "scope",
-           "selection", "link", "forget_preview", "forget_result"]
+           "selection", "rewrite", "link", "forget_preview", "forget_result",
+           "document", "document_page", "document_status", "delete_result"]
 
 
 def _dt(value: Any) -> datetime | None:
@@ -335,6 +338,46 @@ def path(body: dict[str, Any]) -> Path:
                 score=body["score"])
 
 
+def rewrite(body: dict[str, Any] | None) -> Rewrite | None:
+    """The `Rewrite` a read's query rewrite produced, or `None`.
+
+    `None` when the response carries no `rewrite`, which is what a deployment from
+    before the field sends, and what a read that passed `query_rewrite=False` gets. The
+    wire shape is `{"outcome", "reason", "status", "queries", "date_from", "date_to",
+    "valid_at"}`, with the two dates as `YYYY-MM-DD` and `valid_at` as an instant; every
+    field but `outcome` may be absent or null.
+
+    The date range is all or nothing: both dates or neither, and a `valid_at` only beside
+    both. A body that breaks that raises `ValueError` rather than being decoded into a
+    range with a missing end, because a caller reading `valid_at` would otherwise be told
+    the read was dated by a range nobody can state.
+
+    >>> rewrite({"outcome": "applied", "queries": ["Lisbon trip"],
+    ...          "date_from": "2024-03-01", "date_to": "2024-03-31"}).date_to
+    datetime.date(2024, 3, 31)
+    >>> rewrite(None) is None
+    True
+    """
+    if not body:
+        return None
+    raw_from, raw_to = body.get("date_from"), body.get("date_to")
+    valid_at = _dt(body.get("valid_at"))
+    if (raw_from is None) != (raw_to is None) or (valid_at is not None and raw_to is None):
+        raise ValueError(
+            "a rewrite's date_from, date_to and valid_at come together: both dates or "
+            f"neither, and valid_at only beside them; got {raw_from!r}, {raw_to!r}, "
+            f"{body.get('valid_at')!r}")
+    return Rewrite(
+        outcome=body["outcome"],
+        reason=body.get("reason"),
+        status=body.get("status"),
+        queries=tuple(body.get("queries") or ()),
+        date_from=None if raw_from is None else parse_day(raw_from),
+        date_to=None if raw_to is None else parse_day(raw_to),
+        valid_at=valid_at,
+    )
+
+
 def selection(body: dict[str, Any] | None) -> Selection | None:
     """The `Selection` a ranked read's model consultation produced, or `None`.
 
@@ -354,3 +397,47 @@ def selection(body: dict[str, Any] | None) -> Selection | None:
         candidates=body.get("candidates", 0),
         kept=body.get("kept", 0),
     )
+
+
+def _state(value: Any) -> DocumentState:
+    """A document status off the wire, refused if it is not one of the four. A status
+    the library has no word for would be carried into every `if doc.status == ...` a
+    caller writes, and match none of them."""
+    if value not in DOCUMENT_STATES:
+        raise ValueError(f"document status {value!r} is not one of {DOCUMENT_STATES}")
+    return value  # type: ignore[no-any-return]
+
+
+def document(body: dict[str, Any]) -> Document:
+    """One document, as `POST /v1/documents`, `GET /v1/documents/{id}` and `PATCH` return
+    it."""
+    return Document(
+        id=body["id"], scope=scope(body["scope"]), custom_id=body["custom_id"],
+        title=body["title"], filepath=body["filepath"], source_uri=body["source_uri"],
+        mime=body["mime"], content_hash=body["content_hash"],
+        status=_state(body["status"]), error=body["error"],
+        meta=dict(body["metadata"]),
+        created_at=_required_dt("created_at", body["created_at"]),
+        updated_at=_required_dt("updated_at", body["updated_at"]),
+        chunks=int(body["chunks"]))
+
+
+def document_page(body: dict[str, Any]) -> Page[Document]:
+    """One page of `GET /v1/documents`."""
+    return Page([document(d) for d in body["documents"]], body["next_cursor"])
+
+
+def document_status(body: dict[str, Any]) -> DocumentStatus:
+    """`GET /v1/documents/{id}/status`."""
+    return DocumentStatus(id=body["id"], status=_state(body["status"]),
+                          error=body["error"], chunks=int(body["chunks"]),
+                          updated_at=_required_dt("updated_at", body["updated_at"]))
+
+
+def delete_result(body: dict[str, Any]) -> DeleteResult:
+    """One document delete, as `DELETE /v1/documents/{id}` returns it and
+    `POST /v1/documents/delete` lists it."""
+    return DeleteResult(id=body["id"], deleted=bool(body["deleted"]),
+                        custom_id=body["custom_id"], chunks=int(body["chunks"]),
+                        episodes=int(body["episodes"]), retired=tuple(body["retired"]),
+                        unlinked=tuple(body["unlinked"]))
