@@ -73,7 +73,7 @@ from ..confirm import ConfirmationRefused
 # `PROFILE_WINDOW` is the library's: how far back a profile looks when no `since` is
 # given. The tool resolves the instant itself only so its header can print it.
 from ..core import PROFILE_WINDOW, Memvara, ScopedMemvara, is_derived, standing_order
-from ..filters import FILTER_KEY, search_filter
+from ..filters import FILTER_KEY, FilterError
 # `_slugify` is private and imported anyway, for `Memvara._safe_line`'s reason a few
 # lines below: it is the store's own spelling rule, and a copy of it here would be a
 # second implementation that can disagree about whether a fold happened.
@@ -647,8 +647,8 @@ _FILEPATH_PREFIX = {
 }
 
 #: What the two filter arguments say on a server started with `metadata_filters` off.
-#: They stay in the schema so that `validate` lets a call carrying one through to the
-#: handler, which refuses it with the reason, rather than reporting an unknown argument.
+#: They stay in the schema only so that the refusal a model gets names the switch; see
+#: `without_filters`.
 _FILTERS_OFF = (
     "Not accepted on this server: metadata filters are switched off "
     "(MEMVARA_FEATURE_METADATA_FILTERS=0), and a call carrying this argument is refused "
@@ -660,11 +660,11 @@ def without_filters(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
     """The same tools, described for a server with `metadata_filters` switched off.
 
     The two arguments keep their names and schemas, and only their descriptions change,
-    to say they are refused. A model reading the list is told not to send them, and one
-    that sends them anyway is refused by `_filters_allowed` with the reason.
-    `end_reason` removes its arguments instead (`without_reasons`); here a filtered read
-    that went ahead without its filter would answer a different question, so the refusal
-    names the switch rather than calling the argument unknown.
+    to say they are refused. The engine refuses the call; `MemvaraMCPServer` switches the
+    engine's own `metadata_filters` off when this feature is off. Removing the arguments,
+    as `without_reasons` does, would refuse the call too, because `validate` refuses an
+    unknown argument before any handler runs. They are kept only for a friendlier
+    refusal: one that names the switch instead of calling the argument unknown.
     """
     return tuple(
         replace(tool, properties={
@@ -675,21 +675,14 @@ def without_filters(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
         for tool in tools)
 
 
-def _filters_allowed(ctx: "ToolContext", args: dict[str, Any], tool: str) -> None:
-    """Refuse a filtered call when the switch is off, and a filter the engine would
-    refuse, with the tool's name in the message."""
-    filters, prefix = args.get("filters"), args.get("filepath_prefix")
-    if filters is None and prefix is None:
-        return
-    if "metadata_filters" in ctx.features_off:
-        raise ToolError(
-            f"{tool} cannot filter on this server: metadata filters are switched off "
-            "(MEMVARA_FEATURE_METADATA_FILTERS=0). Call it again without filters and "
-            "filepath_prefix, and read the results knowing they are not narrowed.")
-    try:
-        search_filter(filters, prefix)
-    except ValueError as exc:
-        raise ToolError(f"{tool}.{exc}") from None
+def _filter_refusal(tool: str, exc: FilterError) -> ToolError:
+    """A filter the engine refused, as an argument error naming the tool.
+
+    The engine does the checking and holds the `metadata_filters` switch, so a refusal
+    reads the same from a script, a local server and a hosted client.
+    """
+    return ToolError(f"{tool}: {exc}")
+
 
 #: There is deliberately no `close` property on any write tool here, and the reason is
 #: the module docstring's: the two closures are two tools. A `close=` on `memory_remember`
@@ -762,21 +755,23 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
             "at once. Send valid_at alone for what is true of that date as far as we "
             "know today, which is what a question about the past usually means; send "
             "as_of alone for what this system believed on that date.")
-    _filters_allowed(ctx, args, "memory_search")
-    results = cast(SearchResults, ctx.memory.search(
-        args["query"],
-        k=args["k"],
-        min_score=args["min_score"],
-        anchored=bool(args.get("anchored", False)),
-        memory_types=_memory_types(args.get("memory_types")),
-        filters=args.get("filters"),
-        filepath_prefix=args.get("filepath_prefix"),
-        as_of=_timestamp(as_of, "memory_search.as_of") if as_of is not None else None,
-        valid_at=(_timestamp(valid_at, "memory_search.valid_at")
-                  if valid_at is not None else None),
-        # Absent from the schema when the feature is switched off, and then off here.
-        query_rewrite=bool(args.get("query_rewrite", False)),
-    ))
+    try:
+        results = cast(SearchResults, ctx.memory.search(
+            args["query"],
+            k=args["k"],
+            min_score=args["min_score"],
+            anchored=bool(args.get("anchored", False)),
+            memory_types=_memory_types(args.get("memory_types")),
+            filters=args.get("filters"),
+            filepath_prefix=args.get("filepath_prefix"),
+            as_of=_timestamp(as_of, "memory_search.as_of") if as_of is not None else None,
+            valid_at=(_timestamp(valid_at, "memory_search.valid_at")
+                      if valid_at is not None else None),
+            # Absent from the schema when the feature is switched off, and then off here.
+            query_rewrite=bool(args.get("query_rewrite", False)),
+        ))
+    except FilterError as exc:
+        raise _filter_refusal("memory_search", exc) from None
     if not results:
         return _no_match(args["query"], day=_rewrite_day(results.rewrite))
     when = _when(as_of, valid_at)
@@ -831,7 +826,6 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
     # rewrite dated it to. No id reaches the reply; only `.text` and `.rewrite` are read.
     # A hosted deployment renders its own block and reports no rewrite on this surface.
     extra: dict[str, Any] = {"with_ids": True} if isinstance(ctx.memory, ScopedMemvara) else {}
-    _filters_allowed(ctx, args, "memory_recall")
     try:
         block = ctx.memory.recall(
             args["query"],
@@ -852,6 +846,8 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             filepath_prefix=args.get("filepath_prefix"),
             **extra,
         )
+    except FilterError as exc:
+        raise _filter_refusal("memory_recall", exc) from None
     except SelectorBusy as exc:
         # The one ranked-read outcome that is not served at all (see `memvara.select`):
         # the cap is full, and the caller is asked to retry rather than shown a block in

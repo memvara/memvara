@@ -57,9 +57,11 @@ mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False,
 #   filepath_prefix="policies/" keeps only rows that came from a document whose filepath
 #     starts with it, compared exactly: `%` and `_` are ordinary characters.
 #     Both run inside the store, before k is applied, so k matches come back whenever k
-#     exist. The graph leg does not run on a filtered search. A bad key or value is a
-#     ValueError before anything is read, and Memvara(metadata_filters=False) refuses
-#     either argument with ValueError. See memvara/filters.py for the exact rules.
+#     exist. The graph leg does not run on a filtered search. Each key is tested on its
+#     own, so a claim's own meta may hold one key and its source document the other. A
+#     bad key or value is a FilterError (a ValueError) before anything is read, and
+#     Memvara(metadata_filters=False) refuses either argument the same way; an empty
+#     filters={} is not refused. See memvara/filters.py for the exact rules.
 #   anchored=True keeps only the results the query names an entity of — a claim whose
 #     subject or object the query names, or one the graph leg reached from such a
 #     claim — so a question about an entity the store has never heard of returns []
@@ -359,7 +361,8 @@ and a value raises `ValueError`, because a budget silently ignored is an oversiz
 with no signal, and a dated read silently answered with the present is a wrong one.
 
 `search()` and `recall()` send `filters` and `filepath_prefix` only when you set them, and
-check them first with the rules the local engine uses. **The hosted deployment does not
+check them first with the rules the local engine uses. `RemoteMemvara(metadata_filters=False)`
+refuses them before sending anything, as the local switch does. **The hosted deployment does not
 accept these two fields yet.** Its request models refuse a field they do not know, so a
 filtered call answers 422 and the client raises `InvalidRequest`; it is never answered
 unfiltered. An unfiltered call is unchanged.

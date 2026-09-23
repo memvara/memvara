@@ -39,7 +39,7 @@ from urllib.parse import quote
 
 from ..confirm import ConfirmationRefused
 from ..core import _check_k
-from ..filters import FilterValue, search_filter
+from ..filters import FilterValue, checked_filter
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import EpisodeResult, Path, Retrieved
 from ..types import (
@@ -144,17 +144,18 @@ def _sent(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _filter_fields(filters: Mapping[str, FilterValue] | None,
-                   filepath_prefix: str | None) -> dict[str, Any]:
+                   filepath_prefix: str | None, enabled: bool) -> dict[str, Any]:
     """The `filters` and `filepath_prefix` request fields, checked before anything is sent.
 
-    Checked here with the rules the local engine applies, so a key the deployment would
-    refuse is refused without a round trip, and with the same message. Both fields are
-    left out of the body when unset, so a request without a filter is byte for byte what
-    it was before filters existed. **A deployment that does not know the fields refuses a
-    request carrying them** with 422, because its request models forbid unknown fields;
-    a filtered read is never answered unfiltered.
+    Checked by `checked_filter`, the function the local engine uses, so a key the
+    deployment would refuse, or a filter while `metadata_filters` is off, is refused
+    without a round trip and with the same message. Both fields are left out of the body
+    when unset, so a request without a filter is byte for byte what it was before filters
+    existed. **A deployment that does not know the fields refuses a request carrying
+    them** with 422, because its request models forbid unknown fields; a filtered read is
+    never answered unfiltered.
     """
-    where = search_filter(filters, filepath_prefix)
+    where = checked_filter(filters, filepath_prefix, enabled=enabled)
     if where is None:
         return {}
     return {"filters": where.wire() or None, "filepath_prefix": where.filepath_prefix}
@@ -233,8 +234,12 @@ class RemoteMemvara:
                  agent: str | None = None, session: str | None = None,
                  project: str | None = None,
                  timeout: float = DEFAULT_TIMEOUT,
-                 redactor: Redactor | None = None) -> None:
+                 redactor: Redactor | None = None,
+                 metadata_filters: bool = True) -> None:
         key, url = resolve(api_key, base_url)
+        #: The `metadata_filters` switch, as on `Memvara`: off, a read that passes
+        #: `filters` or `filepath_prefix` is refused before anything is sent.
+        self.metadata_filters = metadata_filters
         self._http = HttpClient(key, url, timeout=timeout)
         #: The scope this client narrows to. `tenant` is held for `default_scope`'s sake
         #: and never sent: the facade resolves it from the bearer token, and a `tenant`
@@ -546,7 +551,7 @@ class RemoteMemvara:
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
                         "memory_types": _types(memory_types),
-                        **_filter_fields(filters, filepath_prefix),
+                        **_filter_fields(filters, filepath_prefix, self.metadata_filters),
                         "include_episodes": include_episodes}))
         return SearchResults([_hit(h) for h in body["results"]],
                              selection=hydrate.selection(body.get("selection")),
@@ -607,7 +612,7 @@ class RemoteMemvara:
                         "query_rewrite": None if query_rewrite else False,
                         "synthesize": synthesize or None,
                         "memory_types": _types(memory_types),
-                        **_filter_fields(filters, filepath_prefix),
+                        **_filter_fields(filters, filepath_prefix, self.metadata_filters),
                         "include_episodes": include_episodes}))
         return str(body["text"])
 

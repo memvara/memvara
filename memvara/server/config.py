@@ -1000,6 +1000,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         return RemoteMemvara(
             api_key=config.api_key,
             base_url=config.server_url,
+            metadata_filters="metadata_filters" not in config.features_off,
             **config.scope_kwargs,
         )
     return Memvara(

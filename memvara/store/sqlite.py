@@ -1233,37 +1233,94 @@ _CLAIM_DOCUMENTS = (
 def _register_functions(conn: sqlite3.Connection) -> None:
     """The SQL functions a read needs, on every connection that runs reads.
 
-    `mv_meta_match` is `memvara.filters.meta_matches`, so a metadata filter is evaluated
-    inside the statement that applies the limit. A function belongs to one connection,
-    which is why the snapshot connections `_reader` opens need it as well as the writer's.
+    `mv_meta_match` is `memvara.filters.meta_matches`. A store whose SQLite has no JSON
+    functions tests metadata filters with it, inside the statement that applies the limit.
+    A function belongs to one connection, which is why the snapshot connections `_reader`
+    opens need it as well as the writer's.
     """
     conn.create_function("mv_meta_match", 2, meta_matches, deterministic=True)
 
 
-def _where_clause(where: SearchFilter | None, row: str,
-                  documents: str) -> tuple[str, list]:
+def _has_json_functions(conn: sqlite3.Connection) -> bool:
+    """Whether this SQLite was built with its JSON functions.
+
+    They are built in from SQLite 3.38 and optional before it, and this library supports
+    3.35, so the answer is asked of the library rather than assumed.
+    """
+    try:
+        conn.execute("SELECT json_type('{}')")
+    except sqlite3.OperationalError:
+        return False
+    return True
+
+
+def _starts_with(column: str, prefix: str) -> tuple[str, list]:
+    """SQL and binds for "`column` starts with `prefix`", compared character for character.
+
+    `substr` rather than `LIKE`, so `%` and `_` match only themselves and case matters;
+    `LIKE` treats both as wildcards and ignores ASCII case. `list_documents` and the search
+    filter both use this, so a folder lists and searches by the same rule.
+    """
+    return f"substr({column}, 1, ?) = ?", [len(prefix), prefix]
+
+
+def _key_test(column: str, key: str, values: Sequence[Any], key_spec: str,
+              json_functions: bool) -> tuple[str, list]:
+    """SQL and binds for "the JSON object in `column` holds one of `values` under `key`".
+
+    With SQLite's JSON functions, `json_type` keeps the JSON types apart the way
+    `memvara.filters` does (a boolean is never the number 1, a string never a number), and
+    `json_extract` compares the value. The path is bound as a parameter like the values;
+    a key is restricted to characters that need no quoting inside the double quotes the
+    path puts round it. Without the JSON functions, the registered `mv_meta_match` does
+    the same test in Python, about four times slower on a scan (see `docs/INTERNALS.md`).
+    """
+    if not json_functions:
+        return f"mv_meta_match({column}, ?)", [key_spec]
+    path = f'$."{key}"'
+    texts = [v for v in values if isinstance(v, str)]
+    numbers = [v for v in values
+               if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    flags = sorted({v for v in values if isinstance(v, bool)})
+    parts: list[str] = []
+    params: list[Any] = []
+    for kinds, group in (("'text'", texts), ("'integer', 'real'", numbers)):
+        if group:
+            marks = ", ".join("?" * len(group))
+            parts.append(f"(json_type({column}, ?) IN ({kinds}) "
+                         f"AND json_extract({column}, ?) IN ({marks}))")
+            params += [path, path, *group]
+    for flag in flags:
+        parts.append(f"json_type({column}, ?) = ?")
+        params += [path, "true" if flag else "false"]
+    return "(" + " OR ".join(parts) + ")", params
+
+
+def _where_clause(where: SearchFilter | None, row: str, documents: str,
+                  json_functions: bool) -> tuple[str, list]:
     """SQL and binds for the caller's metadata and file-path filter, or `1=1`.
 
     `row` names the table or alias whose `id`, `tenant` and `meta` are tested, and
     `documents` is `_EPISODE_DOCUMENTS` or `_CLAIM_DOCUMENTS`. Nothing the caller wrote is
-    placed in the SQL text: the metadata spec and the prefix are bound as parameters.
+    placed in the SQL text: keys, values and the prefix are bound as parameters.
 
-    The prefix is compared with `substr`, as `list_documents` compares it, so `%` and `_`
-    match only themselves and case matters. `LIKE` would change both: it treats `%` and
-    `_` as wildcards and ignores ASCII case.
+    **Each key is tested on its own**, against the row's own `meta` or the `meta` of any
+    document the row came from, which is the rule `memvara.filters` states: a claim whose
+    own `meta` holds one key and whose source document holds the other matches both.
     """
     if where is None:
         return "1=1", []
     parts: list[str] = []
     params: list[Any] = []
-    if where.meta:
-        via = documents.format(row=row, test="mv_meta_match(d.meta, ?)")
-        parts.append(f"(mv_meta_match({row}.meta, ?) OR EXISTS ({via}))")
-        params += [where.spec, where.spec]
+    for (key, values), (_, key_spec) in zip(where.meta, where.key_specs):
+        own, own_params = _key_test(f"{row}.meta", key, values, key_spec, json_functions)
+        doc, doc_params = _key_test("d.meta", key, values, key_spec, json_functions)
+        parts.append(f"({own} OR EXISTS ({documents.format(row=row, test=doc)}))")
+        params += own_params + doc_params
     if where.filepath_prefix is not None:
-        via = documents.format(row=row, test="substr(d.filepath, 1, ?) = ?")
-        parts.append(f"EXISTS ({via})")
-        params += [len(where.filepath_prefix), where.filepath_prefix]
+        test, test_params = _starts_with("d.filepath", where.filepath_prefix)
+        parts.append(f"EXISTS ({documents.format(row=row, test=test)})")
+        params += test_params
     return "(" + " AND ".join(parts) + ")", params
 
 
@@ -1292,6 +1349,8 @@ class SQLiteStore:
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         _register_functions(self._db)
+        #: Whether metadata filters use SQLite's JSON functions or `mv_meta_match`.
+        self._json_functions = _has_json_functions(self._db)
         self._lock = threading.RLock()
         # Per-thread: the snapshot connection this thread reads through, how deep it is
         # inside `batch()`, and the last `data_version` it saw. Each of those three is a
@@ -3052,14 +3111,15 @@ class SQLiteStore:
 
         `after` is the `(created_at, id)` of the last document on the previous page; the
         id breaks ties between documents created in the same instant, so no document is
-        skipped or repeated across pages. The prefix is compared with `substr` rather
-        than `LIKE`, so a `%` or `_` in a path matches only itself.
+        skipped or repeated across pages. The prefix is compared by `_starts_with`, so a
+        `%` or `_` in a path matches only itself.
         """
         sc, params = self._scope_clause(scopes, "d")
         where = [sc]
         if filepath_prefix is not None:
-            where.append("substr(d.filepath, 1, ?) = ?")
-            params += [len(filepath_prefix), filepath_prefix]
+            test, test_params = _starts_with("d.filepath", filepath_prefix)
+            where.append(test)
+            params += test_params
         if status is not None:
             where.append("d.status = ?")
             params.append(status)
@@ -3634,7 +3694,7 @@ class SQLiteStore:
         sc, sp = self._scope_clause(scopes)
         lv, lp = self._state_clause(
             valid_at, known_at, resolve_states(states, include_invalidated))
-        wc, wp = _where_clause(where, "claims", _CLAIM_DOCUMENTS)
+        wc, wp = _where_clause(where, "claims", _CLAIM_DOCUMENTS, self._json_functions)
         with self._read() as conn:
             cur = conn.cursor()
             # A whole-tenant scope returns every claim id; building a `Row` object for
@@ -3658,7 +3718,7 @@ class SQLiteStore:
         """
         sc, sp = self._scope_clause(scopes)
         hp, hpp = self._happened_clause(valid_at, known_at)
-        wc, wp = _where_clause(where, "episodes", _EPISODE_DOCUMENTS)
+        wc, wp = _where_clause(where, "episodes", _EPISODE_DOCUMENTS, self._json_functions)
         with self._read() as conn:
             cur = conn.cursor()
             cur.row_factory = None
@@ -3698,7 +3758,7 @@ class SQLiteStore:
         """
         sc, sp = self._scope_clause(scopes)
         hp, hpp = self._happened_clause(valid_at, known_at)
-        wc, wp = _where_clause(where, "episodes", _EPISODE_DOCUMENTS)
+        wc, wp = _where_clause(where, "episodes", _EPISODE_DOCUMENTS, self._json_functions)
         at = as_utc(anchor).timestamp()
         with self._read() as conn:
             cur = conn.cursor()
@@ -3725,7 +3785,7 @@ class SQLiteStore:
         lv, lp = self._state_clause(
             valid_at, known_at, resolve_states(states, include_invalidated), alias="c")
         # The caller's filter goes inside the `LIMIT` too, for the same reason.
-        wc, wp = _where_clause(where, "c", _CLAIM_DOCUMENTS)
+        wc, wp = _where_clause(where, "c", _CLAIM_DOCUMENTS, self._json_functions)
         sql = (
             "SELECT f.claim_id AS cid, bm25(claims_fts) AS s "
             "FROM claims_fts f JOIN claims c ON c.id = f.claim_id "
@@ -3761,7 +3821,7 @@ class SQLiteStore:
             return []
         sc, sp = self._scope_clause(scopes, alias="e")
         hp, hpp = self._happened_clause(valid_at, known_at, alias="e")
-        wc, wp = _where_clause(where, "e", _EPISODE_DOCUMENTS)
+        wc, wp = _where_clause(where, "e", _EPISODE_DOCUMENTS, self._json_functions)
         sql = (
             "SELECT f.episode_id AS eid, bm25(episodes_fts) AS s "
             "FROM episodes_fts f JOIN episodes e ON e.id = f.episode_id "

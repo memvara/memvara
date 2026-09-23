@@ -171,6 +171,12 @@ class MemvaraMCPServer:
         #: `ServerConfig.from_env` gives for an environment that sets nothing, so a server
         #: built in Python and one started from the command line report the same.
         self.features_off = frozenset(features_off)
+        if "metadata_filters" in self.features_off:
+            # The engine holds this switch and refuses a filtered read itself, so the
+            # check lives in one place for a script and a server alike. This server owns
+            # the memory it is given, and turning the switch off here keeps a server
+            # built in Python from advertising a refusal its engine would not make.
+            memory.metadata_filters = False
         extractor, credential_is_read_only = _service_facts(memory)
         #: **OR-ed, never overridden.** A server configured read-only stays read-only
         #: whatever the credential says, because `MEMVARA_READ_ONLY` is a decision somebody
@@ -206,9 +212,9 @@ class MemvaraMCPServer:
         for feature, arguments in FEATURE_ARGUMENTS.items():
             if feature in self.features_off:
                 tools = without_arguments(tools, arguments)
-        #: `metadata_filters` owns arguments too, but keeps them: a model that
-        #: sends one is refused by `_filters_allowed` in `tools.py` with the
-        #: reason, and the descriptions say so.
+        #: `metadata_filters` owns arguments too, but keeps them, with descriptions
+        #: saying they are refused (`without_filters`). The refusal itself is the
+        #: engine's, which is why the switch above was set on it before binding.
         if "metadata_filters" in self.features_off:
             tools = without_filters(tools)
         self._tools: dict[str, Tool] = {

@@ -35,7 +35,7 @@ from typing import (Any, Callable, ClassVar, Collection, Iterable, Literal, Mapp
 from .confirm import ConfirmationRefused, Confirmer
 from .consolidate import Consolidator
 from .embed import Embedder, default_embedder
-from .filters import FilterValue, SearchFilter, search_filter
+from .filters import FilterValue, checked_filter
 from .embed.fingerprint import (
     EmbedderFingerprint,
     embedder_name,
@@ -767,8 +767,7 @@ class Memvara:
         # The same reading for the local options whose default is true: chunking and
         # ingestion run inside the deployment, so turning one off here would be accepted
         # and never used.
-        for switch in ("retrieval_chunks", "ingest_urls", "ingest_media",
-                       "metadata_filters"):
+        for switch in ("retrieval_chunks", "ingest_urls", "ingest_media"):
             if kwargs.pop(switch, True) is not True:
                 named.append(switch)
         # Prefix rather than name, and sorted so two of them read the same way twice.
@@ -2378,7 +2377,8 @@ class Memvara:
         `[A-Za-z0-9_.-]{1,64}`, or a value that is not a string, number or boolean or a
         non-empty list of them, is a `ValueError` raised before anything is read; see
         `memvara.filters` for the exact rules. Constructed with `metadata_filters=False`,
-        this refuses either argument with `ValueError` rather than ignoring it.
+        this refuses either argument with `FilterError`, a `ValueError`, rather than
+        ignoring it; an empty `filters` mapping narrows nothing and is not refused.
 
         >>> mem = Memvara(llm=NullLLM(), user="alice")
         >>> _ = mem.remember("user", "prefers", "tabs", team="infra")
@@ -2386,7 +2386,7 @@ class Memvara:
         >>> [r.claim.object for r in mem.search("prefers", filters={"team": "web"})]
         ['dark mode']
         """
-        where = self._search_filter(filters, filepath_prefix)
+        where = checked_filter(filters, filepath_prefix, enabled=self.metadata_filters)
         scope = self._scope(tenant, user, agent, session)
         return self.reader.search(
             query, scope, k=k, as_of=as_of, valid_at=valid_at, known_at=known_at,
@@ -2395,18 +2395,6 @@ class Memvara:
             memory_types=memory_types, include_episodes=include_episodes,
             query_rewrite=query_rewrite, where=where,
         )
-
-    def _search_filter(self, filters: Mapping[str, FilterValue] | None,
-                       filepath_prefix: str | None) -> SearchFilter | None:
-        """The checked filter for one read, or `None`, refusing it when switched off."""
-        where = search_filter(filters, filepath_prefix)
-        if where is not None and not self.metadata_filters:
-            raise ValueError(
-                "filters and filepath_prefix are switched off for this Memvara "
-                "(metadata_filters=False), so the search was refused rather than run "
-                "without them. Construct it with metadata_filters=True, or leave both "
-                "arguments out.")
-        return where
 
     def get(self, claim_id: str, *, tenant=None, user=None, agent=None,
             session=None) -> Claim | None:

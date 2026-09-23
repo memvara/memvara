@@ -777,7 +777,9 @@ class RemoteShaped:
         self.search_calls = []
 
     def search(self, query, *, k=10, min_score=0.0, anchored=False, ranked=False,
-               query_rewrite=True, memory_types=None, include_episodes=False):
+               query_rewrite=True, as_of=None, valid_at=None, known_at=None,
+               states=None, include_invalidated=None, memory_types=None, filters=None,
+               filepath_prefix=None, include_episodes=False):
         self.search_calls.append({"k": k, "min_score": min_score})
         return [_Row(cid, score) for cid, score in self.rows
                 if score >= min_score][:k]
@@ -817,7 +819,12 @@ def test_the_remote_shaped_stub_carries_the_real_remote_signature():
     If `RemoteMemvara.recall` ever grows `with_ids`, this goes red and the
     harness's hosted branch should be revisited — that is the point of reading
     the parameter list off the real class here rather than trusting the stub.
+    `search()` is compared too: the harness calls both, and a stub that lags the real
+    `search()` would accept a call the real client refuses.
     """
+    real_search = list(inspect.signature(RemoteMemvara.search).parameters)
+    assert list(inspect.signature(RemoteShaped.search).parameters) == real_search, (
+        "the stub's search() has drifted from RemoteMemvara.search")
     real = list(inspect.signature(RemoteMemvara.recall).parameters)
     assert "with_ids" not in real, (
         "RemoteMemvara.recall grew with_ids — bench/hosted.py can now read the "

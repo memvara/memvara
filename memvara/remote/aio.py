@@ -59,8 +59,12 @@ class AsyncRemoteMemvara:
                  agent: str | None = None, session: str | None = None,
                  project: str | None = None,
                  timeout: float = DEFAULT_TIMEOUT,
-                 redactor: Redactor | None = None) -> None:
+                 redactor: Redactor | None = None,
+                 metadata_filters: bool = True) -> None:
         key, url = resolve(api_key, base_url)
+        #: The `metadata_filters` switch, as on `Memvara`: off, a read that passes
+        #: `filters` or `filepath_prefix` is refused before anything is sent.
+        self.metadata_filters = metadata_filters
         self._http = AsyncHttpClient(key, url, timeout=timeout)
         #: See `RemoteMemvara.default_scope`. The tenant is held, never sent; the project
         #: is sent as the `Memvara-Project` header.
@@ -253,7 +257,7 @@ class AsyncRemoteMemvara:
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
                         "memory_types": _types(memory_types),
-                        **_filter_fields(filters, filepath_prefix),
+                        **_filter_fields(filters, filepath_prefix, self.metadata_filters),
                         "include_episodes": include_episodes}))
         return SearchResults([_hit(h) for h in body["results"]],
                              selection=hydrate.selection(body.get("selection")),
@@ -285,7 +289,7 @@ class AsyncRemoteMemvara:
                         "query_rewrite": None if query_rewrite else False,
                         "synthesize": synthesize or None,
                         "memory_types": _types(memory_types),
-                        **_filter_fields(filters, filepath_prefix),
+                        **_filter_fields(filters, filepath_prefix, self.metadata_filters),
                         "include_episodes": include_episodes}))
         return str(body["text"])
 

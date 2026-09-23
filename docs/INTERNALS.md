@@ -1527,21 +1527,50 @@ the lists are fused.
 any one of its values, and every key must match. A string matches only the same string,
 a number any equal number, and `True` or `False` only a boolean; a stored list or object
 never matches. Keys must match `[A-Za-z0-9_.-]{1,64}`, so a backend can put one inside a
-JSON path without quoting rules of its own, and anything else is a `ValueError` before a
-query runs. A row matches a key through its own `meta` **or** through the `meta` of a
-document it came from: a chunk episode through the document that lists it in
+JSON path without quoting rules of its own, and anything else is a `FilterError` (a
+`ValueError`) before a query runs. **Each key is tested on its own**: a row matches a key
+when its own `meta` **or** the `meta` of any document it came from holds a wanted value,
+and different keys may be held by different sources. So a claim whose own `meta` says
+`team: infra`, extracted from a document whose `meta` says `year: 2025`, matches
+`{"team": "infra", "year": 2025}`. A chunk episode reaches its document through
 `document_chunks`, and a claim through `claim_sources` to such a chunk. `filepath_prefix`
-has only the document route. It is compared with `substr`, as `list_documents` compares
-it, so `%` and `_` match only themselves and case matters; `LIKE` would treat both as
-wildcards and ignore ASCII case.
+has only the document route. `_starts_with` compares it with `substr`, and
+`list_documents` uses the same helper, so `%` and `_` match only themselves and case
+matters; `LIKE` would treat both as wildcards and ignore ASCII case.
 
 **How SQLite evaluates it.** `_where_clause` in `store/sqlite.py` adds one condition per
-half, with the two `EXISTS` joins above. The metadata test is `mv_meta_match(meta, ?)`, a
-Python function registered on the writer's connection and on every snapshot connection
-`_reader` opens, because a SQL function belongs to one connection. It is Python rather
-than SQLite's JSON functions because those are not compiled into every SQLite this
-library runs on (the same reason `_migrate_to_v5` parses in Python). The spec and the
-prefix are bound as parameters; nothing the caller wrote is placed in the SQL text.
+key, each "the row's own `meta` holds it, or `EXISTS` a source document whose `meta`
+does", and one `EXISTS` for the prefix. The key test has two forms, and the store picks
+one when it opens:
+
+- **With SQLite's JSON functions**, which the design spec (§3) asked for: `json_type`
+  keeps the JSON types apart the way `memvara.filters` does, so a boolean is never the
+  number 1, and `json_extract` compares the value. The path `$."<key>"` is bound as a
+  parameter like the values.
+- **Without them**, `mv_meta_match(meta, ?)`, a Python function registered on the
+  writer's connection and on every snapshot connection `_reader` opens, because a SQL
+  function belongs to one connection. The JSON functions are built into SQLite only from
+  3.38, and this library supports 3.35 (the reason `_migrate_to_v5` parses in Python), so
+  a build without them still filters correctly, more slowly.
+
+Nothing the caller wrote is placed in the SQL text. There is no index on `meta`: the key
+test runs on the rows the scope, state and text clauses leave, which is the whole scope
+for the vector leg's candidate list.
+
+**What it costs.** `PYTHONPATH=. python3 bench/filters.py` builds a store of N competing
+claims tagged `team=infra` plus 20 tagged `team=web`, and times `search(k=10)` (median of
+15, query rewrite off) unfiltered, filtered to `team=web` with the JSON functions, and
+filtered with the Python callback. Measured on SQLite 3.50.4, Python 3.13, an Apple
+silicon Mac:
+
+| Competing claims | Unfiltered | Filtered, JSON functions | Filtered, Python callback |
+|---|---|---|---|
+| 15,000 | 40.5 ms | 33.1 ms | 79.4 ms |
+| 40,000 | 111.1 ms | 92.0 ms | 216.6 ms |
+
+A filtered search with the JSON functions is slightly faster than an unfiltered one,
+because the vector leg then ranks 20 candidates instead of every claim in scope. The
+callback roughly doubles the unfiltered time, which is why it is only the fallback.
 
 **What does not take the filter.** The graph leg does not run on a filtered search:
 `Store.adjacent` takes no filter, a walk would step onto rows the filter excludes, and
@@ -1556,11 +1585,15 @@ before, and a filtered read against it raises `TypeError` naming the argument ra
 returning rows the filter would have excluded. `RemoteStore` accepts the argument on its
 stubs, which still raise.
 
-**The switch.** `Memvara(metadata_filters=False)` or
-`MEMVARA_FEATURE_METADATA_FILTERS=0` refuses a call that passes either argument with a
-message naming the switch. On the MCP server the two arguments stay in the schema with a
-description saying they are refused, so a call that sends one is refused with the reason
-rather than reported as an unknown argument.
+**The switch.** `Memvara(metadata_filters=False)`, `RemoteMemvara(metadata_filters=False)`
+or `MEMVARA_FEATURE_METADATA_FILTERS=0` refuses a call that passes either argument with a
+`FilterError` naming the switch; an empty `filters` mapping narrows nothing and is not
+refused. The check and the parsing live in one function, `checked_filter`, which every
+engine calls. A server started with the feature off sets its engine's switch, and the MCP
+tools turn the engine's `FilterError` into an argument error. The two arguments stay in
+the schema with a description saying they are refused; removing them would refuse the
+call too, since `validate` refuses unknown arguments, but the message would not name the
+switch.
 
 **The hosted deployment.** `RemoteMemvara` sends `filters` and `filepath_prefix` only when
 set, after the same checks. The deployment does not accept them yet; its request models

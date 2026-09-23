@@ -267,22 +267,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     because `Store.adjacent` takes no filter.
   - **What matches.** Every key must match. A string matches only the same string, case
     included; a number matches an equal number; `True` and `False` match only a boolean,
-    never `1` or `0`; a stored list or object never matches. A row matches through its own
-    `meta` or through the `meta` of a document it came from: a document's chunks are its
-    own text, and a claim came from a document when one of its sources is a chunk of it.
+    never `1` or `0`; a stored list or object never matches. Each key is tested on its
+    own, against the row's own `meta` and the `meta` of every document it came from, so
+    different keys may be held by different sources: a document's chunks are its own
+    text, and a claim came from a document when one of its sources is a chunk of it.
+    SQLite tests a key with `json_type` and `json_extract`, or with a registered Python
+    function on a build without its JSON functions; `bench/filters.py` measures both.
     `filepath_prefix` compares characters exactly, so `%` and `_` are ordinary characters
     and case matters; a row that came from no document never matches it.
   - **Refusals.** A key outside `[A-Za-z0-9_.-]{1,64}`, a value that is not a string,
     number or boolean or a non-empty list of them, or a `filepath_prefix` that is not a
-    string raises `ValueError` before anything is read. Values are bound as parameters and
+    string raises `memvara.filters.FilterError`, a `ValueError`, before anything is
+    read. Values are bound as parameters and
     never placed in SQL text.
   - **MCP.** `memory_search` and `memory_recall` take `filters` and `filepath_prefix`,
     checked by the tool schema. `memvara.server.validate` now understands a list of types,
     `pattern` and `propertyNames`.
-  - **A switch, `metadata_filters`, on by default.** `MEMVARA_FEATURE_METADATA_FILTERS=0`
-    or `Memvara(metadata_filters=False)` refuses a call that passes either argument, with a
-    message naming the switch; it is never answered unfiltered. The plugin hooks accept the
-    name.
+  - **A switch, `metadata_filters`, on by default.** `MEMVARA_FEATURE_METADATA_FILTERS=0`,
+    `Memvara(metadata_filters=False)` or `RemoteMemvara(metadata_filters=False)` refuses a
+    call that passes either argument, with a message naming the switch; it is never
+    answered unfiltered. An empty `filters` mapping is not refused. The plugin hooks
+    accept the name.
   - **The hosted deployment does not accept the two fields yet.** `RemoteMemvara` sends
     them only when set, and a deployment that does not know them answers 422, which the
     client raises as `InvalidRequest`. Server-side support is tracked as stream P2-G of

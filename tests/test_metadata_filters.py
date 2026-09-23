@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -22,7 +23,8 @@ import pytest
 from conftest import entity_registry
 
 from memvara import AsyncMemvara, HashingEmbedder, Memvara, NullLLM, SQLiteStore
-from memvara.filters import SearchFilter, meta_matches, search_filter
+from memvara.filters import FilterError, SearchFilter, meta_matches, search_filter
+from memvara.store.sqlite import _has_json_functions
 from memvara.remote.aio import AsyncRemoteMemvara
 from memvara.remote.api import RemoteMemvara
 from memvara.remote.errors import InvalidRequest
@@ -431,9 +433,21 @@ def test_a_switched_off_filter_is_refused_rather_than_ignored():
     assert [r.claim.object for r in mem.search("prefers", filters={})] == ["tabs"]
 
 
-def test_the_switch_cannot_be_turned_off_against_a_hosted_deployment():
-    with pytest.raises(TypeError, match="metadata_filters"):
-        Memvara(api_key="k", base_url="https://example.test", metadata_filters=False)
+def test_a_hosted_client_with_the_switch_off_refuses_before_sending_anything():
+    """The switch lives in the engine, and the hosted clients are engines too: a filter
+    passed to one switched off is refused without a request."""
+    calls: list = []
+    mem = Memvara(api_key="k", base_url="https://example.test", metadata_filters=False)
+    assert isinstance(mem, RemoteMemvara) and mem.metadata_filters is False
+    mem = _remote(_EMPTY_SEARCH, calls)
+    mem.metadata_filters = False
+    with pytest.raises(FilterError, match="MEMVARA_FEATURE_METADATA_FILTERS=0"):
+        mem.search("q", filters={"team": "web"})
+    with pytest.raises(FilterError):
+        mem.scope(agent="a1").recall("q", filepath_prefix="docs/")
+    assert calls == []
+    mem.search("q", filters={})
+    assert "filters" not in json.loads(calls[-1].content)
 
 
 def test_the_scoped_and_async_views_pass_the_filter_through():
@@ -590,7 +604,7 @@ def test_the_tool_schema_accepts_every_json_type_a_filter_value_may_have():
     ({"filters": {"team": [["web"]]}},
      "memory_search.filters.team[0] must be a string, a number or a boolean"),
     ({"filters": "team=web"}, "memory_search.filters must be an object"),
-    ({"filters": {"team": []}}, "memory_search.filters['team'] is an empty list"),
+    ({"filters": {"team": []}}, "memory_search: filters['team'] is an empty list"),
     ({"filepath_prefix": 3}, "memory_search.filepath_prefix must be a string"),
 ])
 def test_the_tool_schema_refuses_a_bad_filter_with_the_argument_named(arguments,
@@ -611,6 +625,9 @@ def test_a_server_with_the_switch_off_says_so_and_refuses_a_filtered_call():
         assert is_error
         assert "MEMVARA_FEATURE_METADATA_FILTERS=0" in text
         text, is_error = _call(server, tool, {"query": "prefers"})
+        assert not is_error and "tabs" in text
+        # An empty mapping narrows nothing, so the library runs it and so does the tool.
+        text, is_error = _call(server, tool, {"query": "prefers", "filters": {}})
         assert not is_error and "tabs" in text
 
 
@@ -658,3 +675,76 @@ def test_every_phrasing_of_a_rewritten_read_is_filtered():
     filtered = mem.search("green tea", k=2, filters={"team": "web"})
     assert filtered.rewrite.outcome == "applied"
     assert [r.claim.object for r in filtered] == ["green tea"]
+
+
+# -- each key on its own, on both ways SQLite can test it --------------------------------
+
+
+@pytest.fixture(params=["json functions", "python callback"])
+def split(request):
+    """A store with one claim whose own metadata holds `team` and whose source document's
+    metadata holds `year`, tested with SQLite's JSON functions and with the Python
+    callback a build without them uses."""
+    mem = make()
+    if request.param == "python callback":
+        mem.store._json_functions = False
+    doc = mem.add_document("The rollout window is the second week of the quarter.",
+                           filepath="plans/rollout.md", meta={"year": 2025})
+    claim = mem.remember("rollout", "window", "second week", team="infra",
+                         sources=sorted(chunk_episodes(mem, doc))).added[0]
+    mem.remember("rollout", "window_other", "third week", team="infra")
+    return mem, claim, doc
+
+
+def test_a_filter_split_across_a_claim_and_its_document_matches(split):
+    """Each key is held by one source: `team` by the claim, `year` by its document."""
+    mem, claim, _ = split
+    hits = mem.search("rollout window", filters={"team": "infra", "year": 2025})
+    assert [r.claim.id for r in hits] == [claim.id]
+    assert mem.search("rollout window", filters={"team": "infra", "year": 2024}) == []
+
+
+def test_a_chunk_matches_a_filter_split_across_its_own_and_its_documents_metadata(split):
+    mem, _, doc = split
+    hits = mem.search("rollout window", include_episodes=True,
+                      filters={"document_id": doc.id, "year": [2024, 2025]})
+    episodes = [h for h in hits if isinstance(h, EpisodeResult)]
+    assert episodes and {h.episode.id for h in episodes} <= chunk_episodes(mem, doc)
+
+
+@pytest.mark.parametrize("wanted, found", [
+    ({"flag": True}, True), ({"flag": 1}, False), ({"n": 2}, True), ({"n": "2"}, False),
+    ({"s": "x"}, True), ({"s": ["y", "x"]}, True), ({"flag": False}, False),
+    ({"flag": [False, True], "n": [1.0, 2.0], "s": "x"}, True),
+])
+def test_both_sql_paths_keep_json_types_apart(wanted, found):
+    for json_functions in (True, False):
+        mem = make()
+        mem.store._json_functions = json_functions
+        mem.remember("user", "prefers", "tabs", flag=True, n=2, s="x")
+        hits = mem.search("prefers", filters=wanted)
+        assert bool(hits) is found, (json_functions, wanted)
+
+
+def test_a_sqlite_without_json_functions_is_detected():
+    class NoJson:
+        def execute(self, sql):
+            raise sqlite3.OperationalError("no such function: json_type")
+
+    assert _has_json_functions(NoJson()) is False  # type: ignore[arg-type]
+    assert _has_json_functions(sqlite3.connect(":memory:")) is True
+
+
+def test_matches_takes_every_source_of_a_row():
+    where = search_filter({"team": "infra", "year": 2025}, None)
+    assert not where.matches({"team": "infra"})
+    assert where.matches({"team": "infra"}, {"year": 2025})
+    assert where.matches({}, {"team": "infra", "year": 2025})
+    assert not where.matches({"team": "web"}, {"year": 2025})
+
+
+def test_the_spec_is_computed_once_per_filter():
+    where = search_filter({"team": "infra", "year": 2025}, None)
+    assert where.spec is where.spec
+    assert where.key_specs is where.key_specs
+    assert where.key_specs == (("team", '{"team":["infra"]}'), ("year", '{"year":[2025]}'))
