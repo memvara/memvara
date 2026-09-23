@@ -76,6 +76,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **Two feature switches, `ingest_urls` and `ingest_media`.** `MEMVARA_FEATURE_INGEST_URLS=0`
   and `MEMVARA_FEATURE_INGEST_MEDIA=0` are now accepted by the MCP server and the plugin
   hooks. `extract` takes them as `allow_urls` and `allow_media`.
+- **Four predicates in the `engineering` pack for what `/memvara:index` records about a
+  repository.** `purpose` is single-valued, so a restated purpose ends the old one.
+  `convention`, `entry_point` and `runs_with` are many-valued, because a repository
+  follows several conventions, has several entry points and is run with several commands,
+  and a second value is another true fact rather than a change. All four are slow to go
+  stale, take a component as subject and a value as object, and are not graph relations.
+  They join the `engineering` bucket of `profile()`. Before this they fell to the
+  unregistered default, so a changed purpose was kept beside the old one.
 - **End or retire every memory that matches a query, after seeing exactly which.**
   `Memvara.forget_matching(query, close=, k=20, reason=None, confirm=None)` without
   `confirm` changes nothing and returns a `ForgetPreview`: the matching claim ids with

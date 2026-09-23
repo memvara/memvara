@@ -24,9 +24,11 @@ invented at write time, none of them superseding anything.
 Two vocabularies ship with the package:
 
 - **`engineering`** — `deploys_to`, `current_host`, `git_state`, `build_status`,
-  `version`, `endpoint`, `owner` (all single-valued), plus `depends_on`, `rejected`,
-  `known_defect`, `blocked_by` (multi-valued on purpose: a project depends on many things
-  and a later dependency does not make an earlier one untrue).
+  `version`, `endpoint`, `owner`, `purpose` (all single-valued), plus `depends_on`,
+  `rejected`, `known_defect`, `blocked_by`, `convention`, `entry_point`, `runs_with`
+  (multi-valued on purpose: a project depends on many things and a later dependency does
+  not make an earlier one untrue). `purpose`, `convention`, `entry_point` and `runs_with`
+  are what `/memvara:index` records about a repository.
 - **`decisions`** — `decided` and `observed`, both multi-valued and both `episodic`,
   for what an agent records about its own work.
 
