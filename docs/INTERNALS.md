@@ -1633,6 +1633,43 @@ log shows. `ExtractorSpec.model` is empty for such a CLI, and the label recorded
 Codex extraction against the model `claude -p` pins, which is wrong in the one file whose
 whole job is to say what was spent.
 
+**The project a hook works in reaches the server as a header, carried by the environment.**
+`lib/project.py` turns the session's directory into a project: `host/owner/repo` from the
+`origin` remote, read through the common git directory so every worktree of a repository
+gives the same answer, or `path:` and 16 hex characters of a hash of the repository root
+when there is no usable remote, or nothing outside a repository. It is a copy of the
+library's `memvara/project.py`, because the hooks cannot import the library, and the rules
+both copies must agree on are data in `lib/project_vectors.json`. Each hook calls `bind(cwd)`
+once, which puts the value in `MEMVARA_HOOK_PROJECT`. `lib/hosted.py` sends it as the
+`Memvara-Project` header on every call, `lib/ipc.store_key` makes it part of the daemon's
+address on a hosted install, and a daemon the hook spawns inherits it. The environment is
+the channel because the per-prompt path must not import `lib/hosted.py`, and because a
+spawned process gets it with no extra plumbing. Working a project out costs two `git`
+processes, about 30ms together, which is the whole per-prompt budget, so the answer is cached
+per directory for an hour in `~/.memvara/.hooks/projects.json`.
+
+**Every memory line the hooks inject starts with `⋈ `, and capture drops those lines.**
+`lib/mark.py` puts the mark in front of each bullet: `- billing uses postgres` is injected as
+`⋈ - billing uses postgres`. The recall hook's dedup hash is taken over the line without the
+mark, so a session running across the upgrade keeps its record of what it has seen.
+`lib/transcript.py` removes every line that starts with the mark before a turn is mined, and
+still drops a text containing one of the block headers whole. The line rule catches marked
+lines quoted back without their header, which the header rule cannot see.
+
+**Three counters per session feed a status line.** `lib/counts.py` keeps
+`~/.memvara/.hooks/counts/<session>.json` with `recalled` (memory lines the recall hook
+injected), `searched` (read-only memory tools the pre-tool hook approved) and `captured`
+(facts capture stored, counted after the write succeeds). Writes use a temporary file and a
+rename under a file lock, and files older than 14 days are removed. The module imports
+nothing else from the tree, because the status-line script in the plugin repository vendors
+it alone and must finish in under 50ms.
+
+**Each of those three features has a switch.** `lib/settings.py` reads
+`~/.memvara/settings.json`, a flat object of `feature_name: true|false`, where a missing key
+means on. `MEMVARA_FEATURE_<NAME>=0|1` overrides the file. The names are `project_scope`,
+`status_line` and `recall_mark`. Capture drops marked lines whatever `recall_mark` says,
+because a transcript can hold lines injected before the switch changed.
+
 **A hook may never fail a turn.** Every path out of `run.py` returns 0, including the ones
 it does not know about — the `__main__` block catches `BaseException`. That is the rule
 that outranks reporting a problem: a hook that fails a prompt is worse than a hook that

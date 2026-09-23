@@ -170,7 +170,7 @@ Three subject conventions are live at once, and none knows about the others.
 |---|---|---|
 | `user` | the model, through `memory_remember` | `user prefers_prose plain` |
 | the git remote's basename | the capture hook, via `project_subject()` at `plugin/hooks/lib/extract.py:267` | `memvara-cloud deploys_to fly.io` |
-| `project:<absolute path>` | the model, following the note at `plugin/hooks/recall.py:618` | `project:/Applications/workstation/agent-memory uses postgres` |
+| `project:<absolute path>` | the model, following the note at `plugin/hooks/recall.py:645` | `project:/Applications/workstation/agent-memory uses postgres` |
 
 The third is per-machine and per-worktree, so it is unstable as well as wrong.
 
@@ -786,7 +786,7 @@ those fields, so the pack depended on a later step. The order below fixes it.
     channel the hosted plugin lacks. The fifth `Scope` element itself lands at item 4, with
     the other half of the one rehash; this item is what starts using it.
 13. **Migration and rollout** (section 11), including retiring `project:<absolute path>` and
-    fixing the note at `plugin/hooks/recall.py:618`.
+    fixing the note at `plugin/hooks/recall.py:645`.
 14. **Typed disambiguation** (section 9).
 
 ## The six decisions

@@ -35,6 +35,8 @@ import os
 import os.path
 import socket
 
+from .project import ENV as PROJECT_ENV
+
 # `pathlib` is deliberately absent. Importing it costs 10.5ms measured, against a client
 # whose entire budget is ~30ms, and every path here is a string join and a stat. `open.py`
 # still uses it freely — that module is only reached on the fallback path, where 10ms is
@@ -512,10 +514,17 @@ def store_key() -> str:
         except (OSError, ValueError):
             hosted = ""
 
+    # The project the hook bound (`lib.project.bind`), for a hosted store only. The hosted
+    # client sends it as a header on every call, so a daemon started from one repository
+    # would otherwise answer prompts from another with the first one's project. The local
+    # route does not read it, so a local store keeps one daemon for every repository.
+    project = "" if db else env.get(PROJECT_ENV, "")
+
     return "\0".join([
         _host_record().id,
         db,
         hosted,
+        project,
         env.get("MEMVARA_MODE", ""),
         env.get("MEMVARA_TENANT", ""),
         env.get("MEMVARA_USER", ""),
