@@ -29,10 +29,11 @@ import hashlib
 import os
 import re
 import subprocess
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 from urllib.parse import urlsplit
 
-__all__ = ["GitRunner", "canonical_project", "check_project", "normalize_remote"]
+__all__ = ["GitRunner", "canonical_project", "check_project", "main_root",
+           "normalize_remote", "path_identity"]
 
 #: Runs `git` with the given arguments in the given directory and returns its standard
 #: output with surrounding whitespace removed, or `None` when git is missing, fails or
@@ -210,11 +211,43 @@ def canonical_project(cwd: str, *, run: GitRunner | None = None) -> str | None:
         # space would otherwise produce a project the server refuses with a 400.
         if name is not None and _acceptable(name):
             return name
-    # The main working tree is the directory holding `.git`. A bare repository has no
-    # working tree, so its own directory is the most stable thing to name.
-    root = (os.path.dirname(common_dir) if os.path.basename(common_dir) == ".git"
+    return path_identity(os.path.realpath(main_root(common_dir)))
+
+
+def main_root(common_dir: str, paths: Any = os.path) -> str:
+    r"""The main working tree for a repository whose common git directory is `common_dir`.
+
+    That is the directory holding `.git`. A bare repository has no working tree, so its
+    own directory is the most stable thing to name. `paths` is the path module to use,
+    `os.path` by default; a test passes `ntpath` to pin the Windows behaviour on any
+    machine.
+
+    >>> import ntpath
+    >>> main_root("C:\\src\\app\\.git", ntpath)
+    'C:\\src\\app'
+    """
+    return (paths.dirname(common_dir) if paths.basename(common_dir) == ".git"
             else common_dir)
-    digest = hashlib.sha256(os.path.realpath(root).encode("utf-8")).hexdigest()
+
+
+def path_identity(root: str) -> str:
+    r"""The `path:` project name for a repository whose main working tree is `root`.
+
+    `root` should already be a real path. It is put in one spelling before hashing, so
+    that every platform, and the plugin hooks' copy of this function, hash the same
+    string for one directory: backslashes become forward slashes, a drive letter is
+    lower-cased, and trailing slashes are removed. The rest keeps its case, because
+    folding it would merge two directories on a case-sensitive volume. The shared vectors
+    file pins this with Windows and POSIX roots.
+
+    >>> path_identity("C:\\Users\\dev\\memvara") == path_identity("c:/Users/dev/memvara")
+    True
+    """
+    spelled = root.replace("\\", "/")
+    if len(spelled) >= 2 and spelled[1] == ":" and spelled[0].isalpha():
+        spelled = spelled[0].lower() + spelled[1:]
+    spelled = spelled.rstrip("/") or "/"
+    digest = hashlib.sha256(spelled.encode("utf-8")).hexdigest()
     return f"path:{digest[:16]}"
 
 

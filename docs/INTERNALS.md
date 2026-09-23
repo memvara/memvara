@@ -947,7 +947,11 @@ exception at startup.
 
 With no remote, or a remote that is a local path or would not pass `check_project`, the
 name is `path:` plus the first 16 hexadecimal characters of the SHA-256 of the main working
-tree's real path. It is provisional: it changes if the directory moves, and becomes the
+tree's real path (`path_identity`). The path is put in one spelling first, so that Windows,
+POSIX and the hooks' copy hash the same string: backslashes become forward slashes, a
+drive letter is lower-cased, and trailing slashes are removed. `main_root` and
+`path_identity` are pure and take Windows paths on any platform, which is how the Windows
+behaviour is tested. It is provisional: it changes if the directory moves, and becomes the
 remote form once the repository is pushed. Outside a git repository the answer is `None`.
 SSH host aliases from `~/.ssh/config` are not resolved, so `git@work-github:o/r` is the
 project `work-github/o/r`.
@@ -1013,9 +1017,11 @@ filters over one list with no sort of their own.
 `events`), holding that pack's predicate names; each bucket lists the newest `k` live
 claims whose predicate it names. A caller's bucket predicate is kept when the registry
 knows it (its canonical spelling is added), a shipped pack declares it, or a live claim in
-the scope uses it; anything else goes to `Profile.warnings`. On Python 3.10 the packs
-cannot be read, so the default buckets are missing, and with caller buckets the pack
-failure is reported before any "nothing declares" warning it caused.
+the scope uses it; anything else goes to `Profile.warnings`. Python 3.10 has no
+`tomllib`, so there the pack names come from `_scan_pack_names`, a line reader for the
+shipped packs' fixed layout; a test holds it to the TOML reader on every shipped pack. A
+pack that cannot be read at all is reported in `warnings`, before any "nothing declares"
+warning it caused.
 
 `RemoteMemvara.profile()` sends `POST /v1/profile` with a JSON body of `query`, `k`,
 `since` and `buckets` (unset ones left out) and the scope as query parameters, and expects

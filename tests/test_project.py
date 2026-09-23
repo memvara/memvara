@@ -21,7 +21,9 @@ import asyncio
 import hashlib
 import io
 import json
+import ntpath
 import os
+import posixpath
 import pathlib
 import shutil
 import subprocess
@@ -98,11 +100,10 @@ def test_the_library_and_the_hooks_agree_on_every_shared_row():
     for row in vectors["normalise"]:
         assert normalize_remote(row["remote"]) == row["project"], row["rule"]
     for example in vectors["path_form"]["examples"]:
-        # The example root names no real directory, so `realpath` leaves it unchanged
-        # and the digest is the one the file records.
-        got = canonical_project(example["root"],
-                                run=FakeGit(example["root"] + "/.git", None))
-        assert got == example["project"]
+        # The pure half of the path form, so a Windows root is checked on every
+        # platform. `canonical_project` adds only `realpath` in front of it.
+        assert project_module.path_identity(example["root"]) == example["project"], \
+            example["root"]
 
 
 def test_the_library_and_the_hooks_agree_on_which_names_the_server_accepts():
@@ -224,9 +225,10 @@ def test_a_relative_common_directory_is_resolved_against_the_working_directory(t
     sub = tmp_path / "repo" / "src"
     sub.mkdir()
     git = FakeGit(common="../.git", remote=None)
-    expected = hashlib.sha256(
-        os.path.realpath(tmp_path / "repo").encode()).hexdigest()[:16]
-    assert canonical_project(str(sub), run=git) == f"path:{expected}"
+    # `path_identity` rather than a bare SHA-256, because the hashed string is the path in
+    # its one canonical spelling, which on Windows differs from what `realpath` prints.
+    expected = project_module.path_identity(os.path.realpath(tmp_path / "repo"))
+    assert canonical_project(str(sub), run=git) == expected
 
 
 def test_without_a_remote_a_worktree_and_its_main_checkout_share_the_path_name(tmp_path):
@@ -247,8 +249,7 @@ def test_a_bare_repository_is_named_by_its_own_directory(tmp_path):
     bare = tmp_path / "repo.git"
     bare.mkdir()
     name = canonical_project(str(bare), run=FakeGit(str(bare), None))
-    expected = hashlib.sha256(os.path.realpath(bare).encode()).hexdigest()[:16]
-    assert name == f"path:{expected}"
+    assert name == project_module.path_identity(os.path.realpath(bare))
 
 
 @pytest.mark.parametrize("remote", ["/srv/git/app.git", "https://git.lan/team/../app"])
@@ -630,10 +631,15 @@ def test_a_project_scope_contains_only_its_own_project():
 @needs_git
 def test_a_remote_that_is_not_utf8_falls_back_to_the_path_form(tmp_path):
     """Git stores a remote as bytes. One that is not UTF-8 must not raise out of server
-    startup; it is treated as no usable remote, exactly as the hooks treat it."""
+    startup; it is treated as no usable remote, exactly as the hooks treat it.
+
+    The remote is written into the config file as bytes rather than passed to `git
+    config` as an argument, because Windows decodes a command-line argument before git
+    ever sees it, and the test would then fail in its own setup.
+    """
     _git("init", "-q", cwd=tmp_path)
-    subprocess.run([b"git", b"config", b"remote.origin.url",
-                    b"https://example.com/\xff/repo.git"], cwd=tmp_path, check=True)
+    with open(tmp_path / ".git" / "config", "ab") as config:
+        config.write(b'[remote "origin"]\n\turl = https://example.com/\xff/repo.git\n')
     name = canonical_project(str(tmp_path))
     assert name is not None and name.startswith("path:")
 
@@ -643,3 +649,40 @@ def test_the_runner_reads_output_that_is_not_utf8_as_no_answer(monkeypatch, tmp_
         project_module.subprocess, "run",
         lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=b"\xff\xfe", stderr=b""))
     assert project_module._run_git(["--version"], str(tmp_path)) is None
+
+
+
+# -- the path form, with Windows paths on any platform ------------------------------------
+
+@pytest.mark.parametrize("root", ["C:\\Users\\dev\\memvara", "c:/Users/dev/memvara",
+                                  "C:/Users/dev/memvara/", "C:\\Users\\dev\\memvara\\"])
+def test_every_spelling_of_one_windows_root_hashes_one_string(root):
+    """`realpath` on Windows gives backslashes and whichever drive-letter case the
+    system reports. Hashed as given, one repository would get a different name from the
+    hooks, or from itself after a drive letter changed case."""
+    expected = hashlib.sha256(b"c:/Users/dev/memvara").hexdigest()[:16]
+    assert project_module.path_identity(root) == f"path:{expected}"
+
+
+def test_the_rest_of_a_windows_path_keeps_its_case():
+    """Only the drive letter folds. Folding the whole path would merge two directories on
+    a case-sensitive volume."""
+    assert project_module.path_identity("C:\\Src\\App") != \
+        project_module.path_identity("C:\\src\\app")
+
+
+def test_the_filesystem_root_is_not_emptied():
+    assert project_module.path_identity("/") == \
+        f"path:{hashlib.sha256(b'/').hexdigest()[:16]}"
+
+
+@pytest.mark.parametrize("paths, common, root", [
+    (ntpath, "C:\\src\\app\\.git", "C:\\src\\app"),
+    (ntpath, "C:\\srv\\app.git", "C:\\srv\\app.git"),
+    (posixpath, "/src/app/.git", "/src/app"),
+    (posixpath, "/srv/app.git", "/srv/app.git"),
+])
+def test_the_main_working_tree_is_found_the_same_way_on_both_platforms(paths, common, root):
+    """The directory holding `.git`, or a bare repository's own directory, with the
+    platform's own path rules passed in so Windows is pinned on any machine."""
+    assert project_module.main_root(common, paths) == root

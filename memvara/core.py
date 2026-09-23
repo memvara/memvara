@@ -25,6 +25,7 @@ import difflib
 import inspect
 import json
 import os
+import re
 import warnings
 from contextlib import nullcontext
 from copy import copy
@@ -47,8 +48,8 @@ from .llm import LLM, NullLLM, ReplacementJudge, Usage
 from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
 from .retrieve.shadow import shadowed
-from .schema import (Cardinality, PredicatePackError, PredicateRegistry, _slugify,
-                     load_specs)
+from .schema import (PACKS_DIR, Cardinality, PredicatePackError, PredicateRegistry,
+                     _slugify, load_specs)
 from .store import SQLiteStore, Store, bulk_claims, resolve_states
 from .telemetry import WRITE_LLM_CALLS, WRITE_TOKENS_IN, WRITE_TOKENS_OUT, Recorder
 from dataclasses import replace
@@ -655,8 +656,49 @@ def _profile_since(since: datetime | None) -> datetime:
 @lru_cache(maxsize=None)
 def _pack_predicates(pack: str) -> tuple[str, ...]:
     """The predicate names a shipped pack declares. Cached, because the files never change
-    while the process runs and `profile()` is called at the start of every session."""
+    while the process runs and `profile()` is called at the start of every session.
+
+    Read with `tomllib` where it exists. Python 3.10, which this package supports, has no
+    `tomllib`, and a profile only needs the names, so there the line reader
+    `_scan_pack_names` supplies them. A test holds the line reader to the TOML reader on
+    every shipped pack, which is what makes the second reader safe to keep.
+    """
+    try:
+        import tomllib  # noqa: F401 - asked for its presence only
+    except ModuleNotFoundError:
+        return _scan_pack_names(pack)
     return tuple(spec.name for spec in load_specs(pack))
+
+
+#: A `name = "..."` line at the top level of a `[[predicate]]` table, as the shipped
+#: packs write it, with an optional trailing comment.
+_PACK_NAME_LINE = re.compile(r'^name\s*=\s*"([^"\\]+)"\s*(?:#.*)?$')
+
+
+def _scan_pack_names(pack: str) -> tuple[str, ...]:
+    """The predicate names in a shipped pack, read line by line without a TOML parser.
+
+    Only for the packs this package ships, whose layout it controls: a flat list of
+    `[[predicate]]` tables, each with one `name = "..."` line. Anything else in the file
+    is skipped rather than parsed. A pack that cannot be read, or in which no name is
+    found, raises `PredicatePackError`, which `profile()` reports as a warning.
+    """
+    path = PACKS_DIR / f"{pack}.toml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PredicatePackError(f"{path} could not be read: {exc}") from None
+    names: list[str] = []
+    table = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            table = stripped
+        elif table == "[[predicate]]" and (found := _PACK_NAME_LINE.match(stripped)):
+            names.append(found.group(1))
+    if not names:
+        raise PredicatePackError(f"{path} declares no predicate names this reader can see.")
+    return tuple(names)
 
 
 #: Nearest live claims `remember()` asks the judge about when replacement advice is on.
@@ -2979,9 +3021,9 @@ class Memvara:
                 try:
                     defaults[pack] = frozenset(_pack_predicates(pack))
                 except PredicatePackError as exc:
-                    # Python 3.10 has no `tomllib`, so the packs cannot be read there.
-                    # The rest of the profile still works, and the warning says why this
-                    # bucket is missing rather than leaving it silently absent.
+                    # A shipped pack file that is missing or unreadable. The rest of
+                    # the profile still works, and the warning says why this bucket is
+                    # missing rather than leaving it silently absent.
                     warnings.append(f"the {pack!r} bucket is unavailable: {exc}")
             return defaults
         declared: set[str] = set()

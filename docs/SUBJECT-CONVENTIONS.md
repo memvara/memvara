@@ -112,7 +112,8 @@ still outstanding.
 - **Step 8, canonical project identity** (2026-09-23, parity phase 1).
   `memvara/project.py`'s `canonical_project(cwd)` implements section 7 with these
   differences from its text. With no remote, the name is `path:` plus 16 hexadecimal
-  characters of the SHA-256 of the main working tree's real path rather than the directory
+  characters of the SHA-256 of the main working tree's real path, spelled with forward
+  slashes and a lower-case drive letter so every platform agrees, rather than the directory
   name, because two unrelated repositories often share a directory name and section 12
   requires zero collisions; the `path:` prefix is what marks it provisional.
   URL-encoded path segments are left encoded rather than decoded. SSH host aliases from
