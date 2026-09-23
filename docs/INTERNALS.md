@@ -481,7 +481,8 @@ class WritePipeline:
                  near_dup_threshold: float = 0.97,
                  reinforce_bump: float = 0.25,
                  reject_ungrounded: bool | str = "auto",
-                 closed_vocabulary: bool = False) -> None
+                 closed_vocabulary: bool = False,
+                 extraction_chunks: bool = False) -> None
 
     def add(self, episodes: Sequence[Episode]) -> WriteReceipt
     def reextract(self, episodes: Sequence[Episode]) -> WriteReceipt
@@ -552,6 +553,26 @@ suggestion must not turn it into an exception the caller retries.
   2,555 claims under about a hundred invented predicates in one afternoon, every one
   unregistered, multi-valued and retiring nothing, and recall for a short query about a
   repository's CI returned five commit hashes ahead of the note that answered it.
+- **`extraction_chunks`** (default `False`) extracts a long turn in pieces. A turn longer
+  than `write/split.EXTRACTION_CHUNK_CHARS` (6,000 characters) is cut by
+  `split_for_extraction()` into pieces of at most that size. Whole paragraphs go into a
+  piece where they fit, a longer paragraph is cut after a sentence or at a line break, and
+  only a single sentence longer than a piece is cut mid-sentence. Turns under the limit
+  still share the batch's one call, and each piece of a long turn is a call of its own, so
+  `llm_calls` counts one per piece. A piece is a copy of the episode with the same id, and
+  `source_index` from a piece's call is mapped back to the long turn's position in the
+  batch, so every claim cites the whole episode and `why()` shows what the user wrote. An
+  index that names no turn in its call is dropped, not moved. After `_claim_from_dict`, a
+  claim from a later piece with the same `fact_key` and `value_key` as one from an earlier
+  piece of the same turn is folded into it, keeping the higher confidence, so it reaches
+  the reconciler once and is not counted as a second observation. Repeats inside one call
+  are left to the reconciler, as before. If any piece's call fails, the whole batch is
+  deferred and no claim from the other pieces is kept, because `reextract()` skips a turn
+  that has claims and would never read the missing piece. Off by default because its
+  release bar is not met: see the "Reversed" list in `docs/ROADMAP.md` and
+  `tests/test_extraction_chunks.py`. The MCP server turns it on with
+  `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1`, the one feature switch that is off by default
+  (`FEATURES_OFF_BY_DEFAULT` in `server/config.py`).
 
 `reextract()` is `add()` with tier 0 removed, for turns already in the store: a
 deployment that ran without a model, or a batch a provider failure left `deferred` — or

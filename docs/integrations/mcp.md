@@ -71,6 +71,8 @@ derivation off.
 profile tool listed below, `MEMVARA_FEATURE_FORGET_MATCHING=0` hides the two `_matching`
 tools, `MEMVARA_FEATURE_LINKS=0` hides the link tool, and `MEMVARA_FEATURE_END_REASON=0`
 removes the `reason` and `until_reason` arguments from every tool that has them.
+`MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` makes the extraction model read a turn over 6,000
+characters in pieces, one call per piece. It is the one feature that is off by default.
 
 `MEMVARA_ANCHORED=1` makes the three read tools answer only from memories the question is
 demonstrably about, so a question about an entity this store has never heard of returns

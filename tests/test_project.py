@@ -39,7 +39,7 @@ from memvara.remote.aio import AsyncRemoteMemvara
 from memvara.remote.api import PROJECT_HEADER, RemoteMemvara
 from memvara.server import MemvaraMCPServer, ServerConfig, build_memvara, main
 from memvara.server import config as config_module
-from memvara.server.config import FEATURES, ConfigError
+from memvara.server.config import FEATURES, FEATURES_OFF_BY_DEFAULT, ConfigError
 
 VECTORS = pathlib.Path(__file__).resolve().parent / "fixtures" / "project_vectors.json"
 
@@ -360,8 +360,9 @@ LOCAL = {"MEMVARA_DB": ":memory:"}
 
 
 @pytest.mark.derives_project
-def test_every_feature_is_on_unless_switched_off(derive):
-    assert ServerConfig.from_env(LOCAL).features_off == frozenset()
+def test_every_feature_is_on_unless_switched_off_or_off_by_default(derive):
+    assert ServerConfig.from_env(LOCAL).features_off == FEATURES_OFF_BY_DEFAULT
+    assert FEATURES_OFF_BY_DEFAULT == frozenset({"extraction_chunks"})
 
 
 @pytest.mark.parametrize("value, off", [("0", True), ("off", True), ("1", False),
@@ -369,7 +370,8 @@ def test_every_feature_is_on_unless_switched_off(derive):
 @pytest.mark.derives_project
 def test_a_feature_variable_switches_its_feature(derive, value, off):
     config = ServerConfig.from_env({**LOCAL, "MEMVARA_FEATURE_PROFILE": value})
-    assert config.features_off == (frozenset({"profile"}) if off else frozenset())
+    assert config.features_off == (FEATURES_OFF_BY_DEFAULT | {"profile"} if off
+                                   else FEATURES_OFF_BY_DEFAULT)
 
 
 @pytest.mark.derives_project
@@ -563,7 +565,8 @@ def test_the_command_line_binds_the_project_and_the_switches(tmp_path):
     listed, stats = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert "memory_profile" not in [t["name"] for t in listed["result"]["tools"]]
     body = stats["result"]["content"][0]["text"]
-    assert "github.com%2Facme%2Fapp" in body and "features switched off: profile" in body
+    assert "github.com%2Facme%2Fapp" in body
+    assert "features switched off: extraction_chunks, profile" in body
 
 
 def test_a_view_for_the_instances_own_project_needs_no_twin():

@@ -55,12 +55,15 @@ client, not run interactively. Configured entirely by environment:
                      whose predicate is declared global, such as a preference, is
                      still seen from every project.
   MEMVARA_FEATURE_<NAME>
-                     '0' switches one feature off; every feature is on by default.
+                     '0' switches one feature off and '1' switches it on. Every
+                     feature is on by default except EXTRACTION_CHUNKS.
                      PROJECT_SCOPE=0 stops the project being derived (an explicit
                      MEMVARA_PROJECT still applies), PROFILE=0 hides
                      memory_profile, FORGET_MATCHING=0 hides memory_end_matching
                      and memory_forget_matching, LINKS=0 hides memory_link, and
                      END_REASON=0 removes the reason and until_reason arguments.
+                     EXTRACTION_CHUNKS=1 extracts a turn over 6,000 characters in
+                     pieces, one model call per piece.
                      INDEX_COMMAND, RESEARCH_AGENT, STATUS_LINE and RECALL_MARK
                      are also accepted, for the plugin. An unknown name is refused.
   MEMVARA_LLM         'none' (default, offline, extracts only recognised sentence

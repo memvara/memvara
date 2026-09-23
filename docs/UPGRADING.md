@@ -7,6 +7,32 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## One feature switch is now off by default: `extraction_chunks`
+
+### What changed
+
+`extraction_chunks` is a new feature name. With it on, a turn over 6,000 characters is sent
+to the extraction model in pieces, one call per piece. Unlike every earlier feature it is
+off unless `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` turns it on, because its release bar has
+not been met (`docs/ROADMAP.md`, the "Reversed" list). Nothing about extraction changes
+unless you turn it on.
+
+### Who this changes, and in which direction
+
+**If you build `ServerConfig` in Python and compare `features_off` with an empty set**, it
+is now `{"extraction_chunks"}` by default, the same value `ServerConfig.from_env()` returns
+for an environment that sets nothing. Compare with `FEATURES_OFF_BY_DEFAULT` instead.
+
+**If you read `memory_stats` output**, a server started from the environment with no
+feature variables now says `features switched off: extraction_chunks` where it said
+`features: all on`.
+
+**If you keep a copy of the feature names**, as the plugin hooks do in
+`plugin/hooks/lib/settings.py`, add `extraction_chunks`; the MCP server refuses a
+`MEMVARA_FEATURE_*` name it does not know, and a copy without it will not match the library.
+
+---
+
 ## The schema is version 13, three MCP tools are new, erasure proofs count a fifth table, and `supersede()` ends where the new value begins
 
 ### What changed

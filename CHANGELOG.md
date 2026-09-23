@@ -55,6 +55,21 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **A long turn can be extracted in pieces, switched off by default.**
+  `WritePipeline(extraction_chunks=True)`, `Memvara(write_extraction_chunks=True)`, or
+  `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1` on the MCP server. A turn over 6,000 characters
+  is cut at paragraph and sentence ends into pieces of at most 6,000 characters, and each
+  piece is one extraction call, counted in `llm_calls`. Every claim still cites the whole
+  episode, and a claim that two pieces both produce, with the same slot and value, is
+  merged into one before reconciliation. If any piece's call fails, the batch is deferred
+  and nothing from the other pieces is kept, so `reextract()` reads the whole turn again.
+  This reverses a declined ROADMAP entry. It is off by default because its release bar,
+  5 of 5 key facts with 0 duplicates on a long turn, has not been met: the one measured
+  chunked run found 4 of 5. `extraction_chunks` is the first feature switch that is off by
+  default, so `ServerConfig().features_off` is now `{"extraction_chunks"}` rather than
+  empty, and `memory_stats` on a default server says `features switched off:
+  extraction_chunks`.
+
 - **End or retire every memory that matches a query, after seeing exactly which.**
   `Memvara.forget_matching(query, close=, k=20, reason=None, confirm=None)` without
   `confirm` changes nothing and returns a `ForgetPreview`: the matching claim ids with
