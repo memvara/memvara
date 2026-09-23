@@ -112,6 +112,11 @@ _DEFAULT_EMBEDDER = "hashing"
 #: `ingest_urls` and `ingest_media` switch off fetching a URL and reading images, audio and
 #: video when a document is added. `memvara.ingest.extract` takes them as its `allow_urls`
 #: and `allow_media` arguments, and `build_memvara` hands them to `Memvara`.
+#:
+#: `query_rewrite` and `synthesis` switch off the read path's two model stages
+#: (`memvara.select.stages`). A local store is then built with that stage off, and
+#: `memory_search` and `memory_recall` no longer offer the `query_rewrite` or
+#: `synthesize` argument.
 FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "index_command": True,
     "research_agent": True,
@@ -127,6 +132,8 @@ FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "extraction_chunks": False,
     "ingest_urls": True,
     "ingest_media": True,
+    "query_rewrite": True,
+    "synthesis": True,
 })
 
 #: Every feature name, in the order `FEATURE_DEFAULTS` lists them.
@@ -472,7 +479,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls and ingest_media."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite and synthesis."
     >>> unknown_features(["profile"]) is None
     True
     """
@@ -1030,5 +1037,10 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         url_fetcher=config.url_fetcher(),
         ingest_urls="ingest_urls" not in config.features_off,
         ingest_media="ingest_media" not in config.features_off,
+        # The read path's model stages use the `llm` above when it can chat, and these
+        # are their switches, `MEMVARA_FEATURE_QUERY_REWRITE` and
+        # `MEMVARA_FEATURE_SYNTHESIS`.
+        query_rewrite="query_rewrite" not in config.features_off,
+        synthesis="synthesis" not in config.features_off,
         **config.scope_kwargs,
     )

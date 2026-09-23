@@ -75,6 +75,17 @@ contributor guide and a CLI rather than a script per corpus.
 - **Telemetry adds no required dependency and no background thread.** `MemoryRecorder` keeps
   series in memory for a deployment to scrape; the protocol is what a real backend
   implements.
+- **Every read-path model call is counted, whichever stage made it.** The ranked stage
+  emits `retrieval.model_query`, `retrieval.model_fallback`, `retrieval.model_refused`, the
+  token series and `retrieval.select_ms`. The query rewrite and the synthesis emit the same
+  series tagged `stage=rewrite` or `stage=synthesis`, with their own timers
+  `retrieval.rewrite_ms` and `retrieval.synthesis_ms` (`memvara.select.stages.run_stage`).
+  A quota that sums `retrieval.model_query` by name therefore meters every answered call.
+- **Benchmark reads are plain.** Every `search()` and `recall()` in `bench/` and `demo/`
+  passes `**PLAIN_READ` or an explicit `query_rewrite=`, and the harnesses' `Memvara`
+  builders pass `**PLAIN_READ`, so an extraction model that can chat does not also rewrite
+  the questions a benchmark asks. A run that measures the rewrite says so with
+  `query_rewrite=True` (`bench/evalkit.py`'s `retrieve()` and `retrieval_pass()`).
 - **A graph harness declares its corpus's relations, or it measures a store with no edges.**
   A relation nobody has declared takes values, and a value carries no edge, so
   `bench/multihop.py` builds its registry in `vocabulary()` and `bench/twowiki.py` loads

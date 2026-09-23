@@ -78,6 +78,13 @@ chunk instead of passages of about 1,000 characters.
 turn over 6,000 characters in pieces, one call per piece. A feature marked (off by default)
 stays off until its variable says `1`; every other feature is on until its variable says `0`.
 
+With `MEMVARA_LLM` set to a model, the search and recall tools also ask that model for a
+few other phrasings of each query and for the dates it names, before searching. That is one
+model call of up to 10 seconds per read; a failed call serves the ordinary search.
+`MEMVARA_FEATURE_QUERY_REWRITE=0` turns it off. The recall tool can also put a model's
+summary above its notes when called with `synthesize`, and `MEMVARA_FEATURE_SYNTHESIS=0`
+removes that argument. With `MEMVARA_LLM=none`, which is the default, neither happens.
+
 `MEMVARA_ANCHORED=1` makes the three read tools answer only from memories the question is
 demonstrably about, so a question about an entity this store has never heard of returns
 nothing rather than the nearest memory about somebody else. `MEMVARA_READ_W_GRAPH=1.0`

@@ -1975,6 +1975,7 @@ def retrieve(
     haystack: str,
     *,
     valid_at: datetime | None = None,
+    query_rewrite: bool = False,
 ) -> tuple[str, float, int]:
     """Build the reader's context. Returns (context, milliseconds, result count).
 
@@ -1991,6 +1992,10 @@ def retrieve(
     every turn years from the anchor, so the temporal leg abstains on every question;
     that is the configuration every row published before the anchor existed was
     produced under.
+
+    `query_rewrite` is off unless a run asks for it. A rewrite is a model call whose
+    answer can change which memories are searched for and which instant they are read
+    at, so a benchmark that did not set out to measure it must not depend on it.
     """
     if source is ContextSource.NONE:
         return "", 0.0, 0
@@ -1998,7 +2003,7 @@ def retrieve(
         return clip(haystack, budget.full_max_chars), 0.0, 0
     start = time.perf_counter()
     context = mem.recall(question, k=budget.k, include_episodes=budget.include_episodes,
-                         valid_at=valid_at)
+                         valid_at=valid_at, query_rewrite=query_rewrite)
     elapsed = (time.perf_counter() - start) * 1000
     context = clip(context, budget.max_chars)
     # `recall()` renders one "- " line per result under a header, so counting them is
@@ -2337,8 +2342,8 @@ class RetrievalPlan:
 
 
 def retrieval_pass(mem: Any, question: str, plan: RetrievalPlan, budget: RetrievalBudget,
-                   labels: Mapping[str, str], *,
-                   valid_at: datetime | None = None) -> tuple[list[RetrievedItem], float]:
+                   labels: Mapping[str, str], *, valid_at: datetime | None = None,
+                   query_rewrite: bool = False) -> tuple[list[RetrievedItem], float]:
     """The ranked list the curve is drawn from, and what it cost in milliseconds.
 
     `search()` rather than `recall()`, because ranks are needed and `recall()` returns a
@@ -2347,11 +2352,13 @@ def retrieval_pass(mem: Any, question: str, plan: RetrievalPlan, budget: Retriev
     this deeper pass is diagnostic and its cost is not charged to the read path.
 
     `valid_at` is the same instant `retrieve()` was given, so the curve is drawn from a
-    retrieval that ran under the same clock as the context it is reported beside.
+    retrieval that ran under the same clock as the context it is reported beside, and
+    `query_rewrite` is off unless asked for, for `retrieve()`'s reason.
     """
     start = time.perf_counter()
     results = mem.search(question, k=plan.depth(budget),
-                         include_episodes=budget.include_episodes, valid_at=valid_at)
+                         include_episodes=budget.include_episodes, valid_at=valid_at,
+                         query_rewrite=query_rewrite)
     return as_items(results, labels), (time.perf_counter() - start) * 1000
 
 

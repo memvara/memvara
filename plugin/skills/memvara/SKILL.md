@@ -191,6 +191,12 @@ not erased, so the record of what was believed stays. Before you delete, say whi
 of those two they are getting, and when they only want a newer version, send the
 document again rather than deleting it.
 
+A summary at the top of a recall block is there because you asked for one. It
+is a model's reading of the notes under it, not a note. When the two differ,
+answer from the notes. Never store the summary with `memory_remember`: that
+files a paraphrase as though somebody had said it, and the next session cannot
+tell the difference.
+
 ## Other jobs
 
 | They asked | Open |

@@ -74,7 +74,7 @@ class MemoryAPI(Protocol):
     # -- reading -------------------------------------------------------------
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
-               anchored: bool = False,
+               anchored: bool = False, query_rewrite: bool = True,
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
@@ -91,6 +91,7 @@ class MemoryAPI(Protocol):
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                anchored: bool = False, ranked: bool = False,
+               query_rewrite: bool = True, synthesize: bool = False,
                memory_types: Sequence[MemoryType] | None = None,
                include_episodes: bool = False,
                budget: int | None = None,
@@ -113,6 +114,11 @@ class MemoryAPI(Protocol):
         not take it (`server/tools.py`, "The MCP door" in the design spec): `_search`
         pins `include_episodes` to `False`, which a ranked call refuses outright, so a
         `ranked` argument on that tool would be one that always raises.
+
+        `query_rewrite` is declared here and on `search`, and `synthesize` here only,
+        because those are the tools that take them. `ScopedRemoteMemvara` sends each only
+        when it differs from its default, so a deployment from before the fields sees the
+        request it always saw.
         """
 
     def get(self, claim_id: str) -> Claim | None: ...

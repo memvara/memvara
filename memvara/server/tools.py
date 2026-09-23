@@ -77,16 +77,17 @@ from ..core import PROFILE_WINDOW, Memvara, ScopedMemvara, is_derived, standing_
 # lines below: it is the store's own spelling rule, and a copy of it here would be a
 # second implementation that can disagree about whether a fold happened.
 from ..schema import _slugify
-from ..select import SelectorBusy
+from ..select import Rewrite, SelectorBusy
 from ..types import (CUSTOM_ID_CHARS, DOCUMENT_STATES, LINK_RELATIONS, REASON_CHARS,
                      Accumulation, Claim, Closure, Collapse, DeleteResult, Dispute, Document,
-                     ForgetPreview, MemoryType, Retype, Row, WriteReceipt, closure_reason,
-                     closure_reasons, utcnow)
+                     ForgetPreview, MemoryType, RecallResult, Retype, Row, SearchResults,
+                     WriteReceipt, closure_reason, closure_reasons, utcnow)
 from .memory_api import MemoryAPI
 from .validate import ToolError, validate
 
-__all__ = ["TOOLS", "Tool", "ToolContext", "ToolError", "anchoring_by_default",
-           "safe_detail", "safe_line", "without_reasons"]
+__all__ = ["FEATURE_ARGUMENTS", "TOOLS", "Tool", "ToolContext", "ToolError",
+           "anchoring_by_default", "safe_detail", "safe_line", "without_arguments",
+           "without_reasons"]
 
 #: Framing for any block of stored claims. `Memvara.recall` applies its own; this is for
 #: the tools that render results themselves. It names the text below it as data, which
@@ -274,10 +275,26 @@ def without_reasons(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
     validator as an unknown argument. Reasons already stored are still shown by
     `memory_history` and `memory_why`, because they are records, not a feature.
     """
+    return without_arguments(tools, _REASON_ARGUMENTS)
+
+
+#: The arguments that belong to a feature switch, for the features that own arguments
+#: rather than a tool. A server started with one of these features off does not offer
+#: its arguments, and a call that still sends one is refused as an unknown argument.
+FEATURE_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
+    "end_reason": _REASON_ARGUMENTS,
+    "query_rewrite": ("query_rewrite",),
+    "synthesis": ("synthesize",),
+}
+
+
+def without_arguments(tools: "tuple[Tool, ...]",
+                      names: Sequence[str]) -> "tuple[Tool, ...]":
+    """The same tools with every argument in `names` removed from their schemas."""
     return tuple(
         replace(tool, properties={k: v for k, v in tool.properties.items()
-                                  if k not in _REASON_ARGUMENTS})
-        if set(_REASON_ARGUMENTS) & set(tool.properties) else tool
+                                  if k not in names})
+        if set(names) & set(tool.properties) else tool
         for tool in tools)
 
 
@@ -405,6 +422,42 @@ _RANKED = {
         "which of those happened — the ranking was not skipped silently. When the "
         "server's ranked reads are already at capacity, the call fails and asks you to "
         "retry in a few seconds; that failure costs nothing and is worth one retry."
+    ),
+}
+
+#: `memory_search` and `memory_recall`. Removed from both schemas when the server runs
+#: with `MEMVARA_FEATURE_QUERY_REWRITE=0`; see `FEATURE_ARGUMENTS`.
+_QUERY_REWRITE = {
+    "type": "boolean",
+    "default": True,
+    "description": (
+        "Before searching, ask a model, on this server's own key, for up to three other "
+        "ways to phrase the query and for the dates the query refers to, then search "
+        "every phrasing and merge the results. The dates become valid_at unless you "
+        "passed valid_at or as_of yourself, which always win. Default true. It is one "
+        "model call of up to 10 seconds, and it runs only on a server with a model "
+        "configured. On any other server, or when the call fails or times out, the "
+        "ordinary search of your exact query runs instead, so nothing is lost. Set it "
+        "false when the read must match your exact words, for example to check whether "
+        "one particular phrase was stored."
+    ),
+}
+
+#: `memory_recall` only. Removed from its schema when the server runs with
+#: `MEMVARA_FEATURE_SYNTHESIS=0`; see `FEATURE_ARGUMENTS`.
+_SYNTHESIZE = {
+    "type": "boolean",
+    "default": False,
+    "description": (
+        "Also ask a model, on this server's own key, to write a short summary of the "
+        "notes, and put it above them. Every note is still returned below the summary, "
+        "and the notes are the record: where the two differ, trust the notes. Default "
+        "false. Set it when the notes are many or disagree and a summary would save you "
+        "work; it is one more model call of up to 10 seconds. When the server has no "
+        "model configured, the operator has switched summaries off, the provider "
+        "rejected the key, or the call failed or timed out, the block starts with a "
+        "line saying the summary was not written and why. With a budget, the notes are "
+        "fitted first and the summary is left out when it does not fit beside them."
     ),
 }
 
@@ -584,6 +637,38 @@ def _no_match(query: str, day: str | None = None) -> str:
     )
 
 
+def _rewrite_day(rewrite: Rewrite | None) -> str | None:
+    """The day a rewrite dated this read to, as `YYYY-MM-DD`, or `None` if it did not.
+
+    Only a complete range counts, the rule `_rewrite_line` follows, so a no-match reply
+    and a match reply name the same day for the same read.
+    """
+    if (rewrite is None or rewrite.valid_at is None or rewrite.date_from is None
+            or rewrite.date_to is None):
+        return None
+    return rewrite.date_to.isoformat()
+
+
+def _rewrite_line(rewrite: Rewrite | None) -> str | None:
+    """What a query rewrite added to a `memory_search` read, or `None` if it added nothing.
+
+    The phrasings are a model's words, so they are flattened like stored text. They go
+    on their own line, before the rows, so a caller can see why a row that shares no
+    words with its query was returned.
+    """
+    if rewrite is None or rewrite.outcome != "applied":
+        return None
+    parts = []
+    if rewrite.queries:
+        parts.append("Also searched as: " +
+                     "; ".join(repr(safe_line(q)) for q in rewrite.queries) + ".")
+    # All three or no sentence: a range with a missing end is not one a reader can check.
+    if _rewrite_day(rewrite) is not None:
+        parts.append(f"The query names {rewrite.date_from} to {rewrite.date_to}, so "
+                     f"this is as things were on {rewrite.date_to}.")
+    return " ".join(parts) or None
+
+
 def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
     as_of, valid_at = args.get("as_of"), args.get("valid_at")
     # `time_axes` refuses this combination too, with a good message — but as a bare
@@ -597,7 +682,7 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
             "at once. Send valid_at alone for what is true of that date as far as we "
             "know today, which is what a question about the past usually means; send "
             "as_of alone for what this system believed on that date.")
-    results = ctx.memory.search(
+    results = cast(SearchResults, ctx.memory.search(
         args["query"],
         k=args["k"],
         min_score=args["min_score"],
@@ -606,11 +691,16 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
         as_of=_timestamp(as_of, "memory_search.as_of") if as_of is not None else None,
         valid_at=(_timestamp(valid_at, "memory_search.valid_at")
                   if valid_at is not None else None),
-    )
+        # Absent from the schema when the feature is switched off, and then off here.
+        query_rewrite=bool(args.get("query_rewrite", False)),
+    ))
     if not results:
-        return _no_match(args["query"])
+        return _no_match(args["query"], day=_rewrite_day(results.rewrite))
     when = _when(as_of, valid_at)
     lines = [f"{len(results)} match(es){when}. {STORED_HEADER}"]
+    rewritten = _rewrite_line(results.rewrite)
+    if rewritten is not None:
+        lines.append(rewritten)
     # Metadata first, stored text last: the untrusted span then ends the line and cannot
     # be followed by anything it could impersonate. That settles what comes *after* a
     # claim; `safe_line` has to settle what a claim can carry *inside* it, or the payload
@@ -628,16 +718,16 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
     # that frames them as data, with no scores and no JSON, which is precisely the shape
     # an MCP text result should have. Reformatting it here would only weaken the framing.
     #
-    # And called *without* `with_ids=True`, which is a decision and not an oversight —
-    # the next reader is asked not to "fix" it. `recall()` will hand back the ids of the
-    # claims it rendered, and this tool's whole pitch, the sentence a model reads before
-    # choosing it, is numbered plain-text notes with nothing to filter out. An id on
-    # every line is precisely the retrieval metadata that pitch promises is absent, so
-    # adding one would degrade the thing the tool is for, and it would buy nothing: an
-    # agent that needs a handle on a memory — to explain it, correct it, retire it — is
-    # sent to `memory_search`, which is the id-bearing tool and says so. `with_ids`
-    # stays a library API, for a programmatic caller that renders its own prompt and
-    # then has to cite it.
+    # And no claim id is ever put in the reply, which is a decision and not an oversight
+    # — the next reader is asked not to "fix" it. `recall(with_ids=True)` hands back the
+    # ids of the claims it rendered, and this tool's whole pitch, the sentence a model
+    # reads before choosing it, is numbered plain-text notes with nothing to filter out.
+    # An id on every line is precisely the retrieval metadata that pitch promises is
+    # absent, so adding one would degrade the thing the tool is for, and it would buy
+    # nothing: an agent that needs a handle on a memory — to explain it, correct it,
+    # retire it — is sent to `memory_search`, which is the id-bearing tool and says so.
+    # A local store is still asked for its `RecallResult` below, for its `rewrite`
+    # only; its `text` is the same string and its ids are dropped.
     # `valid_at` only, never `as_of`. Both are on `memory_search`; here the block goes
     # into a prompt, and `as_of` rewinds belief as well as the world, so a record
     # retired since that day would be rendered as a fact. `valid_at` is what we believe
@@ -653,18 +743,28 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "were on that day as far as we know now, or call memory_search with as_of "
             "to inspect what was believed then.")
     valid_at = args.get("valid_at")
+    # A local store is asked for its `RecallResult`, whose `text` is byte for byte the
+    # string above, so that a block that came back empty can say which day a query
+    # rewrite dated it to. No id reaches the reply; only `.text` and `.rewrite` are read.
+    # A hosted deployment renders its own block and reports no rewrite on this surface.
+    extra: dict[str, Any] = {"with_ids": True} if isinstance(ctx.memory, ScopedMemvara) else {}
     try:
-        text = ctx.memory.recall(
+        block = ctx.memory.recall(
             args["query"],
             k=args["k"],
             min_score=args["min_score"],
             anchored=bool(args.get("anchored", False)),
             ranked=bool(args.get("ranked", False)),
+            # Both are absent from the schema when their feature is switched off, and
+            # then off here.
+            query_rewrite=bool(args.get("query_rewrite", False)),
+            synthesize=bool(args.get("synthesize", False)),
             memory_types=_memory_types(args.get("memory_types")),
             budget=args.get("budget"),
             include_episodes=bool(args.get("include_episodes", False)),
             valid_at=(_timestamp(valid_at, "memory_recall.valid_at")
                       if valid_at is not None else None),
+            **extra,
         )
     except SelectorBusy as exc:
         # The one ranked-read outcome that is not served at all (see `memvara.select`):
@@ -674,7 +774,11 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "memvara's ranked reads are at capacity right now. Retry in a few seconds, "
             "or call memory_recall again without ranked for an ordinary read."
         ) from exc
-    return text or _no_match(args["query"], day=valid_at)
+    if isinstance(block, RecallResult):
+        text, day = block.text, valid_at or _rewrite_day(block.rewrite)
+    else:
+        text, day = block, valid_at
+    return text or _no_match(args["query"], day=day)
 
 
 #: The bracket field saying a machine derived the row: one more metadata token beside
@@ -2143,8 +2247,10 @@ TOOLS: tuple[Tool, ...] = (
             "answer. Call it at the START of a turn whenever the reply could depend on "
             "something the user told you earlier — their name, where they live or work, "
             "how they like things done, a decision they already made, a preference, a "
-            "constraint. Call it speculatively; it is cheap and local, and involves no "
-            "model unless you set ranked on a server with a selector. Returns "
+            "constraint. Call it speculatively; it is cheap. It calls a model only on a "
+            "server that has one configured: there it rewrites the query into a few "
+            "other phrasings before searching (query_rewrite), and ranked and "
+            "synthesize each add one more call when you set them. Returns "
             "numbered plain-text notes, ready to read as context, with no scores or JSON "
             "to filter out. An empty result means nothing is stored, not that you should "
             "try again. Prefer this over memory_search whenever the goal is to answer "
@@ -2221,6 +2327,8 @@ TOOLS: tuple[Tool, ...] = (
             "min_score": _MIN_SCORE,
             "anchored": _ANCHORED,
             "ranked": _RANKED,
+            "query_rewrite": _QUERY_REWRITE,
+            "synthesize": _SYNTHESIZE,
             "memory_types": _MEMORY_TYPES_FILTER,
         },
         required=("query",),
@@ -2253,6 +2361,7 @@ TOOLS: tuple[Tool, ...] = (
             },
             "min_score": _MIN_SCORE,
             "anchored": _ANCHORED,
+            "query_rewrite": _QUERY_REWRITE,
             "memory_types": _MEMORY_TYPES_FILTER,
             "as_of": {
                 "type": "string",

@@ -34,7 +34,7 @@ SETTINGS = os.path.join(os.path.expanduser("~"), ".memvara", "settings.json")
 FEATURES = ("index_command", "research_agent", "project_scope", "status_line",
             "recall_mark", "profile", "forget_matching", "end_reason", "links",
             "documents", "retrieval_chunks", "extraction_chunks", "ingest_urls",
-            "ingest_media")
+            "ingest_media", "query_rewrite", "synthesis")
 
 #: What an override may say. Anything else is ignored and the file decides, because a typo
 #: in an environment variable should not silently flip a feature the file set.

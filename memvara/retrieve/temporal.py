@@ -22,6 +22,14 @@ instant was given it is the present, which makes the leg "the turns nearest to n
 right reading of "recently" and the wrong one of "in 2019", which is why the second is
 expected to be spelled with `valid_at`.
 
+That rule is for this deterministic leg, and it still holds here: nothing in this module
+reads the words of a question. Since 2026-09-23 the model-backed alternative is
+`query_rewrite` (`memvara.select.stages`), which runs before retrieval, asks a model for
+the date range a question refers to, and hands the range's last second to the read as
+`valid_at`. This leg then anchors on it exactly as on a `valid_at` the caller wrote, and a
+caller's own `valid_at` or `as_of` always wins over the model's range. See
+`docs/INTERNALS.md`, invariant 1.
+
 **And it abstains rather than voting weakly.** If nothing in scope is within a half-life
 of the anchor, time has no opinion about this question, and a leg with no opinion that
 votes anyway is worse than one that does not run — fusion reads positions, so a leg

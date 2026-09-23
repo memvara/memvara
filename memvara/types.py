@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     # cycle. `from __future__ import annotations` (above) already stringifies every
     # annotation in this module, so nothing below needs `Selection` to exist at runtime.
     from .retrieve.hybrid import Retrieved
-    from .select.base import Selection
+    from .select.base import Rewrite, Selection, Synthesis
 
 
 #: How coarse a resolved temporal boundary is. See `Claim.temporal_precision`.
@@ -1382,19 +1382,25 @@ class SearchResults(list):
 
     A list subclass rather than a wrapper, so every existing caller that indexes,
     iterates, slices or serializes a search result keeps working unchanged and
-    `isinstance(result, list)` still holds — the only thing this adds is one attribute.
+    `isinstance(result, list)` still holds — the only things this adds are two attributes.
     `selection` is `None` on a plain read and a `Selection` on any ranked one, including
     an empty result: a ranked read that named nothing to keep still has to say what
     happened, and an empty list has no item left to carry that on, which is why this is
     not a per-item field.
+
+    `rewrite` is the same kind of record for the query rewrite: `None` when the call did
+    not ask for one (`query_rewrite=False`), and a `Rewrite` saying what happened
+    otherwise, including when no model was configured to do it.
     """
 
-    __slots__ = ("selection",)
+    __slots__ = ("selection", "rewrite")
 
     def __init__(self, results: "Iterable[Retrieved]" = (), *,
-                selection: "Selection | None" = None) -> None:
+                selection: "Selection | None" = None,
+                rewrite: "Rewrite | None" = None) -> None:
         super().__init__(results)
         self.selection = selection
+        self.rewrite = rewrite
 
     # Deliberately no custom `__repr__`: `list.__repr__` prints `[]` for an empty result
     # and the ordinary element-by-element form otherwise, which is what every existing
@@ -1450,6 +1456,12 @@ class RecallResult:
     #: without parsing the trailing `RECALL_UNRANKED` line the text block ends with when
     #: the model did not rank it.
     selection: "Selection | None" = None
+    #: How the query rewrite went, or `None` when the call passed `query_rewrite=False`.
+    #: The same record `SearchResults.rewrite` carries.
+    rewrite: "Rewrite | None" = None
+    #: How `synthesize=True`'s summary went, or `None` when it was not asked for. When
+    #: the outcome is `applied`, `synthesis.text` is the summary the block starts with.
+    synthesis: "Synthesis | None" = None
 
     def __repr__(self) -> str:
         # Not the dataclass repr: `text` is a whole system prompt, and printing one at a

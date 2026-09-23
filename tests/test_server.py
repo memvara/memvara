@@ -3335,7 +3335,8 @@ def test_defaults_come_from_the_schema_the_model_read():
     is a default that is eventually wrong in the documentation."""
     args = validate(BY_NAME["memory_search"].properties, (), {"query": "x"},
                     tool="memory_search")
-    assert args == {"query": "x", "k": 10, "min_score": 0.0, "anchored": False}
+    assert args == {"query": "x", "k": 10, "min_score": 0.0, "anchored": False,
+                    "query_rewrite": True}
 
 
 def test_a_tool_with_no_arguments_rejects_unknown_ones():

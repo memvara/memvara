@@ -38,7 +38,7 @@ from .api import (PROJECT_HEADER, _document_body, _document_path, _hit, _iso,
                   _refuse_project_meta, _sent, _states, _type, _types)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
-from .errors import Conflict, NotFound
+from .errors import Conflict, InvalidRequest, NotFound
 
 
 class AsyncRemoteMemvara:
@@ -103,6 +103,24 @@ class AsyncRemoteMemvara:
         if project is not None:
             kw["headers"] = {PROJECT_HEADER: project}
         return await self._http.request(method, path, **kw)
+
+    async def _read(self, path: str, body: dict[str, Any]) -> Any:
+        """POST one read, retrying once without `query_rewrite` for an older deployment.
+
+        `query_rewrite` is sent only as `false`, when the caller opted out. A deployment
+        from before the field refuses it as unknown (422), and such a deployment never
+        rewrites a query, so the opt-out already holds there: the read is sent again
+        without the field. A 422 for any other reason fails the second time as well and
+        is raised. `synthesize` gets no retry, because an older deployment cannot write
+        the summary the caller asked for, and saying so is the honest answer.
+        """
+        try:
+            return await self._request("POST", path, params=self._params(), json=body)
+        except InvalidRequest:
+            if body.get("query_rewrite") is not False:
+                raise
+            body = {k: v for k, v in body.items() if k != "query_rewrite"}
+            return await self._request("POST", path, params=self._params(), json=body)
 
     def _params(self, **extra: Any) -> dict[str, Any]:
         scope = self.default_scope
@@ -175,6 +193,7 @@ class AsyncRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -185,6 +204,7 @@ class AsyncRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -195,6 +215,7 @@ class AsyncRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -204,26 +225,30 @@ class AsyncRemoteMemvara:
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False) -> list[Any]:
-        body = await self._request(
-            "POST", "/v1/search", params=self._params(),
-            json=_sent({"query": query, "k": k, "min_score": min_score,
+        body = await self._read(
+            "/v1/search",
+            body=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
+                        "query_rewrite": None if query_rewrite else False,
                         "as_of": _iso(as_of), "valid_at": _iso(valid_at),
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
         return SearchResults([_hit(h) for h in body["results"]],
-                             selection=hydrate.selection(body.get("selection")))
+                             selection=hydrate.selection(body.get("selection")),
+                             rewrite=hydrate.rewrite(body.get("rewrite")))
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True, synthesize: bool = False,
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False,
                      budget: int | None = None,
@@ -238,10 +263,12 @@ class AsyncRemoteMemvara:
                 "recall(valid_at=...) is not available against a hosted deployment: "
                 "POST /v1/recall has no time axis. Use search(valid_at=...) and render "
                 "your own block.")
-        body = await self._request(
-            "POST", "/v1/recall", params=self._params(),
-            json=_sent({"query": query, "k": k, "min_score": min_score,
+        body = await self._read(
+            "/v1/recall",
+            body=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
+                        "query_rewrite": None if query_rewrite else False,
+                        "synthesize": synthesize or None,
                         "memory_types": _types(memory_types),
                         "include_episodes": include_episodes}))
         return str(body["text"])
@@ -658,6 +685,7 @@ class AsyncScopedRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -668,6 +696,7 @@ class AsyncScopedRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -678,6 +707,7 @@ class AsyncScopedRemoteMemvara:
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
                      anchored: bool = ..., ranked: bool = ...,
+                     query_rewrite: bool = ...,
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
@@ -687,6 +717,7 @@ class AsyncScopedRemoteMemvara:
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True,
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
@@ -695,6 +726,7 @@ class AsyncScopedRemoteMemvara:
                      include_episodes: bool = False) -> list[Any]:
         return await self._mem.search(query, k=k, min_score=min_score, as_of=as_of,
                                       anchored=anchored, ranked=ranked,
+                                      query_rewrite=query_rewrite,
                                       valid_at=valid_at, known_at=known_at,
                                       states=states,
                                       include_invalidated=include_invalidated,
@@ -703,12 +735,14 @@ class AsyncScopedRemoteMemvara:
 
     async def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
                      anchored: bool = False, ranked: bool = False,
+                     query_rewrite: bool = True, synthesize: bool = False,
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False,
                      budget: int | None = None,
                      valid_at: datetime | None = None) -> str:
         return await self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
                                       ranked=ranked,
+                                      query_rewrite=query_rewrite, synthesize=synthesize,
                                       memory_types=memory_types,
                                       include_episodes=include_episodes,
                                       budget=budget, valid_at=valid_at)

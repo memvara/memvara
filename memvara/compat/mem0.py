@@ -384,7 +384,8 @@ class Memory:
 
     def search(self, query: str, *, filters: Mapping[str, Any] | None = None,
                top_k: int = 10, threshold: float | None = None, rerank: bool = False,
-               explain: bool = False, **legacy: Any) -> dict[str, list[dict[str, Any]]]:
+               explain: bool = False, rewrite: bool = False,
+               **legacy: Any) -> dict[str, list[dict[str, Any]]]:
         """Hybrid retrieval, in mem0's response shape.
 
         `threshold` defaults to **no floor**, not to mem0's 0.1. That is deliberate:
@@ -405,6 +406,13 @@ class Memory:
         make it run. `rerank=False`, mem0's default and what an unmodified call site
         passes, expresses no opinion and leaves whatever the instance is configured with
         exactly as it is.
+
+        `rewrite=True` turns on memvara's query rewrite for this search: one call to the
+        wrapped `Memvara`'s chat backend for other phrasings of the query and the dates it
+        names (see `Memvara.search`). It is off by default here, unlike on
+        `Memvara.search`, because mem0's `search()` makes no model call and a caller
+        moving from mem0 is promised the same deterministic hybrid retrieval. It has no
+        mem0 counterpart.
         """
         _reject_entity_kwargs(legacy, "search")
         if rerank and getattr(self.memvara.reader, "reranker", None) is None:
@@ -419,7 +427,7 @@ class Memory:
             )
         results = self.memvara.search(
             query, k=top_k, min_score=0.0 if threshold is None else threshold,
-            **self._scope_kw(filters))
+            query_rewrite=rewrite, **self._scope_kw(filters))
         return {"results": [self._row(r.claim, result=r, explain=explain)
                             for r in results]}
 

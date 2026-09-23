@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from baseline import Mem0StyleMemory
 
 from memvara import Memvara, HashingEmbedder
+from memvara.select import PLAIN_READ
 
 # Slots that genuinely change over a long relationship with a user, plus a few that
 # never do. Each entry is (predicate, [values in chronological order]).
@@ -133,7 +134,7 @@ def score_memvara(mem: Memvara, w: Workload) -> dict:
             correct += 1
         stale += len([g for g in got if g != want])
 
-    hits = [r.claim.object for r in mem.search(NEEDLE_VALUE, k=3)]
+    hits = [r.claim.object for r in mem.search(NEEDLE_VALUE, k=3, **PLAIN_READ)]
     return {"correct": correct, "stale": stale, "live": len(live),
             "needle_found": NEEDLE_VALUE in hits}
 

@@ -259,14 +259,20 @@ def run_probes(mem: Any, probes: "Sequence[dict]", *, k: int,
     Measuring an unfloored read path would measure a configuration no shipped
     surface uses.
     """
+    from memvara.select import PLAIN_READ
+
     named = _names_what_it_rendered(mem)
     rows: list[dict] = []
     for probe in probes:
         t0 = time.perf_counter()
+        # Plain reads: a probe suite is a measurement, and a model's rephrasing would
+        # make two runs over one store disagree.
         results = [(r.claim.id, r.score)
-                   for r in mem.search(probe["query"], k=k, min_score=min_score)]
+                   for r in mem.search(probe["query"], k=k, min_score=min_score,
+                                       **PLAIN_READ)]
         extra = {"with_ids": True} if named else {}
-        recalled = mem.recall(probe["query"], k=k, min_score=min_score, **extra)
+        recalled = mem.recall(probe["query"], k=k, min_score=min_score, **extra,
+                              **PLAIN_READ)
         elapsed = (time.perf_counter() - t0) * 1000.0
         injected = _injected_ids(recalled, results, named=named)
         row = score_probe(probe, results, injected)

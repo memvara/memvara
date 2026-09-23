@@ -44,10 +44,10 @@ mem.reset()                                       -> dict[str, int] # scope + sc
 #   valid_at=  the world clock   known_at=  the belief clock   as_of=  both at once
 # the first three also take `states=`, any non-empty subset of ("live", "ended",
 # "retired"), defaulting to ["live"]; `include_invalidated=` is its two-valued alias.
-mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False, T=None,
-           memory_types=None, states=None, include_invalidated=None,
-           include_episodes=False)
-                                                  -> SearchResults  # a list, plus .selection
+mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False,
+           query_rewrite=True, T=None, memory_types=None, states=None,
+           include_invalidated=None, include_episodes=False)
+                                     -> SearchResults  # a list, plus .selection, .rewrite
 #   anchored=True keeps only the results the query names an entity of — a claim whose
 #     subject or object the query names, or one the graph leg reached from such a
 #     claim — so a question about an entity the store has never heard of returns []
@@ -60,8 +60,15 @@ mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False, T=None,
 #     memvara.select. Needs include_episodes=True and no memory_types (ValueError
 #     otherwise). SearchResults.selection records what happened: None on a plain read,
 #     else an outcome of applied | fallback | unconfigured | disabled | key_rejected.
-mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False, header=None,
-           include_episodes=False,
+#   query_rewrite=True (the default) asks the chat backend, when llm= has one, for up to
+#     three other phrasings of the query and the dates it names, in one call with a 10 s
+#     deadline. Every phrasing is searched and the lists are fused by rank; the dates
+#     become valid_at unless you passed valid_at or as_of. SearchResults.rewrite records
+#     what happened (None when you passed False), with the same five outcomes; every
+#     outcome but applied serves the plain read. Memvara(query_rewrite=False) switches it
+#     off for every read. Against a hosted deployment it is sent only as false.
+mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False,
+           query_rewrite=True, synthesize=False, header=None, include_episodes=False,
            episode_header=None, include_history=False, history_header=None,
            budget=None, counter=<internal>, valid_at=None, with_ids=False)
                                                   -> str | RecallResult
@@ -81,7 +88,16 @@ mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False, header=No
 #     the kept turns (they arrived outside k). A block the model did not actually rank
 #     ends with a RECALL_UNRANKED line naming why; with_ids=True puts the same outcome
 #     on RecallResult.selection instead of making you parse the line.
-#   with_ids=True returns RecallResult(text, claim_ids, dropped, selection) instead of
+#   query_rewrite= is search()'s. synthesize=True sends the rendered notes to one chat
+#     call and puts a summary of at most three sentences above them, under
+#     RECALL_SYNTHESIS_HEADER; every note is still there. With a budget the notes are
+#     fitted first, with RECALL_SUMMARY_RESERVE characters kept for the summary, and the
+#     summary is written from exactly the notes that fitted. A block with no summary
+#     starts with a RECALL_UNSYNTHESIZED line naming the outcome, and the reason after a
+#     fallback ("fallback: budget").
+#     Memvara(synthesis=False) switches it off.
+#   with_ids=True returns RecallResult(text, claim_ids, dropped, selection, rewrite,
+#     synthesis) instead of
 #     `str`. `text` is byte-identical to what you would have got; `claim_ids` is in
 #     render order, 1:1 with the notes, so note n is claim_ids[n - 1]. Live facts only —
 #     an episode has no claim id, and a past value is not the source of a
