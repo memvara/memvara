@@ -2,8 +2,8 @@
 
 One tool table serves a local engine and a hosted deployment because both scoped views —
 `ScopedMemvara` over a SQLite file, `ScopedRemoteMemvara` over `/v1` — satisfy this
-protocol. A second table would be two descriptions of the same nineteen tools, drifting
-apart at whichever one a change forgets.
+protocol. A second table would be two descriptions of the same tools, drifting apart at
+whichever one a change forgets.
 
 **Every member is derived from a call site, not from a wish list.** Eighteen are reached
 as `ctx.memory.<name>`; `connectivity` is reached through a parameter, because `_stats`
@@ -18,10 +18,11 @@ promise `ScopedMemvara` cannot keep. `get_all` declares no `limit`/`offset` even
 the remote view has them, because the tools do not pass them — and a member declared here
 is a member every implementation is then held to.
 
-**`standing` is deliberately absent.** A `Protocol` has no optional members: declaring it
-would stop `ScopedMemvara` satisfying the protocol its own server is typed against.
-`_standing` asks for it with `getattr` and keeps the paging path when it is missing, so
-the local engine behaves exactly as it did.
+**`standing` is declared now that both views have it.** It used to be absent, because a
+`Protocol` has no optional members and `ScopedMemvara` had no `standing`, so `_standing`
+asked for it with `getattr` and paged the scope when it was missing. `Memvara.standing()`
+gave the local view the method, and one declaration covers both. `get_all` left the
+protocol in the same change, because that fallback was its only caller.
 
 **There is no `memvara` member, and its absence is what makes `ToolContext`'s
 security claim checkable.** One existed, typed `Any`, because `_fold_note` reached through
@@ -36,12 +37,12 @@ error rather than a promise.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import (TYPE_CHECKING, Any, Collection, Literal, Protocol, Sequence,
+from typing import (TYPE_CHECKING, Any, Collection, Literal, Mapping, Protocol, Sequence,
                     runtime_checkable)
 
 from ..retrieve import Path
-from ..types import (Answer, Claim, Delta, MemoryType, Provenance, Result, Scope,
-                     WriteReceipt)
+from ..types import (Answer, Claim, Delta, MemoryType, Profile, Provenance, Result,
+                     Scope, WriteReceipt)
 
 __all__ = ["MemoryAPI"]
 
@@ -115,25 +116,6 @@ class MemoryAPI(Protocol):
 
     def get(self, claim_id: str) -> Claim | None: ...
 
-    def get_all(self, *, states: Collection[str] | None = None,
-                include_invalidated: bool | None = None,
-                as_of: datetime | None = None, valid_at: datetime | None = None,
-                known_at: datetime | None = None) -> list[Claim]:
-        """The memories visible at this scope — how many depends on what is serving it.
-
-        `ScopedMemvara` returns the whole scope. `ScopedRemoteMemvara` returns one page,
-        because `GET /v1/memories` materializes server-side and its `limit` defaults to
-        100 — a parameter this protocol does not declare, so no caller reaching it through
-        here can raise it or page past it.
-
-        Harmless today, and named so it stays that way. The one call site is `_standing`'s
-        fallback, and it never runs against a hosted deployment: `ScopedRemoteMemvara` has
-        `standing`, so `_standing` takes `GET /v1/standing` instead. A new caller that
-        needs more than the first hundred memories of a cloud scope has to reach past this
-        protocol for the paging arguments, rather than getting a short answer with nothing
-        saying it was short.
-        """
-
     def count(self, *, states: Collection[str] | None = None,
               include_invalidated: bool | None = None,
               as_of: datetime | None = None, valid_at: datetime | None = None,
@@ -151,6 +133,14 @@ class MemoryAPI(Protocol):
             min_score: float = 0.0, anchored: bool = False) -> Answer: ...
 
     def since(self, when: datetime) -> Delta: ...
+
+    def standing(self, *, k: int | None = None) -> list[Claim]:
+        """Every standing preference, in `core.standing_order`. `k=None` means all of them
+        locally, and the route's own default against a hosted deployment."""
+
+    def profile(self, query: str | None = None, *, k: int = 8,
+                since: datetime | None = None,
+                buckets: Mapping[str, Sequence[str]] | None = None) -> Profile: ...
 
     def neighborhood(self, entity: str, *, depth: int = 2, k: int = 10,
                      min_hops: int = 1, predicates: Sequence[str] | None = None,

@@ -68,7 +68,7 @@ every write. `remember()` is unaffected — a structured write never needed a mo
 MEMVARA_DB=~/.memvara/memory.db python3 -m memvara.server
 ```
 
-JSON-RPC 2.0 over stdio, fourteen tools, no SDK dependency. It refuses to start without
+JSON-RPC 2.0 over stdio, fifteen tools, no SDK dependency. It refuses to start without
 `MEMVARA_DB` and prints the client configuration block instead — so if you have arrived
 here because your client said the server failed, run the command by hand and read what it
 says.
@@ -120,6 +120,8 @@ transport is stdio and the configuration is entirely environment.
 | `MEMVARA_USER` | who this server remembers for. Unset means the whole tenant. |
 | `MEMVARA_TENANT` | isolation boundary above the user. Default `default`. |
 | `MEMVARA_AGENT`, `MEMVARA_SESSION` | narrow further. Leave unset for durable facts — memory written at session scope is invisible to the next session. |
+| `MEMVARA_PROJECT` | the repository this memory belongs to, as `host/owner/repo` (for example `github.com/acme/app`) or `path:` followed by 16 lower-case hexadecimal characters. Unset means the server works it out at startup from the git remote of the directory it was started in, so every clone and worktree of one repository shares one project; outside a git repository there is no project. A fact whose predicate is project-relative is then filed under the repository and not recalled in another one, while a predicate declared global, such as `prefers`, is written without a project and recalled everywhere. A value not in either form is refused at startup. Under `MEMVARA_MODE=cloud` it is sent as the `Memvara-Project` header. |
+| `MEMVARA_FEATURE_<NAME>` | `0` switches one feature off; every feature is on by default. `MEMVARA_FEATURE_PROJECT_SCOPE=0` stops the project being worked out from the working directory (an explicit `MEMVARA_PROJECT` still applies), and `MEMVARA_FEATURE_PROFILE=0` hides `memory_profile`. `INDEX_COMMAND`, `RESEARCH_AGENT`, `STATUS_LINE`, `RECALL_MARK`, `FORGET_MATCHING`, `END_REASON` and `LINKS` are accepted as well and change nothing in this server yet; they are reserved for the plugin and for tools a later release adds. An unknown name, or a value that is not a boolean, is refused at startup. `memory_stats` lists the features that are off. |
 | `MEMVARA_LLM` | `none` (default, offline), `anthropic` (needs `ANTHROPIC_API_KEY` and `memvara[anthropic]`), or `openai` (needs `OPENAI_API_KEY` and `memvara[openai]`). |
 | `MEMVARA_LLM_MODEL` | Model name for `MEMVARA_LLM=openai`. Unset uses the adapter's own default. Point `OPENAI_BASE_URL` at a self-hosted OpenAI-compatible server (vLLM, llama.cpp, Ollama's shim) and name its model here. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |
 | `MEMVARA_LLM_MAX_CLAIMS` | Cap on the claims array for `MEMVARA_LLM=openai`. Unset means uncapped, which is right for hosted OpenAI — it closes the array itself, and OpenAI documents `maxItems` as unsupported under strict mode. Set it for a self-hosted server that constrains decoding, where an uncapped array gives the grammar no way to end a response. A positive integer; anything else is refused at startup. See [Talking to a self-hosted model](#talking-to-a-self-hosted-model). |

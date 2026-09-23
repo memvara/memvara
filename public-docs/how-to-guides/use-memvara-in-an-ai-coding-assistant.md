@@ -75,7 +75,7 @@ write to it.
 
 ## What the assistant can do
 
-Once connected, your assistant gets fourteen tools, covering searching memory, recalling
+Once connected, your assistant gets fifteen tools, covering searching memory, recalling
 what it knows about you, recording new facts, correcting old ones, and asking what was
 true at a past moment. See [MCP tools reference](../reference/mcp-tools.md) for the
 complete list.

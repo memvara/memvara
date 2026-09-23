@@ -255,6 +255,9 @@ def _answer(request):
                                          "valid_at": None, "known_at": None, "count": 1,
                                          "limit": 5, "truncated": False,
                                          "memories": [_memory()]})
+    if path == "/v1/profile":
+        return httpx.Response(200, json={"standing": [], "recent": [], "relevant": [],
+                                         "buckets": {}, "warnings": []})
     if path in ("/v1/neighborhood", "/v1/paths"):
         return httpx.Response(200, json=_PATHS_BODY)
     if path == "/v1/forget":
@@ -300,6 +303,7 @@ DELEGATIONS = [
     ("neighborhood", lambda v: v.neighborhood("alice"), "/v1/neighborhood"),
     ("paths_between", lambda v: v.paths_between("alice", "berlin"), "/v1/paths"),
     ("standing", lambda v: v.standing(k=5), "/v1/standing"),
+    ("profile", lambda v: v.profile("q"), "/v1/profile"),
     ("add", lambda v: v.add("hi"), "/v1/memories"),
     ("remember", lambda v: v.remember("user", "likes", "tea"), "/v1/facts"),
     ("supersede", lambda v: v.supersede("cl_1", "user", "likes", "tea"),

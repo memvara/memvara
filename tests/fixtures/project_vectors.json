@@ -1,0 +1,41 @@
+{
+  "about": "Test vectors for turning a git remote URL into a canonical project. Two implementations must agree on every row: plugin/hooks/lib/project.py (the hooks, which cannot import the library) and memvara/project.py (the library). A row whose project is null is a remote that names no host/owner/repo; canonical_project then falls back to the path form. Owner and repository names are lower-cased only for the hosts in case_insensitive_hosts, because those forges treat them case-insensitively; on any other host the case is kept, since folding it could merge two different projects.",
+  "case_insensitive_hosts": ["github.com", "gitlab.com", "bitbucket.org"],
+  "path_form": {
+    "about": "Used when the repository has no origin remote, or the remote names no host. The value is 'path:' followed by the first 16 hex characters of the SHA-256 of the real path of the repository root, encoded as UTF-8. For a linked worktree the root is the main repository's root, so every worktree of one repository shares one project.",
+    "prefix": "path:",
+    "hex_chars": 16,
+    "examples": [
+      {"root": "/srv/code/memvara", "project": "path:c448437ee234977a"}
+    ]
+  },
+  "normalise": [
+    {"remote": "https://github.com/memvara/memvara.git", "project": "github.com/memvara/memvara", "rule": "https, .git stripped"},
+    {"remote": "git@github.com:memvara/memvara.git", "project": "github.com/memvara/memvara", "rule": "scp-style ssh becomes host/owner/repo"},
+    {"remote": "ssh://git@github.com/memvara/memvara.git", "project": "github.com/memvara/memvara", "rule": "ssh URL"},
+    {"remote": "git+ssh://git@github.com/memvara/memvara", "project": "github.com/memvara/memvara", "rule": "git+ssh URL"},
+    {"remote": "git://github.com/memvara/memvara.git", "project": "github.com/memvara/memvara", "rule": "git protocol"},
+    {"remote": "https://user:token@github.com/memvara/x", "project": "github.com/memvara/x", "rule": "credentials dropped"},
+    {"remote": "https://oauth2@gitlab.com/memvara/x.git", "project": "gitlab.com/memvara/x", "rule": "user without password dropped"},
+    {"remote": "https://GitHub.COM/Memvara/Memvara-Cloud.git", "project": "github.com/memvara/memvara-cloud", "rule": "host lower-cased; owner and repo folded on a case-insensitive host"},
+    {"remote": "git@GitHub.com:Memvara/Memvara.git", "project": "github.com/memvara/memvara", "rule": "scp-style host lower-cased; owner and repo folded"},
+    {"remote": "https://Git.Example.COM/Team/Repo.git", "project": "git.example.com/Team/Repo", "rule": "unknown host: host lower-cased, owner and repo case kept"},
+    {"remote": "https://github.com/memvara/memvara/", "project": "github.com/memvara/memvara", "rule": "trailing slash stripped"},
+    {"remote": "https://github.com/memvara/memvara.git/", "project": "github.com/memvara/memvara", "rule": "trailing slash, then .git, stripped"},
+    {"remote": "https://github.com/memvara/memvara.git?ref=main#readme", "project": "github.com/memvara/memvara", "rule": "query and fragment stripped"},
+    {"remote": "ssh://git@git.example.com:2222/team/repo.git", "project": "git.example.com:2222/team/repo", "rule": "port kept"},
+    {"remote": "https://git.example.com:8443/team/repo", "project": "git.example.com:8443/team/repo", "rule": "port kept on https"},
+    {"remote": "https://gitlab.com/group/subgroup/repo.git", "project": "gitlab.com/group/subgroup/repo", "rule": "nested groups keep every segment"},
+    {"remote": "https://github.com//memvara//memvara.git", "project": "github.com/memvara/memvara", "rule": "empty path segments dropped"},
+    {"remote": "  https://github.com/memvara/memvara.git\n", "project": "github.com/memvara/memvara", "rule": "surrounding whitespace ignored"},
+    {"remote": "github-work:memvara/memvara.git", "project": "github-work/memvara/memvara", "rule": "an ssh alias is kept as written; it is not resolved through ~/.ssh/config"},
+    {"remote": "/srv/git/memvara.git", "project": null, "rule": "a local path names no host"},
+    {"remote": "file:///srv/git/memvara.git", "project": null, "rule": "a file URL names no host"},
+    {"remote": "../memvara.git", "project": null, "rule": "a relative path names no host"},
+    {"remote": "C:\\repos\\memvara", "project": null, "rule": "a Windows path is not scp-style"},
+    {"remote": "https://github.com", "project": null, "rule": "a host with no path"},
+    {"remote": "https://github.com/.git", "project": null, "rule": "a path that is only .git"},
+    {"remote": "", "project": null, "rule": "empty"},
+    {"remote": "https://github.com:notaport/memvara/memvara", "project": null, "rule": "an unparseable port"}
+  ]
+}

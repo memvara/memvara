@@ -47,6 +47,21 @@ client, not run interactively. Configured entirely by environment:
   MEMVARA_AGENT       narrows further; unset is usually right.
   MEMVARA_SESSION     narrows further still. Memory written here is not visible to
                      other sessions, so leave it unset for durable facts.
+  MEMVARA_PROJECT     the repository this memory belongs to, as host/owner/repo (for
+                     example github.com/acme/app) or path:<16 hex>. Unset means it is
+                     derived from the git remote of the directory the server starts
+                     in, so every clone and worktree of one repository shares one
+                     project. Outside a git repository there is no project. A fact
+                     whose predicate is declared global, such as a preference, is
+                     still seen from every project.
+  MEMVARA_FEATURE_<NAME>
+                     '0' switches one feature off; every feature is on by default.
+                     PROJECT_SCOPE=0 stops the project being derived (an explicit
+                     MEMVARA_PROJECT still applies) and PROFILE=0 hides
+                     memory_profile. INDEX_COMMAND, RESEARCH_AGENT, STATUS_LINE,
+                     RECALL_MARK, FORGET_MATCHING, END_REASON and LINKS are also
+                     accepted, for the plugin and for tools a later version adds.
+                     An unknown name is refused.
   MEMVARA_LLM         'none' (default, offline, extracts only recognised sentence
                      forms) or 'anthropic' (needs ANTHROPIC_API_KEY). Local mode only.
   MEMVARA_EMBEDDER    'hashing' (default, offline, 512-dimensional), 'hashing:<dim>',
@@ -177,7 +192,8 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         return 2
 
     server = MemvaraMCPServer(memory, read_only=config.read_only,
-                              anchored=config.anchored, **config.scope_kwargs)
+                              anchored=config.anchored, features_off=config.features_off,
+                              **config.scope_kwargs)
     try:
         server.serve(sys.stdin if stdin is None else stdin, out)
     finally:

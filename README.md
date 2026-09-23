@@ -151,7 +151,7 @@ MEMVARA_DB=~/memory.db memvara-mcp
 memvara-mcp init --agent claude
 ```
 
-JSON-RPC 2.0 over stdio, fourteen tools, no SDK dependency. Claude Code, Claude Desktop,
+JSON-RPC 2.0 over stdio, fifteen tools, no SDK dependency. Claude Code, Claude Desktop,
 Cursor, VS Code, Windsurf and Zed each have their own one-liner at
 [memvara.dev/docs/self-hosted](https://memvara.dev/docs/self-hosted).
 [MCP](https://github.com/memvara/memvara/blob/main/docs/integrations/mcp.md) ·
@@ -308,12 +308,18 @@ The other four shapes this store is built for:
 | **Personal assistants** | The built-in vocabulary is this one: where somebody lives, works, what they are allergic to, and how they want to be spoken to (`memory_standing`). |
 | **Research agents** | A finding that arrives late about the past is a `valid_from` in the past and a `recorded_at` of today, which is exactly what the two clocks are for. |
 | **Multi-agent systems** | `tenant > user > project > agent > session`, with inheritance and fail-closed filters: a session sees that user's durable memory but never a sibling session's scratch space. |
-| **Agents working across repositories** | Pass `Memvara(project="github.com/you/repo")` and a fact learned in one repository stays there. A preference does not: predicates the vocabulary declares global are stored with no project, so they follow the user everywhere. |
+| **Agents working across repositories** | Pass `Memvara(project="github.com/you/repo")`, or `mem.scope(project=...)` per request, and a fact learned in one repository stays there. A preference does not: predicates the vocabulary declares global are stored with no project, so they follow the user everywhere. The MCP server works the project out from the git remote of the directory it starts in, so every clone and worktree of one repository shares it; `memvara.project.canonical_project()` is the same rule for your own code. |
 
 ```python
 bob = mem.scope(user="bob")     # the whole API, with the scope bound
 bob.add("I live in Oslo")
 ```
+
+To open a session, `mem.profile("what this session is about")` returns the user's standing
+preferences, what arrived in the last seven days, the memories most relevant to the query,
+and memories grouped into buckets (by default `decisions`, `engineering` and `events`), in
+one call. `mem.standing()` is the first of those on its own. Over MCP the same call is
+`memory_profile`.
 
 ---
 

@@ -66,14 +66,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 from datetime import datetime
-from typing import Any, Callable, Collection, Literal, Sequence, overload
+from typing import Any, Callable, Collection, Literal, Mapping, Sequence, overload
 
 from .core import Memvara, Messages, ScopedMemvara, _approx_tokens
 from .embed import Embedder
 from .retrieve import Path, Retrieved
 from .write.reconcile import MergeReport
 from .types import (Answer, Claim, Delta, Episode, ErasureProof, MemoryType,
-                    Provenance, RecallResult, Result, Scope, WriteReceipt)
+                    Profile, Provenance, RecallResult, Result, Scope, WriteReceipt)
 
 
 class AsyncMemvara:
@@ -345,6 +345,23 @@ class AsyncMemvara:
             self.memvara.since, when, tenant=tenant, user=user, agent=agent,
             session=session)
 
+    async def standing(self, *, k: int | None = None, tenant=None, user=None, agent=None,
+                       session=None, project=None) -> list[Claim]:
+        """See `Memvara.standing`. It scans the whole scope, so it belongs off the loop."""
+        return await asyncio.to_thread(
+            self.memvara.standing, k=k, tenant=tenant, user=user, agent=agent,
+            session=session, project=project)
+
+    async def profile(self, query: str | None = None, *, k: int = 8,
+                      since: datetime | None = None,
+                      buckets: Mapping[str, Sequence[str]] | None = None,
+                      tenant=None, user=None, agent=None, session=None,
+                      project=None) -> Profile:
+        """See `Memvara.profile`. A scope scan, a delta and a search in one call."""
+        return await asyncio.to_thread(
+            self.memvara.profile, query, k=k, since=since, buckets=buckets,
+            tenant=tenant, user=user, agent=agent, session=session, project=project)
+
     async def get(self, claim_id: str, *, tenant=None, user=None, agent=None,
                   session=None) -> Claim | None:
         """See `Memvara.get`."""
@@ -476,8 +493,8 @@ class AsyncMemvara:
 
     # -- scoped views --------------------------------------------------------
 
-    def scope(self, *, tenant=None, user=None, agent=None,
-              session=None) -> "AsyncScopedMemvara":
+    def scope(self, *, tenant=None, user=None, agent=None, session=None,
+              project=None) -> "AsyncScopedMemvara":
         """A view of this facade bound to one scope. See `Memvara.scope`.
 
         Not a coroutine, and the one method here that is not: it binds four strings and
@@ -492,8 +509,13 @@ class AsyncMemvara:
         facade exists for servers, and a server is precisely where one handle per request
         per user is the shape, and where a mistake is someone else's data.
         """
-        inner = self.memvara._scope(tenant, user, agent, session)
-        return AsyncScopedMemvara(self, inner)
+        inner = self.memvara._scope(tenant, user, agent, session, project)
+        if inner.project == self.memvara.default_scope.project:
+            return AsyncScopedMemvara(self, inner)
+        # Another project needs an engine whose default project is that one, for the
+        # reason `Memvara.scope` gives. The twin shares this instance's store and models.
+        return AsyncScopedMemvara(
+            AsyncMemvara(self.memvara._with_project(inner.project)), inner)
 
 
 class AsyncScopedMemvara:
@@ -729,6 +751,15 @@ class AsyncScopedMemvara:
 
     async def since(self, when: datetime) -> Delta:
         return await self._amem.since(when, **self._kw)
+
+    async def standing(self, *, k: int | None = None) -> list[Claim]:
+        return await self._amem.standing(k=k, **self._kw)
+
+    async def profile(self, query: str | None = None, *, k: int = 8,
+                      since: datetime | None = None,
+                      buckets: Mapping[str, Sequence[str]] | None = None) -> Profile:
+        return await self._amem.profile(query, k=k, since=since, buckets=buckets,
+                                        **self._kw)
 
     async def get(self, claim_id: str) -> Claim | None:
         return await self._amem.get(claim_id, **self._kw)

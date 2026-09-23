@@ -80,10 +80,12 @@ from .types import (
     Explanation,
     MemoryType,
     ObjectKind,
+    Profile,
     Provenance,
     Reading,
     RecallResult,
     Result,
+    Row,
     Scope,
     SearchResults,
     WriteReceipt,
@@ -135,6 +137,9 @@ __all__ = [
     # a caller reads `then` and `stated` off when they need the structure rather than the
     # rendered narrative.
     "Answer", "Reading",
+    # What `profile()` hands back, and the row inside each of its sections. Exported for
+    # the same reason: a caller who annotates the return of `profile()` needs the names.
+    "Profile", "Row",
     # schema
     "PredicateRegistry", "PredicateSpec", "Cardinality", "Volatility",
     # pluggable backends

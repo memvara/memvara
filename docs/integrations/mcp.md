@@ -1,7 +1,7 @@
 # MCP
 
 Memvara speaks the Model Context Protocol, so an agent that supports MCP gets memory as
-fourteen tools without you writing any code. **There are three ways to reach them, and
+fifteen tools without you writing any code. **There are three ways to reach them, and
 picking the right one takes one question.**
 
 | You want | Use | Setup |
@@ -59,7 +59,16 @@ security property of the stdio transport: the process is the user, because the c
 launched it with the user's environment, so there is no caller-supplied scope string for a
 model to be talked into changing.
 
-`MEMVARA_READ_ONLY=1` hides every tool that writes.
+`MEMVARA_PROJECT` is the fifth part of that scope: the repository, as `host/owner/repo`.
+Leave it unset and the server works it out at startup from the git remote of the directory
+the client started it in, so every clone and worktree of one repository shares one
+project. A fact about the codebase is then filed under that repository and is not
+recalled in another one, while a preference whose predicate is declared global is written
+without a project and is recalled everywhere. `MEMVARA_FEATURE_PROJECT_SCOPE=0` turns the
+derivation off.
+
+`MEMVARA_READ_ONLY=1` hides every tool that writes, and `MEMVARA_FEATURE_PROFILE=0` hides
+the profile tool listed below.
 
 `MEMVARA_ANCHORED=1` makes the three read tools answer only from memories the question is
 demonstrably about, so a question about an entity this store has never heard of returns
@@ -69,7 +78,7 @@ what lets an anchored read still reach a fact the question reaches only through 
 one. Both ship off; [`docs/DEPLOY.md`](../DEPLOY.md#choosing-how-this-server-reads) has the
 measurements and the case for each.
 
-## The fourteen tools
+## The fifteen tools
 
 | Tool | What it does |
 |---|---|
@@ -80,6 +89,7 @@ measurements and the case for each.
 | `memory_ask` | Answer about a *past* instant, and say whether the record has changed since |
 | `memory_since` | What changed in this user's memory while you were away |
 | `memory_standing` | Every standing preference recorded, with no query and no ranking |
+| `memory_profile` | Standing preferences, recent arrivals, memories grouped into buckets and, with a query, relevant memories, in one call |
 | `memory_add` | Store what the user just said, in their own words |
 | `memory_remember` | Record one exact fact as a triple, skipping extraction entirely |
 | `memory_forget` | Retire a fact **because the record was wrong** |

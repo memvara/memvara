@@ -27,7 +27,8 @@ import json
 import os
 import warnings
 from contextlib import nullcontext
-from datetime import datetime
+from copy import copy
+from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import (Any, Callable, ClassVar, Collection, Iterable, Literal, Mapping,
                     Sequence, cast, overload)
@@ -45,7 +46,8 @@ from .embed.fingerprint import (
 from .llm import LLM, NullLLM, ReplacementJudge, Usage
 from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
-from .schema import Cardinality, PredicateRegistry, _slugify
+from .schema import (Cardinality, PredicatePackError, PredicateRegistry, _slugify,
+                     load_specs)
 from .store import SQLiteStore, Store, bulk_claims, resolve_states
 from .telemetry import WRITE_LLM_CALLS, WRITE_TOKENS_IN, WRITE_TOKENS_OUT, Recorder
 from dataclasses import replace
@@ -66,10 +68,12 @@ from .types import (
     Episode,
     ErasureProof,
     MemoryType,
+    Profile,
     Provenance,
     Reading,
     RecallResult,
     Result,
+    Row,
     Scope,
     SearchResults,
     WriteReceipt,
@@ -605,6 +609,38 @@ def is_derived(claim: Claim) -> bool:
     naming itself as the deriver.
     """
     return not (claim.derivation is Derivation.USER and claim.extractor in ("", "api"))
+
+
+def standing_order(claim: Claim) -> tuple[bool, float, float, str]:
+    """The sort key for standing preferences: stated first, then by confidence, then newest.
+
+    One home for the rule, for `is_derived`'s reason. `Memvara.standing()` sorts with it,
+    and the MCP server re-sorts a hosted deployment's answer with it, so the two backends
+    return one order.
+
+    Stated before derived comes first because confidence alone did not deliver it: a model
+    reading a transcript reports its own confidence, and one production extractor wrote
+    every paraphrase at 0.84 to 1.00 while the capture hook wrote the user's own words at
+    0.70. The claim id comes last so that two claims written in the same instant cannot
+    swap places between calls.
+    """
+    return (is_derived(claim), -claim.confidence, -claim.recorded_at.timestamp(), claim.id)
+
+
+def _row(claim: Claim) -> Row:
+    return Row(claim_id=claim.id, text=claim.text, inferred=is_derived(claim))
+
+
+#: The shipped predicate packs `profile()` groups memories by when the caller names no
+#: buckets. Each bucket is named after its pack and holds that pack's predicates.
+PROFILE_PACKS = ("decisions", "engineering", "events")
+
+
+@lru_cache(maxsize=None)
+def _pack_predicates(pack: str) -> tuple[str, ...]:
+    """The predicate names a shipped pack declares. Cached, because the files never change
+    while the process runs and `profile()` is called at the start of every session."""
+    return tuple(spec.name for spec in load_specs(pack))
 
 
 #: Nearest live claims `remember()` asks the judge about when replacement advice is on.
@@ -2789,6 +2825,139 @@ class Memvara:
         claims.sort(key=lambda c: c.recorded_at, reverse=True)
         return tuple(claims)
 
+    def standing(self, *, k: int | None = None, tenant=None, user=None, agent=None,
+                 session=None, project=None) -> list[Claim]:
+        """Every standing preference in this scope, with no query and no ranking.
+
+        A standing preference is a live `procedural` memory: how the user wants work done.
+        It applies to every turn, so the whole set is what a session wants at its start,
+        and ranking it against a query is a mistake. A rule stored at confidence 1.00 once
+        scored zero against the sentence a client invented to rank by, and never reached a
+        session.
+
+        The order is `standing_order`: what the user stated before what a machine
+        inferred, then by confidence, then newest first. `k` caps the list, and `None`
+        returns all of it. `RemoteMemvara.standing` returns the same order from
+        `GET /v1/standing`.
+
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> _ = mem.remember("user", "prefers", "pytest", memory_type=MemoryType.PROCEDURAL)
+        >>> _ = mem.remember("user", "lives_in", "Berlin")
+        >>> [c.object for c in mem.standing()]
+        ['pytest']
+        """
+        if project is not None and project != self.default_scope.project:
+            return self._with_project(project).standing(
+                k=k, tenant=tenant, user=user, agent=agent, session=session)
+        live = self.get_all(states=["live"], tenant=tenant, user=user, agent=agent,
+                            session=session)
+        return self._standing_from(live, k)
+
+    @staticmethod
+    def _standing_from(live: Iterable[Claim], k: int | None) -> list[Claim]:
+        claims = sorted((c for c in live if c.memory_type is MemoryType.PROCEDURAL),
+                        key=standing_order)
+        return claims if k is None else claims[:k]
+
+    def profile(self, query: str | None = None, *, k: int = 8,
+                since: datetime | None = None,
+                buckets: Mapping[str, Sequence[str]] | None = None,
+                tenant=None, user=None, agent=None, session=None,
+                project=None) -> Profile:
+        """One call's worth of context about a user: standing preferences, recent changes,
+        search hits for `query`, and memories grouped into named buckets.
+
+        It replaces the three calls a session start used to make. `standing` is what
+        `standing(k=k)` returns. `recent` is the `added` half of `since(since)`, where
+        `since` defaults to seven days before now; memories that stopped being believed
+        are left out, because a profile is read as current context. `relevant` is
+        `search(query, k=k)` and is empty without a query. Each section holds at most `k`
+        rows.
+
+        `buckets` maps a bucket name to the predicates it collects, and each bucket holds
+        the newest `k` live memories with one of those predicates. With no `buckets`, the
+        call uses one bucket per shipped pack in `PROFILE_PACKS` — `decisions`,
+        `engineering` and `events` — holding that pack's predicates. Passing `buckets`
+        replaces those defaults rather than adding to them. A predicate that this store's
+        vocabulary does not know, no shipped pack declares and no live memory in the scope
+        uses is ignored, and `Profile.warnings` says so.
+
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> _ = mem.remember("user", "prefers", "pytest", memory_type=MemoryType.PROCEDURAL)
+        >>> _ = mem.remember("api", "depends_on", "postgres")
+        >>> p = mem.profile("database", buckets={"stack": ["depends_on", "no_such_verb"]})
+        >>> [r.text for r in p.standing], [r.text for r in p.buckets["stack"]]
+        (['user prefers pytest'], ['api depends on postgres'])
+        >>> p.warnings
+        ["bucket 'stack' names 'no_such_verb', which nothing declares or uses, so it was ignored."]
+        """
+        if project is not None and project != self.default_scope.project:
+            return self._with_project(project).profile(
+                query, k=k, since=since, buckets=buckets, tenant=tenant, user=user,
+                agent=agent, session=session)
+        if k < 1:
+            raise ValueError(f"k must be at least 1, got {k}.")
+        scope = {"tenant": tenant, "user": user, "agent": agent, "session": session}
+        live = self.get_all(states=["live"], **scope)
+        when = utcnow() - timedelta(days=7) if since is None else since
+        warnings: list[str] = []
+        wanted = self._bucket_predicates(buckets, warnings,
+                                         stored={c.predicate for c in live})
+        newest = sorted(live, key=lambda c: (-c.recorded_at.timestamp(), c.id))
+        return Profile(
+            standing=[_row(c) for c in self._standing_from(live, k)],
+            recent=[_row(c) for c in self.since(when, **scope).added[:k]],
+            relevant=([_row(r.claim) for r in self.search(query, k=k, **scope)]
+                      if query else []),
+            buckets={name: [_row(c) for c in newest if c.predicate in predicates][:k]
+                     for name, predicates in wanted.items()},
+            warnings=warnings,
+        )
+
+    def _bucket_predicates(self, buckets: Mapping[str, Sequence[str]] | None,
+                           warnings: list[str], *,
+                           stored: Collection[str]) -> dict[str, frozenset[str]]:
+        """Each bucket's predicates as this store spells them, with unknown ones dropped.
+
+        A name is kept when this store's registry knows it, a shipped pack declares it, or
+        a live memory in the scope uses it. The last case matters because a predicate
+        written without a model is stored as given and never registered, and a bucket
+        naming it must still find those memories. The registry's canonical spelling is
+        added beside the name as given, because a claim stores the canonical predicate
+        and an alias would otherwise match nothing.
+        """
+        if buckets is None:
+            defaults: dict[str, frozenset[str]] = {}
+            for pack in PROFILE_PACKS:
+                try:
+                    defaults[pack] = frozenset(_pack_predicates(pack))
+                except PredicatePackError as exc:
+                    # Python 3.10 has no `tomllib`, so the packs cannot be read there.
+                    # The rest of the profile still works, and the warning says why this
+                    # bucket is missing rather than leaving it silently absent.
+                    warnings.append(f"the {pack!r} bucket is unavailable: {exc}")
+            return defaults
+        declared: set[str] = set()
+        for pack in PROFILE_PACKS:
+            try:
+                declared.update(_pack_predicates(pack))
+            except PredicatePackError:
+                pass
+        out: dict[str, frozenset[str]] = {}
+        for name, predicates in buckets.items():
+            kept: set[str] = set()
+            for predicate in predicates:
+                if self.registry.known(predicate):
+                    kept.update({predicate, self.registry.normalize(predicate)})
+                elif predicate in declared or predicate in stored:
+                    kept.add(predicate)
+                else:
+                    warnings.append(
+                        f"bucket {name!r} names {predicate!r}, which nothing declares "
+                        "or uses, so it was ignored.")
+            out[name] = frozenset(kept)
+        return out
+
     def history(self, subject: str, predicate: str, *, tenant=None, user=None,
                 agent=None, session=None, as_of: datetime | None = None,
                 valid_at: datetime | None = None,
@@ -3240,15 +3409,44 @@ class Memvara:
 
     # -- scoped views --------------------------------------------------------
 
-    def scope(self, *, tenant=None, user=None, agent=None, session=None) -> "ScopedMemvara":
+    def scope(self, *, tenant=None, user=None, agent=None, session=None,
+              project=None) -> "ScopedMemvara":
         """A view of this store bound to one scope.
 
         `mem.scope(user="alice", session="s1").add(turn)` instead of repeating four
         keyword arguments on every call. The returned object shares this instance's
         store, embedder and model — it is a binding, not a second memory — so it costs
         nothing to make one per request, which is the shape a server layer wants.
+
+        `project` binds the repository the view reads and writes in, as `host/owner/repo`
+        (see `memvara.project.canonical_project`). Unset keeps this instance's own
+        project. A fact whose predicate is declared global is still written without a
+        project, so it is seen from every project.
+
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> app = mem.scope(project="github.com/acme/app")
+        >>> _ = app.remember("api", "depends_on", "postgres")
+        >>> len(app.get_all()), len(mem.scope(project="github.com/acme/web").get_all())
+        (1, 0)
         """
-        return ScopedMemvara(self, self._scope(tenant, user, agent, session))
+        scope = self._scope(tenant, user, agent, session, project)
+        mem = self if scope.project == self.default_scope.project \
+            else self._with_project(scope.project)
+        return ScopedMemvara(mem, scope)
+
+    def _with_project(self, project: str | None) -> "Memvara":
+        """A twin of this instance whose default project is `project`.
+
+        Every public method reads the project from `default_scope` rather than taking it
+        as an argument, because a project is bound once rather than chosen per call. A
+        scoped view for another project therefore needs an instance whose default is that
+        project. This is a shallow copy: the store, the embedder, the model, the registry
+        and the pipelines are the same objects, so the twin costs one `Scope` and shares
+        everything this instance has learned. Closing either closes the shared store.
+        """
+        twin = copy(self)
+        twin.default_scope = replace(self.default_scope, project=project)
+        return twin
 
     # -- maintenance ---------------------------------------------------------
 
@@ -3658,6 +3856,14 @@ class ScopedMemvara:
 
     def since(self, when: datetime) -> Delta:
         return self._mem.since(when, **self._kw)
+
+    def standing(self, *, k: int | None = None) -> list[Claim]:
+        return self._mem.standing(k=k, **self._kw)
+
+    def profile(self, query: str | None = None, *, k: int = 8,
+                since: datetime | None = None,
+                buckets: Mapping[str, Sequence[str]] | None = None) -> Profile:
+        return self._mem.profile(query, k=k, since=since, buckets=buckets, **self._kw)
 
     def get(self, claim_id: str) -> Claim | None:
         return self._mem.get(claim_id, **self._kw)

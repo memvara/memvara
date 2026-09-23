@@ -27,11 +27,11 @@ from typing import Any, Collection, Literal, Mapping, Sequence, overload
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import Path, Retrieved
 from ..types import (
-    Answer, Claim, Delta, Episode, MemoryType, Provenance, Result, Scope, SearchResults,
-    WriteReceipt, closure,
+    Answer, Claim, Delta, Episode, MemoryType, Profile, Provenance, Result, Scope,
+    SearchResults, WriteReceipt, closure,
 )
 from . import hydrate
-from .api import _hit, _iso, _sent, _states, _type, _types
+from .api import PROJECT_HEADER, _hit, _iso, _sent, _states, _type, _types
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
 from .errors import NotFound
@@ -49,12 +49,14 @@ class AsyncRemoteMemvara:
     def __init__(self, *, api_key: str | None = None, base_url: str | None = None,
                  tenant: str = "default", user: str | None = None,
                  agent: str | None = None, session: str | None = None,
+                 project: str | None = None,
                  timeout: float = DEFAULT_TIMEOUT,
                  redactor: Redactor | None = None) -> None:
         key, url = resolve(api_key, base_url)
         self._http = AsyncHttpClient(key, url, timeout=timeout)
-        #: See `RemoteMemvara.default_scope`: held for `default_scope`'s sake, never sent.
-        self.default_scope = Scope(tenant, user, agent, session)
+        #: See `RemoteMemvara.default_scope`. The tenant is held, never sent; the project
+        #: is sent as the `Memvara-Project` header.
+        self.default_scope = Scope(tenant, user, agent, session, project=project)
         #: See `RemoteMemvara.redactor`.
         self.redactor = redactor
 
@@ -71,7 +73,8 @@ class AsyncRemoteMemvara:
         return f"<AsyncRemoteMemvara {self.default_scope.key()}>"
 
     def scope(self, *, user: str | None = None, agent: str | None = None,
-              session: str | None = None) -> "AsyncScopedRemoteMemvara":
+              session: str | None = None,
+              project: str | None = None) -> "AsyncScopedRemoteMemvara":
         """See `RemoteMemvara.scope`."""
         current = self.default_scope
         narrowed = Scope(
@@ -79,6 +82,7 @@ class AsyncRemoteMemvara:
             user if user is not None else current.user,
             agent if agent is not None else current.agent,
             session if session is not None else current.session,
+            project=project if project is not None else current.project,
         )
         return AsyncScopedRemoteMemvara(self, narrowed)
 
@@ -88,6 +92,13 @@ class AsyncRemoteMemvara:
         twin = copy(self)
         twin.default_scope = scope
         return twin
+
+    async def _request(self, method: str, path: str, **kw: Any) -> Any:
+        """See `RemoteMemvara._request`."""
+        project = self.default_scope.project
+        if project is not None:
+            kw["headers"] = {PROJECT_HEADER: project}
+        return await self._http.request(method, path, **kw)
 
     def _params(self, **extra: Any) -> dict[str, Any]:
         scope = self.default_scope
@@ -120,27 +131,27 @@ class AsyncRemoteMemvara:
         return ids, turns
 
     async def _end(self, body: dict[str, Any]) -> list[Claim]:
-        out = await self._http.request("POST", "/v1/end", params=self._params(),
-                                       json=_sent(body), write=True)
+        out = await self._request("POST", "/v1/end", params=self._params(),
+                                  json=_sent(body), write=True)
         return [hydrate.claim(c) for c in out["ended"]]
 
     # -- service -------------------------------------------------------------
 
     async def health(self) -> dict[str, Any]:
-        return await self._http.request("GET", "/v1/health")
+        return await self._request("GET", "/v1/health")
 
     async def whoami(self) -> dict[str, Any]:
-        return await self._http.request("GET", "/v1/whoami", params=self._params())
+        return await self._request("GET", "/v1/whoami", params=self._params())
 
     async def stats(self) -> dict[str, int]:
-        body = await self._http.request("GET", "/v1/stats", params=self._params())
+        body = await self._request("GET", "/v1/stats", params=self._params())
         return dict(body["tenant_counts"])
 
     async def service(self, *, attempts: int | None = None,
                       timeout: float | None = None) -> dict[str, Any]:
         """The whole `/v1/stats` envelope. See `RemoteMemvara.service`."""
-        return dict(await self._http.request("GET", "/v1/stats", params=self._params(),
-                                             attempts=attempts, timeout=timeout))
+        return dict(await self._request("GET", "/v1/stats", params=self._params(),
+                                        attempts=attempts, timeout=timeout))
 
     async def connectivity(self) -> dict[str, int]:
         body = await self.stats()
@@ -195,7 +206,7 @@ class AsyncRemoteMemvara:
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType | str] | None = None,
                      include_episodes: bool = False) -> list[Any]:
-        body = await self._http.request(
+        body = await self._request(
             "POST", "/v1/search", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
@@ -223,7 +234,7 @@ class AsyncRemoteMemvara:
                 "recall(valid_at=...) is not available against a hosted deployment: "
                 "POST /v1/recall has no time axis. Use search(valid_at=...) and render "
                 "your own block.")
-        body = await self._http.request(
+        body = await self._request(
             "POST", "/v1/recall", params=self._params(),
             json=_sent({"query": query, "k": k, "min_score": min_score,
                         "anchored": anchored or None, "ranked": ranked or None,
@@ -233,8 +244,8 @@ class AsyncRemoteMemvara:
 
     async def get(self, claim_id: str) -> Claim | None:
         try:
-            body = await self._http.request("GET", f"/v1/memories/{claim_id}",
-                                            params=self._params())
+            body = await self._request("GET", f"/v1/memories/{claim_id}",
+                                       params=self._params())
         except NotFound:
             return None
         return hydrate.claim(body)
@@ -244,7 +255,7 @@ class AsyncRemoteMemvara:
                       limit: int = 100, offset: int = 0,
                       as_of: datetime | None = None, valid_at: datetime | None = None,
                       known_at: datetime | None = None) -> list[Claim]:
-        body = await self._http.request(
+        body = await self._request(
             "GET", "/v1/memories",
             params=self._params(limit=limit, offset=offset, states=_states(states),
                                 include_invalidated=include_invalidated,
@@ -256,7 +267,7 @@ class AsyncRemoteMemvara:
                     include_invalidated: bool | None = None,
                     as_of: datetime | None = None, valid_at: datetime | None = None,
                     known_at: datetime | None = None) -> int:
-        body = await self._http.request(
+        body = await self._request(
             "GET", "/v1/memories",
             params=self._params(limit=1, states=_states(states),
                                 include_invalidated=include_invalidated,
@@ -267,7 +278,7 @@ class AsyncRemoteMemvara:
     async def history(self, subject: str, predicate: str, *,
                       as_of: datetime | None = None, valid_at: datetime | None = None,
                       known_at: datetime | None = None) -> list[Claim]:
-        body = await self._http.request(
+        body = await self._request(
             "GET", "/v1/history",
             params=self._params(subject=subject, predicate=predicate, as_of=_iso(as_of),
                                 valid_at=_iso(valid_at), known_at=_iso(known_at)))
@@ -277,7 +288,7 @@ class AsyncRemoteMemvara:
                   valid_at: datetime | None = None,
                   known_at: datetime | None = None) -> Provenance | None:
         try:
-            body = await self._http.request(
+            body = await self._request(
                 "GET", f"/v1/memories/{claim_id}/why",
                 params=self._params(as_of=_iso(as_of), valid_at=_iso(valid_at),
                                     known_at=_iso(known_at)))
@@ -287,21 +298,21 @@ class AsyncRemoteMemvara:
 
     async def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
                  min_score: float = 0.0, anchored: bool = False) -> Answer:
-        body = await self._http.request(
+        body = await self._request(
             "POST", "/v1/ask", params=self._params(),
             json=_sent({"question": question, "at": _iso(at), "k": k,
                         "min_score": min_score, "anchored": anchored or None}))
         return hydrate.answer(body)
 
     async def since(self, when: datetime) -> Delta:
-        body = await self._http.request("GET", "/v1/since",
-                                        params=self._params(since=_iso(when)))
+        body = await self._request("GET", "/v1/since",
+                                   params=self._params(since=_iso(when)))
         return hydrate.delta(body)
 
     async def produced(self, episode_id: str, *, as_of: datetime | None = None,
                        valid_at: datetime | None = None,
                        known_at: datetime | None = None) -> list[Claim]:
-        body = await self._http.request(
+        body = await self._request(
             "GET", f"/v1/episodes/{episode_id}/produced",
             params=self._params(as_of=_iso(as_of), valid_at=_iso(valid_at),
                                 known_at=_iso(known_at)))
@@ -313,7 +324,7 @@ class AsyncRemoteMemvara:
                            valid_at: datetime | None = None,
                            known_at: datetime | None = None,
                            min_score: float = 0.0) -> list[Path]:
-        body = await self._http.request(
+        body = await self._request(
             "GET", "/v1/neighborhood",
             params=self._params(entity=entity, depth=depth, k=k, min_hops=min_hops,
                                 predicates=list(predicates) if predicates else None,
@@ -327,7 +338,7 @@ class AsyncRemoteMemvara:
                             valid_at: datetime | None = None,
                             known_at: datetime | None = None,
                             min_score: float = 0.0) -> list[Path]:
-        body = await self._http.request(
+        body = await self._request(
             "GET", "/v1/paths",
             params=self._params(source=source, target=target, depth=depth, k=k,
                                 predicates=list(predicates) if predicates else None,
@@ -336,9 +347,21 @@ class AsyncRemoteMemvara:
         return [hydrate.path(p) for p in body["paths"]]
 
     async def standing(self, *, k: int | None = None) -> list[Claim]:
-        body = await self._http.request("GET", "/v1/standing",
-                                        params=self._params(limit=k))
+        body = await self._request("GET", "/v1/standing",
+                                   params=self._params(limit=k))
         return [hydrate.claim(c) for c in body["memories"]]
+
+    async def profile(self, query: str | None = None, *, k: int = 8,
+                      since: datetime | None = None,
+                      buckets: Mapping[str, Sequence[str]] | None = None) -> Profile:
+        """See `RemoteMemvara.profile`, which documents the request and the reply."""
+        body = await self._request(
+            "POST", "/v1/profile", params=self._params(),
+            json=_sent({"query": query, "k": k, "since": _iso(since),
+                        "buckets": ({name: list(predicates)
+                                     for name, predicates in buckets.items()}
+                                    if buckets is not None else None)}))
+        return hydrate.profile(body)
 
     # -- writing -------------------------------------------------------------
 
@@ -351,7 +374,7 @@ class AsyncRemoteMemvara:
             payload = [self._turn(messages)]
         else:
             payload = [self._turn(m) for m in messages]
-        body = await self._http.request(
+        body = await self._request(
             "POST", "/v1/memories", params=self._params(),
             json=_sent({"messages": payload, "role": role, "ts": _iso(ts)}),
             write=True)
@@ -378,7 +401,7 @@ class AsyncRemoteMemvara:
             "recorded_at": _iso(recorded_at),
             "source_ids": ids, "sources": turns, "metadata": meta,
         }
-        return hydrate.receipt(await self._http.request(
+        return hydrate.receipt(await self._request(
             "POST", "/v1/facts", params=self._params(), json=_sent(body), write=True))
 
     async def supersede(self, old_claim_id: str, subject: str, predicate: str, obj: str,
@@ -404,7 +427,7 @@ class AsyncRemoteMemvara:
             "recorded_at": _iso(recorded_at),
             "source_ids": ids, "sources": turns, "metadata": meta,
         }
-        return hydrate.receipt(await self._http.request(
+        return hydrate.receipt(await self._request(
             "POST", f"/v1/memories/{old_claim_id}/supersede", params=self._params(),
             json=_sent(body), write=True))
 
@@ -413,7 +436,7 @@ class AsyncRemoteMemvara:
         if closure(close) == "ended":
             return await self._end(
                 {"subject": subject, "predicate": predicate, "at": _iso(at)})
-        body = await self._http.request(
+        body = await self._request(
             "POST", "/v1/forget", params=self._params(),
             json=_sent({"subject": subject, "predicate": predicate, "at": _iso(at)}),
             write=True)
@@ -423,8 +446,8 @@ class AsyncRemoteMemvara:
                      close: str = "retired") -> bool:
         if closure(close) == "ended":
             return await self.end(claim_id=claim_id, at=at)
-        body = await self._http.request("DELETE", f"/v1/memories/{claim_id}",
-                                        params=self._params(), write=True)
+        body = await self._request("DELETE", f"/v1/memories/{claim_id}",
+                                   params=self._params(), write=True)
         return bool(body["retired"])
 
     async def end(self, *, claim_id: str | None = None, subject: str | None = None,
@@ -444,17 +467,17 @@ class AsyncRemoteMemvara:
     # -- erasure -------------------------------------------------------------
 
     async def erase(self, claim_id: str, *, sources: bool = False) -> bool:
-        body = await self._http.request(
+        body = await self._request(
             "POST", "/v1/erasures", params=self._params(),
             json={"memory_id": claim_id, "sources": sources}, write=True)
         return bool(body["erased"])
 
     async def purge(self, *, confirm_tenant: str | None = None) -> dict[str, int]:
         scope = self.default_scope
-        body = await self._http.request(
+        body = await self._request(
             "POST", "/v1/erasures", params=self._params(),
             json=_sent({"scope": _sent({"user": scope.user, "agent": scope.agent,
-                                        "session": scope.session}),
+                                   "session": scope.session}),
                         "confirm_tenant": confirm_tenant}),
             write=True)
         return dict(body["counts"] or {})
@@ -462,8 +485,8 @@ class AsyncRemoteMemvara:
     # -- maintenance ---------------------------------------------------------
 
     async def consolidate(self) -> dict[str, Any]:
-        return await self._http.request("POST", "/v1/maintenance/consolidate",
-                                        params=self._params(), write=True)
+        return await self._request("POST", "/v1/maintenance/consolidate",
+                                   params=self._params(), write=True)
 
 
 class AsyncScopedRemoteMemvara:
@@ -644,6 +667,11 @@ class AsyncScopedRemoteMemvara:
 
     async def standing(self, *, k: int | None = None) -> list[Claim]:
         return await self._mem.standing(k=k)
+
+    async def profile(self, query: str | None = None, *, k: int = 8,
+                      since: datetime | None = None,
+                      buckets: Mapping[str, Sequence[str]] | None = None) -> Profile:
+        return await self._mem.profile(query, k=k, since=since, buckets=buckets)
 
     # -- writing -------------------------------------------------------------
 

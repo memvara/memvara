@@ -8,9 +8,10 @@ a JSON-RPC error — the model sees results, whereas protocol errors are address
 client, which typically renders them as a failed call and moves on.
 
 The validated subset of JSON Schema is exactly what the tools in this package declare:
-`type` (string/integer/number/boolean/array), `enum`, `minimum`, `maximum`, `maxLength`,
-`default`, `required`, and `additionalProperties: false`. Anything wider would be untested
-code in a validator, which is the one place that is not acceptable.
+`type` (string/integer/number/boolean/array/object), `enum`, `minimum`, `maximum`,
+`maxLength`, `default`, `required`, and `additionalProperties`: `false` on a tool's own
+arguments, and a schema for every value of an `object` argument. Anything wider would be
+untested code in a validator, which is the one place that is not acceptable.
 
 That sentence is load-bearing, and `boolean` was missing from it for as long as it was
 missing from the code. `memory_recall` grew an `include_episodes` argument, declared it
@@ -59,6 +60,7 @@ _ARTICLES = {
     "number": "a number",
     "boolean": "a boolean",
     "array": "an array",
+    "object": "an object",
 }
 
 
@@ -125,6 +127,16 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
                 f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
         return [_checked(f"{label}[{i}]", item, spec["items"])
                 for i, item in enumerate(value)]
+    elif kind == "object":
+        # A map from names the caller chooses to values of one declared shape, which is
+        # what `memory_profile.buckets` is. Every value is checked against
+        # `additionalProperties`, so a bucket holding a number instead of a list of
+        # predicate names is refused here with its name in the message.
+        if not isinstance(value, dict):
+            raise ToolError(
+                f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
+        return {key: _checked(f"{label}.{key}", item, spec["additionalProperties"])
+                for key, item in value.items()}
     elif not isinstance(value, str):
         raise ToolError(
             f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")

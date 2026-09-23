@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 from ..core import Memvara
 from ..embed import CachedEmbedder, HashingEmbedder
 from ..llm import NullLLM
+from ..project import canonical_project, check_project
 from ..schema import (BUILTIN_PREDICATES, PredicatePackError,
                       PredicateRegistry, load_all_specs)
 
@@ -83,6 +84,21 @@ _DEFAULT_DIM = 512
 #: same string and nothing else can enforce that. A `ServerConfig` built in Python and one
 #: read from an environment that sets nothing must open the same store.
 _DEFAULT_EMBEDDER = "hashing"
+
+#: Every feature a user can switch off, by the name `MEMVARA_FEATURE_<NAME>` spells in
+#: upper case. Each one is on unless its variable says `0`. The design has the plugin hooks
+#: and the hosted deployment read the same names, so that one variable switches a feature
+#: off on every surface.
+#:
+#: Only two of these change what this process does. `project_scope` decides whether the
+#: project is derived from the working directory, and `profile` decides whether the
+#: `memory_profile` tool is listed. The others belong to the plugin or to tools that are not
+#: in this build yet; they are parsed here so that a typo in any of them is refused at
+#: startup rather than ignored.
+FEATURES = ("index_command", "research_agent", "project_scope", "status_line",
+            "recall_mark", "profile", "forget_matching", "end_reason", "links")
+
+_FEATURE_PREFIX = "MEMVARA_FEATURE_"
 
 EXAMPLE_CONFIG = """\
 {
@@ -239,9 +255,42 @@ class ServerConfig:
     #: paraphrase of its subject, and whether that trade is right depends on what the
     #: deployment's questions look like. `docs/BENCHMARKS.md` measures both sides of it.
     anchored: bool = False
+    #: The repository this server's memory belongs to, as `host/owner/repo` or the
+    #: `path:<16 hex>` form `memvara.project.canonical_project` produces. It becomes the
+    #: `project` part of the bound scope, so facts are filed and recalled per repository,
+    #: while a predicate declared global still writes at user level and is seen from every
+    #: repository. `None` means no project, which is what every server had before this
+    #: field existed.
+    #:
+    #: `MEMVARA_PROJECT` sets it explicitly. When that is unset and the `project_scope`
+    #: feature is on, `from_env` derives it from the working directory the client started
+    #: this process in. Under `MEMVARA_MODE=cloud` it travels to the deployment as the
+    #: `Memvara-Project` header, which can only narrow inside the credential's tenant.
+    project: str | None = None
+    #: Features switched off with `MEMVARA_FEATURE_<NAME>=0`. Empty means every feature in
+    #: `FEATURES` is on, which is the default.
+    features_off: frozenset[str] = frozenset()
+
+    def feature(self, name: str) -> bool:
+        """True unless the feature `name` was switched off.
+
+        A name not in `FEATURES` raises `ValueError`, so a misspelt check in this codebase
+        fails in a test instead of reading as on.
+        """
+        if name not in FEATURES:
+            raise ValueError(
+                f"{name!r} is not a feature. Known features: {', '.join(FEATURES)}.")
+        return name not in self.features_off
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> "ServerConfig":
+    def from_env(cls, env: Mapping[str, str] | None = None, *,
+                 cwd: str | None = None) -> "ServerConfig":
+        """Read the configuration from `env`, which defaults to the process environment.
+
+        `cwd` is the directory the project is derived from when `MEMVARA_PROJECT` is unset,
+        and defaults to the process's working directory. It is a parameter so that a caller
+        can resolve the project for a directory other than the one it runs in.
+        """
         env = os.environ if env is None else env
 
         mode = (env.get("MEMVARA_MODE") or "local").strip().lower()
@@ -308,6 +357,10 @@ class ServerConfig:
             except PredicatePackError as exc:
                 raise ConfigError(f"MEMVARA_PREDICATES: {exc}") from None
 
+        features_off = _features_off(env)
+        project = _project(env.get("MEMVARA_PROJECT"),
+                           derive="project_scope" not in features_off, cwd=cwd)
+
         return cls(
             # `~` is what a human types in a JSON settings file, and nothing else in the
             # launch path will expand it.
@@ -337,12 +390,58 @@ class ServerConfig:
             predicates=predicates,
             read_w_graph=_weight(env.get("MEMVARA_READ_W_GRAPH")),
             anchored=_flag(env.get("MEMVARA_ANCHORED"), "MEMVARA_ANCHORED"),
+            project=project,
+            features_off=features_off,
         )
 
     @property
     def scope_kwargs(self) -> dict[str, Any]:
         return {"tenant": self.tenant, "user": self.user, "agent": self.agent,
-                "session": self.session}
+                "session": self.session, "project": self.project}
+
+
+def _features_off(env: Mapping[str, str]) -> frozenset[str]:
+    """The features the environment switches off, refusing any it does not know.
+
+    An unknown `MEMVARA_FEATURE_*` name is refused rather than ignored. The likely cause is
+    a typo, such as `MEMVARA_FEATURE_PROFLE=0`, and ignoring it would leave the feature on
+    while the operator believes it is off. An empty value means the default, which is on,
+    the same way an empty `MEMVARA_USER` means no user.
+    """
+    off: set[str] = set()
+    for variable, raw in env.items():
+        if not variable.startswith(_FEATURE_PREFIX):
+            continue
+        name = variable[len(_FEATURE_PREFIX):].lower()
+        if name not in FEATURES:
+            raise ConfigError(
+                f"{variable} does not name a feature. The features are "
+                f"{', '.join(f'{_FEATURE_PREFIX}{f.upper()}' for f in FEATURES)}; each "
+                "takes 1 for on, which is the default, or 0 for off.")
+        if (raw or "").strip() and not _flag(raw, variable):
+            off.add(name)
+    return frozenset(off)
+
+
+def _project(raw: str | None, *, derive: bool, cwd: str | None) -> str | None:
+    """The project named by `MEMVARA_PROJECT`, or derived from `cwd`, or `None`.
+
+    An explicit value wins even when the `project_scope` feature is off, because the switch
+    turns off the derivation and the operator who wrote a project name asked for that
+    project. The value must be in the canonical form, since the hosted deployment refuses
+    anything else and the same variable may be pointed at either.
+    """
+    value = _optional(raw)
+    if value is not None:
+        try:
+            return check_project(value)
+        except ValueError as exc:
+            raise ConfigError(
+                f"MEMVARA_PROJECT: {exc} Unset it to derive the project from the git "
+                "remote of the directory the server starts in.") from None
+    if not derive:
+        return None
+    return canonical_project(os.getcwd() if cwd is None else cwd)
 
 
 def _timeout(raw: str | None) -> float | None:
@@ -778,7 +877,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
     table can serve either. It is **not** a `Memvara` over a `RemoteStore`, and that
     distinction is the whole decision — the engine calls `put_claim`, `lexical_search`
     and `competing_claims` on every turn and the facade has an endpoint for none of them,
-    so a server built that way would start, list fourteen tools and fail on the first one
+    so a server built that way would start, list fifteen tools and fail on the first one
     a model reached for. See `docs/OPEN-CORE.md` for which side of the line each seam is
     on.
     """

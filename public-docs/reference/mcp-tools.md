@@ -1,6 +1,6 @@
 # MCP tools reference
 
-When Memvara is connected to an AI assistant over MCP, it exposes fourteen tools. This
+When Memvara is connected to an AI assistant over MCP, it exposes fifteen tools. This
 page lists each one. See
 [Use Memvara in an AI coding assistant](../how-to-guides/use-memvara-in-an-ai-coding-assistant.md)
 for how to connect.
@@ -12,6 +12,7 @@ for how to connect.
 | `memory_recall` | Look up what's already known about the current user, formatted as ready-to-use context before answering a question. |
 | `memory_search` | Search memory and get back individual results with relevance scores — also the tool for asking about a past point in time. |
 | `memory_standing` | List every standing preference the user has stated, with no search query involved — everything that always applies, not just what matches a specific question. |
+| `memory_profile` | Give a session everything it should start with in one call: standing preferences, what was stored recently, memories grouped by kind, and, when given a question, the memories most relevant to it. |
 | `memory_since` | Report what has changed in memory since a given point in time — useful when resuming a conversation after a gap. |
 | `memory_history` | Show every value a specific fact has ever held, and when each one began and ended. |
 | `memory_why` | Explain why a specific stored fact is believed: which message it came from, and what it replaced, if anything. |

@@ -53,7 +53,7 @@ Lookup material: exact signatures, exact tool names, exact settings.
 | | |
 |---|---|
 | [Python API](reference/python-api.md) | Every method on `Memvara`, and everything importable from the package. |
-| [MCP tools](reference/mcp-tools.md) | The fourteen tools an AI assistant gets when connected over MCP. |
+| [MCP tools](reference/mcp-tools.md) | The fifteen tools an AI assistant gets when connected over MCP. |
 | [CLI and configuration](reference/cli-and-configuration.md) | `memvara-mcp`'s commands and every environment variable it reads. |
 | [Predicate schema](reference/predicate-schema.md) | Declaring your own kinds of facts: cardinality, volatility, and the shipped vocabulary packs. |
 
