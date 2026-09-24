@@ -94,6 +94,37 @@ A store that has only ever been written by this library, and copied as a file, w
 
 ---
 
+## `recall()` dates each turn, and shows the part of a long turn the question names
+
+### What changed
+
+Every line under `recall()`'s episode header, `RECALL_EPISODE_HEADER`, now starts with
+the day the turn was said, in brackets: `- [8 May 2023] I went to the support group
+yesterday`. A turn longer than `RECALL_EPISODE_CHARS` (280) is no longer cut to its first
+280 characters. It is cut to the sentence that shares the most words with the question,
+plus as many neighbouring sentences as fit, with `…` on each side where text was left
+out. A turn that shares no word with the question is still cut from its start. Nothing
+changes for claims, for the headers, or for which turns are returned.
+
+### Who this changes, and in which direction
+
+**If you parse `recall()` output**, an episode line is now `- [<day>] <text>`, and the
+day is written like the dated header's: `8 May 2023`. Bullets still start with `- `, so
+code that counts lines that way counts the same number. Find your instances by searching
+for `RECALL_EPISODE_HEADER` or for comparisons against a rendered turn.
+
+**If you compare a long turn's rendering with its first 280 characters**, compare with
+`memvara.retrieve.excerpt.excerpt(text, query, Memvara.RECALL_EPISODE_CHARS)` instead;
+with no word shared between text and query it returns the old head cut.
+
+**If you pass `budget=`**, each episode line is longer by its date, 13 to 20 characters,
+so a tight budget holds slightly fewer turns. Claims are placed first as before.
+
+**If you use `RemoteMemvara`**, nothing changes with this release: `recall()` there returns
+the block the hosted service renders.
+
+---
+
 ## A second feature switch is off by default: `agentic_extraction`
 
 ### What changed
