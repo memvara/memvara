@@ -7,6 +7,39 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A process that searches a large scope keeps that scope's claim list in memory, and claim writes maintain one more index
+
+### What changed
+
+The vector leg over claims keeps, per scope and per set of states, the ids and matrix rows
+of the claims a read of the present can see, and ranks those instead of asking SQLite for
+the list on every search. It returns the same claims. A list is kept until the next commit,
+or until the clock reaches the next instant at which a claim of the same tenant starts,
+ends, is retired, expires or becomes known, whichever comes first. Each claim costs about
+90 bytes, so 100,000 claims in one scope hold 8.9 MB, and building them peaks at 14.5 MB.
+The lists across all scopes are capped at 1,000,000 claims, about 90 MB, and the least
+recently used scope goes first.
+
+The store finds that next instant through a new index on the claims table,
+`cl_last_change`, created on open like the store's other late indexes. A store written by
+an earlier version builds it the first time this version opens it, in about 0.1 s, and the
+file grows by about 2.5 MB, per 100,000 claims. Every claim write maintains it, which
+costs about 5%: +3.5 µs per claim written inside `batch()` and +24 µs per claim committed
+on its own, over 20,000 claims. An earlier version that opens the file afterwards keeps
+the index and maintains it too.
+
+### Who this changes, and in which direction
+
+**If you run memvara where memory is tight and one scope holds hundreds of thousands of
+claims**, budget about 90 bytes per claim per process on top of what it used before.
+
+**If claim writes are your bottleneck**, expect them about 5% slower.
+
+Nothing else changes. A read pinned to an instant, a filtered search, a search inside
+`batch()` and a store with no vectors yet read exactly as before.
+
+---
+
 ## A search on a store with a file uses up to three more threads
 
 ### What changed

@@ -170,7 +170,7 @@ this repository rather than being a hypothetical extension point:
 
 The vector index is exact and in-process — a numpy matmul over the candidate set. It is
 correct and costs time in proportion to the scope: with 199,499 turns and 100,000 claims in
-one scope, a whole search takes a median of about 250 ms, and about 470 ms when it is the
+one scope, a whole search takes a median of about 135 ms, and about 470 ms when it is the
 first after a write (`bench/scale.py`). Past that, `Store`
 is where pgvector or Qdrant goes.
 

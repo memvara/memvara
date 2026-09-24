@@ -21,8 +21,8 @@ answer quality with no error, no exception and nothing in any log.
   `bench/extract_cost.py`, `bench/perf.py`, `bench/evalkit.py`.
 - Read latency when one scope holds a large store: `bench/scale.py`, which times each store
   read a search runs, and the whole search, over the LongMemEval-S haystacks in one scope.
-  Two of its rows empty `SQLiteStore`'s cached turn lists before each read, to time the
-  first search after a write as well as every later one.
+  Three of its rows empty `SQLiteStore`'s cached turn and claim lists before each read, to
+  time the first search after a write as well as every later one.
 - Against a hosted store: `bench/hosted.py`.
 - The release bar for agentic extraction: `bench/extraction_bar.py`, which runs the same
   turns through two stores that differ only in the `agentic_extraction` switch, and the

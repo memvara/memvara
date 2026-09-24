@@ -70,7 +70,10 @@ JSON, under a header that names the text as data rather than instruction.
    `k * candidate_multiplier` rows so that later filtering has something to work with. Over
    turns, `SQLiteStore` ranks each scope's turn list from memory until the next commit
    empties it (`_scope_turns`), and asks SQL for the list only for a filtered read, one
-   inside `batch()`, or one before this process has seen any vector. The lexical leg over
+   inside `batch()`, or one before this process has seen any vector. Over claims it does
+   the same for a read of the present (`_scope_claims`), and also drops a list when the
+   clock reaches the next instant a claim of the tenant changes state; a read pinned to an
+   instant asks SQL. The lexical leg over
    turns ranks the matches inside the text index and reads only the best of them. It runs
    the full query when those cannot prove the answer, and always for a filtered read
    (`_episode_text_first`). On a store with a file, outside `batch()`, the vector leg runs

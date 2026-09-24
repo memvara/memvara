@@ -62,6 +62,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   filtered read still runs the full query. A search whose scopes hold few of the store's
   matching turns pays for both statements, so after one does, the next 16 searches of those
   scopes run the full query directly; a read pinned to an instant counts its own.
+- **The vector leg over claims ranks each scope's claims from memory.** For a read of the
+  present, without a filter and outside `batch()`, `SQLiteStore` keeps per scope and per set
+  of states the ids and matrix rows of the claims the read can see, in the order SQL returns
+  them, instead of asking SQLite for the candidate list on every search. It returns the same
+  claims in the same order. A list is kept until the next commit, or until the clock reaches
+  the next instant at which a claim of the same tenant starts, ends, is retired, expires or
+  becomes known, which a new index, `cl_last_change`, finds with one seek. With 199,499
+  turns and 100,000 claims in one scope, `vector_search` went from a median of 166 to 168 ms
+  to 68 to 69 ms, and `search(k=12, include_episodes=True)` from 233 ms to 132 to 136 ms
+  (`bench/scale.py`, two runs each). The claim leg after a write costs what it did before. A
+  read pinned to an instant still asks SQLite. The lists hold at most 1,000,000 claims, at
+  about 90 bytes each. An existing store builds `cl_last_change` the first time this
+  version opens it, in about 0.1 s and 2.5 MB per 100,000 claims, and a claim write costs
+  about 5% more for it; `docs/UPGRADING.md` has both.
 
 ## [0.15.0] — 2026-09-24
 
