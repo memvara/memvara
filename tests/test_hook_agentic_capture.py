@@ -597,7 +597,12 @@ def test_the_config_file_is_owner_only_and_gone_after_the_run(monkeypatch, tmp_p
     _local_env(monkeypatch, tmp_path)
     proc = _fake(monkeypatch, [init(), result([])])
     agentic.capture(LocalStore(), TURN, "", "/repo", [], hosted=False)
-    assert proc.config_mode == 0o600
+    if os.name == "posix":
+        # Windows has no owner/group/other mode bits to check: `os.stat` reports 0o666
+        # for any writable file whatever `os.open` was asked for. There the file's
+        # privacy rests on the user's own profile directory, which the rest of this test
+        # (the file is gone after the run) still covers.
+        assert proc.config_mode == 0o600
     assert proc.config["mcpServers"]["memvara"]["env"]["MEMVARA_DB"].endswith("memory.db")
     assert os.listdir(tmp_path / "run") == []
     assert proc.env[extract.SENTINEL] == "1"
