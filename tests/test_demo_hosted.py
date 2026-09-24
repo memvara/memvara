@@ -276,7 +276,7 @@ def test_the_dated_rendering_is_the_local_recall_block_byte_for_byte(tmp_path):
                             include_episodes=True)
     results = local.search(question.text, k=bl.DEFAULT_K, valid_at=question.about,
                            include_episodes=True)
-    assert ho.render_dated(results, question.about) == expected
+    assert ho.render_dated(results, question.about, question.text) == expected
 
 
 # --- what gets written, and how often --------------------------------------------

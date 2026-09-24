@@ -2517,7 +2517,10 @@ TOOLS: tuple[Tool, ...] = (
                 "type": "boolean",
                 "description": (
                     "Also return raw excerpts from earlier conversation, not just the "
-                    "facts extracted from them. Default false, because a fact is a "
+                    "facts extracted from them. On a local store, each excerpt starts "
+                    "with the day it was said, in brackets, and a turn too long to show "
+                    "whole is cut to the part that shares the most words with the query, "
+                    "with … where text was left out. Default false, because a fact is a "
                     "settled reading of what was said and an excerpt is not — mixing "
                     "them by default would let something the user once said outrank "
                     "what is known to be true. Turn it on when the store holds text "
