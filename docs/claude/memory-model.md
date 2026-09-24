@@ -143,6 +143,11 @@ either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/sto
   ingest ran. `memvara/store/sqlite.py` orders on `value_key` before `id`.
 - **Scope is bound at startup and cannot be widened by a call.** `ScopedMemvara.bind()`
   narrows only.
+- **Each text index row sits at the rowid of the row it indexes.** Erasure deletes a row's
+  index entry by rowid, and both lexical legs join the index to its table on rowid, so a
+  write that gave a row a new rowid would break both. That is why `put_claim` and
+  `add_episode` upsert instead of `INSERT OR REPLACE`. `tests/test_store.py` checks the
+  invariant after every write that moves or frees a rowid, and after a `VACUUM`.
 
 ## Read next
 

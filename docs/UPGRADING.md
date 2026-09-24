@@ -7,6 +7,44 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## The first open of an existing store builds one index
+
+### What changed
+
+`SQLiteStore` has a new index on the episodes table, `ep_cover`, which the vector leg's
+turn list reads instead of the table. It is created on open, like the store's other late
+indexes, so a store written by an earlier version builds it the first time this version
+opens it. That open is slower once, by about 1.7 s per 190,000 turns, and the file grows
+by about 10 MB per 190,000 turns. Every open after that is unchanged. An earlier version
+that opens the file afterwards keeps the index and uses it.
+
+The lexical legs now join the text index to its table on rowid. That is only correct while
+each text index row sits at the rowid of the row it indexes, which every write in this
+library keeps true, and which `VACUUM`, `VACUUM INTO` and SQLite's backup API preserve.
+
+### Who this changes, and in which direction
+
+**If you open a large store where a pause matters**, open it once after upgrading, at a
+time a slow open costs nothing: `SQLiteStore(path).close()` builds the index.
+
+**If you have copied a store by re-inserting its rows into a new file**, such as a SQL
+dump replayed into an empty database, the text index may no longer line up with the rows.
+Erasure already relied on that, and now lexical search does too: such a store can miss a
+lexical match or return another row in its place. Rebuild both text indexes from their
+tables with the store closed:
+
+```sql
+DELETE FROM claims_fts;
+INSERT INTO claims_fts (rowid, claim_id, text) SELECT rowid, id, text FROM claims;
+DELETE FROM episodes_fts;
+INSERT INTO episodes_fts (rowid, episode_id, content) SELECT rowid, id, content FROM episodes;
+```
+
+A store that has only ever been written by this library, and copied as a file, with
+`VACUUM INTO` or with the backup API, needs nothing.
+
+---
+
 ## A second feature switch is off by default: `agentic_extraction`
 
 ### What changed
