@@ -195,6 +195,37 @@ def test_reopening_never_grows_the_matrix_file(tmp_path):
     assert os.path.getsize(path + ".vecs") == settled
 
 
+def test_a_matrix_file_that_ends_in_a_ctrl_z_byte_keeps_its_last_row(tmp_path):
+    """Windows' C runtime deletes a final 0x1A byte from a file opened for reading and
+    writing in text mode, and `os.open` opens in text mode unless it is told otherwise.
+
+    The last byte of the matrix file is the highest byte of the last float in the last
+    row. A vector whose last component has 0x1A there lost that byte on every reopen,
+    the file came back one row short, and the regrown row read as zeros. This writes
+    such a row directly and reopens the file. It passes on every platform, and fails on
+    Windows if the file is opened in text mode.
+    """
+    path = str(tmp_path / "m.bin")
+    vec = onehot(4, 0)
+    vec[-1] = struct.unpack("<f", b"\0\0\0\x1a")[0]
+    idx = _VecIndex(path=path)
+    idx.attach(4, _VecIndex._INITIAL_ROWS)
+    last = idx._rows - 1
+    idx.put("x", last, vec)
+    idx.close()
+    size = os.path.getsize(path)
+    with open(path, "rb") as fh:
+        assert fh.read()[-1] == 0x1A
+
+    again = _VecIndex(path=path)
+    again.attach(4, 1)
+    again.map("x", last)
+    assert os.path.getsize(path) == size
+    got = again.get("x")
+    again.close()
+    assert got is not None and got.tobytes() == vec.tobytes()
+
+
 def test_the_file_grows_only_when_a_row_is_missing(tmp_path):
     path = str(tmp_path / "g2.db")
     with SQLiteStore(path) as s:

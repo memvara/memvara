@@ -11,6 +11,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **An encrypted store on Windows no longer refuses to open about once in 256 reopens.**
+  The store opened its vector file (`<db>.vecs`) with `os.open` and no `os.O_BINARY`, so
+  Windows opened it in text mode. In that mode, the C runtime deletes a final 0x1A byte
+  from a file opened for reading and writing. The encrypted file ends in 0x1A whenever the
+  last record's authentication tag does, so the reopen cut one byte and the store raised
+  `EncryptionError` saying the last record "ends before it". The file is now opened in
+  binary mode. A store that already failed this way can be fixed by deleting `<db>.vecs`;
+  the store rebuilds it from the database on its next open. An unencrypted vector file on
+  Windows could lose its last byte the same way. That byte is the top byte of the last
+  float in the file, and a float whose top byte is 0x1A is smaller than 1e-21, so the
+  change to search results was negligible; it is fixed too. Linux and macOS were not
+  affected.
 - **The plugin's capture hook can write to a local store again.** It passed a fact's
   memory type to the library as a string, and the library takes the `MemoryType` enum, so
   every fact the hook wrote to a local store failed with `AttributeError: 'str' object has
