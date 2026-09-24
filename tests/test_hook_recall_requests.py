@@ -6,7 +6,7 @@ counts every `memory_recall` it answers with HTTP 200 against the plan's recall 
 including a call it refused because of an argument. So the number of calls is the number
 that matters to a customer, and it is what these tests assert.
 
-The child process gets a temporary HOME, credentials from `MEMVARA_API_KEY` and
+The child process gets a temporary home directory, credentials from `MEMVARA_API_KEY` and
 `MEMVARA_SERVER_URL`, and `MEMVARA_DAEMON=1` so that it never starts a background daemon.
 Nothing here reads or writes the real `~/.memvara` or `~/.claude`.
 
@@ -149,16 +149,23 @@ def _run_hook(fake: Fake, tmp_path: pathlib.Path) -> dict:
         home.mkdir()
         work = tmp_path / "work"
         work.mkdir()
-        env = {
-            "PATH": os.environ.get("PATH", ""),
+        # The parent's environment, not a minimal one: on Windows a child without
+        # SYSTEMROOT cannot open a socket, so the hook reached no server at all. Every
+        # MEMVARA_ variable is removed, so nothing from the machine running the suite
+        # decides what the hook reads, and both home variables point at the temporary
+        # directory (`os.path.expanduser` reads USERPROFILE on Windows).
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith("MEMVARA_")}
+        env.update({
             "HOME": str(home),
+            "USERPROFILE": str(home),
             "PYTHONPATH": str(REPO),
             "MEMVARA_API_KEY": "mv_test",
             "MEMVARA_SERVER_URL": f"http://127.0.0.1:{server.server_address[1]}",
             # Never start a background daemon: it would outlive the test and send a
             # warm-up recall of its own.
             "MEMVARA_DAEMON": "1",
-        }
+        })
         event = {"session_id": "sess-requests", "prompt": "which database does billing use",
                  "cwd": str(work), "hook_event_name": "UserPromptSubmit"}
         done = subprocess.run([sys.executable, str(RECALL)], input=json.dumps(event),
