@@ -898,6 +898,90 @@ def test_a_warm_cache_sees_what_another_worker_writes_and_erases(tmp_path):
     b.close()
 
 
+def _from_a_new_thread(read):
+    """What `read()` returns when called from a thread that has never read the store."""
+    out = []
+    t = threading.Thread(target=lambda: out.append(read()))
+    t.start()
+    t.join()
+    return out[0]
+
+
+def test_a_thread_that_has_never_read_keeps_the_lists_it_finds(tmp_path):
+    """Nothing was committed, so there is nothing to rebuild. When each thread asked its
+    own connection whether anything had changed, a thread's first read emptied every
+    list, and a host that searched from a new thread each time rebuilt them every time."""
+    store = SQLiteStore(str(tmp_path / "t.db"))
+    ep = turn(store)
+    store.set_episode_embedding(ep.id, onehot(1))
+    store.vector_search_episodes(onehot(1), [SCOPE], 5)
+    built = store._turns[("acme", "alice", None, None, None)]
+    hits = _from_a_new_thread(lambda: store.vector_search_episodes(onehot(1), [SCOPE], 5))
+    assert [h[0] for h in hits] == [ep.id]
+    assert store._turns[("acme", "alice", None, None, None)] is built
+    store.close()
+
+
+def test_a_commit_empties_the_lists_once_whichever_threads_search_after_it(tmp_path):
+    """The first search after another connection's commit, on any thread, rebuilds the
+    list with the new turn in it, and every later search, on that thread or another,
+    reads that list rather than rebuilding it again."""
+    path = str(tmp_path / "t.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    first = turn(a)
+    a.set_episode_embedding(first.id, onehot(1))
+    a.vector_search_episodes(onehot(1), [SCOPE], 5)
+    ep = turn(b)
+    b.set_episode_embedding(ep.id, onehot(2))
+    assert _from_a_new_thread(
+        lambda: a.vector_search_episodes(onehot(2), [SCOPE], 1))[0][0] == ep.id
+    rebuilt = a._turns[("acme", "alice", None, None, None)]
+    assert _from_a_new_thread(
+        lambda: a.vector_search_episodes(onehot(2), [SCOPE], 1))[0][0] == ep.id
+    assert a.vector_search_episodes(onehot(2), [SCOPE], 1)[0][0] == ep.id
+    assert a._turns[("acme", "alice", None, None, None)] is rebuilt
+    a.close()
+    b.close()
+
+
+def test_a_commit_just_after_the_map_is_refreshed_is_seen_by_the_next_search(
+        tmp_path, monkeypatch):
+    """The watch is read before the map is refreshed. Read after it, the watch could
+    report a commit the map has not folded in yet: the list built next would leave out
+    that commit's turns, which have no row in the map, and no later look would find
+    anything left to rebuild for."""
+    path = str(tmp_path / "t.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    first = turn(a)
+    a.set_episode_embedding(first.id, onehot(1))
+    a.vector_search_episodes(onehot(1), [SCOPE], 5)
+    refresh, late = a._ensure_index, []
+
+    def then_another_worker_commits():
+        refresh()
+        late.append(turn(b))
+        b.set_episode_embedding(late[0].id, onehot(2))
+
+    monkeypatch.setattr(a, "_ensure_index", then_another_worker_commits)
+    a.vector_search_episodes(onehot(2), [SCOPE], 5)
+    monkeypatch.undo()
+    assert a.vector_search_episodes(onehot(2), [SCOPE], 1)[0][0] == late[0].id
+    a.close()
+    b.close()
+
+
+def test_a_search_on_a_closed_store_fails_without_opening_a_connection(tmp_path):
+    """The connection that watches for commits is opened by the first search that reads
+    the lists. After `close()` that search raises, and leaves no connection open."""
+    store = SQLiteStore(str(tmp_path / "t.db"))
+    ep = turn(store)
+    store.set_episode_embedding(ep.id, onehot(1))
+    store.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.vector_search_episodes(onehot(1), [SCOPE], 5)
+    assert store._watch is None and store._readers == []
+
+
 def test_a_search_inside_a_batch_sees_its_own_turns_and_the_cache_keeps_none(store):
     """Inside `batch()` a thread reads its own uncommitted rows. A cache shared with
     other threads must never hold them, and after a rollback nothing may return a turn
