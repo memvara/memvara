@@ -914,6 +914,38 @@ Search must:
   `anchored=True` return only the results something did. See
   [`retrieve/anchor.py`](#retrieveanchorpy).
 
+#### Two legs at once
+
+Each stage, claims in `_gather` and turns in `_episodes`, hands its vector leg to a pool
+thread (`_beside`) and runs its lexical leg, and on the turn side the time leg, on the
+calling thread. The legs read the store independently, and on a large scope each spends
+most of its time inside SQLite or in a matrix product, both of which release the GIL, so a
+stage costs the longer of its legs rather than their sum. In `bench/scale.py`,
+`search(k=12, include_episodes=True)` went from a median of 286 ms to 245 to 254 ms with
+199,499 turns and 100,000 claims in one scope, and from 100 ms to 64 to 65 ms with 189,520
+turns and few claims, and 50 searches on each store returned the same rows with the same
+scores. `docs/BENCHMARKS.md` has why the first gains less than the legs alone suggest.
+
+The query is embedded on the calling thread before the leg is handed over, and the pass's
+vectors go with it, so the embedder is still called once per pass and only from the thread
+that called `search()`. The leg runs on the calling thread instead, exactly where it ran
+before, in two cases:
+
+- the store does not answer `_parallel_reads()` with true. `SQLiteStore` answers false
+  inside `batch()`, where the calling thread reads its own uncommitted rows through the
+  writer's connection and another thread's connection cannot see them, and for a database
+  with no file, whose one connection a second thread would only wait for. A third-party
+  store has no such method and keeps its legs on one thread;
+- every one of the `_LEG_THREADS` pool threads, three, is busy, so that a saturated pool
+  costs a search what it cost before rather than a wait.
+
+A leg that raises on its thread raises from the search when the stage collects it, and
+frees its thread either way.
+
+`_parallel_reads` is private and read with a guarded `getattr`, as `embed.fingerprint`
+reads `_vec`. A public method would have to join `Store`, and a new protocol member stops
+every existing backend from type-checking as one.
+
 #### The third leg
 
 At `w_graph > 0` a graph leg runs **after** the first fusion and the whole list is fused

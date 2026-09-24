@@ -97,6 +97,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   A filtered read and a read inside `batch()` still ask SQLite. The lists hold at most
   1,000,000 turns across all scopes, at about 100 bytes a turn; `docs/UPGRADING.md` has
   the memory this costs.
+- **A search runs each stage's vector leg beside its lexical leg.** On a `SQLiteStore` with
+  a file, outside `batch()`, the claim stage and the turn stage each hand their vector leg
+  to a pool thread and run their lexical leg themselves, so a stage costs the longer of its
+  two legs rather than their sum. Results are unchanged, and the query is still embedded
+  once, on the thread that called `search()`. With each scope's turns already kept in
+  memory, `search(k=12, include_episodes=True)` went from a median of 286 ms to 245 to
+  254 ms with 199,499 turns and 100,000 claims in one scope, and from 100 ms to 64 to
+  65 ms with 189,520 turns and few claims (`bench/scale.py`, two runs). Each retriever
+  keeps up to three threads for this, each with its own SQLite read connection, and runs
+  the leg itself when all three are busy; a `Store` of your own keeps both legs on one
+  thread.
 
 ## [0.15.0] — 2026-09-24
 

@@ -1759,6 +1759,25 @@ class SQLiteStore:
         else:
             yield conn
 
+    def _parallel_reads(self) -> bool:
+        """Whether a read this thread hands to another thread runs beside it and sees
+        the rows this thread would see. `HybridRetriever` asks before it runs a search's
+        vector leg on another thread, and runs it on the calling thread without it.
+
+        Private, and read with a guarded `getattr`, as `embed.fingerprint` reads `_vec`:
+        it is an optimization this store opts into, not something a backend owes. A
+        public method would have to join `Store`, and a new protocol member stops every
+        existing backend from type-checking as one; see `docs/ROADMAP.md`, "Persisting
+        derived relation terms".
+
+        False in the two cases where `_read` does not give a thread its own connection.
+        Inside `batch()` this thread reads its own uncommitted rows through the writer's
+        connection, and another thread's connection cannot see them. A database with no
+        file has only the writer's connection, so another thread's read waits for the
+        write lock, which this thread holds through a whole batch.
+        """
+        return not self._batch_depth and self.path not in (":memory:", "")
+
     def _reader(self) -> sqlite3.Connection | None:
         """This thread's snapshot connection, opening it on first use, or None."""
         if self._batch_depth or self.path in (":memory:", ""):

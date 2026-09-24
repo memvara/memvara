@@ -795,6 +795,19 @@ def test_a_scope_listed_twice_returns_its_rows_once(store):
     assert store.episode_candidate_ids([SCOPE, Scope("acme", "alice")]) == [ep.id]
 
 
+def test_reads_run_on_two_threads_only_where_each_thread_has_its_own_connection(tmp_path):
+    """Another thread's read sees committed rows through its own connection. Inside
+    `batch()` this thread's rows are not committed yet, and a database with no file has
+    one connection, which a second thread would wait on for the whole batch."""
+    file = SQLiteStore(str(tmp_path / "p.db"))
+    assert file._parallel_reads()
+    with file.batch():
+        assert not file._parallel_reads()
+    assert file._parallel_reads()
+    assert not SQLiteStore(":memory:")._parallel_reads()
+    file.close()
+
+
 # --- The vector leg over turns, from each scope's cached list ------------------------
 
 def _sql_turn_search(store, qvec, scopes, limit, **at):

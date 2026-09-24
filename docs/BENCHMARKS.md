@@ -1360,6 +1360,33 @@ builds three arrays, and every search after it, until the next write, costs the
 over turns: 54 ms at the median and 158 ms at the 95th percentile, when a question's
 content words are common.
 
+**Two legs at once.** The change after that runs each stage's vector leg on a pool thread
+while the stage runs its lexical leg on the calling thread. Same two stores, timed three
+times in a row: this change, the change above, and this change again.
+
+| read | before, median | after, median | before, p95 | after, p95 |
+|---|---:|---:|---:|---:|
+| 100,000 claims: **`search()`** | **285.7 ms** | **254.1 / 245.1 ms** | **392.5 ms** | **369.0 / 351.9 ms** |
+| &nbsp;&nbsp;after a write | 473.8 ms | 479.9 / 461.4 ms | 612.4 ms | 526.8 / 503.1 ms |
+| 1,168 claims: **`search()`** | **100.2 ms** | **65.1 / 63.6 ms** | **205.1 ms** | **188.6 / 170.3 ms** |
+| &nbsp;&nbsp;after a write | 266.4 ms | 239.6 / 243.1 ms | 389.5 ms | 256.6 / 270.4 ms |
+
+The rows that come back are the same: 50 searches on each store returned the same 600 rows
+with the same scores. A stage now costs about its longer leg. Timed on their own, the turn
+stage's two legs took 54 and 56 ms on the first store, 111 ms one after the other and
+61 ms together, and the claim stage's took 167 and 126 ms for five claim queries, 291 ms
+one after the other and 175 ms together. A whole search gains less than that on the first
+store because its claim stage has little to overlap there: the LongMemEval-S questions
+share almost no words with the synthetic claims, so the claim lexical leg takes 0.1 ms.
+
+The first search after a write gains least. Timed on its own in the same runs, the vector
+leg that rebuilds the scope's turn list took 270 to 282 ms in this build against 250 ms in
+the one before, and `episode_candidate_ids` 110 to 118 ms against 96 ms. That difference is
+not the legs. `bench/scale.py` runs on one thread until a search starts the pool, and both
+reads run 11 to 16% slower in any process that has started a second thread, even one that
+opened no connection and has exited. A host that serves requests from more than one thread
+pays that with or without this change.
+
 ---
 
 ## Answer quality, end to end (an authored corpus, an agent as the reader)
