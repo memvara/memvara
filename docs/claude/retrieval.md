@@ -45,8 +45,11 @@ JSON, under a header that names the text as data rather than instruction.
 - Query rewrite and synthesis: `memvara/select/stages.py` — `QueryRewriter` and
   `Synthesizer`; `memvara/select/base.py` — the `Rewrite` and `Synthesis` records;
   `HybridRetriever.search(query_rewrite=)` and `Memvara.recall(synthesize=)`.
-- Prompt rendering: `memvara/core.py` — `Memvara.recall()` and the header constants
-  `RECALL_HEADER`, `RECALL_HEADER_AT` and `RECALL_HISTORY_HEADER`.
+- Prompt rendering: `memvara/core.py` — `Memvara.recall()`, `_recall_block()`,
+  `_episode_line()` and the header constants `RECALL_HEADER`, `RECALL_HEADER_AT` and
+  `RECALL_HISTORY_HEADER`; `memvara/retrieve/excerpt.py` — `excerpt()`, the window of a
+  long turn that `recall()` shows. Tests: `tests/test_excerpt.py`; measurement:
+  `bench/recall_window.py`.
 - Tests: `tests/test_hybrid.py`, `tests/test_fusion.py`, `tests/test_scoring.py`,
   `tests/test_intent.py`, `tests/test_anchor.py`, `tests/test_traverse.py`,
   `tests/test_temporal.py`, `tests/test_rerank.py`, `tests/test_select.py`,
@@ -84,8 +87,11 @@ JSON, under a header that names the text as data rather than instruction.
    `CrossEncoderReranker` is a cross-encoder, not a generative model. It is off by default.
 6. `recall()` renders the survivors into text under `RECALL_HEADER`, or under
    `RECALL_HEADER_AT` when `valid_at` was given, so a block about the past cannot be read as
-   a block about the present. With `synthesize=True`, one model call reads the rendered
-   notes and its short summary goes above them under `RECALL_SYNTHESIS_HEADER`. The notes
+   a block about the present. Each turn starts with the day it was said, in brackets, and
+   a turn longer than `RECALL_EPISODE_CHARS` is cut to the window that best matches the
+   query (`retrieve/excerpt.py`), or to its start when nothing in it matches. With
+   `synthesize=True`, one model call reads the rendered notes and its short summary goes
+   above them under `RECALL_SYNTHESIS_HEADER`. The notes
    are still all there. Under a `budget`, the notes are fitted first with room kept for the
    summary, the summary is written from exactly the notes that fitted, and it is replaced
    by a one-line notice if it does not fit or if no note fits beside it.

@@ -1089,6 +1089,60 @@ Temporal-reasoning rose at R@12 and fell at R@1, R@5, R@20 and MRR in both forma
 The reasoning behind the change and what it does *not* rule out — the claim side was never
 built — are in [`docs/ROADMAP.md`](ROADMAP.md).
 
+### What `recall()` shows of each turn: its day, and the part the question names
+
+Since 2026-09-24, `recall()` starts each turn's line with the day it was said and cuts a
+long turn to the window that matches the question, where it used to show the first 280
+characters. Both are changes to the rendered text only. The index stays undated, for the
+reason in the section above, and retrieval returns the same turns in the same order.
+
+**The window**, measured by rendering one search both ways:
+
+```bash
+PYTHONPATH=. python3 bench/recall_window.py
+```
+
+LongMemEval-S, one store per question, in the configuration `bench/longmemeval.py` runs by
+default. The measure is the harness's string rule: whether at least 60% of the gold
+answer's content words appear in the 4,000-character context. The 30 unanswerable
+questions are left out, because their gold is a refusal sentence.
+
+| question type | n | first 280 characters | window |
+|---|---:|---:|---:|
+| single-session-user | 64 | 89.1 | 90.6 |
+| single-session-assistant | 56 | 41.1 | **62.5** |
+| single-session-preference | 30 | 3.3 | 0.0 |
+| multi-session | 121 | 15.7 | 18.2 |
+| knowledge-update | 72 | 79.2 | 87.5 |
+| temporal-reasoning | 127 | 42.5 | 46.5 |
+| **all** | **470** | **44.9** | **50.4** |
+
+Single-session-assistant gains the most because its answers are in the assistant's own
+replies, which are the long turns: a reply opens with a greeting and a restatement, and the
+detail a question asks about comes later. The rule is a proxy for whether a reader *could*
+answer, not a judged answer, and it is weakest for preference questions. Their gold is a
+paragraph describing what the user would like, mostly in generic words. The one preference
+question the head cut passed covered 62% of those words and the window 54%, either side of
+the 60% line.
+
+**The day** was measured once, as a probe rather than a benchmark: 50 LOCOMO questions
+about when something happened, drawn at random from the 321, each rendered by `recall()`
+with the offline `HashingEmbedder` and the harness's default budget, once with the days and
+once without. Each version went to a reader that saw only the questions and the blocks,
+and the answers were scored by `evalkit.ContainmentJudge`, which needs every gold word or a
+token F1 of 0.6:
+
+| block | correct | mean token F1 |
+|---|---:|---:|
+| without the days | 0 of 50 | 10.8 |
+| with the days | 20 of 50 | 50.7 |
+
+Without the days, the readers answered in the turn's own words: "yesterday", "last week",
+"next month". For 289 of LOCOMO's 321 questions of this kind, no single turn contains every
+word of the answer. The reader was an agent, not a model behind an API, the probe ran
+before the window existed, and its script is not in this repository. Read the result as a direction and a size, not
+as a score to compare with published LOCOMO numbers.
+
 ---
 
 ## A design comparison (synthetic, self-authored)
