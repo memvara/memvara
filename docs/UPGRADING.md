@@ -76,6 +76,13 @@ not read that header yet; the change on the cloud side is separate. A local stor
 affected: the run's local server always starts with `MEMVARA_FEATURE_QUERY_REWRITE=0` and
 `MEMVARA_FEATURE_SYNTHESIS=0`, whatever your own configuration says.
 
+**If you watch a hosted plan's recall allowance**, on the hosted service one capture turn
+counts as one recall, however many searches it makes. Each run sends a
+`Memvara-Capture-Run` header with a new random id, so the service can tell which searches
+belong to one run. This takes effect once the hosted service supports the header, which is
+a separate change on the cloud side. Until then each of a run's searches, up to four,
+counts as a recall.
+
 **If your headless login comes from a settings file** rather than from the normal login,
 the agentic run cannot sign in, because it loads no settings files. Every turn then falls
 back to the single-call extraction, and `capture.log` says so on each turn. Switch it off

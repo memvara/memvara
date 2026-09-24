@@ -198,6 +198,13 @@ per mined turn, with read-only access to the store the hook writes to:
   The hosted config sends `Memvara-Read-Stages: plain`. The hosted service does not read
   that header yet; the cloud side adds it, and until then a search from an organisation
   with a model key may be rewritten.
+- On the hosted service, one capture turn counts as one recall against the plan's
+  allowance, however many searches it makes (decided 2026-09-24). The hosted config sends
+  `Memvara-Capture-Run` with a new random id per run, 16 hex characters from `secrets`, so
+  the service can tell which searches belong to one run. This takes effect once the hosted
+  service supports the header, which the cloud side adds; until then each search counts
+  as a recall. The id is not logged. A local run needs nothing, since no allowance
+  applies.
 - A hook that is killed never reaches the `finally` that deletes the config file, which
   holds a credential. Every capture and every session start delete any
   `capture-mcp-*.json` in the runtime directory older than twice the run's timeout, and

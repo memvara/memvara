@@ -2304,7 +2304,11 @@ hook writes to, through a config file written for the run (owner-only, deleted a
 the hosted endpoint with the hooks' own API key and project header, or the client's own
 local server block. The run's searches are plain reads: the local server is started with
 `MEMVARA_FEATURE_QUERY_REWRITE=0` and `MEMVARA_FEATURE_SYNTHESIS=0`, and the hosted config
-sends `Memvara-Read-Stages: plain`, which the hosted service does not read yet. A hook that
+sends `Memvara-Read-Stages: plain`, which the hosted service does not read yet. The hosted
+config also sends `Memvara-Capture-Run` with a new random id per run (16 hex characters),
+so that on the hosted service one capture turn counts as one recall, however many searches
+it makes; that takes effect once the hosted service supports the header. The id is never
+written to `capture.log`, and a local run sends nothing like it. A hook that
 is killed never reaches the `finally` that deletes the config, so every capture and every
 session start delete any `capture-mcp-*.json` in the runtime directory older than twice the
 run's timeout, and log how many they removed. Only `memory_search`, `memory_recall`, `memory_why` and

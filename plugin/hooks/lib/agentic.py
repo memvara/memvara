@@ -137,6 +137,14 @@ PLAIN_READ_ENV = {"MEMVARA_FEATURE_QUERY_REWRITE": "0", "MEMVARA_FEATURE_SYNTHES
 #: hosted searches may still be rewritten.
 READ_STAGES_HEADER = "Memvara-Read-Stages"
 
+#: The header that names one capture run to the hosted service, with a fresh random id per
+#: run. On the hosted service one capture turn counts as one recall against the plan's
+#: allowance, however many searches it makes, and the service can group a run's searches
+#: only if they carry the same id. It takes effect once the hosted service reads the
+#: header; until then each search counts on its own. The id is never logged: it means
+#: nothing to a reader, and in the log it would link a turn to the service's records.
+CAPTURE_RUN_HEADER = "Memvara-Capture-Run"
+
 #: The config files a run writes, as `_write_config` names them.
 CONFIG_PREFIX = "capture-mcp-"
 
@@ -352,7 +360,10 @@ def mcp_config(hosted: bool) -> "dict | None":
 
     **Hosted:** the endpoint and API key from `lib.hosted.credentials`, and the project
     header the hook's own writes carry, so the model searches exactly the project the
-    proposals will be written to. This is the same server the plugin's `.mcp.json`
+    proposals will be written to. It also asks for plain reads (`READ_STAGES_HEADER`) and
+    names this run with a new random id (`CAPTURE_RUN_HEADER`), so the service can count
+    the run's searches as one recall. Call it once per run: each call makes a new id.
+    This is the same server the plugin's `.mcp.json`
     names, reached with the credential the hooks already use, because the client's own
     connection to it may be signed in through a browser that a headless run cannot use.
 
@@ -372,7 +383,10 @@ def mcp_config(hosted: bool) -> "dict | None":
         if creds is None:
             return None
         headers = {"Authorization": f"Bearer {creds['api_key']}", "User-Agent": USER_AGENT,
-                   READ_STAGES_HEADER: "plain"}
+                   READ_STAGES_HEADER: "plain",
+                   # One call here per run (`capture`), so a fresh id per call is a fresh
+                   # id per run.
+                   CAPTURE_RUN_HEADER: secrets.token_hex(8)}
         project = _project_header()
         if project:
             headers[PROJECT_HEADER] = project
