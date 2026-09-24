@@ -363,7 +363,7 @@ def test_claim_ids_count_as_seen_only_when_a_read_tool_returned_them():
     for event in lines:
         watch.feed(json.dumps(event))
     assert watch.seen == {ID_A, ID_B}
-    assert any("fly.io" in line for line in watch.shown)
+    assert watch.shown == SEARCH_HIT.splitlines(), "only the read tool's own result"
 
 
 def test_a_tool_result_given_as_plain_text_is_read_too():
