@@ -363,14 +363,15 @@ def apply_facts_hosted(scoped: Any, facts: Sequence[Write],
 _RENDERER: Memvara | None = None
 
 
-def render_dated(results: Sequence[Any], valid_at: datetime) -> str:
+def render_dated(results: Sequence[Any], valid_at: datetime, query: str) -> str:
     """Render `search(valid_at=)` results exactly as `recall(valid_at=)` renders them.
 
     Calls the library's own renderer — the dated header, the flattening, claims before
-    turns, the episode cut — on a store that holds nothing and is used for nothing else,
-    because the renderer is a method. The arguments are the ones `Memvara.recall` passes
-    on a read with no history, no budget and no ranking, which is the read the local arm
-    makes. `tests/test_demo_hosted.py` pins the output byte for byte against
+    turns, the episode window — on a store that holds nothing and is used for nothing
+    else, because the renderer is a method. The arguments are the ones `Memvara.recall`
+    passes on a read with no history, no budget and no ranking, which is the read the
+    local arm makes. `query` is the question, because a long turn is shown as the window
+    that matches it. `tests/test_demo_hosted.py` pins the output byte for byte against
     `recall(valid_at=)` on the same store.
     """
     global _RENDERER
@@ -384,7 +385,8 @@ def render_dated(results: Sequence[Any], valid_at: datetime) -> str:
     headers = (_RENDERER._recall_header(valid_at), _RENDERER.RECALL_HISTORY_HEADER,
                _RENDERER.RECALL_EPISODE_HEADER)
     return _RENDERER._recall_block(claims, [[] for _ in claims], kept, episodes,
-                                   len(claims) + len(kept) + len(episodes), headers)
+                                   len(claims) + len(kept) + len(episodes), headers,
+                                   query=query)
 
 
 # --- the arms ----------------------------------------------------------------------
@@ -467,7 +469,8 @@ class HostedMemvara:
             read = "recall"
         else:
             block = render_dated(scoped.search(question.text, k=k, valid_at=question.about,
-                                               include_episodes=True, **PLAIN_READ), question.about)
+                                               include_episodes=True, **PLAIN_READ),
+                                 question.about, question.text)
             read = "search"
         text = bl.clip(block, max_chars)
         return Context(arm="memvara_structured", text=text,

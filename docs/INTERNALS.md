@@ -1075,6 +1075,37 @@ authentication strategy, a store holding only who owns the reporting service cor
 keeps that row — the question is about an entity the store knows — and telling that row
 from the answer is a question about the predicate, which nothing here judges.
 
+### `retrieve/excerpt.py`
+
+```python
+ELLIPSIS = "…"
+
+def excerpt(text: str, query: str, limit: int) -> str
+```
+
+Which part of a long turn `recall()` shows. It returns `text` unchanged when it fits in
+`limit`. Otherwise it splits the text into sentences, scores each by how many of the
+query's content words it contains (both sides folded through `schema.word_stem`), and
+returns the best sentence with as many neighbours as fit, trying the next sentence before
+the previous one, with `ELLIPSIS` on each side where text was left out. A sentence longer
+than `limit` on its own is cut around its first matching word.
+
+It must:
+
+- **never return more than `limit` characters**, whatever the text, the query or the
+  limit. The limit is what stops a pasted stack trace from becoming the prompt;
+  `tests/test_excerpt.py` checks it over a seeded sample of shapes;
+- **return the old head cut when the query shares no word with the text**: the first
+  `limit - 1` characters and `…`, byte for byte what `_safe_line(text, limit)` returns. A
+  turn with nothing to aim at is not rendered differently from before;
+- **be a pure function of its arguments**, so two renders of one search are identical.
+  Ties between sentences go to the earlier one.
+
+`bench/recall_window.py` measures what it changes on LongMemEval-S: whether the gold
+answer's words reach the 4,000-character context, from the same search rendered both
+ways. They did for 44.9% of the 470 answerable questions with the head cut and 50.4% with
+the window; [BENCHMARKS.md](BENCHMARKS.md) has the breakdown by question type.
+
 ### `retrieve/traverse.py`
 
 ```python
@@ -1124,7 +1155,8 @@ class Memvara:
     RECALL_HEADER_AT: str         # the same, naming the day, for recall(valid_at=)
     RECALL_HISTORY_HEADER: str    # "No longer true — ..." in the first three words
     RECALL_EPISODE_HEADER: str    # says "said", not "true"
-    RECALL_EPISODE_CHARS: int     # 280 — a pasted stack trace cannot become the prompt
+    RECALL_EPISODE_CHARS: int     # 280 — a pasted stack trace cannot become the prompt;
+                                  # a longer turn shows the window the query names
 
     def _safe_line(self, text, limit=None) -> str
     def recall(self, query, *, k=8, min_score=0.0, header=None, ...,
@@ -1153,7 +1185,14 @@ class Memvara:
   which ordering metadata-first cannot reach. `memvara/server/tools.py:safe_line` calls
   this method rather than reimplementing it — it was a copy once, the two sets drifted,
   and the same stored value was then neutralised differently depending on which surface
-  replayed it. Episodes are additionally truncated to `RECALL_EPISODE_CHARS`;
+  replayed it. Episodes are additionally truncated to `RECALL_EPISODE_CHARS`, to the
+  window of the turn that best matches the query (`retrieve/excerpt.py`), or to its first
+  characters when the query shares no word with it;
+- write each turn's day in front of it, `- [8 May 2023] …`, through `_day`, the formatter
+  the dated header and the history tail use. The day is added after `_safe_line` has run,
+  so its brackets are the renderer's own and stored text cannot forge them: every bracket
+  inside a turn is already fullwidth. A turn is evidence about when only next to its date,
+  and a turn saying "yesterday" is otherwise unanswerable;
 - keep the three blocks in order — claims, then history, then episodes — each under its own
   header, and emit a header only when its block is non-empty;
 - under `budget=`, **drop whole notes and never part of one**, filling downward from the
