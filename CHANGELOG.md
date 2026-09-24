@@ -108,6 +108,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   keeps up to three threads for this, each with its own SQLite read connection, and runs
   the leg itself when all three are busy; a `Store` of your own keeps both legs on one
   thread.
+- **A search embeds its query the way bge expects a query.** `LocalEmbedder` puts the
+  instruction bge's English models are trained to see before a search query, "Represent
+  this sentence for searching relevant passages: ", before every query a search embeds,
+  and before nothing a store keeps. Over 100 LongMemEval-S questions, whose sessions run
+  to thousands of words, evidence recall at 5 rose from 67.5 to 72.2 and MRR from 45.4 to
+  48.4; over LOCOMO's 1,531, whose turns are a sentence or two, R@12 stayed at 68.2
+  (`bench/longmemeval.py --dataset s --shuffle 7 --limit 100` and `bench/locomo.py`, both
+  with `--score retrieval --embedder local`). Stored vectors do not change, so no store
+  needs re-embedding. The retriever and the agentic writer's search tool call the new
+  `memvara.embed.encode_queries(embedder, texts)`, which uses an embedder's own
+  `encode_queries` method when it has one and `encode` otherwise, and `CachedEmbedder`
+  passes it through, caching a text's query vector apart from its passage vector. A
+  result's score moves with the cosine, so check a `min_score` you tuned under bge-small;
+  `docs/UPGRADING.md` has how far.
 
 ## [0.15.0] — 2026-09-24
 

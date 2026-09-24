@@ -437,9 +437,11 @@ def test_a_store_with_no_vectors_takes_the_default_whatever_a_record_names(tmp_p
     assert asked == [None]
 
 
-def _fake_st(monkeypatch, dim: int = 384) -> None:
-    """A stand-in `sentence_transformers`, so `LocalEmbedder` runs on any machine."""
+def _fake_st(monkeypatch, dim: int = 384) -> list[list[str]]:
+    """A stand-in `sentence_transformers`, so `LocalEmbedder` runs on any machine.
+    Returns the texts each call to the model's `encode` was given."""
     fake = types.ModuleType("sentence_transformers")
+    asked: list[list[str]] = []
 
     class FakeST:
         def __init__(self, name):
@@ -449,10 +451,12 @@ def _fake_st(monkeypatch, dim: int = 384) -> None:
             return dim
 
         def encode(self, texts, normalize_embeddings=True):
+            asked.append(list(texts))
             return np.ones((len(texts), dim), dtype=np.float32)
 
     fake.SentenceTransformer = FakeST
     monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+    return asked
 
 
 def test_local_embedder_with_no_model_loads_bge_small_and_says_it_was_not_chosen(
@@ -463,6 +467,39 @@ def test_local_embedder_with_no_model_loads_bge_small_and_says_it_was_not_chosen
     default, named = LocalEmbedder(), LocalEmbedder("sentence-transformers/all-MiniLM-L6-v2")
     assert (default.name, default.chosen) == ("local:BAAI/bge-small-en-v1.5", False)
     assert (named.name, named.chosen) == (_MINILM, True)
+
+
+def test_local_embedder_puts_bges_instruction_before_a_query_and_not_a_passage(
+        monkeypatch):
+    """bge's English models are trained to see the instruction before a search query and
+    nothing before the passage it should find. Any other model gets neither."""
+    asked = _fake_st(monkeypatch)
+    from memvara.embed.local import BGE_QUERY_INSTRUCTION, LocalEmbedder
+
+    bge, minilm = LocalEmbedder(), LocalEmbedder("sentence-transformers/all-MiniLM-L6-v2")
+    bge.encode(["the Porto office"])
+    bge.encode_queries(["where is the office"])
+    minilm.encode_queries(["where is the office"])
+    assert asked == [["the Porto office"],
+                     [BGE_QUERY_INSTRUCTION + "where is the office"],
+                     ["where is the office"]]
+
+
+def test_a_search_reaches_bge_with_the_instruction_through_the_cache_wrapper(
+        tmp_path, monkeypatch):
+    """`default_embedder()` and the MCP server both wrap `LocalEmbedder` in
+    `CachedEmbedder`, so the instruction has to get through the wrapper to reach the
+    model, and the claim written before it must not."""
+    asked = _fake_st(monkeypatch)
+    from memvara.embed.local import BGE_QUERY_INSTRUCTION, LocalEmbedder
+
+    with Memvara(str(tmp_path / "m.db"), embedder=CachedEmbedder(LocalEmbedder()),
+                 llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Porto")
+        written = list(asked)
+        mem.search("where does the user live")
+    assert all(not t.startswith(BGE_QUERY_INSTRUCTION) for call in written for t in call)
+    assert asked[len(written):] == [[BGE_QUERY_INSTRUCTION + "where does the user live"]]
 
 
 @pytest.mark.parametrize("wrap", [False, True])

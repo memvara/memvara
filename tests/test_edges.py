@@ -26,6 +26,7 @@ from memvara import (
     Scope,
     SQLiteStore,
 )
+from memvara.embed import encode_queries
 from memvara.schema import Cardinality, PredicateSpec, Volatility
 from memvara.store.sqlite import _VecIndex
 from memvara.types import Explanation, utcnow
@@ -163,6 +164,48 @@ def test_cached_embedder_returns_a_row_it_cached_then_evicted_in_the_same_call()
     texts = ["A", "E", "F", "G", "H"]           # "A" hits, then four inserts evict it
     out = cache.encode(texts)
     assert np.array_equal(out, inner.encode(texts))
+
+
+class _QueryForm(HashingEmbedder):
+    """Embeds a query as its text after the word "query", so a query and a passage of
+    one text get different vectors, as under a model that takes a query instruction."""
+
+    def __init__(self) -> None:
+        super().__init__(dim=16)
+        self.queries: list[list[str]] = []
+
+    def encode_queries(self, texts):
+        self.queries.append(list(texts))
+        return self.encode(["query " + t for t in texts])
+
+
+def test_encode_queries_takes_an_embedders_query_form_and_encode_otherwise():
+    asked, plain = _QueryForm(), HashingEmbedder(dim=16)
+    assert np.array_equal(encode_queries(asked, ["where"]), asked.encode(["query where"]))
+    assert asked.queries == [["where"]]
+    assert np.array_equal(encode_queries(plain, ["where"]), plain.encode(["where"]))
+
+
+def test_cached_embedder_keeps_a_texts_query_vector_apart_from_its_passage_vector():
+    """One text embeds two ways under a model that takes a query instruction. One cache
+    entry for both would hand a search the passage's vector, or a write the query's."""
+    inner = _QueryForm()
+    cache = CachedEmbedder(inner)
+    passage, query = cache.encode(["where"]), cache.encode_queries(["where"])
+    assert not np.array_equal(passage, query)
+    assert np.array_equal(query, cache.encode_queries(["where"]))
+    assert np.array_equal(passage, cache.encode(["where"]))
+    assert inner.queries == [["where"]], "the second query came from the cache"
+    assert (cache.misses, cache.hits) == (2, 2)
+
+
+def test_cached_embedder_shares_entries_when_the_wrapped_embedder_has_no_query_form():
+    """`HashingEmbedder` embeds a query as it embeds a passage, so asking for the query
+    form of a text already cached is a hit."""
+    cache = CachedEmbedder(HashingEmbedder(dim=16))
+    cache.encode(["where"])
+    cache.encode_queries(["where"])
+    assert (cache.misses, cache.hits) == (1, 1)
 
 
 def test_hashing_embedder_is_deterministic_across_instances():

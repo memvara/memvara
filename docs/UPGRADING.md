@@ -7,6 +7,32 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A search embeds its query the way bge expects a query
+
+### What changed
+
+`LocalEmbedder` puts the instruction bge's English models are trained to see before a
+search query, `"Represent this sentence for searching relevant passages: "`, before each
+query a search embeds, when its model is one of them: `BAAI/bge-small-en-v1.5`, the
+default, or its base or large sibling. It embeds what a store keeps exactly as before, so
+no store needs re-embedding. Every other model, `HashingEmbedder`, and an embedder of your
+own embed a query as they always did.
+
+### Who this changes, and in which direction
+
+**If you pass `min_score` to `search()` or `recall()` with bge-small**, check it again. A
+result's score reads the cosine between the query and the row, and the instruction lowers
+that cosine by about 0.03: over LOCOMO's questions, the median cosine to the best turn went
+from 0.746 to 0.713, so a threshold that used to pass a row may no longer.
+`episode_score_floor` is a fraction of the best result's score, so it moves less.
+
+**If you wrap `LocalEmbedder` in an embedder of your own**, give the wrapper an
+`encode_queries` method that calls `memvara.embed.encode_queries` on the embedder it
+wraps, as `CachedEmbedder` does. Without one, a search through the wrapper embeds its
+query through `encode`, without the instruction, and finds what it found before.
+
+---
+
 ## A search on a store with a file uses up to three more threads
 
 ### What changed

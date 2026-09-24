@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Protocol, Sequence, runtime_checkable
+from functools import partial
+from typing import Callable, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 
@@ -49,7 +50,25 @@ class Embedder(Protocol):
     # comparable and a store needs to know which one wrote it (see `fingerprint.py`).
     # Requiring it here would break every third-party embedder that already satisfies
     # the protocol — including the two-line lambda wrappers people actually write — for
-    # a check that degrades gracefully to the class name instead.
+    # a check that degrades gracefully to the class name instead. `encode_queries` stays
+    # out for the same reason; see `encode_queries` below.
+
+
+def encode_queries(embedder: Embedder, texts: Sequence[str]) -> np.ndarray:
+    """`texts` embedded as search queries, as an (n, dim) float32 array.
+
+    Some models are trained to see an instruction before a query and nothing before the
+    passage it should find. An embedder for one of those says so by having an
+    `encode_queries` method, and this calls it. Any other embedder encodes a query the
+    way it encodes everything, through `encode`.
+
+    Every vector a store holds is a passage's, so this changes what a search compares
+    against them and nothing about what was written. It is read with a guarded `getattr`
+    rather than declared on `Embedder` because a new protocol member would stop every
+    existing embedder from type-checking as one.
+    """
+    encode = getattr(embedder, "encode_queries", None)
+    return encode(texts) if encode is not None else embedder.encode(texts)
 
 
 class HashingEmbedder:
@@ -138,7 +157,23 @@ class CachedEmbedder:
                 f"hits={self.hits} misses={self.misses}>")
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
-        keys = [hashlib.blake2b(t.encode(), digest_size=16).hexdigest() for t in texts]
+        return self._cached(texts, self.inner.encode, b"")
+
+    def encode_queries(self, texts: Sequence[str]) -> np.ndarray:
+        """`encode_queries` through the wrapped embedder, cached apart from `encode`,
+        because a model that takes an instruction before a query embeds the same text
+        two ways. A wrapped embedder that embeds queries as it embeds everything shares
+        `encode`'s entries."""
+        if getattr(self.inner, "encode_queries", None) is None:
+            return self.encode(texts)
+        return self._cached(texts, partial(encode_queries, self.inner), b"query")
+
+    def _cached(self, texts: Sequence[str], encode: Callable[[Sequence[str]], np.ndarray],
+                kind: bytes) -> np.ndarray:
+        """`encode(texts)`, answered from the cache where it can be. `kind` keeps one
+        kind of encoding's entries apart from another's."""
+        keys = [hashlib.blake2b(t.encode(), digest_size=16, person=kind).hexdigest()
+                for t in texts]
         missing = [(i, t) for i, (t, k) in enumerate(zip(texts, keys)) if k not in self._cache]
         # Everything this call owes the caller, captured before any eviction can run.
         # Both halves of the batch are at risk once it is larger than the cache, and
@@ -151,7 +186,7 @@ class CachedEmbedder:
         have = {k: self._cache[k] for k in keys if k in self._cache}
         if missing:
             self.misses += len(missing)
-            vecs = self.inner.encode([t for _, t in missing])
+            vecs = encode([t for _, t in missing])
             fresh = {keys[i]: v for (i, _), v in zip(missing, vecs)}
             for k, v in fresh.items():
                 if len(self._cache) >= self.max_items:
