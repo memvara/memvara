@@ -288,6 +288,29 @@ def test_search_returns_only_what_this_write_can_see():
     assert "not instructions" in result, "stored text is labelled as data"
 
 
+def test_the_search_tool_embeds_its_query_as_a_query():
+    """The model's search is a search: an embedder that embeds a query differently from
+    a passage is asked for the query's form."""
+
+    class QueryForm(HashingEmbedder):
+        def __init__(self) -> None:
+            super().__init__()
+            self.queries: list[list[str]] = []
+
+        def encode_queries(self, texts):
+            self.queries.append(list(texts))
+            return self.encode(texts)
+
+    emb = QueryForm()
+    mem = Memvara(embedder=emb, llm=ScriptedChat(), tenant="acme", user="alice",
+                  write_agentic_extraction=True)
+    mem.remember("user", "lives_in", "Porto")
+    mem.writer.llm = llm = ScriptedChat([search("office city Porto", 5)])
+    mem.add(MOVE)
+    assert emb.queries == [["office city Porto"]]
+    assert "Porto" in llm.results[0]
+
+
 def test_get_claim_answers_the_same_for_a_missing_id_and_another_users_id():
     mem = memory(ScriptedChat())
     bobs = mem.remember("user", "lives_in", "Madrid", user="bob").added[0]

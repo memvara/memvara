@@ -312,6 +312,27 @@ def test_the_alternative_queries_are_searched_and_fused() -> None:
                                              "user owns bicycle"))
 
 
+def test_every_phrasing_is_embedded_as_a_query_in_one_call() -> None:
+    """The phrasings are search queries like the one they rephrase, and an embedder
+    behind a network pays a round trip per call rather than per text."""
+
+    class QueryForm(HashingEmbedder):
+        def __init__(self) -> None:
+            super().__init__(dim=64)
+            self.queries: list[list[str]] = []
+
+        def encode_queries(self, texts):
+            self.queries.append(list(texts))
+            return self.encode(texts)
+
+    emb = QueryForm()
+    mem = Memvara(llm=NullLLM(), embedder=emb, user="alice", read_rewriter=QueryRewriter(
+        FakeChat(rewrite_reply("bicycle", "owns a bicycle"))))
+    mem.remember("user", "owns", "bicycle")
+    mem.search("green tea", k=1)
+    assert emb.queries == [["green tea", "bicycle", "owns a bicycle"]]
+
+
 def test_a_row_found_by_several_phrasings_is_listed_once() -> None:
     mem = memory(FakeChat(rewrite_reply("green tea", "tea")))
     mem.remember("user", "likes", "green tea")

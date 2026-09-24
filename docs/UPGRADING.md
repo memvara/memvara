@@ -40,6 +40,32 @@ Nothing else changes. A read pinned to an instant, a filtered search, a search i
 
 ---
 
+## A search embeds its query the way bge expects a query
+
+### What changed
+
+`LocalEmbedder` puts the instruction bge's English models are trained to see before a
+search query, `"Represent this sentence for searching relevant passages: "`, before each
+query a search embeds, when its model is one of them: `BAAI/bge-small-en-v1.5`, the
+default, or its base or large sibling. It embeds what a store keeps exactly as before, so
+no store needs re-embedding. Every other model, `HashingEmbedder`, and an embedder of your
+own embed a query as they always did.
+
+### Who this changes, and in which direction
+
+**If you pass `min_score` to `search()` or `recall()` with bge-small**, check it again. A
+result's score reads the cosine between the query and the row, and the instruction lowers
+that cosine by about 0.03: over LOCOMO's questions, the median cosine to the best turn went
+from 0.746 to 0.713, so a threshold that used to pass a row may no longer.
+`episode_score_floor` is a fraction of the best result's score, so it moves less.
+
+**If you wrap `LocalEmbedder` in an embedder of your own**, give the wrapper an
+`encode_queries` method that calls `memvara.embed.encode_queries` on the embedder it
+wraps, as `CachedEmbedder` does. Without one, a search through the wrapper embeds its
+query through `encode`, without the instruction, and finds what it found before.
+
+---
+
 ## A search on a store with a file uses up to three more threads
 
 ### What changed
@@ -86,6 +112,44 @@ committed, and `close()` closes it.
 
 Nothing else changes. A filtered search, a search inside `batch()` and a store with no
 vectors yet read exactly as before.
+
+---
+
+## `LocalEmbedder()` loads bge-small-en-v1.5
+
+### What changed
+
+`LocalEmbedder()` with no model now loads `BAAI/bge-small-en-v1.5`. Through 0.15 it loaded
+`sentence-transformers/all-MiniLM-L6-v2`. The two have the same width, 384, so no
+dimension check can tell their vectors apart; the name in the store's fingerprint,
+`<db>.embedder.json`, is what does. The grounding rescue and the duplicate merge read
+bge-small's cosines with thresholds measured for it, 0.65 and 0.99, and every other
+embedder keeps 0.40 and 0.97.
+
+### Who this changes, and in which direction
+
+**If you construct `Memvara()` with no `embedder=`** and sentence-transformers is
+installed, an existing store opens with the local model its fingerprint names, so nothing
+changes for it. A new store gets bge-small. A store with 384-wide vectors and no
+fingerprint keeps MiniLM, the model a default configuration wrote it with.
+
+**If you run the MCP server with `MEMVARA_EMBEDDER=local`**, the same holds. The server
+reads the model off the store's fingerprint before it starts, so a deployment with an
+existing store neither changes model nor fetches bge-small.
+
+**If you construct `LocalEmbedder()` yourself** and open a store MiniLM wrote, `Memvara`
+now raises `EmbedderMismatchError`. Through 0.15 that opened, because `LocalEmbedder()`
+was MiniLM then. The message names the fix: pass
+`LocalEmbedder("sentence-transformers/all-MiniLM-L6-v2")` to keep the store as it is, or
+migrate it once with `Memvara(..., embedder=LocalEmbedder(), reembed=True)`. Find your
+instances by searching for `LocalEmbedder()`.
+
+**If you call `merge_duplicates()` without `threshold=`**, its default is now the
+calibrated value, which is 0.97, as before, for every embedder but bge-small. A threshold
+you pass is used as it is.
+
+**If ingest time matters**, bge-small encodes at about half MiniLM's speed on a CPU: 192 s
+against 98 s for LOCOMO's 5,882 turns, and 12 ms more for the median read.
 
 ---
 

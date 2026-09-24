@@ -247,6 +247,12 @@ random retrieval would score.
 | open-domain | 92 | 13.9 | 22.4 | **30.7** | 34.1 | 24.7 | 0.4 |
 | **all** | **1531** | **30.5** | **51.7** | **62.0** | **67.4** | **44.9** | **0.3** |
 
+CI reproduces this table on every push and fails when a figure moves, in either direction,
+by more than 0.1 points overall or 1.1 in a category, one question's worth
+(`bench/retrieval_regression.py`, against `bench/expected/locomo_retrieval.json`). A change
+that is meant to move it commits the new figures, measured with `--update`, and this table
+in the same commit.
+
 **LongMemEval, all 500, one shared 940-session store** so there are distractors:
 
 | category | n | R@1 | R@5 | **R@12** | MRR | chance |
@@ -328,6 +334,107 @@ them.
 `bench/locomo.py`, `bench/longmemeval.py` and `bench/multihop.py` were checked and report
 identical figures across runs without a pin: their claims are either absent or carry
 timestamps years old, which is the flat part of the decay curve.
+
+### The local embedder: bge-small-en-v1.5 against all-MiniLM-L6-v2
+
+Since 2026-09-24, `LocalEmbedder()` loads `BAAI/bge-small-en-v1.5` where it loaded
+`sentence-transformers/all-MiniLM-L6-v2`. Both are 384 dimensions. The same command as
+above, with the local embedder, run once with each default:
+
+```bash
+PYTHONPATH=. python3 bench/locomo.py --score retrieval --embedder local
+```
+
+LOCOMO, all 1,531 evidence-labelled questions, `k=12`, the hybrid read, no extraction:
+
+| category | n | R@1 MiniLM | R@1 bge | R@12 MiniLM | R@12 bge | MRR MiniLM | MRR bge |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| single-hop | 840 | 33.1 | 38.6 | 68.8 | 74.7 | 45.9 | 51.7 |
+| temporal | 320 | 38.9 | 45.6 | 72.2 | 78.3 | 53.0 | 58.8 |
+| multi-hop | 279 | 8.9 | 9.6 | 42.5 | 46.2 | 36.9 | 39.2 |
+| open-domain | 92 | 10.0 | 13.2 | 35.5 | 41.2 | 24.4 | 27.7 |
+| **all** | **1531** | **28.5** | **33.2** | **62.7** | **68.2** | **44.4** | **49.4** |
+
+bge-small is ahead in every category at every cut-off the report prints. It costs time:
+ingesting the 5,882 turns took 192 s against 98 s, and the median read 29.3 ms against
+17.3 ms, both on one CPU thread, because the model is larger.
+
+**The query instruction.** bge's English models are trained to see "Represent this
+sentence for searching relevant passages: " before a search query and nothing before a
+passage, and the table above was measured without it. Since `LocalEmbedder` embeds a
+search query with it, the same LOCOMO command reads:
+
+| category | n | R@1 before | R@1 after | R@12 before | R@12 after | MRR before | MRR after |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| single-hop | 840 | 38.6 | 39.0 | 74.7 | 74.9 | 51.7 | 51.8 |
+| temporal | 320 | 45.6 | 45.0 | 78.3 | 78.4 | 58.8 | 58.2 |
+| multi-hop | 279 | 9.6 | 9.9 | 46.2 | 45.4 | 39.2 | 39.9 |
+| open-domain | 92 | 13.2 | 13.8 | 41.2 | 40.4 | 27.7 | 28.3 |
+| **all** | **1531** | **33.2** | **33.5** | **68.2** | **68.2** | **49.4** | **49.6** |
+
+LOCOMO's turns are a sentence or two, and the instruction changes little there. It is
+written for a short query against a long passage, and LongMemEval-S's sessions run to
+thousands of words. Over 100 of its questions, drawn with `--shuffle 7`, each in its own
+store:
+
+```bash
+PYTHONPATH=. python3 bench/longmemeval.py --dataset s --score retrieval --embedder local \
+    --shuffle 7 --limit 100
+```
+
+| category | n | R@1 before | R@1 after | R@5 before | R@5 after | MRR before | MRR after |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| single-session-user | 9 | 22.2 | 22.2 | 77.8 | 88.9 | 43.3 | 49.5 |
+| single-session-assistant | 18 | 27.8 | 33.3 | 77.8 | 83.3 | 49.6 | 53.2 |
+| single-session-preference | 2 | 0.0 | 0.0 | 50.0 | 100.0 | 19.6 | 25.0 |
+| multi-session | 25 | 8.0 | 12.0 | 57.3 | 59.3 | 46.0 | 51.8 |
+| knowledge-update | 12 | 16.7 | 16.7 | 66.7 | 75.0 | 51.5 | 52.2 |
+| temporal-reasoning | 26 | 9.6 | 9.6 | 67.6 | 68.2 | 43.0 | 43.2 |
+| abstention | 8 | 12.5 | 12.5 | 70.8 | 70.8 | 41.4 | 43.0 |
+| **all** | **100** | **14.5** | **16.5** | **67.5** | **72.2** | **45.4** | **48.4** |
+
+R@12, the stated budget, went from 94.2 to 94.4, and `in ctx` from 42.4 to 43.5. A hundred
+questions is a small sample, and in the categories with 2 to 12 questions one question
+moves a figure by several points.
+
+It costs a search 0.75 ms: one query embeds in 24.16 ms with the instruction against
+23.41 ms without, at the median over 300 LOCOMO questions on one CPU thread. It lowers the
+cosines a search reads by about 0.03. Over LOCOMO's questions, the median cosine to the
+best turn went from 0.746 to 0.713, to the twelfth from 0.664 to 0.630, and to the
+evidence turn from 0.697 to 0.665, so a `min_score` tuned under bge-small admits less.
+
+**Its cosines run higher, and two checks read cosines.** The grounding rescue keeps a
+model-proposed claim that shares no word with its source when the two embed close enough,
+and the duplicate merge folds two claims in one slot when they embed close enough. Both
+thresholds were measured under MiniLM. `bench/embedder_calibration.py` reads them in each
+space, over pairs written for it:
+
+```bash
+PYTHONPATH=. python3 bench/embedder_calibration.py
+```
+
+| | MiniLM | bge-small |
+|---|---:|---:|
+| invented value against an unrelated turn, median cosine | 0.020 | 0.442 |
+| invented value against an unrelated turn, highest | 0.394 | 0.614 |
+| paraphrase against its source, median | 0.476 | 0.705 |
+| inventions the rescue keeps at 0.40 | 0.0% | 83.7% |
+| inventions the rescue keeps at 0.65 | 0.0% | 0.0% |
+| paraphrases the rescue keeps at 0.40, and at 0.65 | 80.0%, 20.0% | 100.0%, 80.0% |
+| claim pairs with different values merged at 0.97, and at 0.99 | 3, 1 of 14 | 4, 0 of 14 |
+| restated claims merged at 0.97, and at 0.99 | 4, 3 of 8 | 7, 4 of 8 |
+
+At MiniLM's thresholds, bge-small would keep 84% of invented values and fold two values
+one digit apart into one claim. So each space gets its own thresholds
+(`memvara/embed/calibration.py`), and bge-small's are 0.65 for the rescue and 0.99 for the
+merge. Those match MiniLM's behaviour at 0.40 and 0.97 on this data, with fewer wrong
+merges. Every other embedder keeps 0.40 and 0.97.
+
+Two caveats. The pairs are a reconstruction: the eval behind 0.40, 33 inventions from two
+4B-class models, is not in this repository. And the merge row shows that MiniLM at 0.97
+already folds 3 of the 14 different-value pairs, such as two dates a day apart. That is
+unchanged here, because changing it changes every existing MiniLM store, and it is a
+change that needs its own measurement.
 
 ### The graph leg, and what it costs on the corpora above
 
