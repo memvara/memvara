@@ -126,6 +126,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
+- **On the hosted service, one capture turn counts as one recall, however many searches it
+  makes.** Agentic capture's hosted config now sends a `Memvara-Capture-Run` header with a
+  new random id for each run, so the hosted service can tell which searches belong to one
+  capture run and count them against the plan's allowance once. This takes effect once
+  the hosted service supports the header, which is a separate change on the cloud side;
+  until then each search, up to four per turn, counts as a recall. The id is never written
+  to `capture.log`. A local store is unchanged.
+
 - **The MCP server creates a new store encrypted.** The new `encryption` switch
   (`MEMVARA_FEATURE_ENCRYPTION`) is on by default. With it on, a new store needs
   `pip install 'memvara[encrypt]'`, and the server refuses to start without it rather than

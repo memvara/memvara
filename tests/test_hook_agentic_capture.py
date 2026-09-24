@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import stat
 import sys
 import threading
@@ -549,11 +550,14 @@ def test_the_hosted_config_is_the_hooks_own_credential_and_project(monkeypatch, 
     (tmp_path / "credentials.json").write_text(json.dumps(
         {"api_key": "mv_test_key", "server_url": "https://example.test/"}))
     monkeypatch.setenv(project.ENV, "github.com/memvara/memvara")
-    assert agentic.mcp_config(hosted=True) == {"mcpServers": {"memvara": {
+    config = agentic.mcp_config(hosted=True)
+    run_id = config["mcpServers"]["memvara"]["headers"]["Memvara-Capture-Run"]
+    assert config == {"mcpServers": {"memvara": {
         "type": "http", "url": "https://example.test/mcp",
         "headers": {"Authorization": "Bearer mv_test_key",
                     "User-Agent": hosted.USER_AGENT,
                     "Memvara-Read-Stages": "plain",
+                    "Memvara-Capture-Run": run_id,
                     "memvara-project": "github.com/memvara/memvara"}}}}
     monkeypatch.delenv(project.ENV)
     headers = agentic.mcp_config(hosted=True)["mcpServers"]["memvara"]["headers"]
@@ -634,6 +638,48 @@ def test_the_hosted_run_asks_for_plain_reads(monkeypatch, tmp_path):
     headers = agentic.mcp_config(hosted=True)["mcpServers"]["memvara"]["headers"]
     assert headers[agentic.READ_STAGES_HEADER] == "plain"
     assert agentic.READ_STAGES_HEADER == "Memvara-Read-Stages"
+
+
+def _hosted_run_ids(monkeypatch, tmp_path, runs: int) -> "list[str]":
+    """Run agentic capture `runs` times on a hosted install and return each run's id."""
+    (tmp_path / "credentials.json").write_text(json.dumps({"api_key": "mv_k"}))
+    ids = []
+    for _ in range(runs):
+        proc = _fake(monkeypatch, [init(), tool_use("t1"), tool_result("t1", SEARCH_HIT),
+                                   result([])])
+        assert agentic.capture(FakeHosted(FULL), TURN, "", "/repo", [],
+                               hosted=True) is not None
+        ids.append(proc.config["mcpServers"]["memvara"]["headers"]["Memvara-Capture-Run"])
+    return ids
+
+
+def test_every_hosted_capture_run_carries_its_own_run_id(monkeypatch, tmp_path):
+    """The hosted service counts one capture turn's searches as one recall against the
+    plan's allowance. It can only group them if each run names itself, and only count
+    them once per turn if the next run names itself differently."""
+    ids = _hosted_run_ids(monkeypatch, tmp_path, 3)
+    assert len(set(ids)) == 3
+    assert all(re.fullmatch(r"[0-9a-f]{16}", run_id) for run_id in ids)
+    assert agentic.CAPTURE_RUN_HEADER == "Memvara-Capture-Run"
+
+
+def test_the_run_id_is_only_in_the_hosted_config(monkeypatch, tmp_path):
+    _local_env(monkeypatch, tmp_path)
+    local = agentic.mcp_config(hosted=False)["mcpServers"]["memvara"]
+    assert "headers" not in local
+    assert not any("capture" in key.lower() and "run" in key.lower() for key in local["env"])
+    (tmp_path / "credentials.json").write_text(json.dumps({"api_key": "mv_k"}))
+    assert agentic.CAPTURE_RUN_HEADER in \
+        agentic.mcp_config(hosted=True)["mcpServers"]["memvara"]["headers"]
+
+
+def test_the_run_id_never_reaches_capture_log(monkeypatch, tmp_path):
+    """The id groups a run's searches on the server and means nothing to a reader. It is
+    kept out of the log so the log cannot be used to link a turn to the server's records."""
+    ids = _hosted_run_ids(monkeypatch, tmp_path, 2)
+    log = _log(tmp_path)
+    assert "agentic" in log
+    assert not any(run_id in log for run_id in ids)
 
 
 def _leftovers(tmp_path, *, old_age: float):

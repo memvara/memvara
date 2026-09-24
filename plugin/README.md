@@ -123,7 +123,11 @@ feature's default. Each of these five is on by default.
   The single call cost 45,300 input tokens there, because it loads your
   instruction files and plugins; with small ones it costs about 21,000,
   which is then about the same as an agentic turn. The numbers and how
-  they were measured are in `CHANGELOG.md`.
+  they were measured are in `CHANGELOG.md`. On the hosted service, one
+  capture turn counts as one recall, however many searches it makes.
+  That takes effect once the hosted service supports the
+  `Memvara-Capture-Run` header the hook sends; until then each search
+  counts as a recall.
 
 The file lists the library's other switches too, with the same defaults as
 the MCP server. `extraction_chunks` and `agentic_extraction` are the two that
