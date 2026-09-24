@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, Sequence, runtime_checkable
 
 from ..types import Episode
+from .guidance import Guidance
 
 
 @dataclass(slots=True)
@@ -108,12 +109,18 @@ class LLM(Protocol):
     reports_usage: bool = False
 
     def extract(self, episodes: Sequence[Episode], known_predicates: Sequence[str],
-                *, usage: "Usage | None" = None) -> list[dict[str, Any]]:
+                *, usage: "Usage | None" = None,
+                guidance: "Guidance | None" = None) -> list[dict[str, Any]]:
         """Return claim dicts: subject, predicate, object, polarity, memory_type,
         confidence, source_index (index into `episodes`, for provenance).
 
         Add this call's tokens to `usage` when it is not None and this backend sets
         `reports_usage`. See `Usage` for why it arrives as an argument.
+
+        Append `guidance` to the system message with `guidance.with_guidance` when it is
+        not None. The write path passes it only to a backend whose `accepts_guidance`
+        attribute is true, read with `getattr` rather than declared here, because a new
+        member on this protocol would make every older backend fail `isinstance`.
         """
         ...
 
@@ -251,9 +258,12 @@ class NullLLM:
     # than set True with a zero: `reported` distinguishes a backend that measured nothing
     # from one that cannot measure, and a no-op backend is neither — it never runs.
     reports_usage = False
+    # It takes the argument and ignores it, since it sends no prompt to add it to.
+    accepts_guidance = True
 
     def extract(self, episodes: Sequence[Episode], known_predicates: Sequence[str],
-                *, usage: Usage | None = None) -> list[dict[str, Any]]:
+                *, usage: Usage | None = None,
+                guidance: Guidance | None = None) -> list[dict[str, Any]]:
         return []
 
     def resolve_predicate(self, surface: str, candidates: Sequence[str],

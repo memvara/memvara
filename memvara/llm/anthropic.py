@@ -15,6 +15,7 @@ from typing import Any, Sequence
 from ..ingest.errors import MediaUnsupported
 from ..types import Episode
 from . import _shape
+from .guidance import Guidance, with_guidance
 from .base import (
     CLAIM_SCHEMA,
     EXTRACT_SYSTEM,
@@ -67,6 +68,8 @@ class AnthropicLLM:
     #: A real backend, so every call it makes is billed to `WriteReceipt.llm_calls`.
     is_noop = False
     reports_usage = True
+    #: `extract` appends `guidance=` to its system message. See `llm.guidance`.
+    accepts_guidance = True
 
     def __init__(
         self,
@@ -208,12 +211,12 @@ class AnthropicLLM:
 
     def extract(
         self, episodes: Sequence[Episode], known_predicates: Sequence[str],
-        *, usage: Usage | None = None,
+        *, usage: Usage | None = None, guidance: Guidance | None = None,
     ) -> list[dict[str, Any]]:
         if not episodes:
             return []  # nothing to extract from, and a call we should not pay for
         response = self._call(
-            EXTRACT_SYSTEM,
+            with_guidance(EXTRACT_SYSTEM, guidance),
             _shape.extract_prompt(episodes, known_predicates),
             CLAIM_SCHEMA,
             usage,

@@ -108,12 +108,13 @@ def test_a_method_added_to_the_async_facade_and_not_bound_here_is_reported():
 def test_what_a_scoped_view_legitimately_leaves_out_is_read_off_the_sync_pair():
     """The excused names are not a literal in this file or in `aio.py`.
 
-    `close`, `reembed` and `scope` are absent from `ScopedMemvara` because they are not
-    scoped operations, and `_scoped_omissions()` reads that off the sync pair rather than
-    restating it — so the day `ScopedMemvara` grows one of them, the async view stops
-    being excused for not having it, without anyone remembering to edit a list.
+    `close`, `reembed`, `scope` and `erase_expired` are absent from `ScopedMemvara`
+    because they are not scoped operations (the expiry sweep covers every tenant in the
+    store), and `_scoped_omissions()` reads that off the sync pair rather than restating
+    it — so the day `ScopedMemvara` grows one of them, the async view stops being excused
+    for not having it, without anyone remembering to edit a list.
     """
-    assert _scoped_omissions() == {"close", "reembed", "scope"}
+    assert _scoped_omissions() == {"close", "reembed", "scope", "erase_expired"}
     assert _scoped_omissions() <= _public(AsyncMemvara), \
         "excusing a name the async facade does not even have would hide a real gap"
 

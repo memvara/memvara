@@ -6,6 +6,7 @@ from typing import Any
 
 from .base import (LLM, Chat, Multimodal, NullLLM, ReplacementJudge, TruncatedResponse,
                    Usage)
+from .guidance import Guidance, GuidanceError, load_guidance, with_guidance
 
 # `Usage` is exported because implementing `LLM` outside this package requires it:
 # a backend that sets `reports_usage` is handed one and has to type against it. `Chat`
@@ -18,8 +19,11 @@ from .base import (LLM, Chat, Multimodal, NullLLM, ReplacementJudge, TruncatedRe
 # `Memvara.remember` to give replacement advice implements this beside `LLM`.
 # `Multimodal` is exported for the same reason: a backend that wants
 # `memvara.ingest.extract` to read images, audio or video implements it beside `LLM`.
-__all__ = ["LLM", "Chat", "Multimodal", "NullLLM", "ReplacementJudge", "TruncatedResponse",
-           "Usage", "AnthropicLLM", "OpenAILLM"]
+# `Guidance` and `with_guidance` are exported so an extractor outside this package, or one
+# that sends its own system message, adds per-project guidance the way the two backends do.
+__all__ = ["LLM", "Chat", "Guidance", "GuidanceError", "Multimodal", "NullLLM",
+           "ReplacementJudge", "TruncatedResponse", "Usage", "AnthropicLLM", "OpenAILLM",
+           "load_guidance", "with_guidance"]
 
 
 def __getattr__(name: str) -> Any:

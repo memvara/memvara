@@ -11,10 +11,19 @@ omitted below for readability.
 ```python
 mem = Memvara(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=,
              redactor=, tenant=, user=, agent=, session=, reembed=False,
-             encryption=False, **tuning)
+             encryption=False, expiry_erasure=True, **tuning)
 # api_key= or base_url= instead returns a RemoteMemvara — see "A hosted deployment" below
 # encryption=True creates a new store file encrypted (pip install 'memvara[encrypt]');
 #   an existing file opens as whatever it already is — see "Encryption at rest" below
+# expiry_erasure=True (the default) hides from every read, and erases when the store
+#   opens, every claim whose expires_at has passed — see erase_expired below. False stores
+#   expires_at and neither hides nor erases. sweep_expired=False keeps the hiding and skips
+#   the erasing at open, for a read-only process.
+# write_guidance=Guidance(context=, include=[...], exclude=[...]) adds per-project rules
+#   to every extraction prompt (memvara.llm.guidance): context at most 1,500 characters,
+#   each list at most 20 rules of 200 characters, anything longer refused (GuidanceError).
+#   Appended after the backend's own prompt, never in its place. TypeError for a backend
+#   whose accepts_guidance is not true; AnthropicLLM, OpenAILLM and NullLLM all accept it.
 
 # write
 mem.add(messages, *, role="user", ts=None)        -> WriteReceipt
@@ -22,8 +31,17 @@ mem.add(messages, *, role="user", ts=None)        -> WriteReceipt
     # Pass role="system" for a document, a log or a paste -- stored and cited, nothing
     # extracted. See Memvara.add's docstring for why quoting is not a defence.
 mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, sources=,
-             text=, confidence=, memory_type=, polarity=, extractor=, **meta)
+             text=, confidence=, memory_type=, polarity=, extractor=, expires_at=,
+             expire_reason=, **meta)
                                                   -> WriteReceipt
+#   expires_at= is when the claim is ERASED (not ended, not retired): from that instant
+#   no read returns it, and erase_expired() deletes the row, its text index entry and its
+#   vector, with a proof. A repeat carrying an expiry reinforces only a claim in exactly
+#   its own scope; otherwise it is stored as its own claim, so another project's copy is
+#   never given the expiry.
+#   It must be in the future (ValueError otherwise). expire_reason= says why, at most
+#   500 characters, and is a ValueError without expires_at. Repeating a fact the store
+#   holds puts the expiry on the claim on record. Not valid_to, which ends and keeps.
 #   With `Memvara(advise_replacements=True)` and a backend that implements
 #   `llm.ReplacementJudge`, a write that closed nothing fills `receipt.may_replace`
 #   with the nearest live claims in other slots the model judged it to be a newer
@@ -36,6 +54,12 @@ mem.delete(claim_id, *, at=None)                  -> bool           # one claim
 
 # erase — irreversible, removes the text itself
 mem.erase(claim_id, *, sources=False)             -> bool           # one claim
+mem.erase_expired(now=None)                       -> list[ErasedClaim]
+#   every claim, in every tenant, whose expires_at is at or before now, through the
+#   same path as erase(); source turns are kept. Each ErasedClaim has claim_id, scope,
+#   expires_at, expire_reason and the ErasureProof, and no copy of the fact. Runs when
+#   the store opens and hourly in the MCP server; NotImplementedError for a store with
+#   no expired_claims(), ErasureIncomplete if a proof fails.
 mem.purge()                                       -> dict[str, int] # a whole scope
 mem.reset()                                       -> dict[str, int] # scope + schema
 #   `store.erase_claim` returns purge's four counts instead; `mem.erase` stays a bool
@@ -389,6 +413,13 @@ refuses them before sending anything, as the local switch does. **The hosted dep
 accept these two fields yet.** Its request models refuse a field they do not know, so a
 filtered call answers 422 and the client raises `InvalidRequest`; it is never answered
 unfiltered. An unfiltered call is unchanged.
+
+`remember()` sends `expires_at` and `expire_reason` the same way: only when you set them,
+with `expire_reason` checked first and refused without `expires_at`. The deployment decides
+whether `expires_at` is in the future, because its clock is the one its sweep reads, and it
+runs the sweep itself; there is no `erase_expired()` on this client. A deployment from
+before expiry refuses the fields with 422. A claim the deployment sends back carries
+`expires_at` and `expire_reason` when it renders them, and `None` when it does not.
 
 Two divergences are real and worth knowing before you write against them:
 

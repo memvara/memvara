@@ -663,6 +663,27 @@ def test_remember_splits_cited_ids_from_turns_it_must_store(recorded):
     assert body["sources"] == [{"content": "I like tea", "metadata": {}}]
 
 
+def test_remember_sends_an_expiry_only_when_given_and_checks_the_reason_first(recorded):
+    """The async twin of the sync client's expiry tests: same body, same refusal."""
+    mem = recorded(_receipt())
+
+    async def main():
+        await mem.remember("user", "door_code", "4411",
+                           expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+                           expire_reason="rental")
+        await mem.remember("user", "lives_in", "Lisbon")
+        with pytest.raises(ValueError, match="no expires_at= was given"):
+            await mem.remember("user", "door_code", "4411", expire_reason="rental")
+        await mem.aclose()
+
+    run(main())
+    first, second = (json.loads(c.read()) for c in recorded.calls)
+    assert (first["expires_at"], first["expire_reason"]) == (
+        "2030-01-01T00:00:00+00:00", "rental")
+    assert not {"expires_at", "expire_reason"} & set(second)
+    assert len(recorded.calls) == 2
+
+
 def test_supersede_forwards_close_verbatim_rather_than_defaulting(recorded):
     """A mutation log records that a value changed and never which of the two it was, so
     restating the default here would file every correction as a world event."""
