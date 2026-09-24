@@ -51,7 +51,9 @@ and 19.6 for the single call on the same machine. The run replaces the headless 
 default system prompt and loads no settings files, so its fixed cost is the four tool
 schemas and these rules, about 10,500 input tokens with no search. Each search adds a
 model step that reads everything before it again. The full table is in section 3.7 of the
-phase 3 design.
+phase 3 design. The searches themselves are plain reads (`PLAIN_READ_ENV`,
+`READ_STAGES_HEADER`), so a store with a model configured does not add a model call per
+search on top of these numbers.
 """
 
 from __future__ import annotations
@@ -64,6 +66,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, NamedTuple, Sequence
 
@@ -121,6 +124,21 @@ HIDDEN_TOOLS = (
 SERVER = "memvara"
 
 LINK_RELATIONS = ("extends", "derives")
+
+#: The read-path model stages switched off on the local server the run starts. The run's
+#: searches exist to find claim ids, and a rewrite or a synthesis on each one would be a
+#: model call on the user's key that nothing here needs.
+PLAIN_READ_ENV = {"MEMVARA_FEATURE_QUERY_REWRITE": "0", "MEMVARA_FEATURE_SYNTHESIS": "0"}
+
+#: The header that asks the hosted service for plain reads, for the same reason. Without
+#: it a search from an organisation with a model key is a rewritten search: a call on the
+#: organisation's key, and about 145 rate-limit units instead of about 66. The hosted
+#: service does not read this header yet; the cloud side adds it, and until then the
+#: hosted searches may still be rewritten.
+READ_STAGES_HEADER = "Memvara-Read-Stages"
+
+#: The config files a run writes, as `_write_config` names them.
+CONFIG_PREFIX = "capture-mcp-"
 
 #: The store refuses a longer closure reason (`memvara.types.REASON_CHARS`).
 REASON_CHARS = 500
@@ -353,7 +371,8 @@ def mcp_config(hosted: bool) -> "dict | None":
         creds = credentials()
         if creds is None:
             return None
-        headers = {"Authorization": f"Bearer {creds['api_key']}", "User-Agent": USER_AGENT}
+        headers = {"Authorization": f"Bearer {creds['api_key']}", "User-Agent": USER_AGENT,
+                   READ_STAGES_HEADER: "plain"}
         project = _project_header()
         if project:
             headers[PROJECT_HEADER] = project
@@ -365,6 +384,11 @@ def mcp_config(hosted: bool) -> "dict | None":
     for key, value in os.environ.items():
         if (key.startswith("MEMVARA_") or key == "PYTHONPATH") and key != SENTINEL:
             env[key] = value
+    # Set last, so neither the client block nor this process can turn them back on. With a
+    # model configured (`MEMVARA_LLM`), the server rewrites every search with a model call
+    # by default, which is up to one extra call per search, on the user's key, for reads
+    # whose only job is to find claim ids.
+    env.update(PLAIN_READ_ENV)
     command = block.get("command") or sys.executable
     args = block.get("args") if block.get("command") else ["-m", "memvara.server"]
     return {"mcpServers": {SERVER: {"type": "stdio", "command": command,
@@ -373,12 +397,47 @@ def mcp_config(hosted: bool) -> "dict | None":
 
 def _write_config(config: dict) -> str:
     """Write `config` to a new owner-only file in the private runtime directory."""
-    path = os.path.join(ipc.runtime_dir(), f"capture-mcp-{os.getpid()}-"
+    path = os.path.join(ipc.runtime_dir(), f"{CONFIG_PREFIX}{os.getpid()}-"
                                            f"{secrets.token_hex(4)}.json")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(config, fh)
     return path
+
+
+def sweep_configs() -> int:
+    """Delete run configs left behind by a hook that was killed. Returns how many.
+
+    A run's config holds the hosted API key, or the local store's environment, which can
+    carry `MEMVARA_DB_KEY`. `capture` deletes it in a `finally`, and a `finally` does not
+    run when the hook is killed: the client's hook timeout, the user quitting, a SIGKILL.
+    The runtime directory is readable by its owner only, but a credential left on disk
+    should not depend on that alone.
+
+    A file older than twice `TIMEOUT_SEC` cannot belong to a run that is still going,
+    because the run is killed at `TIMEOUT_SEC`; a younger one may, and is left alone.
+    Called at the start of every capture and at session start. Writes a `capture.log` line
+    only when it removed something, because the common answer is none. Never raises.
+    """
+    removed = 0
+    try:
+        names = os.listdir(ipc.RUNTIME_DIR)
+    except OSError:
+        return 0
+    cutoff = time.time() - 2 * TIMEOUT_SEC
+    for name in names:
+        if not (name.startswith(CONFIG_PREFIX) and name.endswith(".json")):
+            continue
+        path = os.path.join(ipc.RUNTIME_DIR, name)
+        try:
+            if os.stat(path).st_mtime < cutoff:
+                os.unlink(path)
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        log(f"removed {removed} leftover capture config file(s) from a killed run")
+    return removed
 
 
 # -- reading the run as it happens ------------------------------------------------------

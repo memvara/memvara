@@ -171,8 +171,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   output tokens and 17.3 seconds, against 45,258, 1,272 and 19.6 for the single call on the
   same machine; the single call's input is that high because it loads the user's
   instruction files and plugins, and with small ones it is about 21,000, which is then
-  about what an agentic turn costs. See `plugin/hooks/lib/agentic.py` and section 3.7 of the
-  phase 3 design.
+  about what an agentic turn costs. The run's searches are plain reads: its local server
+  starts with `MEMVARA_FEATURE_QUERY_REWRITE=0` and `MEMVARA_FEATURE_SYNTHESIS=0`, and the
+  hosted config sends `Memvara-Read-Stages: plain`, which the hosted service does not read
+  yet. The run's config file holds a credential, so every capture and every session start
+  delete any left behind by a killed hook once it is older than twice the run's timeout.
+  See `plugin/hooks/lib/agentic.py` and section 3.7 of the phase 3 design.
 - **Query rewrite on `search()` and `recall()`.** Before retrieval, one call to the
   configured chat backend sends the query and today's date, and reads back JSON with up
   to three alternative queries and an optional date range. The original query and each

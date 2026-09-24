@@ -553,6 +553,7 @@ def test_the_hosted_config_is_the_hooks_own_credential_and_project(monkeypatch, 
         "type": "http", "url": "https://example.test/mcp",
         "headers": {"Authorization": "Bearer mv_test_key",
                     "User-Agent": hosted.USER_AGENT,
+                    "Memvara-Read-Stages": "plain",
                     "memvara-project": "github.com/memvara/memvara"}}}}
     monkeypatch.delenv(project.ENV)
     headers = agentic.mcp_config(hosted=True)["mcpServers"]["memvara"]["headers"]
@@ -606,6 +607,93 @@ def test_the_config_file_is_owner_only_and_gone_after_the_run(monkeypatch, tmp_p
     assert proc.config["mcpServers"]["memvara"]["env"]["MEMVARA_DB"].endswith("memory.db")
     assert os.listdir(tmp_path / "run") == []
     assert proc.env[extract.SENTINEL] == "1"
+
+
+def test_the_local_server_the_run_starts_never_calls_a_model_on_a_read(monkeypatch, tmp_path):
+    """The local server reads the user's `MEMVARA_*`. With a model configured it rewrites
+    every search with a model call, which would be up to four extra calls per captured
+    turn on the user's key. The run's server has both read-path model stages off, whatever
+    the user's environment or client block says."""
+    config = tmp_path / "claude.json"
+    config.write_text(json.dumps({"mcpServers": {"memvara": {
+        "command": "python3", "args": ["-m", "memvara.server"],
+        "env": {"MEMVARA_LLM": "anthropic", "MEMVARA_FEATURE_SYNTHESIS": "1"}}}}))
+    monkeypatch.setattr(ipc, "_CLIENT_CONFIGS", (str(config),))
+    monkeypatch.setenv("MEMVARA_FEATURE_QUERY_REWRITE", "1")
+    env = agentic.mcp_config(hosted=False)["mcpServers"]["memvara"]["env"]
+    assert env["MEMVARA_LLM"] == "anthropic", "the store's own configuration is kept"
+    assert env["MEMVARA_FEATURE_QUERY_REWRITE"] == "0"
+    assert env["MEMVARA_FEATURE_SYNTHESIS"] == "0"
+
+
+def test_the_hosted_run_asks_for_plain_reads(monkeypatch, tmp_path):
+    """On the hosted service each search from the run would otherwise be a rewritten
+    search for an organisation with a model key: a call on that key, and more rate-limit
+    units. The header asks for plain reads; the service honours it once it reads it."""
+    (tmp_path / "credentials.json").write_text(json.dumps({"api_key": "mv_k"}))
+    headers = agentic.mcp_config(hosted=True)["mcpServers"]["memvara"]["headers"]
+    assert headers[agentic.READ_STAGES_HEADER] == "plain"
+    assert agentic.READ_STAGES_HEADER == "Memvara-Read-Stages"
+
+
+def _leftovers(tmp_path, *, old_age: float):
+    run = tmp_path / "run"
+    run.mkdir(exist_ok=True)
+    old, fresh, other = (run / "capture-mcp-1-aaaa.json", run / "capture-mcp-2-bbbb.json",
+                         run / "recall-0123.sock.json")
+    for path in (old, fresh, other):
+        path.write_text("{}")
+    past = old.stat().st_mtime - old_age
+    os.utime(old, (past, past))
+    os.utime(other, (past, past))
+    return old, fresh, other
+
+
+def test_a_config_left_by_a_killed_hook_is_removed_and_a_fresh_one_is_kept(tmp_path):
+    """The config holds the hosted API key, or the store's environment, which can carry
+    `MEMVARA_DB_KEY`. A hook killed mid-run never reaches its `finally`, so the file would
+    stay on disk for good. Anything older than twice the run's timeout cannot belong to a
+    run still going; a younger file can, and must be left alone."""
+    old, fresh, other = _leftovers(tmp_path, old_age=2 * agentic.TIMEOUT_SEC + 5)
+    assert agentic.sweep_configs() == 1
+    assert not old.exists() and fresh.exists() and other.exists()
+    assert "removed 1 leftover capture config file(s)" in _log(tmp_path)
+    assert agentic.sweep_configs() == 0
+    assert _log(tmp_path).count("leftover capture config") == 1, "nothing to say, no line"
+
+
+def test_a_leftover_younger_than_twice_the_timeout_is_kept(tmp_path):
+    old, _, _ = _leftovers(tmp_path, old_age=2 * agentic.TIMEOUT_SEC - 30)
+    assert agentic.sweep_configs() == 0 and old.exists()
+
+
+def test_the_sweep_never_raises(monkeypatch, tmp_path):
+    assert agentic.sweep_configs() == 0, "no runtime directory yet"
+    old, _, _ = _leftovers(tmp_path, old_age=10_000)
+
+    def refuse(path):
+        raise PermissionError(path)
+
+    monkeypatch.setattr(agentic.os, "unlink", refuse)
+    assert agentic.sweep_configs() == 0 and old.exists()
+
+
+def test_every_capture_sweeps_leftovers_first(monkeypatch, tmp_path):
+    old, fresh, _ = _leftovers(tmp_path, old_age=10_000)
+    _run_capture(monkeypatch, tmp_path, outcome=None)
+    assert not old.exists() and fresh.exists()
+
+
+def test_session_start_sweeps_leftovers(monkeypatch, tmp_path):
+    import session_start
+
+    old, fresh, _ = _leftovers(tmp_path, old_age=10_000)
+    monkeypatch.setattr(session_start, "payload", lambda: {"session_id": "s", "cwd": ""})
+    monkeypatch.setattr(session_start, "write", lambda host, reply: None)
+    monkeypatch.setattr(session_start, "due_capture_alert", lambda: "")
+    monkeypatch.setattr(session_start, "open_writer", lambda: (None, None))
+    assert session_start.main() == 0
+    assert not old.exists() and fresh.exists()
 
 
 def test_a_config_that_cannot_be_removed_does_not_fail_the_turn(monkeypatch, tmp_path):

@@ -244,6 +244,9 @@ def main() -> int:
     if event.reentrant:
         # Re-entry from a hook-triggered continuation. Mining here would double-count.
         return 0
+    # Before anything else that can be slow: a config an earlier, killed capture left
+    # behind holds a credential, and this is the next moment anything can remove it.
+    agentic.sweep_configs()
 
     if not event.transcript_path:
         return 0

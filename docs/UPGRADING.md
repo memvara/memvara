@@ -28,6 +28,14 @@ each one. With it off, capture makes one extraction call per turn, as before.
 on Claude Code is now 180 seconds rather than 120, to cover an agentic run followed by the
 single-call extraction when the agentic run fails.
 
+**If you run a hosted organisation with a model key**, the searches the agentic run makes
+may each be a rewritten search until the hosted service is updated: a call on the
+organisation's key, and about 145 rate-limit units instead of about 66. The run sends a
+`Memvara-Read-Stages: plain` header asking for plain reads, and the hosted service does
+not read that header yet; the change on the cloud side is separate. A local store is not
+affected: the run's local server always starts with `MEMVARA_FEATURE_QUERY_REWRITE=0` and
+`MEMVARA_FEATURE_SYNTHESIS=0`, whatever your own configuration says.
+
 **If your headless login comes from a settings file** rather than from the normal login,
 the agentic run cannot sign in, because it loads no settings files. Every turn then falls
 back to the single-call extraction, and `capture.log` says so on each turn. Switch it off

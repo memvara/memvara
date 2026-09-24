@@ -2094,7 +2094,12 @@ switch on (the default), and only on a host whose first extractor is `claude`,
 memory before anything is written. The command connects to one MCP server, the store this
 hook writes to, through a config file written for the run (owner-only, deleted after):
 the hosted endpoint with the hooks' own API key and project header, or the client's own
-local server block. Only `memory_search`, `memory_recall`, `memory_why` and
+local server block. The run's searches are plain reads: the local server is started with
+`MEMVARA_FEATURE_QUERY_REWRITE=0` and `MEMVARA_FEATURE_SYNTHESIS=0`, and the hosted config
+sends `Memvara-Read-Stages: plain`, which the hosted service does not read yet. A hook that
+is killed never reaches the `finally` that deletes the config, so every capture and every
+session start delete any `capture-mcp-*.json` in the runtime directory older than twice the
+run's timeout, and log how many they removed. Only `memory_search`, `memory_recall`, `memory_why` and
 `memory_profile` are in the model's context; every other memvara tool is denied by name,
 no built-in tool is available, and `--permission-mode dontAsk` refuses anything not
 allowed. The hook reads the command's event stream as it runs and stops it after four tool

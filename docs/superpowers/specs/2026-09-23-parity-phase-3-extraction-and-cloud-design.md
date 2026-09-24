@@ -192,6 +192,16 @@ per mined turn, with read-only access to the store the hook writes to:
   written to. On a local install it is the client's own memvara server block, with this
   process's `MEMVARA_*` variables winning over it. The plugin's own `.mcp.json` entry is
   not used because it may be signed in through a browser, which a headless run cannot do.
+- The run's searches are plain reads. The local server is started with
+  `MEMVARA_FEATURE_QUERY_REWRITE=0` and `MEMVARA_FEATURE_SYNTHESIS=0`, set after the user's
+  own variables, so a configured `MEMVARA_LLM` cannot turn each search into a model call.
+  The hosted config sends `Memvara-Read-Stages: plain`. The hosted service does not read
+  that header yet; the cloud side adds it, and until then a search from an organisation
+  with a model key may be rewritten.
+- A hook that is killed never reaches the `finally` that deletes the config file, which
+  holds a credential. Every capture and every session start delete any
+  `capture-mcp-*.json` in the runtime directory older than twice the run's timeout, and
+  write a `capture.log` line saying how many they removed.
 - `--strict-mcp-config` excludes every other MCP server the user has. `--tools ""` removes
   the built-in tools. `--allowedTools` lists `memory_search`, `memory_recall`, `memory_why`
   and `memory_profile`; `--disallowedTools` names every other memvara tool so it is not in
@@ -273,7 +283,12 @@ path loads the user's instruction files and plugins into every run; with small o
 about 21,000 input tokens, as `lib/extract.py` records, and the agentic run then costs
 about the same. The bar in 3.1 (no fewer facts, no more duplicates) is met on this set, so
 the switch ships on. Nine turns is a small set, and a larger replay over real transcripts
-is left to P3-F.
+is left to P3-F. These numbers were measured before the searches were made plain reads,
+and they still hold: the replay's local server had no model configured, so its searches
+made no model call either way, and its costs count only the headless run's own tokens.
+What the change removes is a cost the replay did not incur: up to four model calls per
+turn on a store with `MEMVARA_LLM` set, which would have been billed on that key and not
+counted in this table.
 
 **Open.** The hosted connection was tested against a fake transport, not against the live
 endpoint. `expires_at` is dropped on every store until stream P3-B ships it.
