@@ -68,12 +68,12 @@ from functools import partial
 from time import perf_counter
 from typing import (
     TYPE_CHECKING, Any, Callable, ClassVar, Collection, Iterable, Literal, NamedTuple,
-    Sequence, overload,
+    Sequence, TypeVar, overload,
 )
 
 import numpy as np
 
-from ..embed.base import Embedder
+from ..embed.base import Embedder, encode_queries
 from ..filters import SearchFilter
 from ..llm.base import Usage
 from ..rerank import Reranker, rerank
@@ -310,6 +310,14 @@ class UnjoinedStoreWarning(DegradedRetrievalWarning):
 #: so the amortised cost is under 10 microseconds a search on a store far larger than most.
 GATE_RECHECK_EVERY = 256
 
+#: Threads a retriever keeps for running one leg beside another; see
+#: `HybridRetriever._beside`. As many as the phrasings a rewritten read runs beside its
+#: own query, `MAX_QUERIES`. With the query and every phrasing in flight, a pass that finds
+#: the pool full runs its legs one after another, as every pass did before.
+_LEG_THREADS = MAX_QUERIES
+
+_T = TypeVar("_T")
+
 
 class HybridRetriever:
     """Scope-aware, time-travelling hybrid search over the claim store."""
@@ -534,6 +542,12 @@ class HybridRetriever:
         #: new connection per read. See `search`'s `query_rewrite`.
         self._phrasings: ThreadPoolExecutor | None = None
         self._phrasings_lock = threading.Lock()
+        #: Runs a stage's vector leg beside its lexical leg; see `_beside`. Made on first
+        #: use and kept, for the reason `_phrasings` is. `_legs_free` counts its idle
+        #: threads, so that a search finding none runs the leg itself instead of queueing.
+        self._legs: ThreadPoolExecutor | None = None
+        self._legs_lock = threading.Lock()
+        self._legs_free = threading.Semaphore(_LEG_THREADS)
         #: The query vectors of the pass running on this thread, so that the claim leg
         #: and the episode leg embed one query once. Per thread and per pass: nothing
         #: is kept between two searches.
@@ -736,9 +750,9 @@ class HybridRetriever:
             main = once(query, valid_at=valid_at, now=asked, ranked=ranked, observe=False)
             hits: list[Retrieved] = list(main)
         else:
-            # Every phrasing in one `encode` call: an embedder behind a network pays a
-            # round trip per call, not per text.
-            vectors = self.embedder.encode([query, *alternatives])
+            # Every phrasing in one call: an embedder behind a network pays a round trip
+            # per call, not per text.
+            vectors = encode_queries(self.embedder, [query, *alternatives])
             pending = [
                 self._phrasing_pool().submit(
                     once, q, valid_at=valid_at, now=asked, ranked=False, observe=False,
@@ -772,6 +786,50 @@ class HybridRetriever:
                 self._phrasings = ThreadPoolExecutor(
                     max_workers=MAX_QUERIES, thread_name_prefix="memvara-phrasing")
             return self._phrasings
+
+    def _beside(self, query: str, leg: Callable[[], _T]) -> Callable[[], _T]:
+        """Start the vector leg `leg` on another thread and return what collects its
+        result.
+
+        A stage's two legs read the store independently, and on a large scope each spends
+        most of its time in SQLite or in a matrix product, both of which release the GIL,
+        so running them together costs the longer of the two instead of their sum. The
+        leg runs here and now instead, which is exactly the order the stage used to run
+        in, when the store does not say it can serve two threads or when every pool
+        thread is busy, so that a saturated pool costs a search what it cost before
+        rather than a wait.
+
+        `query` is embedded here first, on the calling thread, and the pass's vectors go
+        with the leg, so the embedder is still called once per pass and only from the
+        thread that called `search()`: an embedder that is not safe to call from another
+        thread keeps working.
+
+        `_parallel_reads` is private to `SQLiteStore` and read here with a guarded
+        `getattr`, as `embed.fingerprint` reads `_vec`: an optimization the shipped store
+        opts into. A store without it keeps both legs on the calling thread.
+        """
+        can = getattr(self.store, "_parallel_reads", None)
+        if can is not None and can():
+            vector = self._query_vector(query)
+            if self._legs_free.acquire(blocking=False):
+                passing = getattr(self._pass, "vectors", None)
+                carried = passing if passing is not None else {query: vector}
+
+                def run() -> _T:
+                    self._pass.vectors = carried
+                    try:
+                        return leg()
+                    finally:
+                        self._pass.vectors = None
+                        self._legs_free.release()
+
+                with self._legs_lock:
+                    if self._legs is None:
+                        self._legs = ThreadPoolExecutor(
+                            max_workers=_LEG_THREADS, thread_name_prefix="memvara-leg")
+                    return self._legs.submit(run).result
+        done = leg()
+        return lambda: done
 
     @staticmethod
     def _fuse(main: SearchResults, others: Sequence[SearchResults],
@@ -845,7 +903,7 @@ class HybridRetriever:
         cache = getattr(self._pass, "vectors", None)
         if cache is not None and query in cache:
             return cache[query]
-        vec = np.asarray(self.embedder.encode([query])[0], dtype=np.float32)
+        vec = np.asarray(encode_queries(self.embedder, [query])[0], dtype=np.float32)
         if cache is not None:
             cache[query] = vec
         return vec
@@ -1133,10 +1191,11 @@ class HybridRetriever:
         `_graph_search`.
         """
         scopes = scope.ancestors()
-        vector_hits = self._vector_search(
-            query, scopes, limit, valid_at, known_at, states, where)
+        vector = self._beside(query, partial(
+            self._vector_search, query, scopes, limit, valid_at, known_at, states, where))
         lexical_hits, lexical_terms = self._lexical_search(
             query, scopes, limit, valid_at, known_at, states, where)
+        vector_hits = vector()
 
         fused = reciprocal_rank_fusion(
             {VECTOR: vector_hits, LEXICAL: lexical_hits},
@@ -1488,13 +1547,14 @@ class HybridRetriever:
         the design spec's "Where it sits", step 2). `None`, the default, is every other
         caller: a plain read.
         """
-        vector_hits = self._episode_vector_search(
-            query, scopes, limit, valid_at, known_at, where)
+        vector = self._beside(query, partial(
+            self._episode_vector_search, query, scopes, limit, valid_at, known_at, where))
         lexical_hits, terms = self._episode_lexical_search(
             query, scopes, limit, valid_at, known_at, where)
         anchor = anchor_for(valid_at, known_at, now)
         time_hits = self._episode_time_search(
             scopes, limit, valid_at, known_at, weights.temporal, anchor, where)
+        vector_hits = vector()
 
         fused = reciprocal_rank_fusion(
             {VECTOR: vector_hits, LEXICAL: lexical_hits, TEMPORAL: time_hits},

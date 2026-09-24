@@ -38,8 +38,10 @@ JSON, under a header that names the text as data rather than instruction.
   `memvara/rerank/cross.py` — `CrossEncoderReranker`; `memvara/rerank/lexical.py` —
   `CoverageReranker`; `memvara/rerank/stage.py` — `rerank()`.
 - Embedding: `memvara/embed/base.py` — the `Embedder` protocol, `HashingEmbedder` (the
-  offline default) and `CachedEmbedder`; `memvara/embed/local.py` — `LocalEmbedder`, whose
-  default model is `BAAI/bge-small-en-v1.5`; `memvara/embed/fingerprint.py` —
+  offline default), `CachedEmbedder`, and `encode_queries()`, which uses an embedder's own
+  `encode_queries` when it has one and `encode` otherwise; `memvara/embed/local.py` —
+  `LocalEmbedder`, whose default model is `BAAI/bge-small-en-v1.5`, and which puts bge's
+  query instruction before a search query and before nothing it stores; `memvara/embed/fingerprint.py` —
   `fingerprint_of()` and `EmbedderFingerprint`; `memvara/embed/calibration.py` —
   `calibration_of()`, the cosine thresholds measured for each embedding space, and
   `bench/embedder_calibration.py`, the measurement.
@@ -72,8 +74,19 @@ JSON, under a header that names the text as data rather than instruction.
    temporal question, a relational question, or open, and `intent.weights()` shifts the leg
    weights accordingly.
 2. The lexical leg runs SQLite FTS5 and reads its `bm25()` score, flipped so that higher is
-   better. The vector leg embeds the query and runs a cosine search. Each leg over-fetches
-   `k * candidate_multiplier` rows so that later filtering has something to work with.
+   better. The vector leg embeds the query as a query, through `encode_queries()`, and
+   runs a cosine search. Each leg over-fetches `k * candidate_multiplier` rows so that
+   later filtering has something to work with. Over turns, `SQLiteStore` ranks each
+   scope's turn list from memory until the next commit empties it (`_scope_turns`), and
+   asks SQL for the list only for a filtered read, one inside `batch()`, or one before
+   this process has seen any vector. Over claims it does the same for a read of the
+   present (`_scope_claims`), and also drops a list when the clock reaches the next
+   instant a claim of the tenant changes state; a read pinned to an instant asks SQL. The
+   lexical leg over turns ranks the matches inside the text index and reads only the best
+   of them. It runs the full query when those cannot prove the answer, and always for a
+   filtered read (`_episode_text_first`). On a store with a file, outside `batch()`, the
+   vector leg runs on a pool thread while the lexical leg runs on the calling thread, and
+   the query is embedded on the calling thread first (`HybridRetriever._beside`).
 3. `reciprocal_rank_fusion()` merges the ranked lists by position rather than by raw score,
    which is what lets two incomparable scoring scales be combined at all.
 4. `final_score()` re-scores the fused list using the claim's own properties: how fresh it
@@ -132,6 +145,9 @@ JSON, under a header that names the text as data rather than instruction.
   bounded retry when the pool came back full. The caller's metadata and file-path filter
   (`filters`, `filepath_prefix`, checked in `memvara/filters.py`) is a store parameter,
   `where`, on every capped store method, and the graph leg does not run when it is set.
+  One store read cuts before it filters: `_episode_text_first` ranks turns before the
+  scope and the time bound narrow them. Its statement reports the cut, and it answers only
+  when its rows prove that the cut changed nothing; otherwise the full query runs.
 - **A document's passages are episodes.** `add_document()` stores each chunk as a
   `role="system"` episode with `meta["document_id"]`, so the episode legs find passages
   from documents with no index of their own, and only when `include_episodes=True` is
@@ -146,6 +162,11 @@ JSON, under a header that names the text as data rather than instruction.
   a deployment adopts widely, needs its own row there, measured with
   `bench/embedder_calibration.py`, or those two checks read its cosines with `BASELINE`'s
   0.40 and 0.97, which were never measured in its space.
+- **A leg on another thread sees exactly what the calling thread would.** `_beside` hands
+  the vector leg to a pool thread only when `SQLiteStore._parallel_reads()` is true, which
+  it is not inside `batch()` or for a database with no file. The query is embedded on the
+  calling thread first, so the embedder is only called from the thread that searched.
+  `tests/test_hybrid.py` pins both, and that the results match the one-thread path.
 
 ## Read next
 

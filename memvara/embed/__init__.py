@@ -1,4 +1,4 @@
-from .base import CachedEmbedder, Embedder, HashingEmbedder
+from .base import CachedEmbedder, Embedder, HashingEmbedder, encode_queries
 from .fingerprint import (
     EmbedderFingerprint,
     embedder_name,
@@ -9,7 +9,7 @@ from .fingerprint import (
 )
 
 __all__ = [
-    "Embedder", "HashingEmbedder", "CachedEmbedder", "default_embedder",
+    "Embedder", "HashingEmbedder", "CachedEmbedder", "default_embedder", "encode_queries",
     "EmbedderFingerprint", "embedder_name", "fingerprint_of", "read_fingerprint",
     "write_fingerprint", "stored_dim",
 ]

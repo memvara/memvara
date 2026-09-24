@@ -9,6 +9,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **CI fails when a published LOCOMO retrieval figure moves.** A new job,
+  `retrieval regression`, runs `bench/locomo.py --score retrieval` with no flags and
+  compares each category's in-context rate, evidence recall and MRR with
+  `bench/expected/locomo_retrieval.json`. It fails on a move of more than 0.1 points overall
+  or 1.1 in a category, in either direction, so a change meant to move retrieval commits the
+  new figures (`bench/retrieval_regression.py --update`) with the documentation that quotes
+  them. The job fetches the 2.8 MB dataset from `snap-research/locomo` on every run, and a
+  release now waits on it too.
+
 ### Changed
 
 - **`recall()` shows the day each turn was said, and the part of a long turn the question
@@ -34,6 +45,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `memory_recall` on a server backed by the hosted service, return a block the service
   renders, so what they show depends on the service rather than on this release. The
   `include_episodes` description on `memory_recall` says so.
+- **A search over one large scope is faster, and returns the same results.** Four store
+  reads changed how SQLite reaches their rows, not which rows they return. The vector
+  leg's two candidate lists ask for each scope separately instead of through one `OR` of
+  all of them, and the turn list reads a new covering index, `ep_cover`, instead of the
+  table. Both lexical legs join the text index to its table on rowid instead of on the id
+  the index row stores, which meant reading each match's text back out of the index. The
+  vector index looks up its candidates' rows in one vectorised pass. With 199,499
+  LongMemEval-S turns and 100,000 claims in one scope, `search(k=12,
+  include_episodes=True)` went from a median of 738 ms to 470 ms, and from 1,071 ms to
+  557 ms at the 95th percentile (`bench/scale.py`, new; `docs/BENCHMARKS.md` has each
+  read). An existing store builds `ep_cover` the first time this version opens it, about
+  1.7 s and 10 MB per 190,000 turns. `docs/UPGRADING.md` has that, and the repair for a
+  store whose text index was copied out of line with its rows.
 - **`LocalEmbedder()` loads `BAAI/bge-small-en-v1.5`, and a store keeps the model that
   wrote it.** bge-small replaces `sentence-transformers/all-MiniLM-L6-v2` as the default
   local model. Over the 1,531 evidence-labelled LOCOMO questions with the local embedder,
@@ -54,12 +78,78 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   of the inventions the rescue exists to refuse. It scores two values one digit apart as
   high as 0.995, so at the merge's 0.97 it would fold them into one claim.
   `memvara/embed/calibration.py` holds the thresholds per embedding space: bge-small gets
-  0.65 and 0.99, MiniLM keeps 0.40 and merges at 0.985 (next entry), and every other
+  0.65 and 0.99, MiniLM keeps 0.40 and merges at 0.985 (below), and every other
   embedder keeps 0.40 and 0.97, so nothing moves for them.
   `Consolidator.merge_duplicates()` and `merge_pass()` take `threshold=None` by default,
   meaning the calibrated value; a threshold passed explicitly still decides.
   `bench/embedder_calibration.py` is the measurement, over pairs written for it, because
   the original eval behind 0.40 is not in this repository.
+- **The vector leg over turns ranks each scope's turns from memory.** `SQLiteStore` keeps,
+  per scope, the ids, times and matrix rows of the turns that have a vector, in the order
+  SQL returns them, and cuts that list at the instant asked about by binary search instead
+  of asking SQLite for the candidates and looking each one up. It returns the same turns in
+  the same order. With 199,499 turns and 100,000 claims in one scope,
+  `vector_search_episodes` went from a median of 220 ms to 54 ms and `search(k=12,
+  include_episodes=True)` from 450 ms to 284 ms, and with 189,520 turns and few claims
+  from 258 ms to 107 ms (`bench/scale.py`). Every commit empties the lists, and so does
+  another process's commit once a search notices it, so the first search after a write
+  rebuilds what it needs and costs about what every search did before: 471 ms against
+  450 to 472 ms with 100,000 claims, and 268 ms against 258 ms with few.
+  A filtered read and a read inside `batch()` still ask SQLite. The lists hold at most
+  1,000,000 turns across all scopes, at about 100 bytes a turn; `docs/UPGRADING.md` has
+  the memory this costs.
+- **A search runs each stage's vector leg beside its lexical leg.** On a `SQLiteStore` with
+  a file, outside `batch()`, the claim stage and the turn stage each hand their vector leg
+  to a pool thread and run their lexical leg themselves, so a stage costs the longer of its
+  two legs rather than their sum. Results are unchanged, and the query is still embedded
+  once, on the thread that called `search()`. With each scope's turns already kept in
+  memory, `search(k=12, include_episodes=True)` went from a median of 286 ms to 245 to
+  254 ms with 199,499 turns and 100,000 claims in one scope, and from 100 ms to 64 to
+  65 ms with 189,520 turns and few claims (`bench/scale.py`, two runs). Each retriever
+  keeps up to three threads for this, each with its own SQLite read connection, and runs
+  the leg itself when all three are busy; a `Store` of your own keeps both legs on one
+  thread.
+- **A search embeds its query the way bge expects a query.** `LocalEmbedder` puts the
+  instruction bge's English models are trained to see before a search query, "Represent
+  this sentence for searching relevant passages: ", before every query a search embeds,
+  and before nothing a store keeps. Over 100 LongMemEval-S questions, whose sessions run
+  to thousands of words, evidence recall at 5 rose from 67.5 to 72.2 and MRR from 45.4 to
+  48.4; over LOCOMO's 1,531, whose turns are a sentence or two, R@12 stayed at 68.2
+  (`bench/longmemeval.py --dataset s --shuffle 7 --limit 100` and `bench/locomo.py`, both
+  with `--score retrieval --embedder local`). Stored vectors do not change, so no store
+  needs re-embedding. The retriever and the agentic writer's search tool call the new
+  `memvara.embed.encode_queries(embedder, texts)`, which uses an embedder's own
+  `encode_queries` method when it has one and `encode` otherwise, and `CachedEmbedder`
+  passes it through, caching a text's query vector apart from its passage vector. A
+  result's score moves with the cosine, so check a `min_score` you tuned under bge-small;
+  `docs/UPGRADING.md` has how far.
+- **The lexical leg over turns reads only the turns it ranks best.** `lexical_search_episodes`
+  used to read the row of every turn that matched the query, for its scope, its time and the
+  tie-break, before it ranked them. It now ranks the matches inside the text index and reads
+  the best 100, or four for each row asked for when that is more. When those rows prove the
+  answer it returns them, the same turns in the same order as before, and otherwise it runs
+  the full query. With 189,520 turns and few claims in one scope, the leg went from a median
+  of 55 ms to 23 to 26 ms and from 149 ms to 70 to 74 ms at the 95th percentile, and
+  `search(k=12, include_episodes=True)` from 69 ms to 51 to 59 ms and from 186 ms to 88 to
+  103 ms (`bench/scale.py`, two runs). With 199,499 turns and 100,000 claims, a search's
+  median stays about 250 ms and its 95th percentile went from 384 ms to 287 to 303 ms. A
+  filtered read still runs the full query. A search whose scopes hold few of the store's
+  matching turns pays for both statements, so after one does, the next 16 searches of those
+  scopes run the full query directly; a read pinned to an instant counts its own.
+- **The vector leg over claims ranks each scope's claims from memory.** For a read of the
+  present, without a filter and outside `batch()`, `SQLiteStore` keeps per scope and per set
+  of states the ids and matrix rows of the claims the read can see, in the order SQL returns
+  them, instead of asking SQLite for the candidate list on every search. It returns the same
+  claims in the same order. A list is kept until the next commit, or until the clock reaches
+  the next instant at which a claim of the same tenant starts, ends, is retired, expires or
+  becomes known, which a new index, `cl_last_change`, finds with one seek. With 199,499
+  turns and 100,000 claims in one scope, `vector_search` went from a median of 166 to 168 ms
+  to 68 to 69 ms, and `search(k=12, include_episodes=True)` from 233 ms to 132 to 136 ms
+  (`bench/scale.py`, two runs each). The claim leg after a write costs what it did before. A
+  read pinned to an instant still asks SQLite. The lists hold at most 1,000,000 claims, at
+  about 90 bytes each. An existing store builds `cl_last_change` the first time this
+  version opens it, in about 0.1 s and 2.5 MB per 100,000 claims, and a claim write costs
+  about 5% more for it; `docs/UPGRADING.md` has both.
 - **The duplicate merge never folds two values whose numbers differ, and merges at 0.985
   under MiniLM.** In a slot that holds many values, "appointment on 2023-05-01" and
   "appointment on 2023-05-02" are both true, and a merge between them retired one. No

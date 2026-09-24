@@ -68,6 +68,114 @@ such as "left knee" and "right knee". To bring a value back, write it again with
 
 ---
 
+## A process that searches a large scope keeps that scope's claim list in memory, and claim writes maintain one more index
+
+### What changed
+
+The vector leg over claims keeps, per scope and per set of states, the ids and matrix rows
+of the claims a read of the present can see, and ranks those instead of asking SQLite for
+the list on every search. It returns the same claims. A list is kept until the next commit,
+or until the clock reaches the next instant at which a claim of the same tenant starts,
+ends, is retired, expires or becomes known, whichever comes first. Each claim costs about
+90 bytes, so 100,000 claims in one scope hold 8.9 MB, and building them peaks at 14.5 MB.
+The lists across all scopes are capped at 1,000,000 claims, about 90 MB, and the least
+recently used scope goes first.
+
+The store finds that next instant through a new index on the claims table,
+`cl_last_change`, created on open like the store's other late indexes. A store written by
+an earlier version builds it the first time this version opens it, in about 0.1 s, and the
+file grows by about 2.5 MB, per 100,000 claims. Every claim write maintains it, which
+costs about 5%: +3.5 µs per claim written inside `batch()` and +24 µs per claim committed
+on its own, over 20,000 claims. An earlier version that opens the file afterwards keeps
+the index and maintains it too.
+
+### Who this changes, and in which direction
+
+**If you run memvara where memory is tight and one scope holds hundreds of thousands of
+claims**, budget about 90 bytes per claim per process on top of what it used before.
+
+**If claim writes are your bottleneck**, expect them about 5% slower.
+
+Nothing else changes. A read pinned to an instant, a filtered search, a search inside
+`batch()` and a store with no vectors yet read exactly as before.
+
+---
+
+## A search embeds its query the way bge expects a query
+
+### What changed
+
+`LocalEmbedder` puts the instruction bge's English models are trained to see before a
+search query, `"Represent this sentence for searching relevant passages: "`, before each
+query a search embeds, when its model is one of them: `BAAI/bge-small-en-v1.5`, the
+default, or its base or large sibling. It embeds what a store keeps exactly as before, so
+no store needs re-embedding. Every other model, `HashingEmbedder`, and an embedder of your
+own embed a query as they always did.
+
+### Who this changes, and in which direction
+
+**If you pass `min_score` to `search()` or `recall()` with bge-small**, check it again. A
+result's score reads the cosine between the query and the row, and the instruction lowers
+that cosine by about 0.03: over LOCOMO's questions, the median cosine to the best turn went
+from 0.746 to 0.713, so a threshold that used to pass a row may no longer.
+`episode_score_floor` is a fraction of the best result's score, so it moves less.
+
+**If you wrap `LocalEmbedder` in an embedder of your own**, give the wrapper an
+`encode_queries` method that calls `memvara.embed.encode_queries` on the embedder it
+wraps, as `CachedEmbedder` does. Without one, a search through the wrapper embeds its
+query through `encode`, without the instruction, and finds what it found before.
+
+---
+
+## A search on a store with a file uses up to three more threads
+
+### What changed
+
+`HybridRetriever` runs each stage's vector leg on a pool thread beside its lexical leg,
+when the store is a `SQLiteStore` with a file and the calling thread is not inside
+`batch()`. The pool is made on the first such search and kept: up to three threads per
+retriever, and so per `Memvara`, each holding its own SQLite read connection, as the
+threads a rewritten read uses already do. Results are unchanged, and the embedder is still
+called only from the thread that called `search()`.
+
+### Who this changes, and in which direction
+
+**If you count threads or open file handles per process**, allow three more of each per
+`Memvara` that searches a file store. `close()` closes the connections.
+
+**If you pass your own `Store`**, nothing changes: a store without `SQLiteStore`'s private
+`_parallel_reads` keeps both legs on the calling thread.
+
+---
+
+## A process that searches a large scope keeps that scope's turn list in memory
+
+### What changed
+
+The vector leg over turns keeps, per scope, the ids, times and matrix rows of the turns
+that have a vector, and ranks those instead of asking SQLite for the list on every search.
+It returns the same turns. Each turn costs about 100 bytes, so 199,499 turns in one scope
+hold 19.3 MB, and building them peaks at about twice that. The lists across all scopes are
+capped at 1,000,000 turns, about 100 MB, and the least recently used scope goes first. Every
+commit empties them, so the first search after a write rebuilds the list it needs and costs
+a little more than a search did before: over 199,499 turns, 238 ms for the vector leg
+against 220 to 230 ms.
+
+### Who this changes, and in which direction
+
+**If you run memvara where memory is tight and one scope holds hundreds of thousands of
+turns**, budget about 100 bytes per turn per process on top of what it used before. A
+store whose scopes hold a few thousand turns each will not notice.
+
+**If you count open file handles per process**, allow one more SQLite connection per store
+that searches turns. The store uses it only to ask whether another connection has
+committed, and `close()` closes it.
+
+Nothing else changes. A filtered search, a search inside `batch()` and a store with no
+vectors yet read exactly as before.
+
+---
+
 ## `LocalEmbedder()` loads bge-small-en-v1.5
 
 ### What changed
@@ -77,7 +185,8 @@ such as "left knee" and "right knee". To bring a value back, write it again with
 dimension check can tell their vectors apart; the name in the store's fingerprint,
 `<db>.embedder.json`, is what does. The grounding rescue and the duplicate merge read
 bge-small's cosines with thresholds measured for it, 0.65 and 0.99. MiniLM keeps 0.40 and
-merges at 0.985 (the entry above), and every other embedder keeps 0.40 and 0.97.
+merges at 0.985 (see the consolidation entry above), and every other embedder keeps 0.40
+and 0.97.
 
 ### Who this changes, and in which direction
 
@@ -103,6 +212,44 @@ threshold you pass is used as it is.
 
 **If ingest time matters**, bge-small encodes at about half MiniLM's speed on a CPU: 192 s
 against 98 s for LOCOMO's 5,882 turns, and 12 ms more for the median read.
+
+---
+
+## The first open of an existing store builds one index
+
+### What changed
+
+`SQLiteStore` has a new index on the episodes table, `ep_cover`, which the vector leg's
+turn list reads instead of the table. It is created on open, like the store's other late
+indexes, so a store written by an earlier version builds it the first time this version
+opens it. That open is slower once, by about 1.7 s per 190,000 turns, and the file grows
+by about 10 MB per 190,000 turns. Every open after that is unchanged. An earlier version
+that opens the file afterwards keeps the index and uses it.
+
+The lexical legs now join the text index to its table on rowid. That is only correct while
+each text index row sits at the rowid of the row it indexes, which every write in this
+library keeps true, and which `VACUUM`, `VACUUM INTO` and SQLite's backup API preserve.
+
+### Who this changes, and in which direction
+
+**If you open a large store where a pause matters**, open it once after upgrading, at a
+time a slow open costs nothing: `SQLiteStore(path).close()` builds the index.
+
+**If you have copied a store by re-inserting its rows into a new file**, such as a SQL
+dump replayed into an empty database, the text index may no longer line up with the rows.
+Erasure already relied on that, and now lexical search does too: such a store can miss a
+lexical match or return another row in its place. Rebuild both text indexes from their
+tables with the store closed:
+
+```sql
+DELETE FROM claims_fts;
+INSERT INTO claims_fts (rowid, claim_id, text) SELECT rowid, id, text FROM claims;
+DELETE FROM episodes_fts;
+INSERT INTO episodes_fts (rowid, episode_id, content) SELECT rowid, id, content FROM episodes;
+```
+
+A store that has only ever been written by this library, and copied as a file, with
+`VACUUM INTO` or with the backup API, needs nothing.
 
 ---
 

@@ -295,6 +295,27 @@ def test_search_below_the_dense_threshold_still_finds_the_best_row():
     idx.close()
 
 
+def test_a_candidate_with_no_vector_is_skipped_without_moving_the_others():
+    """The candidate list is every row the scope can see, and a row written since the
+    last embedding pass has no vector yet. The rows are looked up in one vectorised pass
+    and the ids without one are filtered out after it, so the failure to guard against is
+    an id paired with its neighbour's row. Each hit is checked against its own vector."""
+    rng = np.random.default_rng(5)
+    idx = _VecIndex()
+    for i in range(0, 60, 2):
+        idx.add(f"c{i}", rng.standard_normal(16).astype(np.float32))
+    allowed = [f"c{i}" for i in range(60)]           # the odd ones have no vector
+    q = rng.standard_normal(16).astype(np.float32)
+    unit = q / np.linalg.norm(q)
+
+    got = idx.search(q, allowed, 60)
+    assert sorted(h[0] for h in got) == sorted(allowed[0::2])
+    for cid, score in got:
+        assert score == pytest.approx(float(idx._mat[idx._row[cid]] @ unit), abs=1e-6)
+    assert idx.search(q, allowed[1::2], 10) == [], "none of these has a vector"
+    idx.close()
+
+
 # --- Cross-process coherence ------------------------------------------------
 
 def test_a_vector_written_by_another_worker_becomes_visible(tmp_path):

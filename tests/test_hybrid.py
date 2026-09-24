@@ -9,6 +9,7 @@ explicitly - nothing here sleeps or patches a clock.
 from __future__ import annotations
 
 import re
+import threading
 import warnings
 from datetime import datetime, timedelta, timezone
 
@@ -2275,3 +2276,181 @@ def test_the_bounds_of_the_range_are_allowed(store, embedder) -> None:
     for floor in (0.0, 1.0):
         assert HybridRetriever(store, embedder, PredicateRegistry(),
                                episode_score_floor=floor).episode_score_floor == floor
+
+
+# ===========================================================================
+# A stage's vector leg runs beside its lexical leg
+# ===========================================================================
+
+_LEG_READS = ("vector_search", "lexical_search", "vector_search_episodes",
+              "lexical_search_episodes")
+
+
+def _threads_of_reads(store: SQLiteStore, monkeypatch) -> dict[str, set[str]]:
+    """Which threads ran each read a stage's two legs make, filled in as they run."""
+    seen: dict[str, set[str]] = {}
+    for name in _LEG_READS:
+        real = getattr(store, name)
+
+        def spy(*a, _real=real, _name=name, **kw):
+            seen.setdefault(_name, set()).add(threading.current_thread().name)
+            return _real(*a, **kw)
+
+        monkeypatch.setattr(store, name, spy)
+    return seen
+
+
+def _on_file(tmp_path, embedder) -> tuple[SQLiteStore, HybridRetriever]:
+    store = SQLiteStore(str(tmp_path / "legs.db"))
+    add(store, embedder, "kafka pipeline ordering guarantees", EP_SCOPE)
+    turn(store, embedder, "we moved the kafka pipeline to a new cluster", EP_SCOPE)
+    turn(store, embedder, "lunch was a sandwich", EP_SCOPE)
+    return store, HybridRetriever(store, embedder, PredicateRegistry())
+
+
+def _rows(results) -> list[tuple[str, str, float]]:
+    return [(kind_of(r), r.episode.id if isinstance(r, EpisodeResult) else r.claim.id,
+             r.score) for r in results]
+
+
+def test_on_a_file_each_stage_runs_its_vector_leg_on_another_thread(
+        tmp_path, embedder, monkeypatch) -> None:
+    """Both stages hand their vector leg to a pool thread and run the lexical leg
+    themselves, and the search returns exactly what it returns on one thread."""
+    store, r = _on_file(tmp_path, embedder)
+    monkeypatch.setattr(store, "_parallel_reads", lambda: False)
+    alone = _rows(r.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True,
+                           now=T2))
+    monkeypatch.undo()
+    seen = _threads_of_reads(store, monkeypatch)
+    together = _rows(r.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True,
+                              now=T2))
+    assert together == alone and len(alone) == 3
+    here = threading.current_thread().name
+    assert seen["lexical_search"] == seen["lexical_search_episodes"] == {here}
+    for leg in ("vector_search", "vector_search_episodes"):
+        assert len(seen[leg]) == 1 and next(iter(seen[leg])).startswith("memvara-leg")
+    store.close()
+
+
+def test_inside_a_batch_every_leg_reads_on_the_calling_thread(tmp_path, embedder) -> None:
+    """Inside `batch()` the calling thread reads its own uncommitted rows, and no other
+    thread's connection can see them. A turn written in the batch must reach the
+    vector leg, not only the lexical one."""
+    store, r = _on_file(tmp_path, embedder)
+    r.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True)
+    with store.batch():
+        ep = turn(store, embedder, "zeppelin hangar inventory", EP_SCOPE)
+        hits = r.search("zeppelin hangar inventory", EP_SCOPE, k=5, include_episodes=True)
+        found = [x for x in hits if isinstance(x, EpisodeResult) and x.episode.id == ep.id]
+        assert found and found[0].explain.vector_rank is not None
+    store.close()
+
+
+def test_a_database_with_no_file_runs_every_leg_on_the_calling_thread(
+        store, embedder, monkeypatch) -> None:
+    """One connection serves every read, so a second thread would only wait for it."""
+    add(store, embedder, "kafka pipeline ordering guarantees", EP_SCOPE)
+    turn(store, embedder, "we moved the kafka pipeline to a new cluster", EP_SCOPE)
+    seen = _threads_of_reads(store, monkeypatch)
+    HybridRetriever(store, embedder, PredicateRegistry()).search(
+        "kafka pipeline", EP_SCOPE, k=5, include_episodes=True)
+    assert set(seen) == set(_LEG_READS)
+    assert all(threads == {threading.current_thread().name} for threads in seen.values())
+
+
+def test_a_search_that_finds_every_leg_thread_busy_runs_the_leg_itself(
+        tmp_path, embedder, monkeypatch) -> None:
+    """A queued leg would make the search wait for somebody else's; running it here
+    costs what the search cost before the legs ran together."""
+    store, r = _on_file(tmp_path, embedder)
+    seen = _threads_of_reads(store, monkeypatch)
+    for _ in range(hybrid_mod._LEG_THREADS):
+        assert r._legs_free.acquire(blocking=False)
+    # On a thread of its own, so that a search that waits for a leg thread fails this
+    # test instead of hanging the suite.
+    searching = threading.Thread(target=r.search, args=("kafka pipeline", EP_SCOPE),
+                                 kwargs={"k": 5, "include_episodes": True}, daemon=True)
+    searching.start()
+    searching.join(timeout=30)
+    assert not searching.is_alive(), "the search waited for a busy leg thread"
+    for _ in range(hybrid_mod._LEG_THREADS):
+        r._legs_free.release()
+    assert all(threads == {searching.name} for threads in seen.values())
+    store.close()
+
+
+def test_the_query_is_embedded_once_and_on_the_thread_that_searched(tmp_path) -> None:
+    """The vector legs run on a pool thread, and the embedder is still called once per
+    pass and only from the thread that called `search()`, as it always was: an embedder
+    that cannot be called from another thread keeps working."""
+
+    class Counting(HashingEmbedder):
+        def __init__(self) -> None:
+            super().__init__(dim=512)
+            self.calls: list[tuple[str, list[str]]] = []
+
+        def encode(self, texts):
+            self.calls.append((threading.current_thread().name, list(texts)))
+            return super().encode(texts)
+
+    emb = Counting()
+    store, r = _on_file(tmp_path, emb)
+    emb.calls.clear()
+    r.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True)
+    assert emb.calls == [(threading.current_thread().name, ["kafka pipeline"])]
+    store.close()
+
+
+def test_a_leg_that_fails_on_its_thread_fails_the_search_and_frees_the_thread(
+        tmp_path, embedder, monkeypatch) -> None:
+    store, r = _on_file(tmp_path, embedder)
+    real = store.vector_search
+
+    def down(*a, **kw):
+        raise RuntimeError("vector leg down")
+
+    monkeypatch.setattr(store, "vector_search", down)
+    with pytest.raises(RuntimeError, match="vector leg down"):
+        r.search("kafka pipeline", EP_SCOPE, k=5, include_episodes=True)
+    monkeypatch.setattr(store, "vector_search", real)
+    for _ in range(hybrid_mod._LEG_THREADS):
+        assert r._legs_free.acquire(blocking=False)
+    store.close()
+
+
+# ===========================================================================
+# The query is embedded as a query
+# ===========================================================================
+
+
+class _QueryForm(HashingEmbedder):
+    """Embeds every query as the vector of one fixed text, so a leg that ranked by the
+    query's passage form would rank differently."""
+
+    def __init__(self, as_if: str) -> None:
+        super().__init__(dim=512)
+        self.as_if = as_if
+        self.queries: list[list[str]] = []
+
+    def encode_queries(self, texts):
+        self.queries.append(list(texts))
+        return self.encode([self.as_if] * len(texts))
+
+
+def test_both_vector_legs_rank_by_the_vector_encode_queries_gives(store) -> None:
+    """A model that embeds a query differently from a passage has to be asked for the
+    query's form, once per pass, and both legs have to rank by it: here that form is the
+    lunch text's vector, where the query's own words are the kafka rows'."""
+    emb = _QueryForm(as_if="lunch was a sandwich")
+    add(store, emb, "kafka pipeline ordering guarantees", EP_SCOPE)
+    lunch = add(store, emb, "lunch was a sandwich", EP_SCOPE)
+    turn(store, emb, "we moved the kafka pipeline to a new cluster", EP_SCOPE)
+    eaten = turn(store, emb, "lunch was a sandwich", EP_SCOPE)
+    hits = HybridRetriever(store, emb, PredicateRegistry()).search(
+        "kafka pipeline", EP_SCOPE, k=10, include_episodes=True)
+    assert emb.queries == [["kafka pipeline"]]
+    claims = [r for r in hits if not isinstance(r, EpisodeResult)]
+    turns = [r for r in hits if isinstance(r, EpisodeResult)]
+    assert min(claims, key=lambda r: r.explain.vector_rank).claim.id == lunch.id
+    assert min(turns, key=lambda r: r.explain.vector_rank).episode.id == eaten.id

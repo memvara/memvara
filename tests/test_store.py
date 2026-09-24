@@ -1,20 +1,24 @@
 """SQLite store: persistence, the indexed conflict lookup, hybrid search primitives,
 and the bitemporal SQL that makes time travel work."""
 
+import re
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
 
 from memvara.embed import HashingEmbedder
+from memvara.filters import SearchFilter
 from memvara.store import (STATES, SQLStore, SQLiteStore, live_predicate,
                            state_predicate, stored_state_predicate,
                            unexpired_predicate)
+from memvara.store import sqlite as sqlite_store
 from memvara.store.base import Store
 from memvara.store.sqlite import _WALKABLE as _WALKABLE_SQL
-from memvara.store.sqlite import SCHEMA_VERSION
+from memvara.store.sqlite import SCHEMA_VERSION, _fts_query
 from memvara.types import Claim, Derivation, Episode, MemoryType, Scope
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -300,6 +304,88 @@ def test_include_invalidated_reveals_retired_claims(store):
     )[0][0] == a.id
 
 
+def _churn(store) -> None:
+    """Every write that rewrites, frees or reuses a rowid, on both indexed tables."""
+    claims = [put(store, predicate=f"p{i}", object=f"kayak trip {'river ' * (i % 4)}{i}")
+              for i in range(12)]
+    claims[3].object, claims[3].text = "canoe", "user p3 canoe"
+    store.put_claim(claims[3])                        # text rewritten in place
+    store.put_claim(claims[4])                        # unchanged, index left alone
+    store.reinforce(claims[5].id, salience=1.5, observation_count=2, sources=["ep_1"])
+    store.erase_claim(claims[7].id)                   # a gap in the middle
+    store.erase_claim(claims[-1].id)                  # frees the highest rowid,
+    put(store, predicate="late", object="kayak trip river late")   # which this reuses
+    turns = [turn(store, content=f"kayak trip {'river ' * (i % 4)}{i}") for i in range(12)]
+    store.add_episode(turns[4])                       # added again
+    turns[5].content = "canoe trip"
+    store.add_episode(turns[5])                       # edited
+    store.erase_episode(turns[7].id)
+    store.erase_episode(turns[-1].id)
+    turn(store, content="kayak trip river late")
+
+
+def test_a_lexical_hit_never_carries_another_rows_score(store):
+    """Both lexical legs join the text index to its table on rowid rather than on the id
+    the index row stores, because reading that id back out of the index cost more than
+    the rest of the query. That is only correct while each index row sits at its own
+    row's rowid. If the two ever parted, a claim would come back scored on another
+    claim's text, and nothing downstream could tell. So after every write that moves or
+    frees a rowid, each leg is checked against the index's own record of which row each
+    entry indexes: the same rows, with the same scores."""
+    _churn(store)
+    query = "kayak river canoe"
+    for search, fts, column in ((store.lexical_search, "claims_fts", "claim_id"),
+                                (store.lexical_search_episodes, "episodes_fts",
+                                 "episode_id")):
+        truth = {r[0]: -r[1] for r in store._db.execute(
+            f"SELECT {column}, bm25({fts}) FROM {fts} WHERE {fts} MATCH ?",
+            (_fts_query(query),))}
+        assert len(truth) > 10
+        assert dict(search(query, [SCOPE], limit=100)) == pytest.approx(truth)
+
+
+def _misfiled(path: str) -> dict[str, tuple[int, int]]:
+    """Per indexed table: index rows not at the rowid of the row they name, and rows
+    with no index row at their rowid."""
+    db = sqlite3.connect(path)
+    try:
+        counts = {}
+        for table, fts, column in (("claims", "claims_fts", "claim_id"),
+                                   ("episodes", "episodes_fts", "episode_id")):
+            astray = db.execute(
+                f"SELECT COUNT(*) FROM {fts} f LEFT JOIN {table} t "
+                f"ON t.rowid = f.rowid WHERE t.id IS NOT f.{column}").fetchone()[0]
+            unindexed = db.execute(
+                f"SELECT COUNT(*) FROM {table} t LEFT JOIN {fts} f "
+                f"ON f.rowid = t.rowid WHERE f.rowid IS NULL").fetchone()[0]
+            counts[table] = (astray, unindexed)
+        return counts
+    finally:
+        db.close()
+
+
+def test_every_index_row_sits_at_its_own_rows_rowid_in_every_copy(tmp_path):
+    """The invariant the join above rests on, checked directly: each index row is at the
+    rowid of the row it names, and every row has one. Then again after a `VACUUM`, which
+    SQLite documents as free to renumber the rowids of a table without an INTEGER
+    PRIMARY KEY, and in a `VACUUM INTO` copy. Both keep them for a table that has an
+    index, as these two do, and this test is what says so if that ever changes. Erasure
+    finds a row's index entry by the same rowid, so it would break too."""
+    path, copy = str(tmp_path / "s.db"), str(tmp_path / "copy.db")
+    with SQLiteStore(path) as s:
+        _churn(s)
+    aligned = {"claims": (0, 0), "episodes": (0, 0)}
+    assert _misfiled(path) == aligned
+    db = sqlite3.connect(path)
+    try:
+        db.execute("VACUUM")
+        db.execute("VACUUM INTO ?", (copy,))
+    finally:
+        db.close()
+    assert _misfiled(path) == aligned, "after VACUUM"
+    assert _misfiled(copy) == aligned, "in a VACUUM INTO copy"
+
+
 # --- Vector search ----------------------------------------------------------
 
 def test_vector_search_ranks_by_cosine(store, emb):
@@ -555,6 +641,46 @@ def test_a_future_turn_is_invisible_to_a_present_query(store):
     assert store.lexical_search_episodes("kafka", [SCOPE], limit=10) == []
 
 
+def test_the_turn_candidate_list_is_one_covering_index_range_per_scope(store):
+    """Every turn a scope can see is the vector leg's candidate list. `ep_cover` holds
+    every column that query reads, so no turn's row is read: 244 ms to 102 ms for the
+    189,520 LongMemEval-S turns in one scope. Asking once per scope, rather than through
+    the `OR` the capped reads use, also drops the temporary set SQLite keeps to return a
+    row two terms of an `OR` both match only once: 102 ms to 84 ms."""
+    turn(store)
+    statements: list[str] = []
+    store._db.set_trace_callback(statements.append)
+    try:
+        store.episode_candidate_ids(MINE.ancestors())
+    finally:
+        store._db.set_trace_callback(None)
+    (sql,) = [s for s in statements if s.startswith("SELECT id FROM episodes")]
+    # The trace fills in the bound values where SQLite can expand them. A marker left
+    # over is bound to NULL, which SQLite plans as the same `IS` lookup.
+    plan = [r[3] for r in store._db.execute("EXPLAIN QUERY PLAN " + sql,
+                                            [None] * sql.count("?"))]
+    reads = [step for step in plan if step.startswith(("SCAN", "SEARCH"))]
+    assert not any("MULTI-INDEX OR" in step for step in plan), plan
+    assert len(reads) == len(MINE.ancestors()), plan
+    assert all("COVERING INDEX ep_cover" in step for step in reads), plan
+
+
+def test_a_store_written_before_the_covering_index_gains_it_when_opened(tmp_path):
+    """`ep_cover` is created with the other late indexes on every open, so a store an
+    older build wrote gets it the first time this one opens it (1.7 s and 10 MB for
+    190,000 turns, once), not only on a schema migration it may never have. `ep_scope`
+    stays, because the older build creates it again on every open."""
+    path = str(tmp_path / "s.db")
+    with SQLiteStore(path) as s:
+        turn(s)
+        s._db.execute("DROP INDEX ep_cover")
+        s._db.commit()
+    with SQLiteStore(path) as s:
+        names = {r[0] for r in s._db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert {"ep_cover", "ep_scope"} <= names
+
+
 # --- Scoped episode listing --------------------------------------------------
 #
 # `iter_episodes` was the only listing, so a caller wanting one scope's turns walked the
@@ -637,6 +763,466 @@ def test_candidate_ids_matches_scopes_exactly(store):
     b = put(store, scope=Scope("acme", "alice", "bot", "s1"), predicate="likes")
     assert set(store.candidate_ids([Scope("acme", "alice")])) == {a.id}
     assert set(store.candidate_ids([Scope("acme", "alice"), Scope("acme", "alice", "bot", "s1")])) == {a.id, b.id}
+
+
+def test_the_candidate_lists_return_a_row_exactly_when_its_scope_is_asked_for(store):
+    """The candidate lists build one `SELECT` per scope instead of going through
+    `_scope_clause`, so they are checked against what that clause means, over every
+    shape a scope can take: each level below the tenant set or unset, in two tenants,
+    with a claim and a turn at each, asked from each shape's own ancestors. An unset
+    level is NULL in the table, so this is also where `=` written for `IS` would show,
+    as rows that never come back."""
+    shapes = [Scope(t, u, a, s, project=p)
+              for t in ("acme", "globex") for u in (None, "alice")
+              for p in (None, "gh/o/a") for a in (None, "bot") for s in (None, "s1")]
+    home = {}
+    for shape in shapes:
+        home[put(store, scope=shape).id] = shape
+        home[turn(store, scope=shape).id] = shape
+    for shape in shapes:
+        asked = shape.ancestors()
+        got = set(store.candidate_ids(asked)) | set(store.episode_candidate_ids(asked))
+        assert got == {i for i, at in home.items() if at in asked}, shape
+
+
+def test_a_scope_listed_twice_returns_its_rows_once(store):
+    """One `SELECT` per scope is joined by `UNION ALL`, where the scopes used to be
+    `OR`ed together. An `OR` returns a row once however many of its terms match it; two
+    identical branches of a `UNION ALL` return it twice, and the vector leg would rank
+    it twice. So a repeated scope is dropped before the SQL is built, including one
+    that is equal to another without being the same object."""
+    c = put(store)
+    ep = turn(store)
+    assert store.candidate_ids([SCOPE, Scope("acme", "alice")]) == [c.id]
+    assert store.episode_candidate_ids([SCOPE, Scope("acme", "alice")]) == [ep.id]
+
+
+def test_reads_run_on_two_threads_only_where_each_thread_has_its_own_connection(tmp_path):
+    """Another thread's read sees committed rows through its own connection. Inside
+    `batch()` this thread's rows are not committed yet, and a database with no file has
+    one connection, which a second thread would wait on for the whole batch."""
+    file = SQLiteStore(str(tmp_path / "p.db"))
+    assert file._parallel_reads()
+    with file.batch():
+        assert not file._parallel_reads()
+    assert file._parallel_reads()
+    assert not SQLiteStore(":memory:")._parallel_reads()
+    file.close()
+
+
+# --- The lexical leg over turns, ranked by the text index first ------------------------
+
+def _full_lexical(store, monkeypatch, *args, **kw):
+    """What `lexical_search_episodes` returned before it ranked the text index first: the
+    full query, which joins every match to its turn."""
+    with monkeypatch.context() as m:
+        m.setattr(store, "_episode_text_first", lambda *a, **k: None)
+        return store.lexical_search_episodes(*args, **kw)
+
+
+def _recording(store, monkeypatch):
+    """A list that every answer `_episode_text_first` gives is appended to, None for a
+    search it left to the full query."""
+    answers = []
+    real = store._episode_text_first
+
+    def record(*args, **kw):
+        answers.append(real(*args, **kw))
+        return answers[-1]
+
+    monkeypatch.setattr(store, "_episode_text_first", record)
+    return answers
+
+
+_WORDS = ("kafka", "pipeline", "lunch", "berlin", "deploy", "ordering", "otter", "sunset")
+
+
+def test_the_text_first_lexical_leg_returns_what_the_full_query_returns(store, monkeypatch):
+    """The text-first form stands in for the full query only where it can prove the
+    answer, so it is checked against the full query: the same turns, in the same order,
+    with the same scores, for every shape of scope asked from its own ancestors, at
+    instants before, among and after the turns, and at every limit, none included. Every
+    third turn repeats one text, so many scores tie and the tie-break has to agree too.
+
+    The sweep means something only if it reaches all three outcomes: a ranking that held
+    every match, a ranking cut short that still proved its answer, and one that could not.
+    A ranking that held every match must never fail to answer."""
+    shapes = [Scope("acme", u, a, s) for u in (None, "alice") for a in (None, "bot")
+              for s in (None, "s1")]
+    for i in range(300):
+        words = " ".join(_WORDS[(i + j) % len(_WORDS)] for j in range(1 + i % 5))
+        turn(store, scope=shapes[i % len(shapes)],
+             content="kafka pipeline" if i % 3 == 0 else words,
+             ts=datetime(2024, 1 + i % 12, 1 + i % 28, tzinfo=timezone.utc))
+    queries = ("kafka", "kafka pipeline", "lunch berlin", "deploy ordering", "zebra")
+    matches = {q: store._db.execute(
+        "SELECT count(*) FROM episodes_fts WHERE episodes_fts MATCH ?",
+        (_fts_query(q),)).fetchone()[0] for q in queries}
+    instants = [{}, {"valid_at": T0, "known_at": T0}, {"valid_at": TMID, "known_at": TMID},
+                {"valid_at": T1, "known_at": TMID}, {"valid_at": TMID, "known_at": T1}]
+    answers = _recording(store, monkeypatch)
+    outcomes = set()
+    for shape in shapes:
+        asked = shape.ancestors()
+        for at in instants:
+            for q in queries:
+                for limit in (1, 5, 30, 1000, 0, -1):
+                    store._text_first_skips.clear()
+                    before = len(answers)
+                    got = store.lexical_search_episodes(q, asked, limit, **at)
+                    want = _full_lexical(store, monkeypatch, q, asked, limit, **at)
+                    assert got == want, (shape, at, q, limit)
+                    if len(answers) > before:
+                        top = max(limit * sqlite_store._TEXT_FIRST_WIDEN,
+                                  sqlite_store._TEXT_FIRST_FLOOR)
+                        outcomes.add((matches[q] >= top, answers[-1] is not None))
+    assert outcomes == {(False, True), (True, True), (True, False)}
+
+
+def test_a_tie_at_the_edge_of_the_ranked_rows_sends_the_leg_to_the_full_query(
+        store, monkeypatch):
+    """Turns with one text in one scope score alike, so the ranking is cut inside a tie
+    and nothing scores better than its worst row. Which of the tied turns made the cut
+    was SQLite's choice rather than the tie-break's, so the leg cannot prove its answer
+    from them and asks the full query, which orders a tie by `hash`, then `id`."""
+    eps = [turn(store, content="kafka pipeline") for _ in range(300)]
+    answers = _recording(store, monkeypatch)
+    got = store.lexical_search_episodes("kafka", [SCOPE], 10)
+    assert answers == [None]
+    assert [h[0] for h in got] == sorted(ep.id for ep in eps)[:10]
+
+
+def test_the_edge_is_the_worst_ranked_match_whoever_it_belongs_to(store, monkeypatch):
+    """The ranked rows prove whatever scores better than the worst of them, and that row
+    need not be one the search may see. This scope's five turns are the best five matches
+    and another user's turns fill the rest of the ranking, so all five are proved, the
+    fifth included, although it is the worst of this scope's."""
+    mine = [turn(store, content="kafka" + " word" * i).id for i in range(5)]
+    for i in range(150):
+        turn(store, content="kafka" + " word" * (5 + i), scope=Scope("acme", "bob"))
+    answers = _recording(store, monkeypatch)
+    hits = store.lexical_search_episodes("kafka", [SCOPE], 5)
+    assert [h[0] for h in hits] == mine
+    assert answers == [hits]
+
+
+def test_a_search_matching_nothing_it_may_see_is_answered_by_the_ranking(
+        store, monkeypatch):
+    """Every match was ranked and none is in the scopes asked, so the answer is proved
+    empty: no full query, and no backing off. A word no turn contains is the same case."""
+    turn(store, content="kafka", scope=Scope("acme", "bob"))
+    answers = _recording(store, monkeypatch)
+    assert store.lexical_search_episodes("kafka", [SCOPE], 5) == []
+    assert store.lexical_search_episodes("zebra", [SCOPE], 5) == []
+    assert answers == [[], []]
+    assert store._text_first_skips == {}
+
+
+def test_a_scope_holding_few_of_the_matches_backs_off_the_text_first_form(
+        store, monkeypatch):
+    """Another user's short turns take every ranked row, so the ranking holds none of
+    this scope's turns and proves nothing. That search and the next `_TEXT_FIRST_BACKOFF`
+    go to the full query, and the one after tries the text-first form again."""
+    for _ in range(200):
+        turn(store, content="kafka", scope=Scope("acme", "bob"))
+    wanted = [turn(store, content="kafka pipeline" + " word" * i).id for i in range(3)]
+    answers = _recording(store, monkeypatch)
+    left = []
+    for _ in range(sqlite_store._TEXT_FIRST_BACKOFF + 2):
+        assert [h[0] for h in store.lexical_search_episodes("kafka", [SCOPE], 5)] == wanted
+        left.append(store._text_first_skips.get(((SCOPE,), False), 0))
+    backoff = sqlite_store._TEXT_FIRST_BACKOFF
+    assert left == list(range(backoff, 0, -1)) + [0, backoff]
+    assert answers == [None] * (backoff + 2)
+
+
+def test_a_miss_reading_the_past_leaves_reads_of_the_present_alone(store, monkeypatch):
+    """Few turns had happened by an early instant, so a read pinned there often misses.
+    Its misses back off only reads pinned to an instant: a read of the present, which
+    usually proves its answer, is not sent to the full query by them."""
+    eps = [turn(store, content="kafka" + " word" * i, ts=T0 if i == 149 else TMID)
+           for i in range(150)]
+    answers = _recording(store, monkeypatch)
+    past = store.lexical_search_episodes("kafka", [SCOPE], 5, valid_at=T0, known_at=T0)
+    assert [h[0] for h in past] == [eps[149].id]
+    now = store.lexical_search_episodes("kafka", [SCOPE], 5)
+    assert [h[0] for h in now] == [ep.id for ep in eps[:5]]
+    assert answers == [None, now]
+    assert store._text_first_skips == {((SCOPE,), True): sqlite_store._TEXT_FIRST_BACKOFF}
+
+
+def test_the_backoff_forgets_every_list_once_it_holds_too_many(store, monkeypatch):
+    """A host serving many scopes must not grow the counts without bound. A miss that
+    finds `_TEXT_FIRST_SKIPS_KEPT` lists already counted forgets them and keeps its own."""
+    monkeypatch.setattr(sqlite_store, "_TEXT_FIRST_SKIPS_KEPT", 3)
+    for _ in range(200):
+        turn(store, content="kafka", scope=Scope("acme", "bob"))
+    for user in ("u1", "u2", "u3", "u4"):
+        turn(store, content="kafka pipeline", scope=Scope("acme", user))
+        store.lexical_search_episodes("kafka", [Scope("acme", user)], 5)
+    assert list(store._text_first_skips) == [((Scope("acme", "u4"),), False)]
+
+
+def test_the_text_first_leg_looks_up_only_the_ranked_turns(store):
+    """The form is worth having only in its join order: rank in the text index, then
+    read each ranked turn by rowid. Left to choose, SQLite walked every turn of the scope
+    in the covering index and looked each one up in the text index, which is slower than
+    the full query. `CROSS JOIN` pins the order, and a new store with no statistics is
+    where the planner prefers the other one."""
+    sc, sp = store._scope_clause([SCOPE], alias="e")
+    hp, hpp = store._happened_clause(None, None, alias="e")
+    plan = [r["detail"] for r in store._db.execute(
+        "EXPLAIN QUERY PLAN " + sqlite_store._text_first_sql(sc, hp),
+        [_fts_query("kafka"), 100] + sp + hpp)]
+    # A substring, not the whole step: before 3.36 SQLite wrote the same step as
+    # "SEARCH TABLE episodes AS e USING ...", and this package supports 3.35.
+    assert any("INTEGER PRIMARY KEY (rowid=?)" in step for step in plan), plan
+    assert not any("ep_cover" in step or "ep_scope" in step for step in plan), plan
+
+
+# --- The vector leg over turns, from each scope's cached list ------------------------
+
+def _sql_turn_search(store, qvec, scopes, limit, **at):
+    """What `vector_search_episodes` ranked before each scope's turns were cached: the
+    SQL candidate list, handed to the index."""
+    allowed = store.episode_candidate_ids(scopes, **at)
+    return store._vec.search(qvec, allowed, limit) if allowed else []
+
+
+def test_the_cached_turn_search_returns_what_the_sql_candidate_list_returns(store):
+    """The cache replaces a SQL candidate list, so it is checked against that list: the
+    same turns, in the same order, with the same scores, for every shape of scope asked
+    from its own ancestors, at instants before, among and after the turns, with the two
+    axes apart as well as together, and at limits from one to everything. Half the
+    turns share a vector with others, and many share a `ts`, because a tie is where a
+    candidate order other than SQL's would put a different turn inside the limit."""
+    rng = np.random.default_rng(7)
+    shapes = [Scope("acme", u, a, s) for u in (None, "alice") for a in (None, "bot")
+              for s in (None, "s1")]
+    shared = rng.standard_normal((6, 64)).astype(np.float32)
+    for i in range(240):
+        ep = turn(store, scope=shapes[i % len(shapes)],
+                  ts=datetime(2024, 1 + i % 12, 1 + i % 28, tzinfo=timezone.utc))
+        store.set_episode_embedding(
+            ep.id, shared[i % 6] if i % 2 else rng.standard_normal(64).astype(np.float32))
+    instants = [{}, {"valid_at": T0, "known_at": T0}, {"valid_at": TMID, "known_at": TMID},
+                {"valid_at": T1, "known_at": TMID}, {"valid_at": TMID, "known_at": T1}]
+    for shape in shapes:
+        asked = shape.ancestors()
+        for at in instants:
+            for limit in (1, 5, 17, 1000):
+                q = shared[limit % 6] if limit % 2 else rng.standard_normal(64)
+                got = store.vector_search_episodes(q, asked, limit, **at)
+                assert got == _sql_turn_search(store, q, asked, limit, **at), (shape, at)
+    assert store._turns, "the searches above were answered from the cache"
+
+
+def test_a_scope_listed_twice_ranks_its_turns_once_from_the_cache(store):
+    """The cached search drops a repeated scope as `_scoped_union` does. Two copies of
+    one scope's list would put each of its turns in the ranking twice."""
+    ep = turn(store)
+    store.set_episode_embedding(ep.id, onehot(1))
+    twice = [SCOPE, Scope("acme", "alice")]
+    assert [h[0] for h in store.vector_search_episodes(onehot(1), twice, 5)] == [ep.id]
+    assert store._turns, "the search was answered from the cache"
+
+
+def test_a_turn_written_after_a_search_is_found_by_the_next_one(store):
+    """Every commit empties the cache, so a turn written between two searches is a
+    candidate for the second."""
+    first = turn(store)
+    store.set_episode_embedding(first.id, onehot(1))
+    assert [h[0] for h in store.vector_search_episodes(onehot(2), [SCOPE], 5)] == [first.id]
+    later = turn(store)
+    store.set_episode_embedding(later.id, onehot(2))
+    assert store.vector_search_episodes(onehot(2), [SCOPE], 1)[0][0] == later.id
+
+
+def test_an_erased_turn_is_not_returned_with_the_vector_that_took_its_row(store):
+    """Erasing a turn frees its row, and the next vector written takes it. A cache
+    that still listed the erased turn at that row would return it, scored by a vector
+    written for another scope."""
+    gone = turn(store)
+    store.set_episode_embedding(gone.id, onehot(1))
+    row = store._vec._row[gone.id]
+    assert store.vector_search_episodes(onehot(1), [SCOPE], 5)[0][0] == gone.id
+    store.erase_episode(gone.id)
+    elsewhere = turn(store, scope=Scope("acme", "bob"))
+    store.set_episode_embedding(elsewhere.id, onehot(1))
+    assert store._vec._row[elsewhere.id] == row
+    assert store.vector_search_episodes(onehot(1), [SCOPE], 5) == []
+
+
+def test_a_warm_cache_sees_what_another_worker_writes_and_erases(tmp_path):
+    """Another process's commit reaches this one only as a new `data_version`, which
+    the vector leg reads before every search and which empties the cache."""
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    first = turn(a)
+    a.set_episode_embedding(first.id, onehot(1))
+    assert a.vector_search_episodes(onehot(1), [SCOPE], 5)[0][0] == first.id
+    ep = turn(b)
+    b.set_episode_embedding(ep.id, onehot(5))
+    assert a.vector_search_episodes(onehot(5), [SCOPE], 1)[0][0] == ep.id
+    b.erase_episode(first.id)
+    assert [h[0] for h in a.vector_search_episodes(onehot(1), [SCOPE], 5)] == [ep.id]
+    a.close()
+    b.close()
+
+
+def _from_a_new_thread(read):
+    """What `read()` returns when called from a thread that has never read the store."""
+    out = []
+    t = threading.Thread(target=lambda: out.append(read()))
+    t.start()
+    t.join()
+    return out[0]
+
+
+def test_a_thread_that_has_never_read_keeps_the_lists_it_finds(tmp_path):
+    """Nothing was committed, so there is nothing to rebuild. When each thread asked its
+    own connection whether anything had changed, a thread's first read emptied every
+    list, and a host that searched from a new thread each time rebuilt them every time."""
+    store = SQLiteStore(str(tmp_path / "t.db"))
+    ep = turn(store)
+    store.set_episode_embedding(ep.id, onehot(1))
+    store.vector_search_episodes(onehot(1), [SCOPE], 5)
+    built = store._turns[("acme", "alice", None, None, None)]
+    hits = _from_a_new_thread(lambda: store.vector_search_episodes(onehot(1), [SCOPE], 5))
+    assert [h[0] for h in hits] == [ep.id]
+    assert store._turns[("acme", "alice", None, None, None)] is built
+    store.close()
+
+
+def test_a_commit_empties_the_lists_once_whichever_threads_search_after_it(tmp_path):
+    """The first search after another connection's commit, on any thread, rebuilds the
+    list with the new turn in it, and every later search, on that thread or another,
+    reads that list rather than rebuilding it again."""
+    path = str(tmp_path / "t.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    first = turn(a)
+    a.set_episode_embedding(first.id, onehot(1))
+    a.vector_search_episodes(onehot(1), [SCOPE], 5)
+    ep = turn(b)
+    b.set_episode_embedding(ep.id, onehot(2))
+    assert _from_a_new_thread(
+        lambda: a.vector_search_episodes(onehot(2), [SCOPE], 1))[0][0] == ep.id
+    rebuilt = a._turns[("acme", "alice", None, None, None)]
+    assert _from_a_new_thread(
+        lambda: a.vector_search_episodes(onehot(2), [SCOPE], 1))[0][0] == ep.id
+    assert a.vector_search_episodes(onehot(2), [SCOPE], 1)[0][0] == ep.id
+    assert a._turns[("acme", "alice", None, None, None)] is rebuilt
+    a.close()
+    b.close()
+
+
+def test_a_commit_just_after_the_map_is_refreshed_is_seen_by_the_next_search(
+        tmp_path, monkeypatch):
+    """The watch is read before the map is refreshed. Read after it, the watch could
+    report a commit the map has not folded in yet: the list built next would leave out
+    that commit's turns, which have no row in the map, and no later look would find
+    anything left to rebuild for."""
+    path = str(tmp_path / "t.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    first = turn(a)
+    a.set_episode_embedding(first.id, onehot(1))
+    a.vector_search_episodes(onehot(1), [SCOPE], 5)
+    refresh, late = a._ensure_index, []
+
+    def then_another_worker_commits():
+        refresh()
+        late.append(turn(b))
+        b.set_episode_embedding(late[0].id, onehot(2))
+
+    monkeypatch.setattr(a, "_ensure_index", then_another_worker_commits)
+    a.vector_search_episodes(onehot(2), [SCOPE], 5)
+    monkeypatch.undo()
+    assert a.vector_search_episodes(onehot(2), [SCOPE], 1)[0][0] == late[0].id
+    a.close()
+    b.close()
+
+
+def test_a_search_on_a_closed_store_fails_without_opening_a_connection(tmp_path):
+    """The connection that watches for commits is opened by the first search that reads
+    the lists. After `close()` that search raises, and leaves no connection open."""
+    store = SQLiteStore(str(tmp_path / "t.db"))
+    ep = turn(store)
+    store.set_episode_embedding(ep.id, onehot(1))
+    store.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.vector_search_episodes(onehot(1), [SCOPE], 5)
+    assert store._watch is None and store._readers == []
+
+
+def test_a_search_inside_a_batch_sees_its_own_turns_and_the_cache_keeps_none(store):
+    """Inside `batch()` a thread reads its own uncommitted rows. A cache shared with
+    other threads must never hold them, and after a rollback nothing may return a turn
+    that was never written."""
+    first = turn(store)
+    store.set_episode_embedding(first.id, onehot(1))
+    store.vector_search_episodes(onehot(1), [SCOPE], 5)
+    with pytest.raises(RuntimeError):
+        with store.batch():
+            ep = turn(store)
+            store.set_episode_embedding(ep.id, onehot(2))
+            assert store.vector_search_episodes(onehot(2), [SCOPE], 1)[0][0] == ep.id
+            raise RuntimeError("roll back")
+    assert [h[0] for h in store.vector_search_episodes(onehot(2), [SCOPE], 5)] == [first.id]
+
+
+def test_a_row_moved_after_the_cache_was_read_sends_the_search_to_sql(store):
+    """A write in another thread can change the index between a search reading the
+    cache and ranking, before its commit empties the cache. Here the index is changed
+    directly, as an erasure and a re-embedding change it before they commit: each
+    returned turn must still hold the row it was ranked by, and the matrix must still
+    reach every row, or the search asks SQL instead."""
+    a_ = turn(store)
+    store.set_episode_embedding(a_.id, onehot(1))
+    b_ = turn(store)
+    store.set_episode_embedding(b_.id, onehot(2))
+    store.vector_search_episodes(onehot(1), [SCOPE], 5)
+    store._vec.forget(a_.id)
+    assert [h[0] for h in store.vector_search_episodes(onehot(1), [SCOPE], 5)] == [b_.id]
+    store._vec.reset()
+    store._vec.put(b_.id, 0, onehot(2))
+    assert [h[0] for h in store.vector_search_episodes(onehot(2), [SCOPE], 5)] == [b_.id]
+
+
+def test_a_turn_list_built_across_a_commit_is_not_kept(store, monkeypatch):
+    """`_scope_turns` reads SQL and the map outside every lock, so a commit can land
+    between its read and its insert. The list is right for the search that built it,
+    which began before the commit, and wrong for any later one."""
+    ep = turn(store)
+    store.set_episode_embedding(ep.id, onehot(1))
+    key = ("acme", "alice", None, None, None)
+    real = store._read
+
+    @contextmanager
+    def committed_meanwhile():
+        with real() as conn:
+            yield conn
+        store._changed()
+
+    monkeypatch.setattr(store, "_read", committed_meanwhile)
+    assert store._scope_turns(key).ids == [ep.id]
+    assert key not in store._turns
+
+
+def test_the_turn_lists_stay_inside_their_row_budget(store, monkeypatch):
+    """The least recently used scope goes first once the lists hold more turns than
+    the budget, and one scope is kept whatever its size."""
+    monkeypatch.setattr(sqlite_store, "_SCOPE_TURNS_ROWS", 5)
+    scopes = [Scope("acme", u) for u in ("a", "b", "c")]
+    for i, s in enumerate(scopes):
+        for _ in range(3 + 2 * (i == 2)):
+            ep = turn(store, scope=s)
+            store.set_episode_embedding(ep.id, onehot(i))
+    for s in scopes[:2]:
+        store.vector_search_episodes(onehot(0), [s], 5)
+    assert list(store._turns) == [("acme", "b", None, None, None)]
+    store.vector_search_episodes(onehot(0), [scopes[2]], 5)
+    assert list(store._turns) == [("acme", "c", None, None, None)]
+    assert store._turns_held == 5
 
 
 def test_no_scopes_matches_nothing_rather_than_everything(store):
@@ -760,6 +1346,299 @@ def test_the_two_axes_move_independently_in_candidate_ids(store):
     assert set(store.candidate_ids([SCOPE], valid_at=TMID, known_at=TMID)) == {a.id}
     assert set(store.candidate_ids([SCOPE], valid_at=TMID, known_at=T2)) == {b.id}
     assert store.candidate_ids([SCOPE], valid_at=T2, known_at=T2) == []
+
+
+# --- The vector leg over claims, from each scope's cached list -----------------------
+
+NOW = datetime(2025, 6, 1, tzinfo=timezone.utc)
+AHEAD = [NOW + timedelta(hours=h) for h in range(1, 6)]
+ALICE = ("acme", "alice", None, None, None)
+
+
+class _Clock:
+    """The wall clock the store reads for the present, set by the test."""
+
+    def __init__(self, monkeypatch, at):
+        self.at = at
+        monkeypatch.setattr(sqlite_store, "utcnow", lambda: self.at)
+
+
+def _sql_claim_search(store, qvec, scopes, limit, at, **kw):
+    """What `vector_search` ranks for a read of the present at `at` without the cache:
+    the SQL candidate list with both instants pinned there, handed to the index. The
+    expiry clause reads the wall clock, so that must be at `at` too."""
+    allowed = store.candidate_ids(scopes, valid_at=at, known_at=at, **kw)
+    store._ensure_index()
+    return store._vec.search(qvec, allowed, limit) if allowed else []
+
+
+def test_the_cached_claim_search_returns_what_the_sql_candidate_list_returns(
+        store, monkeypatch):
+    """The cache replaces a SQL candidate list, so it is checked against that list: the
+    same claims, in the same order, with the same scores, for every shape of scope asked
+    from its own ancestors, in every set of states, at limits from one to everything.
+    Half the claims share a vector with others, because a tie is where a candidate order
+    other than SQL's would put a different claim inside the limit.
+
+    The claims are live, ended, retired and expired, and some are due to start, end, be
+    retired, expire or become known in the hours after the first read. The clock then
+    stops half an hour past each of those instants in turn, and goes back to the start,
+    so every list is checked after the instant its `until` named, and against a clock
+    earlier than the one it was built at."""
+    clock = _Clock(monkeypatch, NOW)
+    rng = np.random.default_rng(11)
+    shapes = [Scope("acme", u, a, s) for u in (None, "alice") for a in (None, "bot")
+              for s in (None, "s1")]
+    shared = rng.standard_normal((6, 64)).astype(np.float32)
+    # Each claim is due to change at one instant at most, so each instant can be found
+    # only through the column that holds it.
+    kinds = [({}, None), ({"valid_to": TMID}, None), ({"expires_at": TMID}, None),
+             ({}, TMID), ({"valid_from": AHEAD[0]}, None), ({"valid_to": AHEAD[1]}, None),
+             ({"expires_at": AHEAD[2]}, None), ({"recorded_at": AHEAD[3]}, None),
+             ({}, AHEAD[4])]
+    for i in range(280):
+        fields, retired = kinds[i % len(kinds)]
+        c = put(store, object=f"city {i}", scope=shapes[i % len(shapes)], **fields)
+        if retired is not None:
+            store.invalidate(c.id, retired, None)
+        if i % 13 == 0:
+            continue  # never embedded, so never a candidate on either path
+        store.set_embedding(
+            c.id, shared[i % 6] if i % 2 else rng.standard_normal(64).astype(np.float32))
+    state_sets = [None, ["live"], ["retired"], ["ended"], ["live", "ended"],
+                  ["live", "retired"], ["ended", "retired"], list(STATES)]
+    for at in (NOW, *(due + timedelta(minutes=30) for due in AHEAD), NOW):
+        clock.at = at
+        for shape in shapes:
+            asked = shape.ancestors()
+            for states in state_sets:
+                for limit in (1, 5, 17, 1000):
+                    q = shared[limit % 6] if limit % 2 else rng.standard_normal(64)
+                    got = store.vector_search(q, asked, limit, states=states)
+                    want = _sql_claim_search(store, q, asked, limit, at, states=states)
+                    assert got == want, (at, shape, states, limit)
+    assert store._claims, "the searches above were answered from the cache"
+
+
+def test_a_warm_claim_search_asks_sqlite_nothing_about_claims(store):
+    """The point of the cache: once a scope's list is built, a read of the present reads
+    no claim until something is written or a claim is due to change state."""
+    c = put(store, object="Berlin")
+    store.set_embedding(c.id, onehot(1))
+    assert store.vector_search(onehot(1), [SCOPE], 5)[0][0] == c.id
+    statements: list[str] = []
+    store._db.set_trace_callback(statements.append)
+    try:
+        assert store.vector_search(onehot(1), [SCOPE], 5)[0][0] == c.id
+    finally:
+        store._db.set_trace_callback(None)
+    assert not any("claims" in s for s in statements), statements
+
+
+def test_the_cached_list_changes_when_the_clock_reaches_a_claims_next_instant(
+        store, monkeypatch):
+    """A claim's state can change with no write at all, when the clock reaches its
+    start, its end, its retirement or its expiry. A list is kept only until the first
+    such instant among its tenant's claims, and the entry built after it replaces the
+    one before."""
+    clock = _Clock(monkeypatch, NOW)
+    starts = put(store, object="Lisbon", valid_from=AHEAD[0])
+    expires = put(store, object="Berlin", expires_at=AHEAD[1])
+    for c in (starts, expires):
+        store.set_embedding(c.id, onehot(1))
+    key = (ALICE, ("live",), True)
+
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [expires.id]
+    assert store._claims[key].until == AHEAD[0].timestamp()
+    clock.at = AHEAD[0]
+    assert ({h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)}
+            == {starts.id, expires.id})
+    assert store._claims[key].until == AHEAD[1].timestamp()
+    clock.at = AHEAD[1]
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [starts.id]
+    assert store._claims[key].until == float("inf")
+    assert list(store._claims) == [key] and store._claims_held == 1
+
+
+def test_a_claim_due_in_another_scope_of_the_tenant_brings_the_list_forward(
+        store, monkeypatch):
+    """`until` is found per tenant rather than per scope, so another user's claim can
+    end this user's list early. That costs a rebuild and never a wrong answer."""
+    clock = _Clock(monkeypatch, NOW)
+    mine = put(store, object="Berlin")
+    store.set_embedding(mine.id, onehot(1))
+    put(store, object="Lisbon", scope=Scope("acme", "bob"), valid_from=AHEAD[0])
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [mine.id]
+    assert store._claims[(ALICE, ("live",), True)].until == AHEAD[0].timestamp()
+    clock.at = AHEAD[0]
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [mine.id]
+
+
+def test_every_column_a_state_compares_with_the_clock_is_one_the_cache_watches():
+    """A cached list is kept until the first instant a claim of the tenant changes state,
+    found from the columns `_LAST_CHANGE` and `_NEXT_CHANGE` read. A state that came to
+    compare another column with the instant would change as the clock moves, and the
+    cache would keep a list past the change. So every column any state predicate, and the
+    expiry clause, compares with the instant must be one those two read."""
+    compared: set[str] = set()
+    for states in (["live"], ["retired"], ["ended"], ["live", "ended"],
+                   ["live", "retired"], ["ended", "retired"], list(STATES)):
+        sql, _ = state_predicate("?", states=states)
+        compared |= set(re.findall(r"(\w+) (?:<=|>=|<|>) \?", sql))
+    compared |= set(re.findall(r"(\w+) (?:<=|>=|<|>) \?", unexpired_predicate("?")))
+    assert compared == {"recorded_at", "invalidated_at", "valid_from", "valid_to",
+                        "expires_at"}
+    for expression in (sqlite_store._LAST_CHANGE, sqlite_store._NEXT_CHANGE):
+        assert compared <= set(re.findall(r"\w+", expression)), expression
+
+
+def test_the_next_change_is_found_through_its_index(store):
+    """`until` costs one seek only while SQLite reads `cl_last_change` for it, which it
+    does only for the exact expression the index holds; and the list half of the
+    statement must read the claims as `candidate_ids` does, so they come back in the
+    same order."""
+    c = put(store)
+    store.set_embedding(c.id, onehot(1))
+    statements: list[str] = []
+    store._db.set_trace_callback(statements.append)
+    try:
+        store.vector_search(onehot(1), [SCOPE], 5)
+    finally:
+        store._db.set_trace_callback(None)
+    (sql,) = [s for s in statements if "UNION ALL SELECT min(" in s]
+    plan = [r["detail"] for r in store._db.execute("EXPLAIN QUERY PLAN " + sql,
+                                                   [None] * sql.count("?"))]
+    # The expression as a range, not only the tenant: an expression that differs from
+    # the index's still uses the index for `tenant`, and then reads every claim of it.
+    assert any("cl_last_change (tenant=? AND <expr>>?)" in step for step in plan), plan
+    assert any("cl_scope" in step for step in plan), plan
+
+
+def test_a_claim_written_or_retired_after_a_search_is_seen_by_the_next_one(store):
+    """Every commit empties the lists, so the next search sees what it wrote."""
+    first = put(store, object="Berlin")
+    store.set_embedding(first.id, onehot(1))
+    assert [h[0] for h in store.vector_search(onehot(2), [SCOPE], 5)] == [first.id]
+    later = put(store, object="Lisbon")
+    store.set_embedding(later.id, onehot(2))
+    assert store.vector_search(onehot(2), [SCOPE], 1)[0][0] == later.id
+    store.invalidate(later.id, T1, None)
+    assert [h[0] for h in store.vector_search(onehot(2), [SCOPE], 5)] == [first.id]
+
+
+def test_a_warm_claim_cache_sees_what_another_worker_writes_and_retires(tmp_path):
+    """Another process's commit reaches this one only as a new `data_version`, which
+    the cached search reads before every search and which empties the lists."""
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    first = put(a, object="Berlin")
+    a.set_embedding(first.id, onehot(1))
+    assert a.vector_search(onehot(1), [SCOPE], 5)[0][0] == first.id
+    c = put(b, object="Lisbon")
+    b.set_embedding(c.id, onehot(5))
+    assert a.vector_search(onehot(5), [SCOPE], 1)[0][0] == c.id
+    b.invalidate(first.id, T1, None)
+    assert [h[0] for h in a.vector_search(onehot(1), [SCOPE], 5)] == [c.id]
+    a.close()
+    b.close()
+
+
+def test_a_claim_search_inside_a_batch_sees_its_own_claims_and_the_cache_keeps_none(
+        store):
+    """Inside `batch()` a thread reads its own uncommitted rows, which a list shared
+    with other threads must never hold; after a rollback nothing may return a claim that
+    was never written."""
+    first = put(store, object="Berlin")
+    store.set_embedding(first.id, onehot(1))
+    store.vector_search(onehot(1), [SCOPE], 5)
+    with pytest.raises(RuntimeError):
+        with store.batch():
+            c = put(store, object="Lisbon")
+            store.set_embedding(c.id, onehot(2))
+            assert store.vector_search(onehot(2), [SCOPE], 1)[0][0] == c.id
+            raise RuntimeError("roll back")
+    assert [h[0] for h in store.vector_search(onehot(2), [SCOPE], 5)] == [first.id]
+
+
+def test_a_pinned_or_filtered_claim_search_asks_sql(store, monkeypatch):
+    """The lists answer a read of the present with no filter. A read pinned to an
+    instant would need a list per instant, and a filter can name any metadata field."""
+    c = put(store, object="Berlin", valid_from=T1)
+    store.set_embedding(c.id, onehot(1))
+    monkeypatch.setattr(store, "_cached_claim_search",
+                        lambda *a, **k: pytest.fail("answered from the cache"))
+    assert store.vector_search(onehot(1), [SCOPE], 5, valid_at=TMID, known_at=TMID) == []
+    assert store.vector_search(onehot(1), [SCOPE], 5, known_at=T2)[0][0] == c.id
+    assert store.vector_search(onehot(1), [SCOPE], 5,
+                               where=SearchFilter(meta=(), filepath_prefix="docs/")) == []
+
+
+def test_turning_expiry_hiding_off_is_not_answered_from_a_list_built_with_it_on(store):
+    """`hide_expired` decides which claims a list holds, so it is part of the key."""
+    gone = put(store, object="Berlin", expires_at=T1)
+    store.set_embedding(gone.id, onehot(1))
+    assert store.vector_search(onehot(1), [SCOPE], 5) == []
+    store.hide_expired = False
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [gone.id]
+
+
+def test_a_scope_listed_twice_ranks_its_claims_once_from_the_cache(store):
+    """The cached search drops a repeated scope as `_scoped_union` does. Two copies of
+    one scope's list would put each of its claims in the ranking twice."""
+    c = put(store)
+    store.set_embedding(c.id, onehot(1))
+    twice = [SCOPE, Scope("acme", "alice")]
+    assert [h[0] for h in store.vector_search(onehot(1), twice, 5)] == [c.id]
+    assert store._claims, "the search was answered from the cache"
+
+
+def test_a_claim_row_moved_after_the_cache_was_read_sends_the_search_to_sql(store):
+    """As for turns: a returned claim must still hold the row it was ranked by, or the
+    search asks SQL instead."""
+    a_ = put(store, object="Berlin")
+    store.set_embedding(a_.id, onehot(1))
+    b_ = put(store, object="Lisbon")
+    store.set_embedding(b_.id, onehot(2))
+    store.vector_search(onehot(1), [SCOPE], 5)
+    store._vec.forget(a_.id)
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [b_.id]
+
+
+def test_a_claim_list_built_across_a_commit_is_not_kept(store, monkeypatch):
+    """`_scope_claims` reads SQL and the map outside every lock, so a commit can land
+    between its read and its insert. The list is right for the search that built it,
+    which began before the commit, and wrong for any later one."""
+    c = put(store)
+    store.set_embedding(c.id, onehot(1))
+    real = store._read
+
+    @contextmanager
+    def committed_meanwhile():
+        with real() as conn:
+            yield conn
+        store._changed()
+
+    monkeypatch.setattr(store, "_read", committed_meanwhile)
+    now = datetime.now(timezone.utc)
+    assert store._scope_claims(SCOPE, ALICE, ("live",), now).ids == [c.id]
+    assert not store._claims
+
+
+def test_the_claim_lists_stay_inside_their_row_budget(store, monkeypatch):
+    """The least recently used scope goes first once the lists hold more claims than
+    the budget, and one scope is kept whatever its size."""
+    monkeypatch.setattr(sqlite_store, "_SCOPE_CLAIMS_ROWS", 5)
+    scopes = [Scope("acme", u) for u in ("a", "b", "c")]
+    for i, s in enumerate(scopes):
+        for j in range(3 + 2 * (i == 2)):
+            c = put(store, object=f"city {i} {j}", scope=s)
+            store.set_embedding(c.id, onehot(i))
+    for s in scopes[:2]:
+        store.vector_search(onehot(0), [s], 5)
+    assert [k[0] for k in store._claims] == [("acme", "b", None, None, None)]
+    store.vector_search(onehot(0), [scopes[2]], 5)
+    assert [k[0] for k in store._claims] == [("acme", "c", None, None, None)]
+    assert store._claims_held == 5
 
 
 # --- Maintenance ------------------------------------------------------------
