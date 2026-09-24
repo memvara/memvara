@@ -47,6 +47,43 @@ both now take a `reason` keyword argument, which `apply` passes.
 
 ---
 
+## The plugin's capture hook searches your memory before it writes
+
+### What changed
+
+`agentic_capture` is a new feature switch, on by default. It belongs to the plugin: the
+MCP server only checks the name. With it on, the capture hook on Claude Code runs the
+headless agent command with read-only access to your memory, lets it search up to four
+times, and applies the facts, replacements, ends and links it proposes after checking
+each one. With it off, capture makes one extraction call per turn, as before.
+
+### Who this changes, and in which direction
+
+**If you keep a copy of the feature names**, as the plugin hooks do in
+`plugin/hooks/lib/settings.py`, add `agentic_capture`. The MCP server refuses a
+`MEMVARA_FEATURE_<NAME>` it does not know, so an older server refuses
+`MEMVARA_FEATURE_AGENTIC_CAPTURE`.
+
+**If you generate the plugin's hooks file**, regenerate it: the capture hook's timeout
+on Claude Code is now 180 seconds rather than 120, to cover an agentic run followed by the
+single-call extraction when the agentic run fails.
+
+**If you run a hosted organisation with a model key**, the searches the agentic run makes
+may each be a rewritten search until the hosted service is updated: a call on the
+organisation's key, and about 145 rate-limit units instead of about 66. The run sends a
+`Memvara-Read-Stages: plain` header asking for plain reads, and the hosted service does
+not read that header yet; the change on the cloud side is separate. A local store is not
+affected: the run's local server always starts with `MEMVARA_FEATURE_QUERY_REWRITE=0` and
+`MEMVARA_FEATURE_SYNTHESIS=0`, whatever your own configuration says.
+
+**If your headless login comes from a settings file** rather than from the normal login,
+the agentic run cannot sign in, because it loads no settings files. Every turn then falls
+back to the single-call extraction, and `capture.log` says so on each turn. Switch it off
+with `MEMVARA_FEATURE_AGENTIC_CAPTURE=0` or `"agentic_capture": false` in
+`~/.memvara/settings.json` to skip the failed attempt.
+
+---
+
 ## Claims can expire and be erased, stores move to schema 15, and extraction takes guidance
 
 ### What changed

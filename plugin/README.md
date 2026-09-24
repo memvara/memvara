@@ -81,9 +81,9 @@ Seven repositories vendor this one tree and each registers a different
 client, so a `hooks.json` committed here would be one of them shipped to all
 of them. This repository ignores that path for exactly that reason.
 
-Four hook features can be switched off in `~/.memvara/settings.json`, a
+Five hook features can be switched off in `~/.memvara/settings.json`, a
 flat object of `feature_name: true|false` where a missing key means the
-feature's default. Each of these four is on by default.
+feature's default. Each of these five is on by default.
 `MEMVARA_FEATURE_<NAME>=0|1` overrides the file for one process.
 
 - `project_scope`: the hooks work out the project from the repository's
@@ -109,6 +109,21 @@ feature's default. Each of these four is on by default.
   If the provider rejects the key during a later prompt, that prompt gets
   the plain result and the hook stops rewriting until the key is checked
   again.
+- `agentic_capture`: when a turn ends, the capture hook lets the headless
+  agent command search your memory with read-only tools before it
+  suggests changes: a new fact, a new value for a stored fact, the end of
+  a stored fact, or a link between two facts. The hook checks each
+  suggestion and writes the ones that pass. The model cannot write
+  anything itself, and it can use only your memvara server. It runs under
+  your own login, like the single extraction call it replaces. Switched
+  off, or when the agentic run fails, capture makes that single call
+  instead. It runs only where the headless agent command is the host's
+  own extractor. Measured on one machine, a turn cost a mean 19,400
+  input and 1,200 output tokens and 17 seconds, with up to four searches.
+  The single call cost 45,300 input tokens there, because it loads your
+  instruction files and plugins; with small ones it costs about 21,000,
+  which is then about the same as an agentic turn. The numbers and how
+  they were measured are in `CHANGELOG.md`.
 
 The file lists the library's other switches too, with the same defaults as
 the MCP server. `extraction_chunks` and `agentic_extraction` are the two that

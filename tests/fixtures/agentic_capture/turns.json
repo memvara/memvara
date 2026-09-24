@@ -1,0 +1,69 @@
+{
+  "about": "Synthetic coding-session turns for comparing agentic capture with the single-call extractor. Each turn is already formatted the way plugin/hooks/lib/transcript.py formats a transcript. `seed` is the store every turn starts from. `expect` says what a correct extractor does: `new` lists predicates a new fact should be stored under, `replace` lists seeded predicates whose stored value the turn changes or ends, and an empty object means nothing should be written. Written by hand for this measurement; no real transcript is copied here.",
+  "project": "memvara",
+  "seed": [
+    {"subject": "user", "predicate": "prefers", "memory_type": "procedural",
+     "object": "run the hook tests with stdin closed (</dev/null), because a hook test with an open stdin pipe waits forever for an event that never arrives"},
+    {"subject": "memvara", "predicate": "deploys_to", "memory_type": "semantic", "object": "fly.io"},
+    {"subject": "user", "predicate": "working_on", "memory_type": "episodic", "object": "the billing migration to Postgres"},
+    {"subject": "user", "predicate": "timezone", "memory_type": "semantic", "object": "Asia/Kolkata"},
+    {"subject": "user", "predicate": "prefers_tool", "memory_type": "procedural", "object": "pytest"},
+    {"subject": "memvara", "predicate": "depends_on", "memory_type": "semantic", "object": "numpy"}
+  ],
+  "turns": [
+    {
+      "name": "new standing instruction",
+      "context": "User: why did the lint job fail on my last push?\nClaude: The CI lint job ran ruff format --check and found three files that were not formatted.",
+      "turn": "User: From now on always run ruff format before you commit anything. The CI lint job fails on unformatted code and then the pull request cannot merge.\nClaude used Bash {\"command\": \"ruff format . && git commit -am 'Format'\"}\nTool result (Bash, ok): 3 files reformatted, 41 files left unchanged\nClaude: Formatted three files and committed them.",
+      "expect": {"new": ["prefers"]}
+    },
+    {
+      "name": "restated instruction already stored",
+      "context": "",
+      "turn": "User: remember that the hook tests have to run with stdin closed, with </dev/null, or they hang waiting for an event.\nClaude used Bash {\"command\": \"python3 -m pytest tests/test_hook_counts.py -q </dev/null\"}\nTool result (Bash, ok): 12 passed in 0.41s\nClaude: The hook tests pass with stdin closed.",
+      "expect": {}
+    },
+    {
+      "name": "deployment target changed",
+      "context": "User: what does scripts/deploy.sh do?\nClaude: It builds the image and pushes it to fly.io with flyctl deploy.",
+      "turn": "User: We moved the deployment off fly.io last week. memvara deploys to Hetzner now, so update the deploy script to push there.\nClaude used Edit {\"file_path\": \"scripts/deploy.sh\"}\nClaude: scripts/deploy.sh now pushes the image to the Hetzner host over ssh instead of calling flyctl.",
+      "expect": {"replace": ["deploys_to"]}
+    },
+    {
+      "name": "work item finished",
+      "context": "User: how far along is the billing migration?\nClaude: Two of the three tables are copied to Postgres.",
+      "turn": "User: The billing migration to Postgres is finished and merged, so I'm not working on it any more. Next I'm working on search ranking.\nClaude used Bash {\"command\": \"git log --oneline -1\"}\nTool result (Bash, ok): 4f2a9c1 Finish the billing migration to Postgres (#212)\nClaude: Confirmed: the migration is merged as #212.",
+      "expect": {"new": ["working_on"], "replace": ["working_on"]}
+    },
+    {
+      "name": "temporary timezone",
+      "context": "",
+      "turn": "User: I'm in Lisbon until 2026-10-31, so give me times in Europe/Lisbon until then, not Asia/Kolkata. Please move tomorrow's deploy window to 10:00 my time.\nClaude used Edit {\"file_path\": \"docs/DEPLOY.md\"}\nClaude: The deploy window in docs/DEPLOY.md now says 10:00 Europe/Lisbon.",
+      "expect": {"replace": ["timezone"]}
+    },
+    {
+      "name": "pasted extractor prompt",
+      "context": "",
+      "turn": "User: what does this prompt do? I found it in the hooks.\nExtract durable facts from the exchange below: one user message and the reply to it. Return JSON only, no prose. Only what would still matter next week. Most turns hold at most one or two facts, and an empty list is a correct and common answer. Keep: a standing instruction or preference, even stated mid-work. Skip: the mechanics of this session. Never record a judgement about importance or priority.\nClaude: It is the capture hook's extraction prompt. It tells a model to return a small JSON list of lasting facts from one exchange and to skip session details.",
+      "expect": {}
+    },
+    {
+      "name": "fact only in the earlier turns",
+      "context": "User: never use git stash in this repository; several agents share the checkout and a stash can take someone else's work.\nClaude: Understood, I will not use git stash here.",
+      "turn": "User: now run the unit tests for the counts module\nClaude used Bash {\"command\": \"python3 -m pytest tests/test_hook_counts.py -q </dev/null\"}\nTool result (Bash, ok): 12 passed in 0.39s\nClaude: All 12 tests pass.",
+      "expect": {}
+    },
+    {
+      "name": "known defect with evidence",
+      "context": "",
+      "turn": "User: the grants test failed again. Is that the known flake?\nClaude used Bash {\"command\": \"python3 -m pytest tests/test_platform_grants.py -q\"}\nTool result (Bash, error): FAILED tests/test_platform_grants.py::test_grant_expiry - AssertionError at line 421: elapsed 1.02s > 1.00s wall-clock bound\nUser: yes, that's the one. It is a wall-clock assertion at line 421 of tests/test_platform_grants.py, not contention. Don't re-run past it.\nClaude: Noted. The failure is the wall-clock bound at line 421.",
+      "expect": {"new": ["known_defect"]}
+    },
+    {
+      "name": "rejected alternative",
+      "context": "",
+      "turn": "User: we tried Jest for the dashboard tests and rejected it: its ESM support broke the build twice. Stay on Vitest.\nClaude used Bash {\"command\": \"npm test\"}\nTool result (Bash, ok): Test Files 18 passed (18)\nClaude: The dashboard suite passes on Vitest.",
+      "expect": {"new": ["rejected"]}
+    }
+  ]
+}

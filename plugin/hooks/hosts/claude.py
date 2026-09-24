@@ -49,7 +49,11 @@ HOST = Host(
     detach_capture=False,
     #: This client imposes no ceiling of its own, so nothing is declared to it.
     context_limit_key=0,
-    timeouts={"session_start": 20, "recall": 10, "capture": 120, "approve": 5},
+    #: `capture` covers an agentic run (`lib.agentic.TIMEOUT_SEC`, 60s) followed, when that
+    #: run fails, by the single-call extraction (`lib.extract.TIMEOUT_SEC`, 90s), plus the
+    #: writes. Only this host runs agentic capture, because only here is `claude` the
+    #: first extractor. The hook is async, so the longer limit holds no turn open.
+    timeouts={"session_start": 20, "recall": 10, "capture": 180, "approve": 5},
     client_configs=("~/.claude.json", "~/.claude/settings.json"),
     config_format="json",
     transcript=TranscriptSpec(format="jsonl"),

@@ -812,6 +812,79 @@ class Fact(NamedTuple):
     memory_type: str
 
 
+def vet(fact: object, *, text: str, spoken: str, injected: "Sequence[str]",
+        project: str) -> "tuple[Fact | None, str, str]":
+    """Check one proposed fact against every rule below. `(fact or None, drop, repair)`.
+
+    `drop` is why the fact was refused, and `repair` says that a standing instruction kept
+    the user's own wording; each is empty when it does not apply. `text` is the turn the
+    fact must come from, `spoken` is the user's lines in it, and `injected` is text the
+    model was shown from the store, which a fact must not simply hand back.
+
+    This was the body of the loop in `triples()`. It is a function now because agentic
+    capture (`lib.agentic`) proposes facts too, and a proposal must pass the same checks
+    as a fact from the single-call extractor. Two copies of these rules would drift, and
+    the copy that drifted would be the one nobody tested.
+    """
+    if not isinstance(fact, dict):
+        return None, "", ""
+    predicate = re.sub(r"[^a-z0-9]+", "_",
+                       str(fact.get("predicate") or "").lower()).strip("_")
+    obj = " ".join(str(fact.get("object") or "").split())
+    subject = str(fact.get("subject") or "user").strip() or "user"
+
+    spec = VOCABULARY.get(predicate)
+    if spec is None:
+        return None, f"{predicate}: not in vocabulary", ""
+    if not obj or obj.lower() in EMPTY_OBJECTS:
+        return None, f"{predicate}: empty object {obj!r}", ""
+    memory_type, rich = spec
+    if rich and len(obj) < MIN_RICH_OBJECT_CHARS:
+        return None, f"{predicate}: object too thin ({len(obj)}c) {obj!r}", ""
+    if len(obj) > MAX_OBJECT_CHARS:
+        obj = obj[:MAX_OBJECT_CHARS].rstrip() + "..."
+    if _fabricated(obj, text):
+        return None, f"{predicate}: values absent from the turn {obj!r}", ""
+    repair = ""
+    if memory_type == "procedural":
+        # A standing instruction is the one kind of claim that outranks other claims,
+        # so a garbled one does more than sit there being wrong. Scoped hard --
+        # procedural only, the user's own lines only, names only -- because this is the
+        # one check here that can reject a TRUE memory.
+        #
+        # It used to `continue` here, on the reasoning that "the same preference will
+        # be stated again while a wrong one in the slot silently wins". The first half
+        # of that was wrong. The user stated the code-review rule once; the summary
+        # lost "Sonnet" and "GitHub"; it was dropped and never stated again. A caught
+        # paraphrase is evidence a standing instruction EXISTS -- it is the reason to
+        # go and get the user's wording, not the reason to discard the fact.
+        lost = _dropped_entities(obj, spoken)
+        if lost:
+            repaired = _repaired(obj, spoken, lost)
+            if repaired is None:
+                return None, (
+                    f"{predicate}: the user's words lost {', '.join(lost)} and no "
+                    f"sentence of theirs carries them {obj!r}"), ""
+            repair = f"{predicate}: kept the user's own wording for {', '.join(lost)}"
+            obj = repaired
+    if injected and _restates(obj, injected) and not _restates(obj, [spoken]):
+        # A note this plugin put in front of the model, handed back as an observation.
+        # Writing it re-records the store's own output, which is how one guess becomes
+        # a fact that several rows agree on. The user restating it is a real event, so
+        # support in what they typed keeps it.
+        return None, f"{predicate}: restates a recalled note {obj!r}", repair
+
+    # The model is told which subject each predicate takes; this makes it true rather
+    # than hoping. A project fact filed under "user" is how a store ends up with one
+    # subject and a 1% join rate.
+    if predicate in PROJECT_PREDICATES:
+        subject = project if subject in ("user", "", project) else subject
+    else:
+        subject = "user"
+
+    return Fact(subject, predicate, obj, memory_type), "", repair
+
+
 def triples(text: str, cwd: "str | None" = None,
             injected: "Sequence[str]" = ()) -> "list[Fact]":
     """Everything worth storing in `text`, as facts this store can actually reconcile.
@@ -846,69 +919,14 @@ def triples(text: str, cwd: "str | None" = None,
     spoken = user_lines(text)
 
     for fact in _facts(result):
-        if not isinstance(fact, dict):
-            continue
-        predicate = re.sub(r"[^a-z0-9]+", "_",
-                           str(fact.get("predicate") or "").lower()).strip("_")
-        obj = " ".join(str(fact.get("object") or "").split())
-        subject = str(fact.get("subject") or "user").strip() or "user"
-
-        spec = VOCABULARY.get(predicate)
-        if spec is None:
-            dropped.append(f"{predicate}: not in vocabulary")
-            continue
-        if not obj or obj.lower() in EMPTY_OBJECTS:
-            dropped.append(f"{predicate}: empty object {obj!r}")
-            continue
-        memory_type, rich = spec
-        if rich and len(obj) < MIN_RICH_OBJECT_CHARS:
-            dropped.append(f"{predicate}: object too thin ({len(obj)}c) {obj!r}")
-            continue
-        if len(obj) > MAX_OBJECT_CHARS:
-            obj = obj[:MAX_OBJECT_CHARS].rstrip() + "..."
-        if _fabricated(obj, text):
-            dropped.append(f"{predicate}: values absent from the turn {obj!r}")
-            continue
-        if memory_type == "procedural":
-            # A standing instruction is the one kind of claim that outranks other claims,
-            # so a garbled one does more than sit there being wrong. Scoped hard --
-            # procedural only, the user's own lines only, names only -- because this is the
-            # one check here that can reject a TRUE memory.
-            #
-            # It used to `continue` here, on the reasoning that "the same preference will
-            # be stated again while a wrong one in the slot silently wins". The first half
-            # of that was wrong. The user stated the code-review rule once; the summary
-            # lost "Sonnet" and "GitHub"; it was dropped and never stated again. A caught
-            # paraphrase is evidence a standing instruction EXISTS -- it is the reason to
-            # go and get the user's wording, not the reason to discard the fact.
-            lost = _dropped_entities(obj, spoken)
-            if lost:
-                repaired = _repaired(obj, spoken, lost)
-                if repaired is None:
-                    dropped.append(
-                        f"{predicate}: the user's words lost {', '.join(lost)} and no "
-                        f"sentence of theirs carries them {obj!r}")
-                    continue
-                repairs.append(f"{predicate}: kept the user's own wording for "
-                               f"{', '.join(lost)}")
-                obj = repaired
-        if injected and _restates(obj, injected) and not _restates(obj, [spoken]):
-            # A note this plugin put in front of the model, handed back as an observation.
-            # Writing it re-records the store's own output, which is how one guess becomes
-            # a fact that several rows agree on. The user restating it is a real event, so
-            # support in what they typed keeps it.
-            dropped.append(f"{predicate}: restates a recalled note {obj!r}")
-            continue
-
-        # The model is told which subject each predicate takes; this makes it true rather
-        # than hoping. A project fact filed under "user" is how a store ends up with one
-        # subject and a 1% join rate.
-        if predicate in PROJECT_PREDICATES:
-            subject = project if subject in ("user", "", project) else subject
-        else:
-            subject = "user"
-
-        out.append(Fact(subject, predicate, obj, memory_type))
+        kept, drop, repair = vet(fact, text=text, spoken=spoken, injected=injected,
+                                 project=project)
+        if drop:
+            dropped.append(drop)
+        if repair:
+            repairs.append(repair)
+        if kept is not None:
+            out.append(kept)
 
     if dropped:
         log("dropped " + "; ".join(dropped))

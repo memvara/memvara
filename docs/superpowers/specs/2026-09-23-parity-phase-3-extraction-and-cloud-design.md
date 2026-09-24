@@ -23,7 +23,7 @@ a verified merge. Each reversal gets a Confluence decision page and rewrites the
 reverses in the same commit.
 
 Switch names: `agentic_extraction`, `extraction_guidance`, `project_descriptions`,
-`expiry_erasure`, `connectors`.
+`expiry_erasure`, `connectors`, and `agentic_capture` for the plugin (section 3.7).
 
 ## 2. Constraints every workstream keeps
 
@@ -174,6 +174,127 @@ change is one of the reconciler's recorded outcomes.
 - `/memvara:setup` (phase 1 §4.10) reads and writes the hosted switches through these routes when
   the plugin is connected to the hosted service.
 
+### 3.7 Agentic capture in the plugin (local)
+
+Added on 2026-09-24, when stream P3-H was approved. Section 3.1 makes extraction agentic on
+the write path of the library and the hosted worker. This section does the same for the
+plugin's capture hook, which extracts on the user's own machine with the headless agent
+command and the user's own login. The principle is the same: the model proposes, and the
+deterministic write path applies.
+
+**What the hook runs.** `plugin/hooks/lib/agentic.py` runs the headless agent command once
+per mined turn, with read-only access to the store the hook writes to:
+
+- The command connects to one MCP server, named `memvara`, from a config file the hook
+  writes for the run and deletes afterwards (owner-only, in `~/.memvara/.hooks/run/`). On a
+  hosted install the file names the endpoint with the hooks' API key and the
+  `memvara-project` header, so the model searches the project the proposals will be
+  written to. On a local install it is the client's own memvara server block, with this
+  process's `MEMVARA_*` variables winning over it. The plugin's own `.mcp.json` entry is
+  not used because it may be signed in through a browser, which a headless run cannot do.
+- The run's searches are plain reads. The local server is started with
+  `MEMVARA_FEATURE_QUERY_REWRITE=0` and `MEMVARA_FEATURE_SYNTHESIS=0`, set after the user's
+  own variables, so a configured `MEMVARA_LLM` cannot turn each search into a model call.
+  The hosted config sends `Memvara-Read-Stages: plain`. The hosted service does not read
+  that header yet; the cloud side adds it, and until then a search from an organisation
+  with a model key may be rewritten.
+- A hook that is killed never reaches the `finally` that deletes the config file, which
+  holds a credential. Every capture and every session start delete any
+  `capture-mcp-*.json` in the runtime directory older than twice the run's timeout, and
+  write a `capture.log` line saying how many they removed.
+- `--strict-mcp-config` excludes every other MCP server the user has. `--tools ""` removes
+  the built-in tools. `--allowedTools` lists `memory_search`, `memory_recall`, `memory_why`
+  and `memory_profile`; `--disallowedTools` names every other memvara tool so it is not in
+  the model's context; `--permission-mode dontAsk` refuses anything not allowed, including
+  a tool the server adds later. A test compares the denied list with the server's tool
+  table.
+- `--setting-sources ""` loads no settings files and so no plugins or instruction files,
+  and `--system-prompt` replaces the default system prompt with the rules. Together they
+  are most of the cost difference measured below. `--no-session-persistence` keeps the
+  run's transcript, which contains the user's turn, off disk.
+- The step limit is `--max-turns 6`. The hook reads the command's `stream-json` events as
+  they arrive and stops the run at the fifth tool call or after 60 seconds.
+
+**Proposals.** The model returns `{"proposals": [...]}` with four kinds: `fact`;
+`supersede` of a claim id with a new value and a reason; `end` of a claim id with a reason;
+and `link` (`extends` or `derives`) between two claim ids, where `new:N` names the Nth fact
+or supersede in the same reply. A fact or supersede may carry `"standing": false`, which
+files it as `episodic`, and `expires_at`. Each proposal passes the checks a single-call
+fact passes (`extract.vet`: closed vocabulary, empty and thin objects, values absent from
+the turn, the user's own wording for a standing instruction, echoes of recalled notes and
+of the search results the model read), and three more: every claim id must have appeared
+in a read tool's result in this run, which the hook reads from the event stream rather
+than from the model's text; the object must not repeat the rules; and it must come from
+the new turn rather than from the earlier ones. Accepted proposals go through the hook's
+existing writes: `remember`, `remember` with `replaces` and `reason`, `memory_end` (locally
+`delete(close="ended")`), and `memory_link`. The reconciler decides duplicates and
+conflicts as before.
+
+**Context without re-reading.** Capture stays per turn. The model also sees up to 4,000
+characters of the turns before, marked as already processed, inside the same data block.
+
+**Instructions are never content.** The rules are the system prompt. The earlier turns
+and the new turn are the user message, inside delimiters that carry a random value per run
+and a first line saying the block is data. A test pastes the rules into a turn and has the
+fake model restate them; every such proposal is refused.
+
+**Expiry and standing facts.** `expires_at` is passed only when the store's `remember`
+takes it: the hosted server's tool schema is asked, and a local library's signature is
+read. Otherwise it is dropped with a log note. Supermemory's static flag has no new field:
+a standing fact keeps its predicate's type (`procedural` is the set every session starts
+with and the profile shows), and a fact marked not standing is filed as `episodic`.
+
+**Fallback and visibility.** No config to connect with, a missing command, a failed or
+timed-out run, no memory access, or a run over the search limit falls back to the
+single-call extraction for that turn, with a `capture.log` line naming the reason. A reply
+that is not a proposal list writes nothing, and the turn counts as mined. The capture
+alert is raised by the single-call path as before, so an expired login still reaches the
+terminal. The capture hook's timeout on Claude Code went from 120 to 180 seconds to cover
+both runs. Only a host whose first extractor is the headless agent command runs agentic
+capture; the other hosts keep their own CLI.
+
+**Switch.** `agentic_capture`, on by default, in `FEATURE_DEFAULTS` and the hooks' copy.
+
+**Measured.** On 2026-09-24 on one machine, with
+`tests/fixtures/agentic_capture/replay.py`: nine synthetic coding turns in
+`turns.json` (no real transcript was used), each replayed twice through both paths against
+a freshly seeded local store, 18 runs per path. The raw rows are in
+`results-2026-09-24.json` beside the fixtures.
+
+| | single call | agentic |
+|---|---|---|
+| Expected changes made (new facts and replaced values) | 7 of 14 | 12 of 14 |
+| Stored values the turn changed that were ended (supersedes caught) | 2 of 6 | 6 of 6 |
+| Duplicate of a stored fact on the restated-instruction turn | 2 of 2 runs | 1 of 2 runs |
+| New claims the turn did not call for, all turns | 6 | 4 |
+| Writes from the turn that pastes the extractor's prompt | 0 | 0 |
+| Writes from a fact stated only in the earlier turns | 0 | 0 |
+| Mean input tokens per turn (of which cache writes) | 45,258 (19,290) | 19,436 (3,905) |
+| Mean output tokens per turn | 1,272 | 1,163 |
+| Mean seconds per turn | 19.6 | 17.3 |
+
+The agentic runs made 0 to 3 searches (6 runs with none, 7 with one, 4 with two, 1 with
+three), and none fell back. Both paths missed the project defect in the "known defect"
+turn in both rounds. Three of the four unwanted agentic claims are `located_now Lisbon`
+on the temporary-timezone turn, which a reader may well count as correct; the fourth is a
+restatement of the stored hook-test rule filed under `known_defect`, where the reconciler
+cannot see it as a duplicate. The single-call cost is high on this machine because that
+path loads the user's instruction files and plugins into every run; with small ones it is
+about 21,000 input tokens, as `lib/extract.py` records, and the agentic run then costs
+about the same. The bar in 3.1 (no fewer facts, no more duplicates) is met on this set, so
+the switch ships on. Nine turns is a small set, and a larger replay over real transcripts
+is left to P3-F. These numbers were measured before the searches were made plain reads,
+and they still hold: the replay's local server had no model configured, so its searches
+made no model call either way, and its costs count only the headless run's own tokens.
+What the change removes is a cost the replay did not incur: up to four model calls per
+turn on a store with `MEMVARA_LLM` set, which would have been billed on that key and not
+counted in this table.
+
+**Open.** The hosted connection was tested against a fake transport, not against the live
+endpoint. `expires_at` now reaches a local store: the library has it since P3-B (#238),
+and a test writes an expiring proposal to it. A hosted deployment gets it once it runs a
+server that lists the argument; until then the hook drops it with a log note.
+
 ## 4. Workstreams for the fan-out
 
 | Stream | Repository | Features | Depends on |
@@ -185,6 +306,7 @@ change is one of the reconciler's recorded outcomes.
 | P3-E | cloud `dashboard/` | Project settings, Connectors screens, onboarding step, layout specs | P3-C and P3-D routes merged |
 | P3-F | cloud `deploy/` worker and core `bench/` | the extraction worker switch and the release-bar runs for 3.1 | P3-A merged |
 | P3-G | memvara-web | customer documentation for every phase 1–3 feature, customer-first per the house rule | each feature's pull request merged |
+| P3-H | core `plugin/hooks/` | 3.7 agentic capture in the plugin: read-only search, checked proposals, fallback, `agentic_capture` switch | phase 1 `claim_links`; uses `expires_at` once P3-B ships it |
 
 ## 5. Out of scope for phase 3
 

@@ -433,6 +433,22 @@ def last_turn_with_injections(raw: bytes) -> "tuple[str, list[str]]":
     entries of type `user`, so the naive boundary cuts the turn in half; and a prompt that
     survives the noise filter is a prompt somebody typed.
     """
+    turn, injected, _ = last_turn_with_context(raw, 0)
+    return turn, injected
+
+
+def last_turn_with_context(raw: bytes,
+                          context_chars: int) -> "tuple[str, list[str], str]":
+    """The turn that just ended, the memories injected into it, and what came before it.
+
+    The first two are `last_turn_with_injections`. The third is at most `context_chars`
+    characters of the turns before the new one, formatted the same way and cut from the
+    front, so the text nearest the new turn is kept. Agentic capture (`lib.agentic`)
+    shows it to the model marked as already mined, so the model can read a short reply
+    such as "yes, do that" against the question it answers. Nothing is extracted from
+    it: those turns were mined when they ended. `0` returns an empty string and costs
+    nothing.
+    """
     entries = []
     for line in raw.decode("utf-8", "replace").splitlines():
         line = line.strip()
@@ -460,7 +476,7 @@ def last_turn_with_injections(raw: bytes) -> "tuple[str, list[str]]":
     if start is None:
         # No typed prompt in the window. Mining everything from here would re-mine turns
         # that were already handled when they happened.
-        return "", []
+        return "", [], ""
 
     out: list[str] = []
     for entry in entries[start:]:
@@ -474,7 +490,13 @@ def last_turn_with_injections(raw: bytes) -> "tuple[str, list[str]]":
     injected: list[str] = []
     for entry in entries:
         injected.extend(_entry_injected(entry))
-    return "\n".join(out), injected
+    context = ""
+    if context_chars > 0:
+        earlier: list[str] = []
+        for entry in entries[:start]:
+            earlier.extend(format_entry(entry))
+        context = "\n".join(earlier)[-context_chars:]
+    return "\n".join(out), injected, context
 
 
 def last_turn(raw: bytes) -> str:

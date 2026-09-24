@@ -261,6 +261,11 @@ def _capture(monkeypatch, tmp_path, stored: int, failed: "list[str]") -> None:
     monkeypatch.setattr(capture, "log", lambda line: None)
     monkeypatch.setattr(capture, "open_writer", lambda: (object(), None))
     monkeypatch.setattr(capture, "_keep_turn", lambda *a: (False, []))
+    # Agentic capture is on by default and would start a real headless run here. These
+    # tests are about the single-call path's count, which is what capture falls back to
+    # when the agentic run cannot use the store; `tests/test_hook_agentic_capture.py`
+    # covers the agentic path's own count.
+    monkeypatch.setattr(capture.agentic, "capture", lambda *a, **k: None)
     monkeypatch.setattr(capture, "triples", lambda *a, **k: ["a fact"] * max(stored, 1))
     monkeypatch.setattr(capture, "store_facts", lambda *a, **k: (stored, failed))
     assert capture.main() == 0

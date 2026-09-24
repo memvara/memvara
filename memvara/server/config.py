@@ -145,6 +145,12 @@ _DEFAULT_EMBEDDER = "hashing"
 #: passed, when it opens and then hourly while the server runs (`Memvara.erase_expired`).
 #: Off, `memory_remember` still stores `expires_at`, its description says nothing will be
 #: erased, and nothing is.
+#:
+#: `agentic_capture` belongs to the plugin. With it on, the capture hook lets the headless
+#: agent command search the user's memory with read-only tools before it proposes facts,
+#: supersedes, ends and links, which the hook checks and applies
+#: (`plugin/hooks/lib/agentic.py`). With it off, capture makes one extraction call per turn
+#: as before.
 FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "index_command": True,
     "research_agent": True,
@@ -166,6 +172,7 @@ FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "encryption": True,
     "extraction_guidance": True,
     "expiry_erasure": True,
+    "agentic_capture": True,
     "agentic_extraction": False,
 })
 
@@ -542,7 +549,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis, metadata_filters, encryption, extraction_guidance, expiry_erasure and agentic_extraction."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis, metadata_filters, encryption, extraction_guidance, expiry_erasure, agentic_capture and agentic_extraction."
     >>> unknown_features(["profile"]) is None
     True
     """
