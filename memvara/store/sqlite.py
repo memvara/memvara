@@ -696,6 +696,42 @@ class _ScopeTurns:
 #: that. The least recently used scope goes first; one scope is kept whatever its size.
 _SCOPE_TURNS_ROWS = 1_000_000
 
+#: How many of the text index's best matches `SQLiteStore._episode_text_first` ranks for
+#: each row it is asked for, and the fewest it ranks in all. Four for each row proved the
+#: answer to every one of 50 LongMemEval-S questions over a scope of 189,520 turns.
+_TEXT_FIRST_WIDEN = 4
+_TEXT_FIRST_FLOOR = 100
+#: How many searches skip `_episode_text_first` after it could not prove an answer for the
+#: same scopes, so a scope holding few of the store's turns pays for the extra statement
+#: once in this many searches rather than on every one.
+_TEXT_FIRST_BACKOFF = 16
+#: How many keys `SQLiteStore._text_first_skips` holds at most. A miss that finds it full
+#: forgets them all, which costs each forgotten key one extra statement at most.
+_TEXT_FIRST_SKIPS_KEPT = 1024
+
+
+def _text_first_sql(scope_clause: str, happened_clause: str) -> str:
+    """The statement behind `SQLiteStore._episode_text_first`, binding the match, the
+    number of matches to rank, then the two clauses' parameters.
+
+    Every row carries how many matches were ranked and the worst score among them, so the
+    caller can tell a complete ranking from a cut one. When no ranked match passes the two
+    clauses, one row still comes back, with no id and no score, to carry those two numbers.
+    """
+    return (
+        "WITH top AS MATERIALIZED ("
+        "SELECT rowid AS r, bm25(episodes_fts) AS s FROM episodes_fts "
+        "WHERE episodes_fts MATCH ? ORDER BY s LIMIT ?), "
+        "hit AS (SELECT e.id AS id, top.s AS s, e.hash AS h "
+        "FROM top CROSS JOIN episodes e ON e.rowid = top.r "
+        f"WHERE {scope_clause} AND {happened_clause}) "
+        "SELECT hit.id, hit.s, edge.n, edge.worst "
+        "FROM (SELECT count(*) AS n, max(s) AS worst FROM top) AS edge "
+        "LEFT JOIN hit ON 1 "
+        "ORDER BY hit.s ASC, hit.h ASC, hit.id ASC"
+    )
+
+
 # Everything the index needs to know about what is on disk, in one query per open:
 # how many vectors, whether they agree on a width, the highest row in use, and how many
 # rows have no address yet. `SUM(n)`, not `COUNT(*)` — the outer query counts the two
@@ -1644,6 +1680,10 @@ class SQLiteStore:
         self._watch: sqlite3.Connection | None = None
         self._watch_version = -1
         self._watch_lock = threading.Lock()
+        # Searches left to skip `_episode_text_first` for, per list of scopes and whether
+        # the read is pinned to an instant, after it could not prove an answer for them.
+        # Only keys still skipping are kept.
+        self._text_first_skips: dict[tuple[tuple[Scope, ...], bool], int] = {}
         with self._lock:
             self._db.executescript(SCHEMA)
             self._migrate()
@@ -4359,6 +4399,11 @@ class SQLiteStore:
             return []
         sc, sp = self._scope_clause(scopes, alias="e")
         hp, hpp = self._happened_clause(valid_at, known_at, alias="e")
+        if where is None and limit > 0:
+            key = (tuple(scopes), valid_at is not None or known_at is not None)
+            hits = self._episode_text_first(m, key, sc, sp, hp, hpp, limit)
+            if hits is not None:
+                return hits
         wc, wp = _where_clause(where, "e", _EPISODE_DOCUMENTS, self._json_functions)
         sql = (
             "SELECT e.id AS eid, bm25(episodes_fts) AS s "
@@ -4376,6 +4421,58 @@ class SQLiteStore:
         with self._read() as conn:
             rows = conn.execute(sql, [m] + sp + hpp + wp + [limit]).fetchall()
         return [(r["eid"], -float(r["s"])) for r in rows]
+
+    def _episode_text_first(self, match: str, key: tuple[tuple[Scope, ...], bool],
+                            sc: str, sp: list, hp: str, hpp: list, limit: int,
+                            ) -> list[tuple[str, float]] | None:
+        """`lexical_search_episodes` from the text index's best matches, or None when
+        those cannot prove the answer.
+
+        The full query joins every matching turn to its row for the scope, the time bound
+        and the tie-break, and those columns sit after `content`, so a long turn costs its
+        overflow pages. Over 189,520 turns a question matching 73,719 of them took 187 ms,
+        71 of them inside the text index. This ranks the matches by `bm25` alone, keeps the
+        best `top`, and looks up only those, by rowid. `CROSS JOIN` fixes that order:
+        left to choose, SQLite walked every turn of the scope in `ep_cover` instead.
+
+        The answer is the full query's whenever it can be proved from those rows. If fewer
+        than `top` matched, every match was ranked. Otherwise every match scoring strictly
+        better than the worst kept row was kept, so once `limit` of those pass the scope
+        and time filters they are the full query's first `limit`, in its order: a row left
+        out scores no better than the worst kept row, and so comes after all of them. Short
+        of that it returns None and the caller runs the full query, as it does for a
+        filtered read, whose filter can reach any metadata field. One statement, so the
+        count, the worst score and the rows all come from the same snapshot.
+
+        After a miss, the next `_TEXT_FIRST_BACKOFF` searches with the same `key` go
+        straight to the full query, because a scope holding few of the store's turns
+        seldom proves its answer this way. `key` is the scopes and whether the read is
+        pinned to an instant, so a read of the past, which misses whenever few turns had
+        happened by then, does not slow the reads of the present. The counts are not
+        locked: a race changes how many searches skip, never what a search returns.
+        """
+        skips = self._text_first_skips.pop(key, 0)
+        if skips:
+            if skips > 1:
+                self._text_first_skips[key] = skips - 1
+            return None
+        top = max(limit * _TEXT_FIRST_WIDEN, _TEXT_FIRST_FLOOR)
+        with self._read() as conn:
+            cur = conn.cursor()
+            cur.row_factory = None
+            rows = cur.execute(_text_first_sql(sc, hp), [match, top] + sp + hpp).fetchall()
+        ranked, worst = rows[0][2], rows[0][3]
+        # A lone row with no id says that no ranked match passed the two clauses.
+        hits = rows if rows[0][0] is not None else []
+        if ranked < top:
+            return [(eid, -float(s)) for eid, s, _, _ in hits[:limit]]
+        proved = [(eid, -float(s)) for eid, s, _, _ in hits if s < worst]
+        if len(proved) >= limit:
+            return proved[:limit]
+        if len(self._text_first_skips) >= _TEXT_FIRST_SKIPS_KEPT:
+            self._text_first_skips.clear()
+        self._text_first_skips[key] = _TEXT_FIRST_BACKOFF
+        return None
 
     def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int, *,
                       valid_at: datetime | None = None,

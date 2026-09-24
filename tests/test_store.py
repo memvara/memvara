@@ -808,6 +808,174 @@ def test_reads_run_on_two_threads_only_where_each_thread_has_its_own_connection(
     file.close()
 
 
+# --- The lexical leg over turns, ranked by the text index first ------------------------
+
+def _full_lexical(store, monkeypatch, *args, **kw):
+    """What `lexical_search_episodes` returned before it ranked the text index first: the
+    full query, which joins every match to its turn."""
+    with monkeypatch.context() as m:
+        m.setattr(store, "_episode_text_first", lambda *a, **k: None)
+        return store.lexical_search_episodes(*args, **kw)
+
+
+def _recording(store, monkeypatch):
+    """A list that every answer `_episode_text_first` gives is appended to, None for a
+    search it left to the full query."""
+    answers = []
+    real = store._episode_text_first
+
+    def record(*args, **kw):
+        answers.append(real(*args, **kw))
+        return answers[-1]
+
+    monkeypatch.setattr(store, "_episode_text_first", record)
+    return answers
+
+
+_WORDS = ("kafka", "pipeline", "lunch", "berlin", "deploy", "ordering", "otter", "sunset")
+
+
+def test_the_text_first_lexical_leg_returns_what_the_full_query_returns(store, monkeypatch):
+    """The text-first form stands in for the full query only where it can prove the
+    answer, so it is checked against the full query: the same turns, in the same order,
+    with the same scores, for every shape of scope asked from its own ancestors, at
+    instants before, among and after the turns, and at every limit, none included. Every
+    third turn repeats one text, so many scores tie and the tie-break has to agree too.
+
+    The sweep means something only if it reaches all three outcomes: a ranking that held
+    every match, a ranking cut short that still proved its answer, and one that could not.
+    A ranking that held every match must never fail to answer."""
+    shapes = [Scope("acme", u, a, s) for u in (None, "alice") for a in (None, "bot")
+              for s in (None, "s1")]
+    for i in range(300):
+        words = " ".join(_WORDS[(i + j) % len(_WORDS)] for j in range(1 + i % 5))
+        turn(store, scope=shapes[i % len(shapes)],
+             content="kafka pipeline" if i % 3 == 0 else words,
+             ts=datetime(2024, 1 + i % 12, 1 + i % 28, tzinfo=timezone.utc))
+    queries = ("kafka", "kafka pipeline", "lunch berlin", "deploy ordering", "zebra")
+    matches = {q: store._db.execute(
+        "SELECT count(*) FROM episodes_fts WHERE episodes_fts MATCH ?",
+        (_fts_query(q),)).fetchone()[0] for q in queries}
+    instants = [{}, {"valid_at": T0, "known_at": T0}, {"valid_at": TMID, "known_at": TMID},
+                {"valid_at": T1, "known_at": TMID}, {"valid_at": TMID, "known_at": T1}]
+    answers = _recording(store, monkeypatch)
+    outcomes = set()
+    for shape in shapes:
+        asked = shape.ancestors()
+        for at in instants:
+            for q in queries:
+                for limit in (1, 5, 30, 1000, 0, -1):
+                    store._text_first_skips.clear()
+                    before = len(answers)
+                    got = store.lexical_search_episodes(q, asked, limit, **at)
+                    want = _full_lexical(store, monkeypatch, q, asked, limit, **at)
+                    assert got == want, (shape, at, q, limit)
+                    if len(answers) > before:
+                        top = max(limit * sqlite_store._TEXT_FIRST_WIDEN,
+                                  sqlite_store._TEXT_FIRST_FLOOR)
+                        outcomes.add((matches[q] >= top, answers[-1] is not None))
+    assert outcomes == {(False, True), (True, True), (True, False)}
+
+
+def test_a_tie_at_the_edge_of_the_ranked_rows_sends_the_leg_to_the_full_query(
+        store, monkeypatch):
+    """Turns with one text in one scope score alike, so the ranking is cut inside a tie
+    and nothing scores better than its worst row. Which of the tied turns made the cut
+    was SQLite's choice rather than the tie-break's, so the leg cannot prove its answer
+    from them and asks the full query, which orders a tie by `hash`, then `id`."""
+    eps = [turn(store, content="kafka pipeline") for _ in range(300)]
+    answers = _recording(store, monkeypatch)
+    got = store.lexical_search_episodes("kafka", [SCOPE], 10)
+    assert answers == [None]
+    assert [h[0] for h in got] == sorted(ep.id for ep in eps)[:10]
+
+
+def test_the_edge_is_the_worst_ranked_match_whoever_it_belongs_to(store, monkeypatch):
+    """The ranked rows prove whatever scores better than the worst of them, and that row
+    need not be one the search may see. This scope's five turns are the best five matches
+    and another user's turns fill the rest of the ranking, so all five are proved, the
+    fifth included, although it is the worst of this scope's."""
+    mine = [turn(store, content="kafka" + " word" * i).id for i in range(5)]
+    for i in range(150):
+        turn(store, content="kafka" + " word" * (5 + i), scope=Scope("acme", "bob"))
+    answers = _recording(store, monkeypatch)
+    hits = store.lexical_search_episodes("kafka", [SCOPE], 5)
+    assert [h[0] for h in hits] == mine
+    assert answers == [hits]
+
+
+def test_a_search_matching_nothing_it_may_see_is_answered_by_the_ranking(
+        store, monkeypatch):
+    """Every match was ranked and none is in the scopes asked, so the answer is proved
+    empty: no full query, and no backing off. A word no turn contains is the same case."""
+    turn(store, content="kafka", scope=Scope("acme", "bob"))
+    answers = _recording(store, monkeypatch)
+    assert store.lexical_search_episodes("kafka", [SCOPE], 5) == []
+    assert store.lexical_search_episodes("zebra", [SCOPE], 5) == []
+    assert answers == [[], []]
+    assert store._text_first_skips == {}
+
+
+def test_a_scope_holding_few_of_the_matches_backs_off_the_text_first_form(
+        store, monkeypatch):
+    """Another user's short turns take every ranked row, so the ranking holds none of
+    this scope's turns and proves nothing. That search and the next `_TEXT_FIRST_BACKOFF`
+    go to the full query, and the one after tries the text-first form again."""
+    for _ in range(200):
+        turn(store, content="kafka", scope=Scope("acme", "bob"))
+    wanted = [turn(store, content="kafka pipeline" + " word" * i).id for i in range(3)]
+    answers = _recording(store, monkeypatch)
+    left = []
+    for _ in range(sqlite_store._TEXT_FIRST_BACKOFF + 2):
+        assert [h[0] for h in store.lexical_search_episodes("kafka", [SCOPE], 5)] == wanted
+        left.append(store._text_first_skips.get(((SCOPE,), False), 0))
+    backoff = sqlite_store._TEXT_FIRST_BACKOFF
+    assert left == list(range(backoff, 0, -1)) + [0, backoff]
+    assert answers == [None] * (backoff + 2)
+
+
+def test_a_miss_reading_the_past_leaves_reads_of_the_present_alone(store, monkeypatch):
+    """Few turns had happened by an early instant, so a read pinned there often misses.
+    Its misses back off only reads pinned to an instant: a read of the present, which
+    usually proves its answer, is not sent to the full query by them."""
+    eps = [turn(store, content="kafka" + " word" * i, ts=T0 if i == 149 else TMID)
+           for i in range(150)]
+    answers = _recording(store, monkeypatch)
+    past = store.lexical_search_episodes("kafka", [SCOPE], 5, valid_at=T0, known_at=T0)
+    assert [h[0] for h in past] == [eps[149].id]
+    now = store.lexical_search_episodes("kafka", [SCOPE], 5)
+    assert [h[0] for h in now] == [ep.id for ep in eps[:5]]
+    assert answers == [None, now]
+    assert store._text_first_skips == {((SCOPE,), True): sqlite_store._TEXT_FIRST_BACKOFF}
+
+
+def test_the_backoff_forgets_every_list_once_it_holds_too_many(store, monkeypatch):
+    """A host serving many scopes must not grow the counts without bound. A miss that
+    finds `_TEXT_FIRST_SKIPS_KEPT` lists already counted forgets them and keeps its own."""
+    monkeypatch.setattr(sqlite_store, "_TEXT_FIRST_SKIPS_KEPT", 3)
+    for _ in range(200):
+        turn(store, content="kafka", scope=Scope("acme", "bob"))
+    for user in ("u1", "u2", "u3", "u4"):
+        turn(store, content="kafka pipeline", scope=Scope("acme", user))
+        store.lexical_search_episodes("kafka", [Scope("acme", user)], 5)
+    assert list(store._text_first_skips) == [((Scope("acme", "u4"),), False)]
+
+
+def test_the_text_first_leg_looks_up_only_the_ranked_turns(store):
+    """The form is worth having only in its join order: rank in the text index, then
+    read each ranked turn by rowid. Left to choose, SQLite walked every turn of the scope
+    in the covering index and looked each one up in the text index, which is slower than
+    the full query. `CROSS JOIN` pins the order, and a new store with no statistics is
+    where the planner prefers the other one."""
+    sc, sp = store._scope_clause([SCOPE], alias="e")
+    hp, hpp = store._happened_clause(None, None, alias="e")
+    plan = [r["detail"] for r in store._db.execute(
+        "EXPLAIN QUERY PLAN " + sqlite_store._text_first_sql(sc, hp),
+        [_fts_query("kafka"), 100] + sp + hpp)]
+    assert "SEARCH e USING INTEGER PRIMARY KEY (rowid=?)" in plan
+    assert not any("ep_cover" in step or "ep_scope" in step for step in plan)
+
+
 # --- The vector leg over turns, from each scope's cached list ------------------------
 
 def _sql_turn_search(store, qvec, scopes, limit, **at):

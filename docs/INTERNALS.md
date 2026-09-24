@@ -1626,6 +1626,40 @@ does not return cannot change the answer by having moved. The lists hold at most
 `_SCOPE_TURNS_ROWS` turns, 1,000,000, across all scopes, dropping the least recently used
 scope first. Each turn costs about 100 bytes: 19.3 MB for those 199,499.
 
+**The lexical leg over turns ranks in the text index first.** The full query joins every
+matching turn to its row, because the scope, the time bound and the tie-break are columns of
+`episodes`. Those columns sit after `content`, so each long turn also costs its overflow
+pages. Over the 189,520 turns in one scope, a question matching 73,719 of them took 187 ms,
+71 ms of it inside the text index. `_episode_text_first` ranks the matches by `bm25` inside
+the text index instead, keeps the best `top` of them, the larger of four per row asked for
+and 100, and reads only those turns, by rowid. `CROSS JOIN` fixes that join order. Left to
+choose, SQLite walked every turn of the scope in `ep_cover` and looked each one up in the
+text index, which is slower than the full query.
+
+It returns the full query's answer when the ranked rows prove it, and None otherwise, which
+sends the leg to the full query. When fewer than `top` turns match, every match was ranked,
+so the ranked rows that pass the scope and the time bound are all the rows the full query
+would see. When `top` or more match, every match scoring strictly better than the worst
+ranked row was ranked, because a match left out scores no better than that row. So once
+`limit` of those pass the scope and the time bound, they are the full query's first
+`limit`, in its order, tie-break included. The count, the worst score and the rows come
+from one statement, so from one snapshot. The ranked rows are cut before the scope and the
+time bound narrow them, which is the arrangement design invariant 7 forbids when nothing
+notices the cut. Here the statement reports the cut, and the leg returns rows only when they
+prove that the cut changed nothing. `tests/test_store.py` checks the leg against the full
+query over every shape of scope, five pairs of instants and six limits, with every third
+turn a copy of one text so that scores tie.
+
+A search misses when too few ranked rows are turns it may see: its scopes hold few of the
+store's matching turns, it reads an instant before most of them happened, or a tie runs
+across the worst ranked row. A miss pays for both statements, so after one the next
+`_TEXT_FIRST_BACKOFF` searches, 16, of the same scopes go straight to the full query. A
+read pinned to an instant counts its misses apart from a read of the present, so reading
+the past does not slow the present. A filtered read always runs the full query, because
+its filter can name any metadata field. Over those 189,520 turns, all 50 LongMemEval-S
+questions that `bench/scale.py` times proved their answers. The leg's median went from
+55 ms to 23 to 26 ms, and its 95th percentile from 149 ms to 70 to 74 ms.
+
 ### Why a claim was closed
 
 The reason for a closure is stored on the closure witness, `meta["closure"]`, which
