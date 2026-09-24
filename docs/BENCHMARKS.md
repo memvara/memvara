@@ -247,6 +247,12 @@ random retrieval would score.
 | open-domain | 92 | 13.9 | 22.4 | **30.7** | 34.1 | 24.7 | 0.4 |
 | **all** | **1531** | **30.5** | **51.7** | **62.0** | **67.4** | **44.9** | **0.3** |
 
+CI reproduces this table on every push and fails when a figure moves, in either direction,
+by more than 0.1 points overall or 1.1 in a category, one question's worth
+(`bench/retrieval_regression.py`, against `bench/expected/locomo_retrieval.json`). A change
+that is meant to move it commits the new figures, measured with `--update`, and this table
+in the same commit.
+
 **LongMemEval, all 500, one shared 940-session store** so there are distractors:
 
 | category | n | R@1 | R@5 | **R@12** | MRR | chance |

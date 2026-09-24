@@ -9,6 +9,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **CI fails when a published LOCOMO retrieval figure moves.** A new job,
+  `retrieval regression`, runs `bench/locomo.py --score retrieval` with no flags and
+  compares each category's in-context rate, evidence recall and MRR with
+  `bench/expected/locomo_retrieval.json`. It fails on a move of more than 0.1 points overall
+  or 1.1 in a category, in either direction, so a change meant to move retrieval commits the
+  new figures (`bench/retrieval_regression.py --update`) with the documentation that quotes
+  them. The job fetches the 2.8 MB dataset from `snap-research/locomo` on every run, and a
+  release now waits on it too.
+
 ### Changed
 
 - **`recall()` shows the day each turn was said, and the part of a long turn the question
