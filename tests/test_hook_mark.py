@@ -233,11 +233,18 @@ def test_capture_hands_the_extractor_a_turn_without_the_injected_block(monkeypat
     monkeypatch.setattr(capture, "log", lambda line: None)
     monkeypatch.setattr(capture, "open_writer", lambda: (object(), None))
     monkeypatch.setattr(capture, "_keep_turn", lambda *a: (False, []))
+    # Agentic capture is on by default, so it is handed the turn first. It records what
+    # it was given and reports that it could not run, which sends the turn on to the
+    # single-call extractor as well: both must get it without the injected block.
+    monkeypatch.setattr(capture.agentic, "capture",
+                        lambda store, turn, context, *a, **k:
+                        handed.extend([turn, context]) and None)
     monkeypatch.setattr(capture, "triples",
                         lambda turn, cwd, injected=(): handed.append(turn) or [])
     assert capture.main() == 0
-    assert handed and "billing uses postgres" not in handed[0]
-    assert "Then postgres it is." in handed[0]
+    assert len(handed) == 3
+    assert not any("billing uses postgres" in text for text in handed)
+    assert "Then postgres it is." in handed[0] and "Then postgres it is." in handed[2]
 
 
 # -- the standing digest ---------------------------------------------------------------

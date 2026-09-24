@@ -2189,6 +2189,37 @@ log shows. `ExtractorSpec.model` is empty for such a CLI, and the label recorded
 Codex extraction against the model `claude -p` pins, which is wrong in the one file whose
 whole job is to say what was spent.
 
+**Agentic capture: the model proposes, the hook applies.** With the `agentic_capture`
+switch on (the default), and only on a host whose first extractor is `claude`,
+`lib/agentic.py` runs the headless agent command with read-only access to the user's
+memory before anything is written. The command connects to one MCP server, the store this
+hook writes to, through a config file written for the run (owner-only, deleted after):
+the hosted endpoint with the hooks' own API key and project header, or the client's own
+local server block. The run's searches are plain reads: the local server is started with
+`MEMVARA_FEATURE_QUERY_REWRITE=0` and `MEMVARA_FEATURE_SYNTHESIS=0`, and the hosted config
+sends `Memvara-Read-Stages: plain`, which the hosted service does not read yet. A hook that
+is killed never reaches the `finally` that deletes the config, so every capture and every
+session start delete any `capture-mcp-*.json` in the runtime directory older than twice the
+run's timeout, and log how many they removed. Only `memory_search`, `memory_recall`, `memory_why` and
+`memory_profile` are in the model's context; every other memvara tool is denied by name,
+no built-in tool is available, and `--permission-mode dontAsk` refuses anything not
+allowed. The hook reads the command's event stream as it runs and stops it after four tool
+calls or 60 seconds. The model returns JSON proposals of four kinds: a new fact, a
+supersede of a claim id with a new value and a reason, an end of a claim id with a reason,
+and a link (`extends` or `derives`) between two claims. Each proposal passes the same
+checks as a fact from the single-call extractor (`extract.vet`), and three more: a claim id
+must have appeared in a tool result during this run, the object must not repeat the
+extractor's own rules, and it must come from the new turn rather than from the earlier
+turns the model was shown for reference. Accepted proposals are written with
+`remember` (with `replaces` and `reason` for a supersede), `delete(close="ended")` or
+`memory_end`, and `link` or `memory_link`, so the reconciler still decides duplicates and
+conflicts. `expires_at` is passed only when the store's `remember` takes it. A reply that is
+not a proposal list writes nothing, and the turn still counts as mined. A run that cannot
+use the store, fails, times out or goes over the search limit falls back to the
+single-call extraction for that turn, with a `capture.log` line saying why; the
+single-call path raises the capture alert if it fails as well. The capture hook's timeout
+on Claude Code is 180 seconds to cover both runs.
+
 **The project a hook works in reaches the server as a header, carried by the environment.**
 `lib/project.py` turns the session's directory into a project: `host/owner/repo` from the
 `origin` remote, which every worktree of a repository shares, or `path:` and 16 hex
@@ -2240,7 +2271,9 @@ rather than `OSError`.
 **Each of those three features has a switch.** `lib/settings.py` reads
 `~/.memvara/settings.json`, a flat object of `feature_name: true|false`, where a missing key
 means the feature's default. `MEMVARA_FEATURE_<NAME>=0|1` overrides the file. The names are
-`project_scope`, `status_line` and `recall_mark`, all on by default. The hooks know the same
+`project_scope`, `status_line` and `recall_mark`, all on by default. Two more are on by
+default: `agentic_capture`, described above, and `query_rewrite`, described below. The
+hooks know the same
 feature names and defaults as `ServerConfig`, kept as a copy in
 `lib/settings.FEATURE_DEFAULTS` that a test compares with the library's. The file is read at
 most once per process. Capture drops

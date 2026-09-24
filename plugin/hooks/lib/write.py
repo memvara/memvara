@@ -179,34 +179,145 @@ def store_facts(store: Any, facts: Iterable[Any], turn: str = "",
     for fact in facts:
         subject, predicate, obj = fact[0], fact[1], fact[2]
         memory_type = fact[3] if len(fact) > 3 else None
-        kwargs: dict = {"confidence": 0.7}
-        if memory_type:
-            kwargs["memory_type"] = memory_type
-        # The label the host writes under. It is stored on every claim and rendered back
-        # by `memory_why`, so it is a fact about recorded history rather than a string to
-        # tidy: changing it re-labels everything written before the change.
-        kwargs["extractor"] = active().extractor_label
-        if not hosted:
-            episode = _episode(turn)
-            if episode is not None:
-                kwargs["sources"] = [episode]
-        elif sources:
-            # The hosted half of the same thing, and it took two changes on the other side
-            # to become possible: the tool had to declare `sources`, and the receipt had to
-            # render the episode ids, or a caller could not learn the id it needed to cite.
-            # Each made the other useless, which is why `memory_why` answered "No source
-            # turns are retained" for every fact any hosted client had ever written.
-            #
-            # IDs, not the turn. `_cite` stores what it is handed and links a string, so
-            # passing the text would store a second copy of the turn `_keep_turn` just
-            # wrote. The client drops this again if the server has not got #76.
-            kwargs["sources"] = list(sources)
         try:
-            store.remember(subject, predicate, obj, **kwargs)
+            store.remember(subject, predicate, obj,
+                           **remember_kwargs(memory_type, turn, hosted, sources))
             stored += 1
         except Exception as exc:
             failed.append(f"{subject}/{predicate}: {type(exc).__name__}: {exc}")
     return stored, failed
+
+
+def remember_kwargs(memory_type: "str | None", turn: str, hosted: bool,
+                    sources: "Sequence[str]") -> dict:
+    """The keyword arguments every hook write passes to `remember`. See `store_facts`.
+
+    Shared by `store_facts` and by agentic capture's proposals (`lib.agentic`), so that a
+    fact the model proposed is written with the same confidence, type, extractor label
+    and provenance as a fact from the single-call extractor.
+    """
+    kwargs: dict = {"confidence": 0.7}
+    if memory_type:
+        # The hosted tool takes the type's name. The local library takes its enum, and a
+        # plain string fails there with `AttributeError: 'str' object has no attribute
+        # 'value'` when the claim is stored. Every fact this hook wrote to a local store
+        # failed that way, and capture.log recorded each one under `failed=`.
+        kwargs["memory_type"] = memory_type if hosted else _memory_type(memory_type)
+    # The label the host writes under. It is stored on every claim and rendered back
+    # by `memory_why`, so it is a fact about recorded history rather than a string to
+    # tidy: changing it re-labels everything written before the change.
+    kwargs["extractor"] = active().extractor_label
+    if not hosted:
+        episode = _episode(turn)
+        if episode is not None:
+            kwargs["sources"] = [episode]
+    elif sources:
+        # The hosted half of the same thing, and it took two changes on the other side
+        # to become possible: the tool had to declare `sources`, and the receipt had to
+        # render the episode ids, or a caller could not learn the id it needed to cite.
+        # Each made the other useless, which is why `memory_why` answered "No source
+        # turns are retained" for every fact any hosted client had ever written.
+        #
+        # IDs, not the turn. `_cite` stores what it is handed and links a string, so
+        # passing the text would store a second copy of the turn `_keep_turn` just
+        # wrote. The client drops this again if the server has not got #76.
+        kwargs["sources"] = list(sources)
+    return kwargs
+
+
+def _memory_type(name: str) -> Any:
+    """`MemoryType(name)` from the installed library, or `name` when it cannot be built."""
+    try:
+        from memvara.types import MemoryType
+
+        return MemoryType(name)
+    except Exception:
+        return name
+
+
+def takes(store: Any, argument: str, hosted: bool) -> bool:
+    """Whether this store's `remember` accepts `argument`. Never raises.
+
+    Asked the way the hooks already ask about optional arguments. A hosted store is asked
+    through the server's own tool schema (`HostedRecall.accepts`), because the server
+    refuses an argument it does not know and loses the whole write. A local store is the
+    installed library, which may be older than these hooks, so its signature is read:
+    `expires_at` arrives with the phase 3 expiry work and an older library would raise
+    `TypeError` on it.
+    """
+    if hosted:
+        accepts = getattr(store, "accepts", None)
+        try:
+            return bool(accepts("memory_remember", argument)) if accepts else False
+        except Exception:
+            return False
+    import inspect
+
+    try:
+        params = inspect.signature(store.remember).parameters
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return argument in params
+
+
+def end_claim(store: Any, claim_id: str, reason: str, hosted: bool) -> None:
+    """End one claim by id, recording `reason`. Raises when nothing was ended.
+
+    Ending, never retiring: the claim was true and has stopped being true, so it keeps
+    answering questions about the time it held. A proposal cannot say the record was
+    always wrong; that is `memory_forget`, and agentic capture is not given it.
+
+    The local library's `delete(claim_id, close="ended")` is what `memory_end` runs with
+    a claim id, and it answers `False` for an id this scope cannot see. The hosted
+    client raises for the same case.
+    """
+    if hosted:
+        store.end(claim_id, reason=reason)
+        return
+    if not store.delete(claim_id, close="ended", reason=reason):
+        raise KeyError(f"no claim {claim_id} is visible here")
+
+
+def link_claims(store: Any, from_id: str, to_id: str, relation: str,
+                hosted: bool) -> None:
+    """Record `from_id <relation> to_id`, where relation is `extends` or `derives`.
+
+    Raises when the store refuses it: an id it cannot see, a claim linked to itself, or a
+    store with no links at all.
+    """
+    if hosted:
+        store.link(from_id, to_id, relation)
+        return
+    store.link(from_id, to_id, relation, by=active().extractor_label)
+
+
+#: A claim id as the store renders it: `cl_` and 20 hex characters (`types._new_id`).
+CLAIM_ID = re.compile(r"\bcl_[0-9a-f]{20}\b")
+
+
+def new_claim_id(receipt: object) -> "str | None":
+    """The id of the claim a `remember` call wrote or found, or None when it cannot tell.
+
+    The local library returns a `WriteReceipt`: the new claim is in `added`, or, when the
+    store already held the same fact, in `reinforced`. The hosted server returns text in
+    which a line starting `+ [cl_...]` names each added claim. A receipt that names none
+    (for example a fact the store already knew, reported only as a count) gives None, and
+    a link that needed the id is then refused rather than guessed.
+    """
+    if isinstance(receipt, str):
+        for line in receipt.splitlines():
+            if line.startswith("+ ["):
+                found = CLAIM_ID.findall(line)
+                if found:
+                    return found[0]
+        return None
+    for field in ("added", "reinforced"):
+        claims = getattr(receipt, field, None) or []
+        for claim in claims:
+            claim_id = getattr(claim, "id", None)
+            if isinstance(claim_id, str):
+                return claim_id
+    return None
 
 
 def _episode(turn: str) -> Any:
