@@ -920,6 +920,38 @@ Search must:
   `anchored=True` return only the results something did. See
   [`retrieve/anchor.py`](#retrieveanchorpy).
 
+#### Two legs at once
+
+Each stage, claims in `_gather` and turns in `_episodes`, hands its vector leg to a pool
+thread (`_beside`) and runs its lexical leg, and on the turn side the time leg, on the
+calling thread. The legs read the store independently, and on a large scope each spends
+most of its time inside SQLite or in a matrix product, both of which release the GIL, so a
+stage costs the longer of its legs rather than their sum. In `bench/scale.py`,
+`search(k=12, include_episodes=True)` went from a median of 286 ms to 245 to 254 ms with
+199,499 turns and 100,000 claims in one scope, and from 100 ms to 64 to 65 ms with 189,520
+turns and few claims, and 50 searches on each store returned the same rows with the same
+scores. `docs/BENCHMARKS.md` has why the first gains less than the legs alone suggest.
+
+The query is embedded on the calling thread before the leg is handed over, and the pass's
+vectors go with it, so the embedder is still called once per pass and only from the thread
+that called `search()`. The leg runs on the calling thread instead, exactly where it ran
+before, in two cases:
+
+- the store does not answer `_parallel_reads()` with true. `SQLiteStore` answers false
+  inside `batch()`, where the calling thread reads its own uncommitted rows through the
+  writer's connection and another thread's connection cannot see them, and for a database
+  with no file, whose one connection a second thread would only wait for. A third-party
+  store has no such method and keeps its legs on one thread;
+- every one of the `_LEG_THREADS` pool threads, three, is busy, so that a saturated pool
+  costs a search what it cost before rather than a wait.
+
+A leg that raises on its thread raises from the search when the stage collects it, and
+frees its thread either way.
+
+`_parallel_reads` is private and read with a guarded `getattr`, as `embed.fingerprint`
+reads `_vec`. A public method would have to join `Store`, and a new protocol member stops
+every existing backend from type-checking as one.
+
 #### The third leg
 
 At `w_graph > 0` a graph leg runs **after** the first fusion and the whole list is fused
@@ -1554,6 +1586,92 @@ and no `states` because nothing retires a turn.
 of `_live_clause` and is held to the same wording clause for clause. Three copies of one
 predicate is three chances to disagree; `tests/test_bitemporal.py` checks the Python one
 against the SQL one row for row.
+
+### Reading a whole scope, and joining the text index
+
+Most reads are capped, and they filter by scope with `_scope_clause`: one `OR` term per
+ancestor scope, in the same statement as the `LIMIT` (design invariant 7). The two
+candidate lists are not capped. `candidate_ids` and `episode_candidate_ids` return every
+row a scope can see, because the vector leg ranks inside that list, so what a query costs
+per row decides what they cost.
+
+**One `SELECT` per scope.** SQLite plans the `OR` as a MULTI-INDEX OR: every rowid each
+term returns goes into a temporary set first, so that a row two terms both match comes back
+once. For a whole-scope list that set holds the whole scope. `_scoped_union` instead builds
+one `SELECT` per scope and joins them with `UNION ALL`. That needs no set, because a row is
+stored at exactly one scope and two distinct scopes never return the same row. Repeated
+scopes are dropped before the SQL is built, since two copies of one scope would return its
+rows twice. Over 100,000 claims in one user's scope this takes the claim list from 84 ms to
+69 ms. `tests/test_store.py` checks the lists against the `OR`'s meaning over every shape a
+scope can take.
+
+**A covering index for the turn list.** `ep_cover` indexes a turn's five scope columns,
+`ts` and `id`, which is every column `episode_candidate_ids` reads. SQLite answers the query
+from the index and never reads a turn's row. Over the 189,520 LongMemEval-S turns in one
+scope, the list took 244 ms before, 102 ms with the index, and 84 ms with one range per
+scope. A plain scan of the table takes 70 ms. `ep_scope`, the older index, stays: an older
+build creates it on every open, so dropping it would make a file both builds open rebuild
+it each time. `ep_cover` is one of the late indexes, created on every open, so an existing
+store builds it the first time this version opens it: 1.7 s and 10 MB for those 189,520
+turns.
+
+**The lexical legs join on rowid.** `lexical_search` and `lexical_search_episodes` join
+each text index row to its table on rowid, not on the `claim_id` or `episode_id` column the
+index row also stores. Reading that column back reads the index's copy of the row, text and
+all, for every match. In `bench/scale.py` the claim leg's median went from 323 ms to 120 ms
+over 100,000 claims, and the turn leg's from 140 ms to 55 ms over 199,499 turns. The join
+is correct only because every index row sits at the rowid of the row it indexes, which has
+been true since 0.1.0 and which erasure already relied on. `put_claim` and `add_episode`
+upsert, so a row keeps its rowid, and write the index row with that rowid. Erasure and
+`purge` delete the index row by rowid before the row. `VACUUM` and `VACUUM INTO` keep the
+rowids of a table that has an index, as both tables do, although SQLite documents `VACUUM`
+as free to renumber a table without an INTEGER PRIMARY KEY. The backup API copies pages, so
+it keeps them too. A copy that re-inserts the rows into a new file need not keep them, and
+a store copied that way can miss a lexical match or return another row in its place;
+`docs/UPGRADING.md` has the repair. `tests/test_store.py` checks the invariant after every
+write that moves or frees a rowid, after a `VACUUM`, and in a `VACUUM INTO` copy.
+
+The vector leg then looks up each candidate's row in the matrix. `_VecIndex.search` does
+that with `np.fromiter(map(dict.get, ...))`, which runs the lookups in C rather than in a
+Python loop: 79 ms to 57 ms for 199,499 candidates, beside 45 ms for the product itself.
+
+**Each scope's turns, kept in memory.** The turn list and those lookups are the same work
+on every search until something is written, so the vector leg over turns keeps them.
+`_scope_turns` holds, per scope, the ids of the turns that have a vector, their `ts` and
+their matrix rows, sorted by `(ts, id)`. A search takes, for each of its scopes, the prefix
+with `ts` at or before the instant asked about, found by binary search, and hands the rows
+to `_VecIndex.search_rows`, which ranks them exactly as `search` does. The candidates are
+the rows `_scoped_union` returns, in the order it returns them, so two turns whose cosines
+tie keep the same order and the same rows come back. `tests/test_store.py` checks that
+against the SQL path over every shape of scope, five pairs of instants and four limits,
+with half the vectors shared. Over the 199,499 turns in one scope of `bench/scale.py`, the
+vector leg's median went from 220 ms to 54 ms, and a whole search's from 450 ms to 284 ms.
+
+A list lives until `_changed` empties the cache. That runs after every commit this store
+makes, whatever it wrote, and when the first search after another connection's commit
+sees it. That search asks one connection kept for the purpose, through `_notice_commits`,
+because `PRAGMA data_version` can only be compared with an earlier answer from the same
+connection: asked on each reading thread's own connection, it emptied the cache once per
+thread per commit, and on every thread's first read with nothing committed at all. The
+watch is read before `_ensure_index` refreshes the map, so a list rebuilt for a commit is
+built from a map that already holds that commit's rows. A list built while a change
+happened is returned to the search that built it and not kept. So the first search after
+any write rebuilds the lists it needs,
+which costs more than the SQL path it replaces: in `bench/scale.py` the vector leg took
+238 ms after a write against 220 ms before this change, and a whole search 471 ms against
+450 to 472 ms. Every search after it, until the next write, takes the 54 ms. Three reads
+still take the SQL path: a filtered one, because a filter can name any metadata field
+and the lists hold none; one inside `batch()`, because that thread must see its own
+uncommitted rows and a list shared with other threads must never hold them; and one before
+this process has seen any vector, because an index loaded then never learns a width.
+
+A write in another thread can still move a row between a search reading its lists and
+ranking them. `search_rows` therefore checks, under the index lock, that every row is
+inside the matrix and that each turn it returns still holds the row it was scored by, and
+returns `None` when one does not, which sends the search down the SQL path. A turn it
+does not return cannot change the answer by having moved. The lists hold at most
+`_SCOPE_TURNS_ROWS` turns, 1,000,000, across all scopes, dropping the least recently used
+scope first. Each turn costs about 100 bytes: 19.3 MB for those 199,499.
 
 ### Why a claim was closed
 

@@ -69,6 +69,19 @@ mypy job, and a fourth that installs the package with **no extras** and imports 
 module — a top-level `import anthropic` anywhere in the tree fails that job, which is the
 whole reason it exists.
 
+It also runs LOCOMO retrieval and fails when a published figure moves, in either
+direction, by more than 0.1 points overall or 1.1 in a category, which is one question's
+worth (`bench/retrieval_regression.py`). A change that is meant to move retrieval measures
+the new figures and commits them beside the code:
+
+```bash
+PYTHONPATH=. python3 bench/locomo.py --download             # 2.8 MB, once
+PYTHONPATH=. python3 bench/retrieval_regression.py          # what CI runs
+PYTHONPATH=. python3 bench/retrieval_regression.py --update  # rewrite bench/expected/
+```
+
+Then update the figures `docs/BENCHMARKS.md` quotes in the same commit.
+
 ## The bar
 
 Three hard requirements, all enforced in CI.

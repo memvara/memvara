@@ -247,6 +247,12 @@ random retrieval would score.
 | open-domain | 92 | 13.9 | 22.4 | **30.7** | 34.1 | 24.7 | 0.4 |
 | **all** | **1531** | **30.5** | **51.7** | **62.0** | **67.4** | **44.9** | **0.3** |
 
+CI reproduces this table on every push and fails when a figure moves, in either direction,
+by more than 0.1 points overall or 1.1 in a category, one question's worth
+(`bench/retrieval_regression.py`, against `bench/expected/locomo_retrieval.json`). A change
+that is meant to move it commits the new figures, measured with `--update`, and this table
+in the same commit.
+
 **LongMemEval, all 500, one shared 940-session store** so there are distractors:
 
 | category | n | R@1 | R@5 | **R@12** | MRR | chance |
@@ -1332,6 +1338,98 @@ architecture from model quality. The benchmark does **not** demonstrate the hybr
 advantage — the offline `HashingEmbedder` is character-n-gram based and therefore unusually
 good at exact tokens, so the vector-only baseline finds them too. That claim needs a real
 semantic embedder to test, and is stated here rather than claimed.
+
+### One large scope
+
+`bench/perf.py` spreads its claims over fifty users, so no scope it searches holds more than
+a few hundred rows. `bench/scale.py` measures the other end: one user's scope holding all
+199,499 LongMemEval-S haystack turns, deduplicated by session, and 100,000 synthetic claims,
+written straight through the store with the hashing embedder. It times each store read a
+search runs, over 50 questions or five fixed claim queries, and then
+`search(k=12, include_episodes=True)` as a whole.
+
+```bash
+PYTHONPATH=. python3 bench/scale.py --path /tmp/scale.db
+```
+
+Both columns time copies of one store file, built once, on a 4-core Linux container, one
+run after the other. "Before" is `main` on 2026-09-24. "After" is the change that asks for
+each scope's candidates separately, reads the turn list from the covering index `ep_cover`,
+joins the text index to its table on rowid, and looks up vector rows in one vectorised pass:
+
+| read | before, median | after, median | before, p95 | after, p95 |
+|---|---:|---:|---:|---:|
+| `candidate_ids` | 86.7 ms | 70.6 ms | 124.5 ms | 77.4 ms |
+| `episode_candidate_ids` | 265.5 ms | 88.5 ms | 288.2 ms | 106.4 ms |
+| `lexical_search` | 323.3 ms | 120.0 ms | 360.6 ms | 131.8 ms |
+| `lexical_search_episodes` | 140.0 ms | 55.4 ms | 423.0 ms | 161.0 ms |
+| `vector_search` | 176.2 ms | 158.9 ms | 274.0 ms | 216.1 ms |
+| `vector_search_episodes` | 391.5 ms | 215.1 ms | 447.5 ms | 253.3 ms |
+| **`search()`** | **737.6 ms** | **469.8 ms** | **1,071.0 ms** | **556.5 ms** |
+
+Every read returns the same rows before and after; only how SQLite reaches them changed.
+The claim vector leg moved least. Measured on its own, about half its time is the
+candidate list, which no covering index answers because it reads the claim's state
+columns, and most of the rest is the product over 100,000 vectors, which is the floor for
+an exact index. The lexical legs are handed what
+`HybridRetriever` hands them, the query reduced to its content words. The mechanism behind
+each row, and the first open that builds `ep_cover`, are in
+[`docs/INTERNALS.md`](INTERNALS.md) under *Reading a whole scope, and joining the text
+index*.
+
+**Each scope's turns, kept in memory.** The next change keeps each scope's turn list and
+its matrix rows between searches, and empties them on every commit. Two stores this time:
+the one above, and the LongMemEval-S turns written with the benchmark harness, 189,520 in
+one scope with 1,168 claims, where the turns are nearly all of the work. "After a write"
+empties the lists before each search, which is what the first search after any commit
+pays. "Before" is the change above, timed at the start and again at the end of the run, and
+both columns give the two runs where they differ:
+
+| read | before, median | after, median | before, p95 | after, p95 |
+|---|---:|---:|---:|---:|
+| 100,000 claims: `vector_search_episodes` | 219.8 / 229.8 ms | 53.7 ms | 249.8 / 263.3 ms | 66.0 ms |
+| &nbsp;&nbsp;after a write | | 238.2 ms | | 270.0 ms |
+| 100,000 claims: **`search()`** | **449.7 / 471.5 ms** | **284.1 ms** | **567.6 / 570.9 ms** | **399.0 ms** |
+| &nbsp;&nbsp;after a write | | 471.4 ms | | 592.1 ms |
+| 1,168 claims: `vector_search_episodes` | 182.8 / 181.0 ms | 36.5 ms | 221.8 / 218.8 ms | 40.2 ms |
+| &nbsp;&nbsp;after a write | | 202.7 ms | | 217.3 ms |
+| 1,168 claims: **`search()`** | **257.5 / 258.0 ms** | **107.2 ms** | **360.3 / 353.1 ms** | **223.4 ms** |
+| &nbsp;&nbsp;after a write | | 267.9 ms | | 381.5 ms |
+
+The rows that come back are the same: 50 searches on each store returned the same 600
+rows with the same scores under both builds. The first search after a write costs slightly
+more than a search did before, because rebuilding a list also reads each turn's `ts` and
+builds three arrays, and every search after it, until the next write, costs the
+"after" column. On the turn-heavy store, what is left of a search is mostly the lexical leg
+over turns: 54 ms at the median and 158 ms at the 95th percentile, when a question's
+content words are common.
+
+**Two legs at once.** The change after that runs each stage's vector leg on a pool thread
+while the stage runs its lexical leg on the calling thread. Same two stores, timed three
+times in a row: this change, the change above, and this change again.
+
+| read | before, median | after, median | before, p95 | after, p95 |
+|---|---:|---:|---:|---:|
+| 100,000 claims: **`search()`** | **285.7 ms** | **254.1 / 245.1 ms** | **392.5 ms** | **369.0 / 351.9 ms** |
+| &nbsp;&nbsp;after a write | 473.8 ms | 479.9 / 461.4 ms | 612.4 ms | 526.8 / 503.1 ms |
+| 1,168 claims: **`search()`** | **100.2 ms** | **65.1 / 63.6 ms** | **205.1 ms** | **188.6 / 170.3 ms** |
+| &nbsp;&nbsp;after a write | 266.4 ms | 239.6 / 243.1 ms | 389.5 ms | 256.6 / 270.4 ms |
+
+The rows that come back are the same: 50 searches on each store returned the same 600 rows
+with the same scores. A stage now costs about its longer leg. Timed on their own, the turn
+stage's two legs took 54 and 56 ms on the first store, 111 ms one after the other and
+61 ms together, and the claim stage's took 167 and 126 ms for five claim queries, 291 ms
+one after the other and 175 ms together. A whole search gains less than that on the first
+store because its claim stage has little to overlap there: the LongMemEval-S questions
+share almost no words with the synthetic claims, so the claim lexical leg takes 0.1 ms.
+
+The first search after a write gains least. Timed on its own in the same runs, the vector
+leg that rebuilds the scope's turn list took 270 to 282 ms in this build against 250 ms in
+the one before, and `episode_candidate_ids` 110 to 118 ms against 96 ms. That difference is
+not the legs. `bench/scale.py` runs on one thread until a search starts the pool, and both
+reads run 11 to 16% slower in any process that has started a second thread, even one that
+opened no connection and has exited. A host that serves requests from more than one thread
+pays that with or without this change.
 
 ---
 

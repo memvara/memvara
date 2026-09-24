@@ -143,6 +143,19 @@ either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/sto
   ingest ran. `memvara/store/sqlite.py` orders on `value_key` before `id`.
 - **Scope is bound at startup and cannot be widened by a call.** `ScopedMemvara.bind()`
   narrows only.
+- **Each text index row sits at the rowid of the row it indexes.** Erasure deletes a row's
+  index entry by rowid, and both lexical legs join the index to its table on rowid, so a
+  write that gave a row a new rowid would break both. That is why `put_claim` and
+  `add_episode` upsert instead of `INSERT OR REPLACE`. `tests/test_store.py` checks the
+  invariant after every write that moves or frees a rowid, and after a `VACUUM`.
+- **Every commit `SQLiteStore` makes that can change a turn goes through `_maybe_commit`.**
+  That is what empties `_scope_turns`, the vector leg's in-memory list of each scope's turns
+  and their matrix rows. Another connection's commit, from another process or another
+  `SQLiteStore` on the same file, is seen by `_notice_commits`, which one connection
+  answers for the whole store, before the next search reads the lists. A commit that went
+  around both would leave searches missing a new turn, or returning an erased one scored by
+  the vector that took its row, until the next commit. `tests/test_store.py` checks a turn
+  written, erased, rolled back and written by another process between two searches.
 
 ## Read next
 

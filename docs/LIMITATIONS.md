@@ -57,9 +57,11 @@ the date is here to be read, and to be old enough to disbelieve eventually.
   `docs/BENCHMARKS.md` exactly as it applies here: `gpt-5.4` may have seen LongMemEval in
   training, one sample and one run is not a distribution, and no same-harness comparison
   against another vendor's hosted service has been completed to weigh it against.
-- **The vector index is exact and in-process.** A numpy matmul over the candidate set —
-  correct and fast to roughly a million claims, at which point the `Store` protocol is
-  where pgvector or Qdrant goes.
+- **The vector index is exact and in-process.** A numpy matmul over the candidate set,
+  which is correct and costs time in proportion to the scope. With 199,499 turns and
+  100,000 claims in one scope, a whole `search()` takes a median of about 250 ms, and
+  about 470 ms when it is the first search after a write (`bench/scale.py`). Past that, the `Store`
+  protocol is where pgvector or Qdrant goes.
 - **Predicate schema, the salience gate and the fast extractor are English-centric.** The
   schema grows by learning, but the seed set is small on purpose, and the gate's and
   extractor's rules are English sentence forms. On other scripts they fall through to the

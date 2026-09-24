@@ -33,6 +33,55 @@ query through `encode`, without the instruction, and finds what it found before.
 
 ---
 
+## A search on a store with a file uses up to three more threads
+
+### What changed
+
+`HybridRetriever` runs each stage's vector leg on a pool thread beside its lexical leg,
+when the store is a `SQLiteStore` with a file and the calling thread is not inside
+`batch()`. The pool is made on the first such search and kept: up to three threads per
+retriever, and so per `Memvara`, each holding its own SQLite read connection, as the
+threads a rewritten read uses already do. Results are unchanged, and the embedder is still
+called only from the thread that called `search()`.
+
+### Who this changes, and in which direction
+
+**If you count threads or open file handles per process**, allow three more of each per
+`Memvara` that searches a file store. `close()` closes the connections.
+
+**If you pass your own `Store`**, nothing changes: a store without `SQLiteStore`'s private
+`_parallel_reads` keeps both legs on the calling thread.
+
+---
+
+## A process that searches a large scope keeps that scope's turn list in memory
+
+### What changed
+
+The vector leg over turns keeps, per scope, the ids, times and matrix rows of the turns
+that have a vector, and ranks those instead of asking SQLite for the list on every search.
+It returns the same turns. Each turn costs about 100 bytes, so 199,499 turns in one scope
+hold 19.3 MB, and building them peaks at about twice that. The lists across all scopes are
+capped at 1,000,000 turns, about 100 MB, and the least recently used scope goes first. Every
+commit empties them, so the first search after a write rebuilds the list it needs and costs
+a little more than a search did before: over 199,499 turns, 238 ms for the vector leg
+against 220 to 230 ms.
+
+### Who this changes, and in which direction
+
+**If you run memvara where memory is tight and one scope holds hundreds of thousands of
+turns**, budget about 100 bytes per turn per process on top of what it used before. A
+store whose scopes hold a few thousand turns each will not notice.
+
+**If you count open file handles per process**, allow one more SQLite connection per store
+that searches turns. The store uses it only to ask whether another connection has
+committed, and `close()` closes it.
+
+Nothing else changes. A filtered search, a search inside `batch()` and a store with no
+vectors yet read exactly as before.
+
+---
+
 ## `LocalEmbedder()` loads bge-small-en-v1.5
 
 ### What changed
@@ -68,6 +117,44 @@ you pass is used as it is.
 
 **If ingest time matters**, bge-small encodes at about half MiniLM's speed on a CPU: 192 s
 against 98 s for LOCOMO's 5,882 turns, and 12 ms more for the median read.
+
+---
+
+## The first open of an existing store builds one index
+
+### What changed
+
+`SQLiteStore` has a new index on the episodes table, `ep_cover`, which the vector leg's
+turn list reads instead of the table. It is created on open, like the store's other late
+indexes, so a store written by an earlier version builds it the first time this version
+opens it. That open is slower once, by about 1.7 s per 190,000 turns, and the file grows
+by about 10 MB per 190,000 turns. Every open after that is unchanged. An earlier version
+that opens the file afterwards keeps the index and uses it.
+
+The lexical legs now join the text index to its table on rowid. That is only correct while
+each text index row sits at the rowid of the row it indexes, which every write in this
+library keeps true, and which `VACUUM`, `VACUUM INTO` and SQLite's backup API preserve.
+
+### Who this changes, and in which direction
+
+**If you open a large store where a pause matters**, open it once after upgrading, at a
+time a slow open costs nothing: `SQLiteStore(path).close()` builds the index.
+
+**If you have copied a store by re-inserting its rows into a new file**, such as a SQL
+dump replayed into an empty database, the text index may no longer line up with the rows.
+Erasure already relied on that, and now lexical search does too: such a store can miss a
+lexical match or return another row in its place. Rebuild both text indexes from their
+tables with the store closed:
+
+```sql
+DELETE FROM claims_fts;
+INSERT INTO claims_fts (rowid, claim_id, text) SELECT rowid, id, text FROM claims;
+DELETE FROM episodes_fts;
+INSERT INTO episodes_fts (rowid, episode_id, content) SELECT rowid, id, content FROM episodes;
+```
+
+A store that has only ever been written by this library, and copied as a file, with
+`VACUUM INTO` or with the backup API, needs nothing.
 
 ---
 

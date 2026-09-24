@@ -168,9 +168,11 @@ this repository rather than being a hypothetical extension point:
 | `Redactor` | none | `PatternRedactor` |
 | `Recorder` | none | `MemoryRecorder` |
 
-The vector index is exact and in-process — a numpy matmul over the candidate set. Correct
-and fast to roughly a million claims, at which point `Store` is where pgvector or Qdrant
-goes.
+The vector index is exact and in-process — a numpy matmul over the candidate set. It is
+correct and costs time in proportion to the scope: with 199,499 turns and 100,000 claims in
+one scope, a whole search takes a median of about 250 ms, and about 470 ms when it is the
+first after a write (`bench/scale.py`). Past that, `Store`
+is where pgvector or Qdrant goes.
 
 ## What is not in this repository
 

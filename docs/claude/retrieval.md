@@ -76,7 +76,12 @@ JSON, under a header that names the text as data rather than instruction.
 2. The lexical leg runs SQLite FTS5 and reads its `bm25()` score, flipped so that higher is
    better. The vector leg embeds the query as a query, through `encode_queries()`, and
    runs a cosine search. Each leg over-fetches `k * candidate_multiplier` rows so that
-   later filtering has something to work with.
+   later filtering has something to work with. Over turns, `SQLiteStore` ranks each
+   scope's turn list from memory until the next commit empties it (`_scope_turns`), and
+   asks SQL for the list only for a filtered read, one inside `batch()`, or one before
+   this process has seen any vector. On a store with a file, outside `batch()`, the
+   vector leg runs on a pool thread while the lexical leg runs on the calling thread,
+   and the query is embedded on the calling thread first (`HybridRetriever._beside`).
 3. `reciprocal_rank_fusion()` merges the ranked lists by position rather than by raw score,
    which is what lets two incomparable scoring scales be combined at all.
 4. `final_score()` re-scores the fused list using the claim's own properties: how fresh it
@@ -148,6 +153,11 @@ JSON, under a header that names the text as data rather than instruction.
   duplicate merge read theirs through `calibration_of()`. A new default model, or any model
   a deployment adopts widely, needs its own row there, measured with
   `bench/embedder_calibration.py`, or those two checks read its cosines on MiniLM's scale.
+- **A leg on another thread sees exactly what the calling thread would.** `_beside` hands
+  the vector leg to a pool thread only when `SQLiteStore._parallel_reads()` is true, which
+  it is not inside `batch()` or for a database with no file. The query is embedded on the
+  calling thread first, so the embedder is only called from the thread that searched.
+  `tests/test_hybrid.py` pins both, and that the results match the one-thread path.
 
 ## Read next
 
