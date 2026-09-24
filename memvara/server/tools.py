@@ -26,6 +26,11 @@ misread "forget that" as "delete everything". `memory_forget` retires and `memor
 closes out a fact that stopped being true; both stay visible to `memory_history`, and
 neither removes anything from disk.
 
+The one erasure a tool can arrange is decided when the fact is written, not afterwards:
+`memory_remember` takes `expires_at`, and the store erases that fact itself once the
+instant passes (`Memvara.erase_expired`). It cannot reach a fact that is already stored,
+so it gives a model no way to erase what somebody else wrote.
+
 `memory_delete_document` is the one tool that erases stored text, and what it erases is
 narrow: one document's own chunks, which the caller put there as a document and names by
 id. It erases no memory. A memory whose only source was that document is retired with
@@ -88,7 +93,7 @@ from .validate import ToolError, validate
 
 __all__ = ["FEATURE_ARGUMENTS", "TOOLS", "Tool", "ToolContext", "ToolError",
            "anchoring_by_default", "safe_detail", "safe_line", "without_arguments",
-           "without_reasons"]
+           "without_expiry", "without_reasons"]
 
 #: Framing for any block of stored claims. `Memvara.recall` applies its own; this is for
 #: the tools that render results themselves. It names the text below it as data, which
@@ -269,6 +274,11 @@ def anchoring_by_default(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
 #: lineage, which is worth keeping when reasons are switched off.
 _REASON_ARGUMENTS = ("reason", "until_reason")
 
+#: `memory_remember`'s two expiry arguments. With `MEMVARA_FEATURE_EXPIRY_ERASURE=0` they
+#: stay, because the date is still stored, and `without_expiry` rewrites their
+#: descriptions to say that nothing will be erased.
+_EXPIRY_ARGUMENTS = ("expires_at", "expire_reason")
+
 
 def without_reasons(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
     """The same tools with every reason argument removed, for `end_reason` switched off.
@@ -290,6 +300,22 @@ FEATURE_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
     "query_rewrite": ("query_rewrite",),
     "synthesis": ("synthesize",),
 }
+
+
+def without_expiry(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
+    """The same tools, described for a server with `expiry_erasure` switched off.
+
+    The arguments keep their names and schemas, because the library still stores the
+    date. Only their descriptions change, so a model is not told that a fact will be
+    erased when this server will never erase it.
+    """
+    return tuple(
+        replace(tool, properties={
+            **tool.properties,
+            "expires_at": {**_EXPIRES_AT, "description": _EXPIRES_AT_OFF},
+            "expire_reason": {**_EXPIRE_REASON, "description": _EXPIRES_AT_OFF}})
+        if "expires_at" in tool.properties else tool
+        for tool in tools)
 
 
 def without_arguments(tools: "tuple[Tool, ...]",
@@ -570,6 +596,39 @@ _TRUE_SINCE = {
         "could falsify — the same boundary memory_forget and memory_end respect."
     ),
 }
+
+_EXPIRES_AT = {
+    "type": "string",
+    "description": (
+        "ISO-8601 instant after which this fact is ERASED, e.g. '2026-10-01T00:00:00Z'. "
+        "Erased means deleted from the store, with its search index entry and its vector: "
+        "it is not ended and not retired, memory_recall, memory_history and memory_why "
+        "stop showing it, and nothing can bring it back. The store keeps a record that "
+        "a fact was erased, with no copy of the fact. Use it only for something that must "
+        "not be kept past a date, such as a temporary door code or a note the user wants "
+        "gone after a trip, and only when the user asked for that. For a fact that will "
+        "stop being true, send true_until instead, which keeps the history. The store "
+        "stops returning the fact as soon as that instant passes, and deletes it from "
+        "disk when it next opens or at its hourly sweep. Refused when the instant is not "
+        "in the future. Omit it for a fact that should be kept, which is almost every "
+        "fact."
+    ),
+}
+
+_EXPIRE_REASON = {
+    "type": "string", "maxLength": REASON_CHARS,
+    "description": (
+        "Why the fact is erased at expires_at: 'temporary door code for the rental'. "
+        "Erased with the fact. Only with expires_at; sent without it, the call is "
+        f"refused. At most {REASON_CHARS} characters."
+    ),
+}
+
+#: The description both expiry arguments carry on a server with the switch off.
+_EXPIRES_AT_OFF = (
+    "Expiry erasure is switched off on this memory server "
+    "(MEMVARA_FEATURE_EXPIRY_ERASURE=0). The date and reason are stored with the fact, "
+    "and nothing is erased when the date passes, so do not tell the user it will be.")
 
 _TRUE_UNTIL = {
     "type": "string",
@@ -1601,6 +1660,13 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
             "value with a reason and store nothing new, use memory_end or memory_forget.")
     until_reason = _reason(args, "until_reason", "memory_remember")
     reason = _reason(args, "reason", "memory_remember")
+    expires_at = _expiry(args)
+    expire_reason = _reason(args, "expire_reason", "memory_remember")
+    # Sent only when set, so a hosted deployment from before expiry receives the request
+    # it has always received.
+    expiry: dict[str, Any] = {}
+    if expires_at is not None:
+        expiry = {"expires_at": expires_at, "expire_reason": expire_reason}
     try:
         receipt = ctx.memory.remember(
             args["subject"], args["predicate"], args["object"],
@@ -1615,6 +1681,7 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
             until_reason=until_reason,
             replaces=args.get("replaces"),
             reason=reason,
+            **expiry,
         )
     except KeyError:
         # Only `replaces` raises this, and the message names no scope on purpose: the
@@ -1633,7 +1700,55 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
                                            # only displaced a value, which still names the
                                            # canonical slot.
                                            list(receipt.added) + list(receipt.closed)),
-                               _interval_note(receipt.added), _pending(receipt.closed)]))
+                               _interval_note(receipt.added), _pending(receipt.closed),
+                               _expiry_note(ctx, receipt.added)]))
+
+
+def _expiry(args: Mapping[str, Any]) -> datetime | None:
+    """`memory_remember.expires_at`, parsed and checked, or `None` when not sent.
+
+    Checked here, before anything is written, so each refusal names the argument the
+    model sent. The library refuses the same two cases.
+    """
+    raw = args.get("expires_at")
+    if raw is None:
+        if args.get("expire_reason") is not None:
+            raise ToolError(
+                "memory_remember.expire_reason says why a fact will be erased, and no "
+                "expires_at was sent, so nothing will erase it. Send expires_at with it, "
+                "or leave expire_reason out.")
+        return None
+    when = _timestamp(raw, "memory_remember.expires_at")
+    if when <= utcnow():
+        raise ToolError(
+            f"memory_remember.expires_at ({when.isoformat()}) is not in the future. A fact "
+            "that is already due would be erased by the next sweep, so nothing was "
+            "written. If the fact should not be kept, do not store it; otherwise send a "
+            "later instant.")
+    return when
+
+
+def _expiry_note(ctx: ToolContext, claims: Sequence[Claim]) -> str:
+    """Say when a fact just written will be erased, or that nothing will erase it.
+
+    A model that set `expires_at` should be able to tell the user what will happen, and
+    the two answers differ by server: with the switch off the date is only recorded.
+    """
+    lines = []
+    for c in claims:
+        if c.expires_at is None:
+            continue
+        if "expiry_erasure" in ctx.features_off:
+            lines.append(
+                f"note: expires_at {_stamp(c.expires_at)} is stored, and expiry erasure "
+                "is switched off on this server, so nothing will erase this fact.")
+        else:
+            lines.append(
+                f"note: this fact will be erased at {_stamp(c.expires_at)}. It stops being "
+                "returned at that instant and is deleted from disk within the hour after. "
+                "Erased means deleted: memory_recall, memory_history and memory_why stop "
+                "showing it, and it cannot be brought back.")
+    return "\n".join(lines)
 
 
 def _reason(args: Mapping[str, Any], field: str, tool: str) -> str | None:
@@ -2911,6 +3026,8 @@ TOOLS: tuple[Tool, ...] = (
                 "Vitest'. Stored on the replaced fact, and memory_history and memory_why "
                 "show it. Only with replaces; sent without it, the call is refused. "
                 f"At most {REASON_CHARS} characters.")),
+            "expires_at": _EXPIRES_AT,
+            "expire_reason": _EXPIRE_REASON,
             "sources": {
                 "type": "array",
                 "items": {"type": "string"},

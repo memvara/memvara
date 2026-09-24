@@ -25,6 +25,7 @@ from ..core import Memvara
 from ..embed import CachedEmbedder, HashingEmbedder
 from ..ingest.url import SafeFetcher, nat64_networks
 from ..llm import NullLLM
+from ..llm.guidance import Guidance, GuidanceError, load_guidance
 from ..project import canonical_project, check_project
 from .validate import _suggest
 from ..schema import (BUILTIN_PREDICATES, PredicatePackError,
@@ -128,6 +129,15 @@ _DEFAULT_EMBEDDER = "hashing"
 #: With the switch on and the `encrypt` extra missing, a new store is refused rather than
 #: created unencrypted; see `build_memvara`.
 #:
+#: `extraction_guidance` decides whether the guidance file `MEMVARA_EXTRACT_GUIDANCE` names
+#: is added to the extraction prompt (`memvara.llm.guidance`). Off, the file is still read
+#: and checked at startup, and no extraction sees it.
+#:
+#: `expiry_erasure` decides whether a local store erases the claims whose `expires_at` has
+#: passed, when it opens and then hourly while the server runs (`Memvara.erase_expired`).
+#: Off, `memory_remember` still stores `expires_at`, its description says nothing will be
+#: erased, and nothing is.
+#:
 #: `agentic_capture` belongs to the plugin. With it on, the capture hook lets the headless
 #: agent command search the user's memory with read-only tools before it proposes facts,
 #: supersedes, ends and links, which the hook checks and applies
@@ -152,6 +162,8 @@ FEATURE_DEFAULTS: Mapping[str, bool] = MappingProxyType({
     "synthesis": True,
     "metadata_filters": True,
     "encryption": True,
+    "extraction_guidance": True,
+    "expiry_erasure": True,
     "agentic_capture": True,
 })
 
@@ -216,6 +228,12 @@ class ServerConfig:
     #: because a multi-paragraph prompt in an environment variable is unreadable in
     #: `docker inspect` and unmaintainable in a compose file.
     llm_extract_system: str | None = None
+    #: Path to a TOML file of per-project extraction guidance, from
+    #: `MEMVARA_EXTRACT_GUIDANCE`: `context`, `include` and `exclude`, appended to the
+    #: extraction prompt under a fixed heading (`memvara.llm.guidance`). Unlike
+    #: `llm_extract_system` it adds to the prompt rather than replacing it, and it applies
+    #: to both model backends. Read and checked at startup; needs Python 3.11 or later.
+    extract_guidance: str | None = None
     #: Ask the "openai" backend for the shorter claim shape, and again this is only for
     #: the self-hosted case `llm_model` describes. The shipped schema requires every field
     #: on every claim, so a model writes `"when":null,"amount":null,"unit":null` for every
@@ -425,6 +443,23 @@ class ServerConfig:
 
         closed = _flag(env.get("MEMVARA_CLOSED_VOCABULARY"), "MEMVARA_CLOSED_VOCABULARY")
 
+        features_off = _features_off(env)
+
+        guidance = _optional(env.get("MEMVARA_EXTRACT_GUIDANCE"))
+        if guidance is not None:
+            # Read now and discard the result, as MEMVARA_PREDICATES is: a typo, an
+            # unreadable file or a rule over the limit is a startup error rather than a
+            # surprise at the first write.
+            _read_guidance(guidance)
+            if (backend == "none" and mode != "cloud"
+                    and "extraction_guidance" not in features_off):
+                # Refused for the reason MEMVARA_ADVISE_REPLACEMENTS is: guidance is added
+                # to a model's prompt, and with no model it would be read and never used.
+                raise ConfigError(
+                    "MEMVARA_EXTRACT_GUIDANCE is set, and MEMVARA_LLM is 'none', so no "
+                    "model would ever read it. Set MEMVARA_LLM=anthropic or "
+                    "MEMVARA_LLM=openai, or unset MEMVARA_EXTRACT_GUIDANCE.")
+
         predicates = (env.get("MEMVARA_PREDICATES") or "").strip()
         if predicates:
             # Read now and discard the result: a typo in a pack name or an unreadable file
@@ -444,7 +479,6 @@ class ServerConfig:
         except ValueError as exc:
             raise ConfigError(f"MEMVARA_NAT64_PREFIXES: {exc}") from None
 
-        features_off = _features_off(env)
         project = _project(env.get("MEMVARA_PROJECT"),
                            derive="project_scope" not in features_off, cwd=cwd)
 
@@ -462,6 +496,7 @@ class ServerConfig:
             llm_model=_optional(env.get("MEMVARA_LLM_MODEL")),
             llm_max_claims=_max_claims(env.get("MEMVARA_LLM_MAX_CLAIMS")),
             llm_extract_system=_optional(env.get("MEMVARA_LLM_EXTRACT_SYSTEM")),
+            extract_guidance=guidance,
             llm_terse_claims=_flag(
                 env.get("MEMVARA_LLM_TERSE_CLAIMS"), "MEMVARA_LLM_TERSE_CLAIMS"),
             llm_max_tokens=_max_tokens(env.get("MEMVARA_LLM_MAX_TOKENS")),
@@ -505,7 +540,7 @@ def unknown_features(names: Iterable[str]) -> str | None:
     exception, so the two cannot disagree about what a feature is.
 
     >>> unknown_features(["profle"])
-    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis, metadata_filters, encryption and agentic_capture."
+    "'profle' (did you mean 'profile'?) is not a feature. The features are index_command, research_agent, project_scope, status_line, recall_mark, profile, forget_matching, end_reason, links, documents, retrieval_chunks, extraction_chunks, ingest_urls, ingest_media, query_rewrite, synthesis, metadata_filters, encryption, extraction_guidance, expiry_erasure and agentic_capture."
     >>> unknown_features(["profile"]) is None
     True
     """
@@ -723,6 +758,18 @@ def _read_extract_system(path: str | None) -> str | None:
             f"MEMVARA_LLM_EXTRACT_SYSTEM={path!r} is empty. A model told nothing extracts "
             "nothing; unset it to use the extraction instructions memvara ships.")
     return text
+
+
+def _read_guidance(path: str) -> Guidance:
+    """The guidance `MEMVARA_EXTRACT_GUIDANCE` names, or a `ConfigError` saying why not.
+
+    On Python 3.10 this is always the refusal, because the file is TOML and that is where
+    `tomllib` is missing. See `llm.guidance.load_guidance`.
+    """
+    try:
+        return load_guidance(os.path.expanduser(path))
+    except GuidanceError as exc:
+        raise ConfigError(f"MEMVARA_EXTRACT_GUIDANCE: {exc}") from None
 
 
 def _db_key(raw: str | None) -> str | None:
@@ -974,6 +1021,7 @@ _SERVER_SIDE_UNDER_CLOUD = (
     ("llm_model", None, "MEMVARA_LLM_MODEL", "extraction model"),
     ("llm_max_claims", None, "MEMVARA_LLM_MAX_CLAIMS", "claim cap"),
     ("llm_extract_system", None, "MEMVARA_LLM_EXTRACT_SYSTEM", "extraction prompt"),
+    ("extract_guidance", None, "MEMVARA_EXTRACT_GUIDANCE", "extraction guidance"),
     ("llm_terse_claims", False, "MEMVARA_LLM_TERSE_CLAIMS", "claim shape"),
     ("llm_max_tokens", None, "MEMVARA_LLM_MAX_TOKENS", "response budget"),
     ("llm_timeout", None, "MEMVARA_LLM_TIMEOUT", "extraction timeout"),
@@ -1094,6 +1142,16 @@ def _local_memvara(config: ServerConfig, encryption: bool) -> Memvara:
         advise_replacements=config.advise_replacements,
         write_closed_vocabulary=config.closed_vocabulary,
         write_extraction_chunks="extraction_chunks" not in config.features_off,
+        # Added to every extraction prompt, unless `MEMVARA_FEATURE_EXTRACTION_GUIDANCE=0`.
+        write_guidance=(_read_guidance(config.extract_guidance)
+                        if config.extract_guidance is not None
+                        and "extraction_guidance" not in config.features_off else None),
+        # `MEMVARA_FEATURE_EXPIRY_ERASURE=0` stops the sweep at open and the hiding of
+        # expired claims from reads. The hourly sweep is the server's, and reads the same
+        # switch.
+        expiry_erasure="expiry_erasure" not in config.features_off,
+        # A read-only server writes nothing, and erasing is a write.
+        sweep_expired=not config.read_only,
         # Explicit at its own default, like `llm` and `embedder` above and for a related
         # reason: this is the one line that says which retrieval legs this store reads
         # with, and a reader of this function should not have to know that

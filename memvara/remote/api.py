@@ -133,6 +133,23 @@ def _hit(body: dict[str, Any]) -> Retrieved:
     return hydrate.result(body)
 
 
+def _expire_reason(reason: str | None, expires_at: datetime | None) -> str | None:
+    """`remember(expire_reason=...)`, checked as the local engine checks it.
+
+    Refused without `expires_at`, and blank or over 500 characters, before any request,
+    so the hosted client and the local engine refuse the same call with the same kind of
+    error. Whether `expires_at` is in the future is left to the deployment, whose clock is
+    the one the sweep reads.
+    """
+    checked = closure_reason(reason)
+    if checked is not None and expires_at is None:
+        raise ValueError(
+            "expire_reason= says why the fact will be erased, and no expires_at= was "
+            "given, so nothing will erase it. Pass expires_at with it, or leave "
+            "expire_reason out.")
+    return checked
+
+
 def _sent(body: dict[str, Any]) -> dict[str, Any]:
     """A request body with its unset fields removed.
 
@@ -835,6 +852,8 @@ class RemoteMemvara:
                  text: str | None = None, extractor: str = "api",
                  until_reason: str | None = None, replaces: str | None = None,
                  reason: str | None = None,
+                 expires_at: datetime | None = None,
+                 expire_reason: str | None = None,
                  **meta: Any) -> WriteReceipt:
         """State one exact fact, skipping extraction entirely.
 
@@ -863,6 +882,8 @@ class RemoteMemvara:
             "source_ids": ids, "sources": turns, "metadata": meta,
             "until_reason": closure_reason(until_reason),
             "replaces": replaces, "reason": closure_reason(reason),
+            "expires_at": _iso(expires_at),
+            "expire_reason": _expire_reason(expire_reason, expires_at),
         }
         with _as_local_refusal(replaces) if replaces is not None else nullcontext():
             out = self._request(

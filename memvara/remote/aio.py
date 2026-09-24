@@ -38,7 +38,7 @@ from ..types import (
 )
 from . import hydrate
 from .api import (PROJECT_HEADER, _as_local_refusal, _document_body,
-                  _document_path, _filter_fields, _hit,
+                  _document_path, _expire_reason, _filter_fields, _hit,
                   _iso, _refuse_project_meta, _sent, _states, _type, _types)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
@@ -442,6 +442,8 @@ class AsyncRemoteMemvara:
                        text: str | None = None, extractor: str = "api",
                        until_reason: str | None = None, replaces: str | None = None,
                        reason: str | None = None,
+                       expires_at: datetime | None = None,
+                       expire_reason: str | None = None,
                        **meta: Any) -> WriteReceipt:
         _refuse_project_meta(meta, "remember()")
         ids, turns = self._cite(sources)
@@ -457,6 +459,8 @@ class AsyncRemoteMemvara:
             "source_ids": ids, "sources": turns, "metadata": meta,
             "until_reason": closure_reason(until_reason),
             "replaces": replaces, "reason": closure_reason(reason),
+            "expires_at": _iso(expires_at),
+            "expire_reason": _expire_reason(expire_reason, expires_at),
         }
         with _as_local_refusal(replaces) if replaces is not None else nullcontext():
             out = await self._request(

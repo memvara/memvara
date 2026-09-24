@@ -3,9 +3,10 @@
 # default, and spelling it locally is exactly the drift this module exists to prevent.
 from .base import (BELIEVED, LIVE_ONLY, OMITTABLE, STATES, ClaimState, SQLStore, Store,
                    bulk_claims, live_predicate, resolve_states, state_predicate,
-                   stored_state_predicate, transaction)
+                   stored_state_predicate, transaction, unexpired_predicate)
 from .sqlite import SQLiteStore
 
 __all__ = ["BELIEVED", "LIVE_ONLY", "OMITTABLE", "SQLStore", "STATES", "ClaimState",
            "Store", "SQLiteStore", "bulk_claims", "live_predicate", "resolve_states",
-           "state_predicate", "stored_state_predicate", "transaction"]
+           "state_predicate", "stored_state_predicate", "transaction",
+           "unexpired_predicate"]

@@ -306,6 +306,22 @@ def closure_reason(value: str | None) -> str | None:
     return text
 
 
+def expired(claim: "Claim", at: datetime) -> bool:
+    """Whether `claim` carries an `expires_at` at or before `at`.
+
+    Such a claim is gone to every read from that instant, and `Memvara.erase_expired`
+    deletes it at its next run. A claim with no `expires_at` never expires.
+
+    >>> c = Claim(subject="user", predicate="door_code", object="4411")
+    >>> expired(c, utcnow())
+    False
+    >>> c.expires_at = utcnow()
+    >>> expired(c, c.expires_at)
+    True
+    """
+    return claim.expires_at is not None and as_utc(claim.expires_at) <= as_utc(at)
+
+
 def closure_reasons(claim: "Claim") -> list[tuple[str, str]]:
     """Every reason recorded on this claim's closures, oldest first, as (close, reason).
 
@@ -819,6 +835,23 @@ class Claim:
     #: `write.when.normalize_unit`, which converts nothing: 120 minutes never becomes 2
     #: hours, and an unrecognised unit is kept rather than guessed at.
     unit: str | None = None
+
+    # --- expiry: when the claim is erased ---
+    #: The instant after which this claim is **erased**: its row, its text index entry
+    #: and its vector are deleted, and an erasure record and proof are kept, by
+    #: `Memvara.erase_expired`. `None`, the default, means the claim is never erased on
+    #: its own. Only a caller sets it (`remember(expires_at=...)`); nothing the engine
+    #: extracts carries one.
+    #:
+    #: **Not `valid_to`, and the difference matters.** `valid_to` says when the fact
+    #: stopped being true in the world, and the engine also sets it when a claim is ended
+    #: or superseded, so erasing on `valid_to` would erase history. A claim with a
+    #: `valid_to` is kept and keeps answering about the period it held; a claim with an
+    #: `expires_at` that has passed is gone.
+    expires_at: datetime | None = None
+    #: Why the claim expires ("temporary access code"), at most `REASON_CHARS`
+    #: characters, or `None`. Erased with the claim.
+    expire_reason: str | None = None
 
     # --- provenance ---
     sources: list[str] = field(default_factory=list)   # Episode ids
@@ -1347,6 +1380,26 @@ class ErasureProof:
         if self.proven:
             return f"<ErasureProof {self.claim_id} gone {sorted(self.residue)}>"
         return f"<ErasureProof {self.claim_id} UNPROVEN {self.reason!r}>"
+
+
+@dataclass(frozen=True, slots=True)
+class ErasedClaim:
+    """One claim `Memvara.erase_expired` erased because its `expires_at` had passed.
+
+    It carries the claim's id and where it lived, the expiry instant and its reason, and
+    the `ErasureProof` checked against the disk after the delete. It carries no subject,
+    predicate, object or text, for the reason the store's erasure record carries none: a
+    report of an erasure that repeats the erased fact is a copy of it.
+
+    `expire_reason` is the caller's own text, returned to the caller that is running the
+    sweep; it is no longer on disk.
+    """
+
+    claim_id: str
+    scope: Scope
+    expires_at: datetime
+    proof: ErasureProof
+    expire_reason: str | None = None
 
 
 @dataclass(slots=True)

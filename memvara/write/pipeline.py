@@ -60,6 +60,7 @@ from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 from ..embed.base import Embedder
 from ..llm._shape import finite_amount
 from ..llm.base import LLM, Usage
+from ..llm.guidance import Guidance
 from ..redact import Redactor, redact_claim, redact_episode
 from . import pollution, split
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
@@ -231,7 +232,8 @@ class WritePipeline:
                  extraction_deferred: bool = False,
                  reject_polluted: bool = True,
                  closed_vocabulary: bool = False,
-                 extraction_chunks: bool = False) -> None:
+                 extraction_chunks: bool = False,
+                 guidance: Guidance | None = None) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
@@ -279,6 +281,20 @@ class WritePipeline:
         #: `docs/ROADMAP.md` has not been met: the one measured chunked run on a long turn
         #: found 4 of 5 key facts where the whole turn found 5 of 5.
         self.extraction_chunks = bool(extraction_chunks)
+        #: Per-project extraction guidance, or `None`. Every tier-2 model call appends it
+        #: to its system message (`llm.guidance.with_guidance`); another extractor that
+        #: sends its own system message reads it from here. Refused for a backend that
+        #: does not say it accepts it, because the other outcome is a guidance file the
+        #: operator wrote that no extraction ever sees.
+        if guidance is not None and guidance.is_empty:
+            guidance = None
+        if guidance is not None and not getattr(llm, "accepts_guidance", False):
+            raise TypeError(
+                f"{getattr(llm, 'name', type(llm).__name__)} does not accept extraction "
+                "guidance: its extract() has no guidance argument, and it does not set "
+                "accepts_guidance. Use AnthropicLLM or OpenAILLM, or leave the guidance "
+                "unset.")
+        self.guidance = guidance
         if not (reject_ungrounded is True or reject_ungrounded is False
                 or reject_ungrounded == "auto"):
             raise TypeError(
@@ -870,10 +886,14 @@ class WritePipeline:
 
     def _extract(self, episodes: Sequence[Episode], vocabulary: Sequence[str],
                  usage: Usage | None) -> list[dict[str, Any]]:
-        """One `llm.extract()` call, passing `usage` only to a backend that fills it."""
-        if usage is None:
-            return self.llm.extract(episodes, vocabulary)
-        return self.llm.extract(episodes, vocabulary, usage=usage)
+        """One `llm.extract()` call, passing `usage` only to a backend that fills it, and
+        `guidance` only when there is some."""
+        kwargs: dict[str, Any] = {}
+        if usage is not None:
+            kwargs["usage"] = usage
+        if self.guidance is not None:
+            kwargs["guidance"] = self.guidance
+        return self.llm.extract(episodes, vocabulary, **kwargs)
 
     def _plan_calls(self, episodes: Sequence[Episode]) -> list[_Call] | None:
         """The extraction calls tier 2 makes for `episodes`, or `None` for one call.

@@ -25,7 +25,9 @@ it on framing would be a poor trade. See `protocol.py`.
 an agent, given it, will call in a loop. `purge` and `reset` are irreversible erasure,
 which must never be one tool call away from a model that read "forget that" as "delete
 everything". `memory_delete_document` erases one document's own text and no memory; a
-memory whose only source was that document is retired. The two closures are offered instead, as two tools: `memory_forget` retires
+memory whose only source was that document is retired. `memory_remember` can set
+`expires_at` on the fact it writes, and the store erases that fact once the instant
+passes; that reaches only the fact being written, never one already stored. The two closures are offered instead, as two tools: `memory_forget` retires
 a record that was wrong, `memory_end` closes out a fact that stopped being true, and both
 stay visible to `memory_history`. They are separate tools rather than one with a
 `closure` flag because a model commits to a tool by its name before it reads a parameter,

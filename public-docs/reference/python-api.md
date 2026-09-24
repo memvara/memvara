@@ -37,8 +37,12 @@ returns a `RemoteMemvara` with the same methods, described in
 | Method | Returns | Calls a model? |
 |---|---|---|
 | `add(messages, *, role="user", ts=None)` | `WriteReceipt` | Only if you configured `llm=` and the text doesn't match a recognized simple sentence pattern |
-| `remember(subject, predicate, object, *, valid_from=, valid_to=, recorded_at=, sources=, confidence=, memory_type=, **meta)` | `WriteReceipt` | Never |
+| `remember(subject, predicate, object, *, valid_from=, valid_to=, recorded_at=, sources=, confidence=, memory_type=, expires_at=, expire_reason=, **meta)` | `WriteReceipt` | Never |
 | `supersede(old_claim_id, new_claim, *, at=, sources=)` | `WriteReceipt` | Never |
+
+`expires_at=` on `remember()` is a date and time in the future after which the fact is
+erased, as `erase()` would erase it; `expire_reason=` records why. It is not `valid_to=`,
+which records when a fact stopped being true and keeps it.
 
 `role="user"` on `add()` is scanned for facts; `role="system"` (for documents, logs, or
 pasted transcripts) is stored and citable, but never scanned. See
@@ -59,6 +63,7 @@ pasted transcripts) is stored and citable, but never scanned. See
 | `purge()` | `dict[str, int]` | Everything in the current scope. |
 | `reset()` | `dict[str, int]` | Everything in the current scope, plus the schema itself. |
 | `prove_erased(claim_id)` | `ErasureProof` | Re-checks every table for leftover content, and returns proof it's gone. |
+| `erase_expired(now=None)` | `list[ErasedClaim]` | Every fact whose `expires_at` has passed, each with its proof. It runs on its own when the store opens (turn that off with `Memvara(expiry_erasure=False)`), so you rarely call it. |
 
 See [Delete personal data](../how-to-guides/delete-personal-data.md) for why these are
 kept separate from the reversible corrections above.

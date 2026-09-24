@@ -294,6 +294,25 @@ def live_predicate(at: str = "?", *, include_invalidated: bool = False,
     )[0]
 
 
+def unexpired_predicate(at: str = "?", *, alias: str = "") -> str:
+    """SQL for "carries no `expires_at`, or one after `at`".
+
+    The companion of `state_predicate` for a store that keeps `expires_at`. A claim whose
+    expiry has passed is left out of every read at once, before the sweep deletes it, so
+    a store ANDs this onto its state clause in the one place its limited queries run
+    (invariant 7). `at` is always the **wall clock now**, never the read's `valid_at` or
+    `known_at`: the caller who set the expiry asked for the fact to stop existing, which
+    no read may rewind past. It is its own predicate rather than a term inside
+    `state_predicate` because a backend without the column (a hosted store before its
+    migration) must keep compiling that one unchanged.
+
+    >>> unexpired_predicate("?", alias="c")
+    '(c.expires_at IS NULL OR c.expires_at > ?)'
+    """
+    a = f"{alias}." if alias else ""
+    return f"({a}expires_at IS NULL OR {a}expires_at > {at})"
+
+
 def bulk_claims(store: "Store", claim_ids: Sequence[str]) -> dict[str, Claim]:
     """`get_claims` where the store has it, one `get_claim` per id where it does not.
 
@@ -365,6 +384,11 @@ OMITTABLE: dict[str, str] = {
     "put_link": "Memvara.link() raises NotImplementedError naming the store, rather "
                 "than reporting a link it did not keep.",
     "claim_links": "links() and why().links report no links. Nothing else reads them.",
+    "hide_expired": "Memvara cannot switch the store's own hiding of expired claims "
+                    "off. Reads by id still follow expiry_erasure.",
+    "expired_claims": "erase_expired() raises NotImplementedError naming the store, and "
+                      "the sweep when the store opens is skipped. A claim's expires_at "
+                      "is kept if the store keeps it, and the claim is never erased.",
     # The nine document members are one capability, and a store that has it says so
     # with `holds_documents = True`; `Memvara` asks that marker rather than the methods,
     # because `RemoteStore` has every method as a stub that raises.
@@ -397,6 +421,11 @@ class Store(Protocol):
     #: that raise, as `RemoteStore` does. Optional, and read as false when absent; see
     #: `OMITTABLE`.
     holds_documents: bool = False
+    #: True on a store that leaves a claim whose `expires_at` has passed out of its own
+    #: queries (`unexpired_predicate`). `Memvara` sets it from `expiry_erasure`, so an
+    #: expiry that erases nothing hides nothing either. Optional, and read as true when
+    #: absent; see `OMITTABLE`.
+    hide_expired: bool = True
 
     # --- episodes ---------------------------------------------------------
     def add_episode(self, ep: Episode) -> None: ...
@@ -932,6 +961,17 @@ class Store(Protocol):
         correct for a memory that *is* its source text, wrong for a fact extracted from
         a conversation turn that holds much else besides. Those turns are what `episodes`
         counts, so it is 0 without the flag.
+        """
+        ...
+
+    def expired_claims(self, now: datetime) -> list[Claim]:
+        """Every claim, in every tenant, whose `expires_at` is at or before `now`.
+
+        What `Memvara.erase_expired` erases. Across tenants, because an expiry is a rule
+        the caller wrote on the claim, not a request made from one scope. A claim with no
+        `expires_at` is never returned, however old it is and whatever its `valid_to`.
+
+        Optional; see `OMITTABLE`.
         """
         ...
 
