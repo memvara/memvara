@@ -122,6 +122,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   passes it through, caching a text's query vector apart from its passage vector. A
   result's score moves with the cosine, so check a `min_score` you tuned under bge-small;
   `docs/UPGRADING.md` has how far.
+- **The lexical leg over turns reads only the turns it ranks best.** `lexical_search_episodes`
+  used to read the row of every turn that matched the query, for its scope, its time and the
+  tie-break, before it ranked them. It now ranks the matches inside the text index and reads
+  the best 100, or four for each row asked for when that is more. When those rows prove the
+  answer it returns them, the same turns in the same order as before, and otherwise it runs
+  the full query. With 189,520 turns and few claims in one scope, the leg went from a median
+  of 55 ms to 23 to 26 ms and from 149 ms to 70 to 74 ms at the 95th percentile, and
+  `search(k=12, include_episodes=True)` from 69 ms to 51 to 59 ms and from 186 ms to 88 to
+  103 ms (`bench/scale.py`, two runs). With 199,499 turns and 100,000 claims, a search's
+  median stays about 250 ms and its 95th percentile went from 384 ms to 287 to 303 ms. A
+  filtered read still runs the full query. A search whose scopes hold few of the store's
+  matching turns pays for both statements, so after one does, the next 16 searches of those
+  scopes run the full query directly; a read pinned to an instant counts its own.
 
 ## [0.15.0] — 2026-09-24
 

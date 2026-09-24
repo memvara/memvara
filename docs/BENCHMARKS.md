@@ -1431,6 +1431,30 @@ reads run 11 to 16% slower in any process that has started a second thread, even
 opened no connection and has exited. A host that serves requests from more than one thread
 pays that with or without this change.
 
+**The lexical leg over turns, ranked first.** The change after that ranks the lexical leg's
+matches over turns inside the text index and reads only the best of them. Same two stores,
+timed three times in a row: this change, the change above, and this change again.
+
+| read | before, median | after, median | before, p95 | after, p95 |
+|---|---:|---:|---:|---:|
+| 100,000 claims: `lexical_search_episodes` | 57.1 ms | 26.4 / 27.2 ms | 158.3 ms | 96.8 / 77.5 ms |
+| 100,000 claims: **`search()`** | **247.1 ms** | **254.9 / 240.9 ms** | **384.1 ms** | **302.8 / 287.2 ms** |
+| &nbsp;&nbsp;after a write | 473.9 ms | 461.2 / 476.6 ms | 535.6 ms | 509.7 / 552.0 ms |
+| 1,168 claims: `lexical_search_episodes` | 55.3 ms | 22.9 / 25.9 ms | 149.3 ms | 69.5 / 73.7 ms |
+| 1,168 claims: **`search()`** | **69.0 ms** | **58.6 / 51.2 ms** | **186.4 ms** | **102.9 / 87.6 ms** |
+| &nbsp;&nbsp;after a write | 253.8 ms | 265.7 / 261.0 ms | 307.8 ms | 323.3 / 328.6 ms |
+
+The rows that come back are the same: 50 searches on each store returned the same 600 rows
+with the same scores under both builds. On both stores, all 50 questions proved their
+answers from the ranked rows, so none of them ran the full query. The leg takes about half
+as long, at the median and at the 95th percentile. A whole search gains less, because the
+turn stage runs the leg beside its vector leg and so costs the longer of the two. At the
+median the vector leg, 36 to 55 ms, is now the longer on both stores, which caps the gain:
+10 to 18 ms on the second store, and within the spread between runs on the first. At the
+95th percentile the lexical leg was by far the longer, and a whole search's 95th percentile
+fell by 80 to 100 ms on both stores. The first search after a write does not change,
+because it waits for the vector leg to rebuild the scope's turn list.
+
 ---
 
 ## Answer quality, end to end (an authored corpus, an agent as the reader)

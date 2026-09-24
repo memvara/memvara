@@ -79,9 +79,12 @@ JSON, under a header that names the text as data rather than instruction.
    later filtering has something to work with. Over turns, `SQLiteStore` ranks each
    scope's turn list from memory until the next commit empties it (`_scope_turns`), and
    asks SQL for the list only for a filtered read, one inside `batch()`, or one before
-   this process has seen any vector. On a store with a file, outside `batch()`, the
-   vector leg runs on a pool thread while the lexical leg runs on the calling thread,
-   and the query is embedded on the calling thread first (`HybridRetriever._beside`).
+   this process has seen any vector. The lexical leg over turns ranks the matches inside
+   the text index and reads only the best of them. It runs the full query when those
+   cannot prove the answer, and always for a filtered read (`_episode_text_first`). On a
+   store with a file, outside `batch()`, the vector leg runs on a pool thread while the
+   lexical leg runs on the calling thread, and the query is embedded on the calling
+   thread first (`HybridRetriever._beside`).
 3. `reciprocal_rank_fusion()` merges the ranked lists by position rather than by raw score,
    which is what lets two incomparable scoring scales be combined at all.
 4. `final_score()` re-scores the fused list using the claim's own properties: how fresh it
@@ -140,6 +143,9 @@ JSON, under a header that names the text as data rather than instruction.
   bounded retry when the pool came back full. The caller's metadata and file-path filter
   (`filters`, `filepath_prefix`, checked in `memvara/filters.py`) is a store parameter,
   `where`, on every capped store method, and the graph leg does not run when it is set.
+  One store read cuts before it filters: `_episode_text_first` ranks turns before the
+  scope and the time bound narrow them. Its statement reports the cut, and it answers only
+  when its rows prove that the cut changed nothing; otherwise the full query runs.
 - **A document's passages are episodes.** `add_document()` stores each chunk as a
   `role="system"` episode with `meta["document_id"]`, so the episode legs find passages
   from documents with no index of their own, and only when `include_episodes=True` is
