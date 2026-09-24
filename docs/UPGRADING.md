@@ -28,9 +28,6 @@ called only from the thread that called `search()`.
 
 ---
 
-
----
-
 ## A process that searches a large scope keeps that scope's turn list in memory
 
 ### What changed
