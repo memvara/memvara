@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Mapping, Sequence, Union
 
-from ..embed.base import Embedder
+from ..embed.base import Embedder, encode_queries
 from ..llm import _shape
 from ..llm.base import Message, ToolChat, ToolRun, ToolSpec, Usage
 from ..llm.guidance import Guidance, with_guidance
@@ -422,7 +422,7 @@ class _Session:
         store, scopes, now = self.extractor.store, self.scope.ancestors(), self.now
         legs = [store.lexical_search(query, scopes, k, valid_at=now, known_at=now)]
         try:
-            vector = self.extractor.embedder.encode([query])[0]
+            vector = encode_queries(self.extractor.embedder, [query])[0]
             legs.append(store.vector_search(vector, scopes, k, valid_at=now, known_at=now))
         except ValueError:
             # The index was built by another embedder. The lexical leg still answers, as

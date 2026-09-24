@@ -38,8 +38,13 @@ JSON, under a header that names the text as data rather than instruction.
   `memvara/rerank/cross.py` — `CrossEncoderReranker`; `memvara/rerank/lexical.py` —
   `CoverageReranker`; `memvara/rerank/stage.py` — `rerank()`.
 - Embedding: `memvara/embed/base.py` — the `Embedder` protocol, `HashingEmbedder` (the
-  offline default) and `CachedEmbedder`; `memvara/embed/local.py` — `LocalEmbedder`;
-  `memvara/embed/fingerprint.py` — `fingerprint_of()` and `EmbedderFingerprint`.
+  offline default), `CachedEmbedder`, and `encode_queries()`, which uses an embedder's own
+  `encode_queries` when it has one and `encode` otherwise; `memvara/embed/local.py` —
+  `LocalEmbedder`, whose default model is `BAAI/bge-small-en-v1.5`, and which puts bge's
+  query instruction before a search query and before nothing it stores; `memvara/embed/fingerprint.py` —
+  `fingerprint_of()` and `EmbedderFingerprint`; `memvara/embed/calibration.py` —
+  `calibration_of()`, the cosine thresholds measured for each embedding space, and
+  `bench/embedder_calibration.py`, the measurement.
 - Optional model-ranked reads: `memvara/select/base.py` — the `Selector` protocol,
   `Candidate`, `Selection`, `SelectorRefused`; `memvara/select/model.py` — `ModelSelector`.
 - Query rewrite and synthesis: `memvara/select/stages.py` — `QueryRewriter` and
@@ -69,16 +74,17 @@ JSON, under a header that names the text as data rather than instruction.
    temporal question, a relational question, or open, and `intent.weights()` shifts the leg
    weights accordingly.
 2. The lexical leg runs SQLite FTS5 and reads its `bm25()` score, flipped so that higher is
-   better. The vector leg embeds the query and runs a cosine search. Each leg over-fetches
-   `k * candidate_multiplier` rows so that later filtering has something to work with. Over
-   turns, `SQLiteStore` ranks each scope's turn list from memory until the next commit
-   empties it (`_scope_turns`), and asks SQL for the list only for a filtered read, one
-   inside `batch()`, or one before this process has seen any vector. The lexical leg over
-   turns ranks the matches inside the text index and reads only the best of them. It runs
-   the full query when those cannot prove the answer, and always for a filtered read
-   (`_episode_text_first`). On a store with a file, outside `batch()`, the vector leg runs
-   on a pool thread while the lexical leg runs on the calling thread, and the query is
-   embedded on the calling thread first (`HybridRetriever._beside`).
+   better. The vector leg embeds the query as a query, through `encode_queries()`, and
+   runs a cosine search. Each leg over-fetches `k * candidate_multiplier` rows so that
+   later filtering has something to work with. Over turns, `SQLiteStore` ranks each
+   scope's turn list from memory until the next commit empties it (`_scope_turns`), and
+   asks SQL for the list only for a filtered read, one inside `batch()`, or one before
+   this process has seen any vector. The lexical leg over turns ranks the matches inside
+   the text index and reads only the best of them. It runs the full query when those
+   cannot prove the answer, and always for a filtered read (`_episode_text_first`). On a
+   store with a file, outside `batch()`, the vector leg runs on a pool thread while the
+   lexical leg runs on the calling thread, and the query is embedded on the calling
+   thread first (`HybridRetriever._beside`).
 3. `reciprocal_rank_fusion()` merges the ranked lists by position rather than by raw score,
    which is what lets two incomparable scoring scales be combined at all.
 4. `final_score()` re-scores the fused list using the claim's own properties: how fresh it
@@ -146,7 +152,13 @@ JSON, under a header that names the text as data rather than instruction.
   asked for. The chunker is `memvara/documents/chunk.py`.
 - **A store can only be opened by the embedder that wrote it.** `fingerprint_of()` records
   which embedder and dimension produced the vectors, and `Memvara` refuses a mismatch with a
-  message naming the width to use. `reembed()` is the way through.
+  message naming the width to use. `reembed()` is the way through. `Memvara()` with no
+  embedder, and the MCP server's bare `local`, load the local model the store's fingerprint
+  names, because the default model changed after 0.15 to one of the same width.
+- **A cosine threshold belongs to an embedding space.** The grounding rescue and the
+  duplicate merge read theirs through `calibration_of()`. A new default model, or any model
+  a deployment adopts widely, needs its own row there, measured with
+  `bench/embedder_calibration.py`, or those two checks read its cosines on MiniLM's scale.
 - **A leg on another thread sees exactly what the calling thread would.** `_beside` hands
   the vector leg to a pool thread only when `SQLiteStore._parallel_reads()` is true, which
   it is not inside `batch()` or for a database with no file. The query is embedded on the

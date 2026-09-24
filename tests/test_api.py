@@ -375,6 +375,174 @@ def test_a_same_width_model_swap_warns_because_nothing_else_would(tmp_path):
         Memvara(path, embedder=Rival(dim=128), llm=NullLLM()).close()
 
 
+# `LocalEmbedder()` moved from all-MiniLM-L6-v2 to bge-small-en-v1.5, two models of the
+# same width, 384. No dimension check can tell their vectors apart, so what keeps an
+# existing store on the model that wrote it is the name its fingerprint records.
+
+_MINILM = "local:sentence-transformers/all-MiniLM-L6-v2"
+
+
+def _written_by(tmp_path, name: str, dim: int = 384) -> str:
+    """A store whose vectors, and fingerprint, say `name` wrote them."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=_renamed(HashingEmbedder(dim=dim), name),
+                 llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    return path
+
+
+def _default_asked_for(monkeypatch) -> list:
+    """Stand `default_embedder` in with one that records which model it was asked for."""
+    asked: list = []
+
+    def pick(dim=512, *, model=None):
+        asked.append(model)
+        return _renamed(HashingEmbedder(dim=384),
+                        f"local:{model or 'BAAI/bge-small-en-v1.5'}")
+
+    monkeypatch.setattr(core_module, "default_embedder", pick)
+    return asked
+
+
+def test_a_store_keeps_the_local_model_its_fingerprint_names(tmp_path, monkeypatch):
+    """`Memvara()` with no embedder asks for the model the store records, so a store
+    MiniLM wrote goes on opening with MiniLM after the default moved."""
+    path = _written_by(tmp_path, _MINILM)
+    asked = _default_asked_for(monkeypatch)
+    with Memvara(path, llm=NullLLM()) as mem:
+        assert asked == ["sentence-transformers/all-MiniLM-L6-v2"]
+        assert [r.claim.object for r in mem.search("lives")] == ["Lisbon"]
+
+
+def test_a_store_with_the_old_width_and_no_record_keeps_the_old_default(tmp_path,
+                                                                        monkeypatch):
+    """A store copied without its sidecar says only its width. At 384, the one local model
+    a default configuration could have written it with is the one the default was then."""
+    path = _written_by(tmp_path, _MINILM)
+    (tmp_path / "m.db.embedder.json").unlink()
+    asked = _default_asked_for(monkeypatch)
+    Memvara(path, llm=NullLLM()).close()
+    assert asked == ["sentence-transformers/all-MiniLM-L6-v2"]
+
+
+def test_a_store_with_no_vectors_takes_the_default_whatever_a_record_names(tmp_path,
+                                                                          monkeypatch):
+    """A record binds only while there are vectors for it to describe, as in
+    `_check_embedder`. A sidecar left behind by a deleted store must not choose the model
+    for the new one."""
+    (tmp_path / "m.db.embedder.json").write_text(
+        json.dumps({"embedder": _MINILM, "dim": 384}))
+    asked = _default_asked_for(monkeypatch)
+    Memvara(str(tmp_path / "m.db"), llm=NullLLM()).close()
+    assert asked == [None]
+
+
+def _fake_st(monkeypatch, dim: int = 384) -> list[list[str]]:
+    """A stand-in `sentence_transformers`, so `LocalEmbedder` runs on any machine.
+    Returns the texts each call to the model's `encode` was given."""
+    fake = types.ModuleType("sentence_transformers")
+    asked: list[list[str]] = []
+
+    class FakeST:
+        def __init__(self, name):
+            self.name = name
+
+        def get_sentence_embedding_dimension(self):
+            return dim
+
+        def encode(self, texts, normalize_embeddings=True):
+            asked.append(list(texts))
+            return np.ones((len(texts), dim), dtype=np.float32)
+
+    fake.SentenceTransformer = FakeST
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+    return asked
+
+
+def test_local_embedder_with_no_model_loads_bge_small_and_says_it_was_not_chosen(
+        monkeypatch):
+    _fake_st(monkeypatch)
+    from memvara.embed.local import LocalEmbedder
+
+    default, named = LocalEmbedder(), LocalEmbedder("sentence-transformers/all-MiniLM-L6-v2")
+    assert (default.name, default.chosen) == ("local:BAAI/bge-small-en-v1.5", False)
+    assert (named.name, named.chosen) == (_MINILM, True)
+
+
+def test_local_embedder_puts_bges_instruction_before_a_query_and_not_a_passage(
+        monkeypatch):
+    """bge's English models are trained to see the instruction before a search query and
+    nothing before the passage it should find. Any other model gets neither."""
+    asked = _fake_st(monkeypatch)
+    from memvara.embed.local import BGE_QUERY_INSTRUCTION, LocalEmbedder
+
+    bge, minilm = LocalEmbedder(), LocalEmbedder("sentence-transformers/all-MiniLM-L6-v2")
+    bge.encode(["the Porto office"])
+    bge.encode_queries(["where is the office"])
+    minilm.encode_queries(["where is the office"])
+    assert asked == [["the Porto office"],
+                     [BGE_QUERY_INSTRUCTION + "where is the office"],
+                     ["where is the office"]]
+
+
+def test_a_search_reaches_bge_with_the_instruction_through_the_cache_wrapper(
+        tmp_path, monkeypatch):
+    """`default_embedder()` and the MCP server both wrap `LocalEmbedder` in
+    `CachedEmbedder`, so the instruction has to get through the wrapper to reach the
+    model, and the claim written before it must not."""
+    asked = _fake_st(monkeypatch)
+    from memvara.embed.local import BGE_QUERY_INSTRUCTION, LocalEmbedder
+
+    with Memvara(str(tmp_path / "m.db"), embedder=CachedEmbedder(LocalEmbedder()),
+                 llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Porto")
+        written = list(asked)
+        mem.search("where does the user live")
+    assert all(not t.startswith(BGE_QUERY_INSTRUCTION) for call in written for t in call)
+    assert asked[len(written):] == [[BGE_QUERY_INSTRUCTION + "where does the user live"]]
+
+
+@pytest.mark.parametrize("wrap", [False, True])
+def test_an_unnamed_local_embedder_is_refused_on_a_store_another_local_model_wrote(
+        tmp_path, monkeypatch, wrap):
+    """`LocalEmbedder()` asks for the default, and the default is no longer the model that
+    wrote this store. A warning would let every search compare two unrelated spaces, so
+    it is refused before anything writes, with the constructor call that keeps the store
+    working. Through the cache wrapper too, which is how the MCP server builds it."""
+    path = _written_by(tmp_path, _MINILM)
+    _fake_st(monkeypatch)
+    from memvara.embed.local import LocalEmbedder
+
+    unnamed = CachedEmbedder(LocalEmbedder()) if wrap else LocalEmbedder()
+    with pytest.raises(EmbedderMismatchError) as excinfo:
+        Memvara(path, embedder=unnamed, llm=NullLLM())
+    message = str(excinfo.value)
+    assert "LocalEmbedder('sentence-transformers/all-MiniLM-L6-v2')" in message
+    assert "reembed=True" in message
+
+
+def test_only_local_embedder_itself_is_refused_for_naming_no_model(tmp_path):
+    """The refusal is about `LocalEmbedder()` and its moved default. Any other embedder
+    whose name happens to start with `local:` chose that name, so a same-width swap to it
+    keeps the rule every swap had: a warning, not a refusal."""
+    path = _written_by(tmp_path, _MINILM)
+    other = _renamed(HashingEmbedder(dim=384), "local:someone/their-own-model")
+    with pytest.warns(EmbedderChangedWarning):
+        Memvara(path, embedder=other, llm=NullLLM()).close()
+
+
+def test_a_named_local_model_on_that_store_still_only_warns(tmp_path, monkeypatch):
+    """Naming a model is a choice, and the existing rule for a chosen same-width swap
+    stands: a warning, not a refusal."""
+    path = _written_by(tmp_path, _MINILM)
+    _fake_st(monkeypatch)
+    from memvara.embed.local import LocalEmbedder
+
+    with pytest.warns(EmbedderChangedWarning):
+        Memvara(path, embedder=LocalEmbedder("BAAI/bge-small-en-v1.5"),
+                llm=NullLLM()).close()
+
+
 def test_an_in_memory_store_has_no_fingerprint_to_record():
     """Nothing to persist alongside, so identity checking degrades to the dimension
     check rather than inventing a file somewhere."""

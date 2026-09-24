@@ -73,7 +73,7 @@ from typing import (
 
 import numpy as np
 
-from ..embed.base import Embedder
+from ..embed.base import Embedder, encode_queries
 from ..filters import SearchFilter
 from ..llm.base import Usage
 from ..rerank import Reranker, rerank
@@ -750,9 +750,9 @@ class HybridRetriever:
             main = once(query, valid_at=valid_at, now=asked, ranked=ranked, observe=False)
             hits: list[Retrieved] = list(main)
         else:
-            # Every phrasing in one `encode` call: an embedder behind a network pays a
-            # round trip per call, not per text.
-            vectors = self.embedder.encode([query, *alternatives])
+            # Every phrasing in one call: an embedder behind a network pays a round trip
+            # per call, not per text.
+            vectors = encode_queries(self.embedder, [query, *alternatives])
             pending = [
                 self._phrasing_pool().submit(
                     once, q, valid_at=valid_at, now=asked, ranked=False, observe=False,
@@ -903,7 +903,7 @@ class HybridRetriever:
         cache = getattr(self._pass, "vectors", None)
         if cache is not None and query in cache:
             return cache[query]
-        vec = np.asarray(self.embedder.encode([query])[0], dtype=np.float32)
+        vec = np.asarray(encode_queries(self.embedder, [query])[0], dtype=np.float32)
         if cache is not None:
             cache[query] = vec
         return vec
