@@ -14,7 +14,8 @@ importable from the foundation modules:
 - `memvara/store/` — `Store` and `SQLStore` protocols, `SQLiteStore`, `STATES`,
   `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,
   `live_predicate()`, `unexpired_predicate()`
-- `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`
+- `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`,
+  and `calibration_of()`, the cosine thresholds measured for each embedding space
 - `memvara/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `RESOLVE_SCHEMA`,
   `PREDICATE_SCHEMA`, `EXTRACT_SYSTEM`, `RESOLVE_SYSTEM`, `PREDICATE_SYSTEM`,
   `MAX_CLAIMS`, `bounded_claim_schema()`, and for agentic extraction the `ToolChat`
@@ -707,9 +708,10 @@ suggestion must not turn it into an exception the caller retries.
   `reject_ungrounded` guards this tier's output, defaulting to `"auto"`: a proposed
   claim whose object shares not one content word with the episode it cites is a
   fabrication candidate, and the embedder then gets a veto — kept if the best
-  chunk-cosine against the source reaches `_GROUNDING_RESCUE_COSINE` (0.40, measured;
-  the constant's docstring carries the distributions), refused and counted on
-  `receipt.ungrounded` otherwise. `True` is the lexical check alone; `False` is off.
+  chunk-cosine against the source reaches the embedder's `grounding_rescue` threshold
+  (`embed/calibration.py`: 0.40 as measured under MiniLM, 0.65 for bge-small-en-v1.5,
+  whose cosines run higher; that module carries the distributions), refused and
+  counted on `receipt.ungrounded` otherwise. `True` is the lexical check alone; `False` is off.
   Only model-proposed claims are ever checked — `remember()` and the fast path do not
   pass through `_claim_from_dict` — and the reason the default is on rather than off is
   that the destructive direction is storing: a fabricated value in a ONE-cardinality
@@ -1547,6 +1549,54 @@ of `_live_clause` and is held to the same wording clause for clause. Three copie
 predicate is three chances to disagree; `tests/test_bitemporal.py` checks the Python one
 against the SQL one row for row.
 
+### Reading a whole scope, and joining the text index
+
+Most reads are capped, and they filter by scope with `_scope_clause`: one `OR` term per
+ancestor scope, in the same statement as the `LIMIT` (design invariant 7). The two
+candidate lists are not capped. `candidate_ids` and `episode_candidate_ids` return every
+row a scope can see, because the vector leg ranks inside that list, so what a query costs
+per row decides what they cost.
+
+**One `SELECT` per scope.** SQLite plans the `OR` as a MULTI-INDEX OR: every rowid each
+term returns goes into a temporary set first, so that a row two terms both match comes back
+once. For a whole-scope list that set holds the whole scope. `_scoped_union` instead builds
+one `SELECT` per scope and joins them with `UNION ALL`. That needs no set, because a row is
+stored at exactly one scope and two distinct scopes never return the same row. Repeated
+scopes are dropped before the SQL is built, since two copies of one scope would return its
+rows twice. Over 100,000 claims in one user's scope this takes the claim list from 84 ms to
+69 ms. `tests/test_store.py` checks the lists against the `OR`'s meaning over every shape a
+scope can take.
+
+**A covering index for the turn list.** `ep_cover` indexes a turn's five scope columns,
+`ts` and `id`, which is every column `episode_candidate_ids` reads. SQLite answers the query
+from the index and never reads a turn's row. Over the 189,520 LongMemEval-S turns in one
+scope, the list took 244 ms before, 102 ms with the index, and 84 ms with one range per
+scope. A plain scan of the table takes 70 ms. `ep_scope`, the older index, stays: an older
+build creates it on every open, so dropping it would make a file both builds open rebuild
+it each time. `ep_cover` is one of the late indexes, created on every open, so an existing
+store builds it the first time this version opens it: 1.7 s and 10 MB for those 189,520
+turns.
+
+**The lexical legs join on rowid.** `lexical_search` and `lexical_search_episodes` join
+each text index row to its table on rowid, not on the `claim_id` or `episode_id` column the
+index row also stores. Reading that column back reads the index's copy of the row, text and
+all, for every match. In `bench/scale.py` the claim leg's median went from 323 ms to 120 ms
+over 100,000 claims, and the turn leg's from 140 ms to 55 ms over 199,499 turns. The join
+is correct only because every index row sits at the rowid of the row it indexes, which has
+been true since 0.1.0 and which erasure already relied on. `put_claim` and `add_episode`
+upsert, so a row keeps its rowid, and write the index row with that rowid. Erasure and
+`purge` delete the index row by rowid before the row. `VACUUM` and `VACUUM INTO` keep the
+rowids of a table that has an index, as both tables do, although SQLite documents `VACUUM`
+as free to renumber a table without an INTEGER PRIMARY KEY. The backup API copies pages, so
+it keeps them too. A copy that re-inserts the rows into a new file need not keep them, and
+a store copied that way can miss a lexical match or return another row in its place;
+`docs/UPGRADING.md` has the repair. `tests/test_store.py` checks the invariant after every
+write that moves or frees a rowid, after a `VACUUM`, and in a `VACUUM INTO` copy.
+
+The vector leg then looks up each candidate's row in the matrix. `_VecIndex.search` does
+that with `np.fromiter(map(dict.get, ...))`, which runs the lookups in C rather than in a
+Python loop: 79 ms to 57 ms for 199,499 candidates, beside 45 ms for the product itself.
+
 ### Why a claim was closed
 
 The reason for a closure is stored on the closure witness, `meta["closure"]`, which
@@ -2101,7 +2151,8 @@ class Consolidator:
     def __init__(self, store, embedder, registry) -> None
 
     def decay(self, tenant: str | None = None, now: datetime | None = None) -> int
-    def merge_duplicates(self, tenant: str | None = None, threshold: float = 0.97) -> int
+    def merge_duplicates(self, tenant: str | None = None,
+                         threshold: float | None = None) -> int
     def promote(self, tenant: str | None = None, min_observations: int = 3) -> int
     def run(self, tenant: str | None = None,
             now: datetime | None = None) -> dict[str, int]
@@ -2109,14 +2160,17 @@ class Consolidator:
 
 - `decay` multiplies `salience` by the predicate's recency factor, floored at `0.05` so
   nothing decays to zero and disappears from ranking entirely.
-- `merge_duplicates` finds live claims sharing a `fact_key` whose embeddings exceed
+- `merge_duplicates` finds live claims sharing a `fact_key` whose embeddings reach
   `threshold`, keeps the one with the highest `observation_count` (ties broken by earliest
   `recorded_at` for determinism), folds the others' `sources` and `observation_count` into
   it, and invalidates them with `invalidated_by` pointing at the survivor. It writes no
   typed link. A merge is a supersession of near-duplicates, `invalidated_by` already
   records it, and `why(survivor).superseded` reports it; a `derives` link would be a
   second record of the same fact. `derives` is for a claim inferred from other claims,
-  and nothing in consolidation creates one.
+  and nothing in consolidation creates one. `threshold=None`, the default, and what
+  `run()` uses, is the value measured for the embedder's space (`embed/calibration.py`):
+  0.97, or 0.99 for bge-small-en-v1.5, which scores two values one digit apart as high as
+  0.985 and would fold them into one claim at 0.97.
 - `promote` turns a repeatedly-observed `EPISODIC` claim into a `SEMANTIC` one: seeing
   something happen once is an event, seeing it `min_observations` times is a pattern.
   The promoted claim gets `derivation=Derivation.CONSOLIDATION`.

@@ -335,6 +335,63 @@ them.
 identical figures across runs without a pin: their claims are either absent or carry
 timestamps years old, which is the flat part of the decay curve.
 
+### The local embedder: bge-small-en-v1.5 against all-MiniLM-L6-v2
+
+Since 2026-09-24, `LocalEmbedder()` loads `BAAI/bge-small-en-v1.5` where it loaded
+`sentence-transformers/all-MiniLM-L6-v2`. Both are 384 dimensions. The same command as
+above, with the local embedder, run once with each default:
+
+```bash
+PYTHONPATH=. python3 bench/locomo.py --score retrieval --embedder local
+```
+
+LOCOMO, all 1,531 evidence-labelled questions, `k=12`, the hybrid read, no extraction:
+
+| category | n | R@1 MiniLM | R@1 bge | R@12 MiniLM | R@12 bge | MRR MiniLM | MRR bge |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| single-hop | 840 | 33.1 | 38.6 | 68.8 | 74.7 | 45.9 | 51.7 |
+| temporal | 320 | 38.9 | 45.6 | 72.2 | 78.3 | 53.0 | 58.8 |
+| multi-hop | 279 | 8.9 | 9.6 | 42.5 | 46.2 | 36.9 | 39.2 |
+| open-domain | 92 | 10.0 | 13.2 | 35.5 | 41.2 | 24.4 | 27.7 |
+| **all** | **1531** | **28.5** | **33.2** | **62.7** | **68.2** | **44.4** | **49.4** |
+
+bge-small is ahead in every category at every cut-off the report prints. It costs time:
+ingesting the 5,882 turns took 192 s against 98 s, and the median read 29.3 ms against
+17.3 ms, both on one CPU thread, because the model is larger.
+
+**Its cosines run higher, and two checks read cosines.** The grounding rescue keeps a
+model-proposed claim that shares no word with its source when the two embed close enough,
+and the duplicate merge folds two claims in one slot when they embed close enough. Both
+thresholds were measured under MiniLM. `bench/embedder_calibration.py` reads them in each
+space, over pairs written for it:
+
+```bash
+PYTHONPATH=. python3 bench/embedder_calibration.py
+```
+
+| | MiniLM | bge-small |
+|---|---:|---:|
+| invented value against an unrelated turn, median cosine | 0.020 | 0.442 |
+| invented value against an unrelated turn, highest | 0.394 | 0.614 |
+| paraphrase against its source, median | 0.476 | 0.705 |
+| inventions the rescue keeps at 0.40 | 0.0% | 83.7% |
+| inventions the rescue keeps at 0.65 | 0.0% | 0.0% |
+| paraphrases the rescue keeps at 0.40, and at 0.65 | 80.0%, 20.0% | 100.0%, 80.0% |
+| claim pairs with different values merged at 0.97, and at 0.99 | 3, 1 of 14 | 4, 0 of 14 |
+| restated claims merged at 0.97, and at 0.99 | 4, 3 of 8 | 7, 4 of 8 |
+
+At MiniLM's thresholds, bge-small would keep 84% of invented values and fold two values
+one digit apart into one claim. So each space gets its own thresholds
+(`memvara/embed/calibration.py`), and bge-small's are 0.65 for the rescue and 0.99 for the
+merge. Those match MiniLM's behaviour at 0.40 and 0.97 on this data, with fewer wrong
+merges. Every other embedder keeps 0.40 and 0.97.
+
+Two caveats. The pairs are a reconstruction: the eval behind 0.40, 33 inventions from two
+4B-class models, is not in this repository. And the merge row shows that MiniLM at 0.97
+already folds 3 of the 14 different-value pairs, such as two dates a day apart. That is
+unchanged here, because changing it changes every existing MiniLM store, and it is a
+change that needs its own measurement.
+
 ### The graph leg, and what it costs on the corpora above
 
 `w_graph > 0` adds a third retrieval leg: a bounded walk out of the entities the vector
@@ -1237,6 +1294,44 @@ architecture from model quality. The benchmark does **not** demonstrate the hybr
 advantage — the offline `HashingEmbedder` is character-n-gram based and therefore unusually
 good at exact tokens, so the vector-only baseline finds them too. That claim needs a real
 semantic embedder to test, and is stated here rather than claimed.
+
+### One large scope
+
+`bench/perf.py` spreads its claims over fifty users, so no scope it searches holds more than
+a few hundred rows. `bench/scale.py` measures the other end: one user's scope holding all
+199,499 LongMemEval-S haystack turns, deduplicated by session, and 100,000 synthetic claims,
+written straight through the store with the hashing embedder. It times each store read a
+search runs, over 50 questions or five fixed claim queries, and then
+`search(k=12, include_episodes=True)` as a whole.
+
+```bash
+PYTHONPATH=. python3 bench/scale.py --path /tmp/scale.db
+```
+
+Both columns time copies of one store file, built once, on a 4-core Linux container, one
+run after the other. "Before" is `main` on 2026-09-24. "After" is the change that asks for
+each scope's candidates separately, reads the turn list from the covering index `ep_cover`,
+joins the text index to its table on rowid, and looks up vector rows in one vectorised pass:
+
+| read | before, median | after, median | before, p95 | after, p95 |
+|---|---:|---:|---:|---:|
+| `candidate_ids` | 86.7 ms | 70.6 ms | 124.5 ms | 77.4 ms |
+| `episode_candidate_ids` | 265.5 ms | 88.5 ms | 288.2 ms | 106.4 ms |
+| `lexical_search` | 323.3 ms | 120.0 ms | 360.6 ms | 131.8 ms |
+| `lexical_search_episodes` | 140.0 ms | 55.4 ms | 423.0 ms | 161.0 ms |
+| `vector_search` | 176.2 ms | 158.9 ms | 274.0 ms | 216.1 ms |
+| `vector_search_episodes` | 391.5 ms | 215.1 ms | 447.5 ms | 253.3 ms |
+| **`search()`** | **737.6 ms** | **469.8 ms** | **1,071.0 ms** | **556.5 ms** |
+
+Every read returns the same rows before and after; only how SQLite reaches them changed.
+The claim vector leg moved least. Measured on its own, about half its time is the
+candidate list, which no covering index answers because it reads the claim's state
+columns, and most of the rest is the product over 100,000 vectors, which is the floor for
+an exact index. The lexical legs are handed what
+`HybridRetriever` hands them, the query reduced to its content words. The mechanism behind
+each row, and the first open that builds `ep_cover`, are in
+[`docs/INTERNALS.md`](INTERNALS.md) under *Reading a whole scope, and joining the text
+index*.
 
 ---
 

@@ -9,11 +9,31 @@ from typing import Sequence
 
 import numpy as np
 
-DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+#: What `LocalEmbedder()` loads. bge-small-en-v1.5 has the same width as the model before
+#: it, 384, and finds more of the evidence: over the 1,531 evidence-labelled LOCOMO
+#: questions, R@12 rose from 62.7 to 68.2 and R@1 from 28.5 to 33.2
+#: (`bench/locomo.py --score retrieval --embedder local`), for about twice the encoding
+#: time. Its cosines run higher, so the thresholds that read them are per model; see
+#: `embed/calibration.py`.
+DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+
+#: What `LocalEmbedder()` loaded through 0.15. A store it wrote names this model in its
+#: fingerprint, and `Memvara` goes on opening that store with it rather than with
+#: `DEFAULT_MODEL`: the two share a width, so nothing but the name tells their vectors
+#: apart.
+PREVIOUS_DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+#: Its width, which is also `DEFAULT_MODEL`'s.
+PREVIOUS_DEFAULT_DIM = 384
 
 
 class LocalEmbedder:
-    def __init__(self, model: str = DEFAULT_MODEL) -> None:
+    def __init__(self, model: str | None = None) -> None:
+        #: Whether the caller named the model. `LocalEmbedder()` asks for the default,
+        #: and the default changed under stores that already exist, so `Memvara` refuses
+        #: to open a store another local model wrote with an unnamed one, where a named
+        #: one only earns a warning.
+        self.chosen = model is not None
+        model = model if model is not None else DEFAULT_MODEL
         try:
             # `type: ignore` because the SDK is an extra: a checker run in an
             # environment that has not installed `memvara[local-embed]` — CI, and most

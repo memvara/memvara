@@ -28,6 +28,7 @@ from typing import Sequence
 import numpy as np
 
 from ..embed.base import Embedder
+from ..embed.calibration import calibration_of
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..telemetry import CONSOLIDATE_MERGED, CONSOLIDATE_PROMOTED, Recorder
@@ -128,8 +129,15 @@ def _absorb(survivor: Claim, loser: Claim, registry: PredicateRegistry,
 
 
 def merge_pass(sweep: Sweep, embedder: Embedder, registry: PredicateRegistry, *,
-               threshold: float = 0.97, neighbourhood: int = NEIGHBOURHOOD) -> int:
-    """Fold near-identical live claims over a snapshot in hand. Returns claims retired."""
+               threshold: float | None = None, neighbourhood: int = NEIGHBOURHOOD) -> int:
+    """Fold near-identical live claims over a snapshot in hand. Returns claims retired.
+
+    `threshold` is the cosine two claims must reach to merge. `None` takes the value
+    measured for this embedder's space (`embed/calibration.py`): 0.97, or 0.99 for
+    `bge-small-en-v1.5`, which scores two values one digit apart as high as 0.985.
+    """
+    if threshold is None:
+        threshold = calibration_of(embedder).merge
     at = sweep.now
     groups: dict[str, list[Claim]] = {}
     for claim in sweep.claims:
@@ -206,7 +214,7 @@ def merge_duplicates(
     embedder: Embedder,
     registry: PredicateRegistry,
     tenant: str | None = None,
-    threshold: float = 0.97,
+    threshold: float | None = None,
     now: datetime | None = None,
     *,
     neighbourhood: int = NEIGHBOURHOOD,

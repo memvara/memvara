@@ -7,6 +7,82 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `LocalEmbedder()` loads bge-small-en-v1.5
+
+### What changed
+
+`LocalEmbedder()` with no model now loads `BAAI/bge-small-en-v1.5`. Through 0.15 it loaded
+`sentence-transformers/all-MiniLM-L6-v2`. The two have the same width, 384, so no
+dimension check can tell their vectors apart; the name in the store's fingerprint,
+`<db>.embedder.json`, is what does. The grounding rescue and the duplicate merge read
+bge-small's cosines with thresholds measured for it, 0.65 and 0.99, and every other
+embedder keeps 0.40 and 0.97.
+
+### Who this changes, and in which direction
+
+**If you construct `Memvara()` with no `embedder=`** and sentence-transformers is
+installed, an existing store opens with the local model its fingerprint names, so nothing
+changes for it. A new store gets bge-small. A store with 384-wide vectors and no
+fingerprint keeps MiniLM, the model a default configuration wrote it with.
+
+**If you run the MCP server with `MEMVARA_EMBEDDER=local`**, the same holds. The server
+reads the model off the store's fingerprint before it starts, so a deployment with an
+existing store neither changes model nor fetches bge-small.
+
+**If you construct `LocalEmbedder()` yourself** and open a store MiniLM wrote, `Memvara`
+now raises `EmbedderMismatchError`. Through 0.15 that opened, because `LocalEmbedder()`
+was MiniLM then. The message names the fix: pass
+`LocalEmbedder("sentence-transformers/all-MiniLM-L6-v2")` to keep the store as it is, or
+migrate it once with `Memvara(..., embedder=LocalEmbedder(), reembed=True)`. Find your
+instances by searching for `LocalEmbedder()`.
+
+**If you call `merge_duplicates()` without `threshold=`**, its default is now the
+calibrated value, which is 0.97, as before, for every embedder but bge-small. A threshold
+you pass is used as it is.
+
+**If ingest time matters**, bge-small encodes at about half MiniLM's speed on a CPU: 192 s
+against 98 s for LOCOMO's 5,882 turns, and 12 ms more for the median read.
+
+---
+
+## The first open of an existing store builds one index
+
+### What changed
+
+`SQLiteStore` has a new index on the episodes table, `ep_cover`, which the vector leg's
+turn list reads instead of the table. It is created on open, like the store's other late
+indexes, so a store written by an earlier version builds it the first time this version
+opens it. That open is slower once, by about 1.7 s per 190,000 turns, and the file grows
+by about 10 MB per 190,000 turns. Every open after that is unchanged. An earlier version
+that opens the file afterwards keeps the index and uses it.
+
+The lexical legs now join the text index to its table on rowid. That is only correct while
+each text index row sits at the rowid of the row it indexes, which every write in this
+library keeps true, and which `VACUUM`, `VACUUM INTO` and SQLite's backup API preserve.
+
+### Who this changes, and in which direction
+
+**If you open a large store where a pause matters**, open it once after upgrading, at a
+time a slow open costs nothing: `SQLiteStore(path).close()` builds the index.
+
+**If you have copied a store by re-inserting its rows into a new file**, such as a SQL
+dump replayed into an empty database, the text index may no longer line up with the rows.
+Erasure already relied on that, and now lexical search does too: such a store can miss a
+lexical match or return another row in its place. Rebuild both text indexes from their
+tables with the store closed:
+
+```sql
+DELETE FROM claims_fts;
+INSERT INTO claims_fts (rowid, claim_id, text) SELECT rowid, id, text FROM claims;
+DELETE FROM episodes_fts;
+INSERT INTO episodes_fts (rowid, episode_id, content) SELECT rowid, id, content FROM episodes;
+```
+
+A store that has only ever been written by this library, and copied as a file, with
+`VACUUM INTO` or with the backup API, needs nothing.
+
+---
+
 ## `recall()` dates each turn, and shows the part of a long turn the question names
 
 ### What changed

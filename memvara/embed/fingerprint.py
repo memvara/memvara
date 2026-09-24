@@ -29,6 +29,7 @@ which is derived from the stored vectors themselves and cannot be lost.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,8 +37,9 @@ import numpy as np
 
 from .base import _name_of
 
-__all__ = ["EmbedderFingerprint", "embedder_name", "fingerprint_of",
-           "read_fingerprint", "write_fingerprint", "stored_dim", "SIDECAR_SUFFIX"]
+__all__ = ["EmbedderFingerprint", "embedder_name", "fingerprint_of", "local_model",
+           "read_fingerprint", "read_fingerprint_at", "write_fingerprint", "stored_dim",
+           "SIDECAR_SUFFIX"]
 
 SIDECAR_SUFFIX = ".embedder.json"
 
@@ -88,6 +90,36 @@ def read_fingerprint(store: Any) -> EmbedderFingerprint | None:
     path = sidecar_path(store)
     if path is None:
         return None
+    return _read_sidecar(path)
+
+
+def read_fingerprint_at(db_path: str) -> EmbedderFingerprint | None:
+    """`read_fingerprint` for a store file that is not open yet.
+
+    The MCP server builds its embedder before it opens the store, and `local` there means
+    the local model this store was written by, so it reads the record by path. A record
+    beside no store file is a leftover from a deleted one and describes nothing, so it
+    reads as none.
+    """
+    if not db_path or db_path.startswith(":memory:") or not os.path.exists(db_path):
+        return None
+    return _read_sidecar(db_path + SIDECAR_SUFFIX)
+
+
+def local_model(fp: EmbedderFingerprint | None) -> str | None:
+    """The sentence-transformers model a `local:MODEL` fingerprint names, else None.
+
+    >>> local_model(EmbedderFingerprint("local:BAAI/bge-small-en-v1.5", 384))
+    'BAAI/bge-small-en-v1.5'
+    >>> local_model(EmbedderFingerprint("hashing:512:3-5", 512)) is None
+    True
+    """
+    if fp is None or not fp.name.startswith("local:"):
+        return None
+    return fp.name[len("local:"):] or None
+
+
+def _read_sidecar(path: str) -> EmbedderFingerprint | None:
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)

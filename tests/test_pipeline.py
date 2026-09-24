@@ -1141,6 +1141,51 @@ def test_auto_still_rejects_what_the_embedder_cannot_connect_either():
     store.close()
 
 
+class _AngledEmbedder:
+    """Every text on one axis, except a text carrying `marker`, set `cosine` away from it.
+
+    `name` is the fingerprint name, and the name is what the rescue's threshold is looked
+    up by (`embed/calibration.py`), so one fake stands in for any embedding space.
+    """
+
+    dim = 2
+
+    def __init__(self, name: str, cosine: float, marker: str) -> None:
+        self.name, self.marker = name, marker
+        self._off = [cosine, (1.0 - cosine * cosine) ** 0.5]
+
+    def encode(self, texts):
+        import numpy as np
+
+        return np.array([self._off if self.marker in t else [1.0, 0.0] for t in texts],
+                        dtype=np.float32)
+
+
+@pytest.mark.parametrize("name, kept", [
+    ("hashing:512:3-5", True),
+    ("local:sentence-transformers/all-MiniLM-L6-v2", True),
+    ("local:BAAI/bge-small-en-v1.5", False),
+])
+def test_the_rescue_reads_a_cosine_in_the_space_it_was_measured_in(name, kept):
+    """A cosine of 0.5 between an ungrounded claim and its source clears the 0.40 measured
+    under MiniLM, where the paraphrases the rescue exists for score. Under bge-small it is
+    no evidence at all: the median invented value scores 0.44 there, and its threshold is
+    0.65. So one cosine keeps the claim under one embedder and refuses it under the
+    other, and a model that reads cosines higher cannot wave fabrications through."""
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "prefers", "object": "keep replies brief",
+         "polarity": 1, "memory_type": "procedural", "confidence": 0.9,
+         "source_index": 0},
+    ])
+    store = SQLiteStore(":memory:")
+    embedder = _AngledEmbedder(name, 0.5, "keep replies brief")
+    pipe = WritePipeline(store, embedder, PredicateRegistry(), llm)
+    receipt = pipe.add([ep("Short answers only please, and no padding.")])
+    assert llm.extract_calls == 1, "the turn must actually reach tier 2"
+    assert (len(receipt.added), receipt.ungrounded) == ((1, 0) if kept else (0, 1))
+    store.close()
+
+
 def test_strict_mode_takes_no_second_opinion():
     """`True` is the lexical check alone, even with a semantic embedder configured.
 
