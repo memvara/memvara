@@ -17,6 +17,8 @@ answer quality with no error, no exception and nothing in any log.
   that catches each.
 - Retrieval and ranking benchmarks: `bench/locomo.py`, `bench/longmemeval.py`,
   `bench/twowiki.py`, `bench/multihop.py`, `bench/temporal.py`.
+- What `recall()` shows of a long turn: `bench/recall_window.py`, which renders one search
+  both ways and counts how often the gold answer reaches the reader's context.
 - Comparison and cost: `bench/compare.py`, `bench/mem0_real.py`, `bench/baseline.py`,
   `bench/extract_cost.py`, `bench/perf.py`, `bench/evalkit.py`.
 - Against a hosted store: `bench/hosted.py`.
