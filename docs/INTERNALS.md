@@ -14,7 +14,8 @@ importable from the foundation modules:
 - `memvara/store/` — `Store` and `SQLStore` protocols, `SQLiteStore`, `STATES`,
   `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,
   `live_predicate()`, `unexpired_predicate()`
-- `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`
+- `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`,
+  and `calibration_of()`, the cosine thresholds measured for each embedding space
 - `memvara/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `RESOLVE_SCHEMA`,
   `PREDICATE_SCHEMA`, `EXTRACT_SYSTEM`, `RESOLVE_SYSTEM`, `PREDICATE_SYSTEM`,
   `MAX_CLAIMS`, `bounded_claim_schema()`, and for agentic extraction the `ToolChat`
@@ -707,9 +708,10 @@ suggestion must not turn it into an exception the caller retries.
   `reject_ungrounded` guards this tier's output, defaulting to `"auto"`: a proposed
   claim whose object shares not one content word with the episode it cites is a
   fabrication candidate, and the embedder then gets a veto — kept if the best
-  chunk-cosine against the source reaches `_GROUNDING_RESCUE_COSINE` (0.40, measured;
-  the constant's docstring carries the distributions), refused and counted on
-  `receipt.ungrounded` otherwise. `True` is the lexical check alone; `False` is off.
+  chunk-cosine against the source reaches the embedder's `grounding_rescue` threshold
+  (`embed/calibration.py`: 0.40 as measured under MiniLM, 0.65 for bge-small-en-v1.5,
+  whose cosines run higher; that module carries the distributions), refused and
+  counted on `receipt.ungrounded` otherwise. `True` is the lexical check alone; `False` is off.
   Only model-proposed claims are ever checked — `remember()` and the fast path do not
   pass through `_claim_from_dict` — and the reason the default is on rather than off is
   that the destructive direction is storing: a fabricated value in a ONE-cardinality
@@ -2219,7 +2221,8 @@ class Consolidator:
     def __init__(self, store, embedder, registry) -> None
 
     def decay(self, tenant: str | None = None, now: datetime | None = None) -> int
-    def merge_duplicates(self, tenant: str | None = None, threshold: float = 0.97) -> int
+    def merge_duplicates(self, tenant: str | None = None,
+                         threshold: float | None = None) -> int
     def promote(self, tenant: str | None = None, min_observations: int = 3) -> int
     def run(self, tenant: str | None = None,
             now: datetime | None = None) -> dict[str, int]
@@ -2227,14 +2230,17 @@ class Consolidator:
 
 - `decay` multiplies `salience` by the predicate's recency factor, floored at `0.05` so
   nothing decays to zero and disappears from ranking entirely.
-- `merge_duplicates` finds live claims sharing a `fact_key` whose embeddings exceed
+- `merge_duplicates` finds live claims sharing a `fact_key` whose embeddings reach
   `threshold`, keeps the one with the highest `observation_count` (ties broken by earliest
   `recorded_at` for determinism), folds the others' `sources` and `observation_count` into
   it, and invalidates them with `invalidated_by` pointing at the survivor. It writes no
   typed link. A merge is a supersession of near-duplicates, `invalidated_by` already
   records it, and `why(survivor).superseded` reports it; a `derives` link would be a
   second record of the same fact. `derives` is for a claim inferred from other claims,
-  and nothing in consolidation creates one.
+  and nothing in consolidation creates one. `threshold=None`, the default, and what
+  `run()` uses, is the value measured for the embedder's space (`embed/calibration.py`):
+  0.97, or 0.99 for bge-small-en-v1.5, which scores two values one digit apart as high as
+  0.985 and would fold them into one claim at 0.97.
 - `promote` turns a repeatedly-observed `EPISODIC` claim into a `SEMANTIC` one: seeing
   something happen once is an event, seeing it `min_observations` times is a pattern.
   The promoted claim gets `derivation=Derivation.CONSOLIDATION`.
