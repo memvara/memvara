@@ -9,190 +9,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
-### Fixed
+## [0.15.0] — 2026-09-24
 
-- **The recall hook says when a paid plan's daily recall allowance is used up.** On a
-  paid plan the hosted service meters recalls per day, and it refuses a recall over that
-  allowance with HTTP 429 and code `rate_limited`, which is the same status and code as a
-  plain rate limit. The hook read only the code, so the banner said
-  "⋈ Memvara · recall failed". It now reads the refusal's `detail.reason`
-  (`over_period_allowance`) and says "today's recall allowance is used up", followed by
-  "resets in 3 h 30 min" from the `Retry-After` header, or by "resets at 00:00 UTC" from
-  `detail.resets_at` when the header is missing. A plain rate limit, a server error and a
-  timeout are still reported as "recall failed". The monthly allowance on Free, which the
-  service refuses with 402 `quota_exhausted`, keeps its message.
-- **A hosted recall is sent once, not up to three times.** When a recall failed, the
-  hooks' hosted client sent it again without `min_score`, and then again without
-  `include_episodes`, whatever the failure was. The hosted service counts every recall it
-  answers against the plan's allowance, including one it refused because of an argument,
-  so on a server that does not take `include_episodes` the wider second recall the hook
-  makes on a thin prompt cost three recalls, and the whole prompt four. The client now
-  checks each optional argument against the server's `tools/list` schema, which it already
-  fetched for `query_rewrite`, and leaves off any argument the server does not declare. A 429, a 402, a server error and a timeout are
-  never sent again, because none of them is about an argument. Resending without an
-  argument is now only the fallback for a client whose `tools/list` request failed, and
-  only after the tool itself refused the call. Against `app.memvara.dev` today no argument
-  is refused: its schema declares `min_score` and `include_episodes`, and `query_rewrite`,
-  which it does not declare, is not sent. The resends there came from refusals such as a
-  spent allowance, and each one was logged as "hosted rejected min_score" although the
-  server had not rejected it.
-- **The test suite no longer writes into the real `~/.memvara/.hooks/recall.log`.** The
-  hooks' `lib.ipc` reads the home directory once, when it is imported, and hook test files
-  import it before any fixture runs, so every test that logged wrote into the developer's
-  own log. The hosted client's tests left "hosted rejected min_score" lines there, three
-  at a time. `tests/conftest.py` now points `lib.ipc._HOME` at a temporary directory for
-  every test.
-- **An encrypted store on Windows no longer refuses to open about once in 256 reopens.**
-  The store opened its vector file (`<db>.vecs`) with `os.open` and no `os.O_BINARY`, so
-  Windows opened it in text mode. In that mode, the C runtime deletes a final 0x1A byte
-  from a file opened for reading and writing. The encrypted file ends in 0x1A whenever the
-  last record's authentication tag does, so the reopen cut one byte and the store raised
-  `EncryptionError` saying the last record "ends before it". The file is now opened in
-  binary mode. A store that already failed this way can be fixed by deleting `<db>.vecs`;
-  the store rebuilds it from the database on its next open. An unencrypted vector file on
-  Windows could lose its last byte the same way. That byte is the top byte of the last
-  float in the file, and a float whose top byte is 0x1A is smaller than 1e-21, so the
-  change to search results was negligible; it is fixed too. Linux and macOS were not
-  affected.
-- **The plugin's capture hook can write to a local store again.** It passed a fact's
-  memory type to the library as a string, and the library takes the `MemoryType` enum, so
-  every fact the hook wrote to a local store failed with `AttributeError: 'str' object has
-  no attribute 'value'` and was logged under `failed=` in `capture.log`. The hook now
-  passes the enum to a local store and the name to the hosted server.
+**Connected MCP sessions keep the old tool list until they reconnect.** This release adds
+six tools (`memory_add_document`, `memory_get_document`, `memory_list_documents`,
+`memory_delete_document`, `memory_profile` and `memory_link`), and a session left open
+keeps the list it negotiated when it connected, so the new tools are absent rather than
+erroring until the client reconnects.
 
-- **A hosted client bound to a project refuses to purge.** `RemoteMemvara.purge()` and
-  `AsyncRemoteMemvara.purge()`, and their scoped views, sent `POST /v1/erasures` with the
-  user, agent and session only. From a client bound to one project that would have erased
-  the user's memory in every project. They now raise `ValueError` and send nothing, for the
-  reason `RemoteStore.purge()` already gave: the erasure route has no project field yet.
-  A client with no project bound purges as before.
-- **The hosted clients raise what the local engine raises for a refused replacement.**
-  `remember(replaces=...)` and `supersede()` on `RemoteMemvara` and `AsyncRemoteMemvara`
-  now raise `KeyError` when the deployment answers 404 for the named claim and
-  `ValueError` when it answers 409, as `Memvara` does, so `memory_remember` gives its own
-  "Nothing written" message against a hosted deployment instead of a transport error.
-  `link()` refuses a claim linked to itself before sending anything, as `Memvara.link`
-  does, and `profile()` refuses `k` below 1, as `Memvara.profile` does.
-- **Replaying a supersession is idempotent.** `Memvara.supersede()` on a claim already
-  closed the same way, by a claim holding the same value, from the same `valid_from` and in
-  the same project, writes nothing and returns a receipt naming that successor under
-  `reinforced`, with no salience change. `remember(replaces=...)` and the
-  `memory_remember` tool go through `supersede()`, so they behave the same way: a replayed
-  replacement is reported as already known instead of refused. A supersession that
-  conflicts with the recorded one, including the same value from another date or in
-  another project, is still refused with `ValueError`.
-- **The customer tool reference lists every tool.** It was missing `memory_end_matching`,
-  `memory_forget_matching` and `memory_link`, and three customer pages stated an old tool
-  count. The pages no longer state a count, and a test holds the reference table to the
-  server's tool list.
-- **Erasing a claim before the process has searched now blanks its vector on disk.**
-  `erase_claim()` and `purge()` blanked a row of the vector file only through the map
-  from ids to rows, and that map is loaded on the first search. A process that opened a
-  store and erased something before searching left the vector in `<db>.vecs`, where the
-  erased text can be recovered from it by inversion. The row now comes from the database.
-- **`docs/DEPLOY.md` said a store without its `.vecs` file loses its vectors.** It does
-  not: the database holds every vector and the file is rebuilt from it on the next open.
-  What a bind mount of the database file alone loses is the `-wal`.
-- **`profile()` on Python 3.10 reports its default buckets as unavailable.** They are
-  read from the shipped predicate packs, which need `tomllib`, and 3.10 has none. A line
-  reader that supplied the names there was added and is now withdrawn, because it
-  contradicted a recorded decision: `schema._toml_reader` refuses a second reader or a
-  `tomli` fallback, since refusing one optional feature on one interpreter is the smaller
-  loss than a second parser to keep in step. On 3.10 each default bucket is listed in
-  `Profile.warnings`, and every other section of the profile is unaffected. Caller
-  buckets that name registered or stored predicates never read the packs, so they carry
-  no such warning.
-- **A purge bound to a project erases only that project.** `Memvara.scope(project=...)
-  .purge()` and `.reset()` used to erase the user's memory in every repository. What was
-  written without a project is user-wide and is kept. A purge with no project still
-  takes every project. `RemoteStore.purge()` refuses a project scope, because the hosted
-  erasure route cannot express one.
-- **Read-side shadowing asks the store once per read.** It now runs after the cheap
-  search filters and looks every candidate slot up in one `Store.occupied_slots` query,
-  a new optional store method. A store without it falls back to one `count_competing`
-  per slot, and a store with neither returns the read unshadowed instead of raising.
-- **The MCP server reads `~/.memvara/credentials.json` with the same reader as `memvara
-  whoami`**, which strips surrounding whitespace from the key, so the two cannot disagree
-  about one file.
-- **A project name ending in a newline is refused.** `check_project()` anchored its
-  patterns with `$`, which also matches before a final newline.
-- **The plugin recall benchmark's `seed` and `calibrate` never scope their store to a
-  repository.** They build a server config, which now derives a project from the working
-  directory; they switch that off and ignore `MEMVARA_PROJECT`.
-- **The `path:` project name is the same on Windows as on other systems.** The main
-  working tree's path is hashed in one spelling: forward slashes, a lower-case drive
-  letter, no trailing slash. Before, a Windows path was hashed with backslashes, so the
-  name differed from the plugin hooks' copy. The shared vectors file gains Windows roots.
-
-### Changed
-
-- **On the hosted service, one capture turn counts as one recall, however many searches it
-  makes.** Agentic capture's hosted config now sends a `Memvara-Capture-Run` header with a
-  new random id for each run, so the hosted service can tell which searches belong to one
-  capture run and count them against the plan's allowance once. This takes effect once
-  the hosted service supports the header, which is a separate change on the cloud side;
-  until then each search, up to four per turn, counts as a recall. The id is never written
-  to `capture.log`. A local store is unchanged.
-
-- **The MCP server creates a new store encrypted.** The new `encryption` switch
-  (`MEMVARA_FEATURE_ENCRYPTION`) is on by default. With it on, a new store needs
-  `pip install 'memvara[encrypt]'`, and the server refuses to start without it rather than
-  create the store unencrypted; the message names the extra and
-  `MEMVARA_FEATURE_ENCRYPTION=0`. An existing store opens as whatever it already is, and an
-  unencrypted one is reported by a warning at start and a `storage:` line in
-  `memory_stats`. `memvara-mcp init` says when the extra is missing. The library's
-  `Memvara(path)` is unchanged: encryption there is `encryption=True`.
-- **The Docker image installs the `encrypt` extra and sets `HOME=/data`**, so a key the
-  server generates is written to the volume beside the store rather than into the
-  container, where it would be deleted with it. Passing `MEMVARA_DB_KEY` keeps the key
-  off the volume.
-
-- **`memvara login --project` accepts any spelling of a project id** that `uuid.UUID`
-  reads (with or without hyphens, either case, in braces, or as `urn:uuid:`), and sends
-  it as lower-case with hyphens.
-
-- **`memory_stats` labels the scope line with its five parts**,
-  `tenant/user/project/agent/session`. It said four while printing five.
-- **The local MCP server lists `memory_profile`**, after `memory_standing`.
-- **A `Memvara` whose `llm=` can chat now makes one model call on every `search()` and
-  `recall()`**, to rewrite the query (see *Added*). Before this, a read called a model
-  only with `ranked=True`. With the default `NullLLM` nothing changes: it cannot chat, so
-  no read calls a model. To keep the old behaviour with an extraction model configured,
-  pass `query_rewrite=False` to `Memvara(...)`, or set `MEMVARA_FEATURE_QUERY_REWRITE=0`
-  on a server. `docs/INTERNALS.md` invariant 1 is rewritten to say this: deterministic
-  stages (deduplication, contradiction resolution, ranking, decay, time travel) never call
-  a model, and the read path calls one only through the named stages `ranked`,
-  `query_rewrite` and `synthesis`, each with a recorded outcome and a model-free fallback.
-  `forget_matching()`, `profile()` and `ask()` do not rewrite, so their results are
-  unchanged.
-- **The `memory_recall` tool description and the MCP server's instructions** no longer
-  say that recall involves no model; they say it calls one only on a server that has one
-  configured.
-- **The hooks' hosted client always asks for a plain read.** A server that offers
-  `query_rewrite` on `memory_recall` rewrites by default, with the organisation's own model
-  key, which setup cannot check from the user's machine. The client now sends
-  `query_rewrite: false` to such a server, and nothing to a server that does not offer the
-  argument. Finding out costs one `tools/list` call per client, which a resident daemon
-  pays once. A probe that fails is not kept, and the next call asks again; until one
-  answers, the client sends `query_rewrite: false` anyway, and drops it only when the
-  server's refusal names that argument, because a server that does not know it cannot
-  rewrite. `HostedRecall.offers()` returns `True`, `False`, or `None` when the probe could
-  not answer, and `accepts()` is `offers() is True`. The client also asks for its session
-  once before the call rather than inside each retry, so an endpoint that cannot be
-  reached is reported after one handshake instead of one per optional argument the
-  retries drop.
-- **The session-start hook and the daemon's warm-up read no longer pass `query_rewrite`
-  to a library released before query rewrite.** Such a library raises `TypeError` on the
-  unknown argument, which the session-start hook reported as a store it could not ask.
-  The argument is now passed only to a `recall()` that takes it. `lib.fast.read_kinds`
-  decides that once per store: the daemon when it starts, the in-process route when it
-  opens its handle, and the session-start hook once.
-- **The hooks read the client's MCP configuration once per process, through one rule.**
-  `lib.ipc.client_env()` is the client's server block with this process's own variables
-  winning, and the daemon's address, the store the hooks open and the rewrite decision all
-  read it. `server_env()` keeps what it read for the rest of the process.
-- **The recall hook opens the store once per prompt.** The episode-widening retry reuses
-  the handle the first read opened, instead of opening a second one.
+Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store moves to schema 15 on
+its first open; a build older than this one refuses a store this one has opened.
 
 ### Added
 
@@ -841,6 +667,74 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
+- **On the hosted service, one capture turn counts as one recall, however many searches it
+  makes.** Agentic capture's hosted config now sends a `Memvara-Capture-Run` header with a
+  new random id for each run, so the hosted service can tell which searches belong to one
+  capture run and count them against the plan's allowance once. This takes effect once
+  the hosted service supports the header, which is a separate change on the cloud side;
+  until then each search, up to four per turn, counts as a recall. The id is never written
+  to `capture.log`. A local store is unchanged.
+
+- **The MCP server creates a new store encrypted.** The new `encryption` switch
+  (`MEMVARA_FEATURE_ENCRYPTION`) is on by default. With it on, a new store needs
+  `pip install 'memvara[encrypt]'`, and the server refuses to start without it rather than
+  create the store unencrypted; the message names the extra and
+  `MEMVARA_FEATURE_ENCRYPTION=0`. An existing store opens as whatever it already is, and an
+  unencrypted one is reported by a warning at start and a `storage:` line in
+  `memory_stats`. `memvara-mcp init` says when the extra is missing. The library's
+  `Memvara(path)` is unchanged: encryption there is `encryption=True`.
+- **The Docker image installs the `encrypt` extra and sets `HOME=/data`**, so a key the
+  server generates is written to the volume beside the store rather than into the
+  container, where it would be deleted with it. Passing `MEMVARA_DB_KEY` keeps the key
+  off the volume.
+
+- **`memvara login --project` accepts any spelling of a project id** that `uuid.UUID`
+  reads (with or without hyphens, either case, in braces, or as `urn:uuid:`), and sends
+  it as lower-case with hyphens.
+
+- **`memory_stats` labels the scope line with its five parts**,
+  `tenant/user/project/agent/session`. It said four while printing five.
+- **The local MCP server lists `memory_profile`**, after `memory_standing`.
+- **A `Memvara` whose `llm=` can chat now makes one model call on every `search()` and
+  `recall()`**, to rewrite the query (see *Added*). Before this, a read called a model
+  only with `ranked=True`. With the default `NullLLM` nothing changes: it cannot chat, so
+  no read calls a model. To keep the old behaviour with an extraction model configured,
+  pass `query_rewrite=False` to `Memvara(...)`, or set `MEMVARA_FEATURE_QUERY_REWRITE=0`
+  on a server. `docs/INTERNALS.md` invariant 1 is rewritten to say this: deterministic
+  stages (deduplication, contradiction resolution, ranking, decay, time travel) never call
+  a model, and the read path calls one only through the named stages `ranked`,
+  `query_rewrite` and `synthesis`, each with a recorded outcome and a model-free fallback.
+  `forget_matching()`, `profile()` and `ask()` do not rewrite, so their results are
+  unchanged.
+- **The `memory_recall` tool description and the MCP server's instructions** no longer
+  say that recall involves no model; they say it calls one only on a server that has one
+  configured.
+- **The hooks' hosted client always asks for a plain read.** A server that offers
+  `query_rewrite` on `memory_recall` rewrites by default, with the organisation's own model
+  key, which setup cannot check from the user's machine. The client now sends
+  `query_rewrite: false` to such a server, and nothing to a server that does not offer the
+  argument. Finding out costs one `tools/list` call per client, which a resident daemon
+  pays once. A probe that fails is not kept, and the next call asks again; until one
+  answers, the client sends `query_rewrite: false` anyway, and drops it only when the
+  server's refusal names that argument, because a server that does not know it cannot
+  rewrite. `HostedRecall.offers()` returns `True`, `False`, or `None` when the probe could
+  not answer, and `accepts()` is `offers() is True`. The client also asks for its session
+  once before the call rather than inside each retry, so an endpoint that cannot be
+  reached is reported after one handshake instead of one per optional argument the
+  retries drop.
+- **The session-start hook and the daemon's warm-up read no longer pass `query_rewrite`
+  to a library released before query rewrite.** Such a library raises `TypeError` on the
+  unknown argument, which the session-start hook reported as a store it could not ask.
+  The argument is now passed only to a `recall()` that takes it. `lib.fast.read_kinds`
+  decides that once per store: the daemon when it starts, the in-process route when it
+  opens its handle, and the session-start hook once.
+- **The hooks read the client's MCP configuration once per process, through one rule.**
+  `lib.ipc.client_env()` is the client's server block with this process's own variables
+  winning, and the daemon's address, the store the hooks open and the rewrite decision all
+  read it. `server_env()` keeps what it read for the rest of the process.
+- **The recall hook opens the store once per prompt.** The episode-widening retry reuses
+  the handle the first read opened, instead of opening a second one.
+
 - **`supersede()` ends the old claim where the new one begins, and refuses a claim with
   nothing left to close.** With no `at`, `close="ended"` now closes the old claim at the new claim's
   `valid_from`, the instant the world changed; it used to close it at the new claim's
@@ -877,6 +771,119 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   name whichever command was typed, `memvara login` or `memvara-mcp login`.
 
 ### Fixed
+
+- **The recall hook says when a paid plan's daily recall allowance is used up.** On a
+  paid plan the hosted service meters recalls per day, and it refuses a recall over that
+  allowance with HTTP 429 and code `rate_limited`, which is the same status and code as a
+  plain rate limit. The hook read only the code, so the banner said
+  "⋈ Memvara · recall failed". It now reads the refusal's `detail.reason`
+  (`over_period_allowance`) and says "today's recall allowance is used up", followed by
+  "resets in 3 h 30 min" from the `Retry-After` header, or by "resets at 00:00 UTC" from
+  `detail.resets_at` when the header is missing. A plain rate limit, a server error and a
+  timeout are still reported as "recall failed". The monthly allowance on Free, which the
+  service refuses with 402 `quota_exhausted`, keeps its message.
+- **A hosted recall is sent once, not up to three times.** When a recall failed, the
+  hooks' hosted client sent it again without `min_score`, and then again without
+  `include_episodes`, whatever the failure was. The hosted service counts every recall it
+  answers against the plan's allowance, including one it refused because of an argument,
+  so on a server that does not take `include_episodes` the wider second recall the hook
+  makes on a thin prompt cost three recalls, and the whole prompt four. The client now
+  checks each optional argument against the server's `tools/list` schema, which it already
+  fetched for `query_rewrite`, and leaves off any argument the server does not declare. A 429, a 402, a server error and a timeout are
+  never sent again, because none of them is about an argument. Resending without an
+  argument is now only the fallback for a client whose `tools/list` request failed, and
+  only after the tool itself refused the call. Against `app.memvara.dev` today no argument
+  is refused: its schema declares `min_score` and `include_episodes`, and `query_rewrite`,
+  which it does not declare, is not sent. The resends there came from refusals such as a
+  spent allowance, and each one was logged as "hosted rejected min_score" although the
+  server had not rejected it.
+- **The test suite no longer writes into the real `~/.memvara/.hooks/recall.log`.** The
+  hooks' `lib.ipc` reads the home directory once, when it is imported, and hook test files
+  import it before any fixture runs, so every test that logged wrote into the developer's
+  own log. The hosted client's tests left "hosted rejected min_score" lines there, three
+  at a time. `tests/conftest.py` now points `lib.ipc._HOME` at a temporary directory for
+  every test.
+- **An encrypted store on Windows no longer refuses to open about once in 256 reopens.**
+  The store opened its vector file (`<db>.vecs`) with `os.open` and no `os.O_BINARY`, so
+  Windows opened it in text mode. In that mode, the C runtime deletes a final 0x1A byte
+  from a file opened for reading and writing. The encrypted file ends in 0x1A whenever the
+  last record's authentication tag does, so the reopen cut one byte and the store raised
+  `EncryptionError` saying the last record "ends before it". The file is now opened in
+  binary mode. A store that already failed this way can be fixed by deleting `<db>.vecs`;
+  the store rebuilds it from the database on its next open. An unencrypted vector file on
+  Windows could lose its last byte the same way. That byte is the top byte of the last
+  float in the file, and a float whose top byte is 0x1A is smaller than 1e-21, so the
+  change to search results was negligible; it is fixed too. Linux and macOS were not
+  affected.
+- **The plugin's capture hook can write to a local store again.** It passed a fact's
+  memory type to the library as a string, and the library takes the `MemoryType` enum, so
+  every fact the hook wrote to a local store failed with `AttributeError: 'str' object has
+  no attribute 'value'` and was logged under `failed=` in `capture.log`. The hook now
+  passes the enum to a local store and the name to the hosted server.
+
+- **A hosted client bound to a project refuses to purge.** `RemoteMemvara.purge()` and
+  `AsyncRemoteMemvara.purge()`, and their scoped views, sent `POST /v1/erasures` with the
+  user, agent and session only. From a client bound to one project that would have erased
+  the user's memory in every project. They now raise `ValueError` and send nothing, for the
+  reason `RemoteStore.purge()` already gave: the erasure route has no project field yet.
+  A client with no project bound purges as before.
+- **The hosted clients raise what the local engine raises for a refused replacement.**
+  `remember(replaces=...)` and `supersede()` on `RemoteMemvara` and `AsyncRemoteMemvara`
+  now raise `KeyError` when the deployment answers 404 for the named claim and
+  `ValueError` when it answers 409, as `Memvara` does, so `memory_remember` gives its own
+  "Nothing written" message against a hosted deployment instead of a transport error.
+  `link()` refuses a claim linked to itself before sending anything, as `Memvara.link`
+  does, and `profile()` refuses `k` below 1, as `Memvara.profile` does.
+- **Replaying a supersession is idempotent.** `Memvara.supersede()` on a claim already
+  closed the same way, by a claim holding the same value, from the same `valid_from` and in
+  the same project, writes nothing and returns a receipt naming that successor under
+  `reinforced`, with no salience change. `remember(replaces=...)` and the
+  `memory_remember` tool go through `supersede()`, so they behave the same way: a replayed
+  replacement is reported as already known instead of refused. A supersession that
+  conflicts with the recorded one, including the same value from another date or in
+  another project, is still refused with `ValueError`.
+- **The customer tool reference lists every tool.** It was missing `memory_end_matching`,
+  `memory_forget_matching` and `memory_link`, and three customer pages stated an old tool
+  count. The pages no longer state a count, and a test holds the reference table to the
+  server's tool list.
+- **Erasing a claim before the process has searched now blanks its vector on disk.**
+  `erase_claim()` and `purge()` blanked a row of the vector file only through the map
+  from ids to rows, and that map is loaded on the first search. A process that opened a
+  store and erased something before searching left the vector in `<db>.vecs`, where the
+  erased text can be recovered from it by inversion. The row now comes from the database.
+- **`docs/DEPLOY.md` said a store without its `.vecs` file loses its vectors.** It does
+  not: the database holds every vector and the file is rebuilt from it on the next open.
+  What a bind mount of the database file alone loses is the `-wal`.
+- **`profile()` on Python 3.10 reports its default buckets as unavailable.** They are
+  read from the shipped predicate packs, which need `tomllib`, and 3.10 has none. A line
+  reader that supplied the names there was added and is now withdrawn, because it
+  contradicted a recorded decision: `schema._toml_reader` refuses a second reader or a
+  `tomli` fallback, since refusing one optional feature on one interpreter is the smaller
+  loss than a second parser to keep in step. On 3.10 each default bucket is listed in
+  `Profile.warnings`, and every other section of the profile is unaffected. Caller
+  buckets that name registered or stored predicates never read the packs, so they carry
+  no such warning.
+- **A purge bound to a project erases only that project.** `Memvara.scope(project=...)
+  .purge()` and `.reset()` used to erase the user's memory in every repository. What was
+  written without a project is user-wide and is kept. A purge with no project still
+  takes every project. `RemoteStore.purge()` refuses a project scope, because the hosted
+  erasure route cannot express one.
+- **Read-side shadowing asks the store once per read.** It now runs after the cheap
+  search filters and looks every candidate slot up in one `Store.occupied_slots` query,
+  a new optional store method. A store without it falls back to one `count_competing`
+  per slot, and a store with neither returns the read unshadowed instead of raising.
+- **The MCP server reads `~/.memvara/credentials.json` with the same reader as `memvara
+  whoami`**, which strips surrounding whitespace from the key, so the two cannot disagree
+  about one file.
+- **A project name ending in a newline is refused.** `check_project()` anchored its
+  patterns with `$`, which also matches before a final newline.
+- **The plugin recall benchmark's `seed` and `calibrate` never scope their store to a
+  repository.** They build a server config, which now derives a project from the working
+  directory; they switch that off and ignore `MEMVARA_PROJECT`.
+- **The `path:` project name is the same on Windows as on other systems.** The main
+  working tree's path is hashed in one spelling: forward slashes, a lower-case drive
+  letter, no trailing slash. Before, a Windows path was hashed with backslashes, so the
+  name differed from the plugin hooks' copy. The shared vectors file gains Windows roots.
 
 - **Two prompts in one session no longer drop each other's dedup record.** The recall
   hook's per-session state file was rewritten whole, without a lock, so a prompt answered at
