@@ -223,29 +223,93 @@ class _AngledEmbedder:
                         dtype=np.float32)
 
 
+def _merged(consolidator: Consolidator, sweep: str) -> int:
+    """Claims the merge retired, through `merge_duplicates()` or the scheduled `run()`."""
+    return (consolidator.merge_duplicates() if sweep == "merge_duplicates"
+            else consolidator.run()["merged"])
+
+
 @pytest.mark.parametrize("name, merged", [
     ("hashing:256:3-5", 1),
-    ("local:sentence-transformers/all-MiniLM-L6-v2", 1),
+    ("local:sentence-transformers/all-MiniLM-L6-v2", 0),
     ("local:BAAI/bge-small-en-v1.5", 0),
 ])
 @pytest.mark.parametrize("sweep", ["merge_duplicates", "run"])
 def test_the_merge_threshold_is_the_one_measured_in_the_embedders_space(name, merged,
                                                                         sweep):
-    """bge-small scores two values one digit apart as high as 0.985, so the 0.97 every
-    other space merges at would fold "port 8080" and "port 8081" into one claim under it.
-    Its threshold is 0.99. A pair at 0.98 merges under every other space and stays two
-    claims under bge-small, in `merge_duplicates()` and in the scheduled `run()` alike."""
+    """bge-small scores two booking references a letter apart as high as 0.988, and
+    MiniLM as high as 0.979, so the 0.97 an unmeasured space merges at would fold them
+    into one claim under either. Their thresholds are 0.99 and 0.985. A pair at 0.98
+    merges under an unmeasured space and stays two claims under both, in
+    `merge_duplicates()` and in the scheduled `run()` alike. The two references hold the
+    same numbers, so the threshold is all that decides."""
     store = SQLiteStore(":memory:")
     try:
-        consolidator = Consolidator(store, _AngledEmbedder(name, 0.98, "8081"),
+        consolidator = Consolidator(store, _AngledEmbedder(name, 0.98, "QZ"),
                                     PredicateRegistry())
-        add(store, "cl_a", "port 8080", predicate="listens_on")
-        add(store, "cl_b", "port 8081", predicate="listens_on")
-        done = (consolidator.merge_duplicates() if sweep == "merge_duplicates"
-                else consolidator.run()["merged"])
-        assert done == merged
+        add(store, "cl_a", "booking KLM7QX", predicate="holds")
+        add(store, "cl_b", "booking KLM7QZ", predicate="holds")
+        assert _merged(consolidator, sweep) == merged
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("cosine, merged", [(0.979, 0), (0.984, 0), (0.986, 1), (0.991, 1)])
+@pytest.mark.parametrize("sweep", ["merge_duplicates", "run"])
+def test_minilm_folds_a_restatement_only_above_its_closest_pair_of_different_values(
+        cosine, merged, sweep):
+    """Under MiniLM the closest pair of different values that hold the same numbers,
+    two booking references a letter apart, scores 0.979, and "grey" and "gray" score
+    0.991. Its threshold of 0.985 keeps the first pair apart and folds the second, with
+    0.006 to spare on the side where a mistake retires a true value."""
+    store = SQLiteStore(":memory:")
+    try:
+        embedder = _AngledEmbedder("local:sentence-transformers/all-MiniLM-L6-v2",
+                                   cosine, "gray")
+        consolidator = Consolidator(store, embedder, PredicateRegistry())
+        add(store, "cl_a", "grey", predicate="favorite_color_is")
+        add(store, "cl_b", "gray", predicate="favorite_color_is")
+        assert _merged(consolidator, sweep) == merged
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("name", ["hashing:256:3-5",
+                                  "local:sentence-transformers/all-MiniLM-L6-v2",
+                                  "local:BAAI/bge-small-en-v1.5"])
+@pytest.mark.parametrize("sweep", ["merge_duplicates", "run"])
+def test_two_values_whose_numbers_differ_never_merge_whatever_their_cosine(name, sweep):
+    """MiniLM scores two appointment dates a day apart at 0.997, and bge-small two numpy
+    versions at 0.995, above any threshold that still folds a restatement. In a slot that
+    holds many values both dates are true, and a merge would retire one. So two values
+    whose numbers differ stay two claims in every space, here at a cosine of 1, and so do
+    two holding the same digits in another order. Two that differ only in a leading zero
+    are one value, and fold."""
+    store = SQLiteStore(":memory:")
+    try:
+        consolidator = Consolidator(store, _AngledEmbedder(name, 1.0, "-02"),
+                                    PredicateRegistry())
+        add(store, "cl_a", "2023-05-01", predicate="has_appointment_on")
+        add(store, "cl_b", "2023-05-02", predicate="has_appointment_on")
+        add(store, "cl_e", "2025-08-01", predicate="lease_ends_on")
+        add(store, "cl_f", "2025-01-08", predicate="lease_ends_on")
+        add(store, "cl_c", "9:30", predicate="stands_up_at")
+        add(store, "cl_d", "09:30", predicate="stands_up_at", obs=2)
+        assert _merged(consolidator, sweep) == 1
+        assert live_ids(store) == {"cl_a", "cl_b", "cl_e", "cl_f", "cl_d"}
+    finally:
+        store.close()
+
+
+def test_a_value_thousands_of_digits_long_is_compared_without_converting_it(
+        consolidator):
+    """Numbers are compared as digit strings. Read as integers, a pasted value longer
+    than Python's limit on converting a string to an integer, 4,300 digits by default,
+    would raise inside the scheduled sweep."""
+    store = consolidator.store
+    add(store, "cl_a", "1" * 5000, predicate="notes")
+    add(store, "cl_b", "1" * 5000 + " ", predicate="notes")
+    assert consolidator.merge_duplicates(threshold=0.0) == 1
 
 
 def test_a_threshold_passed_by_the_caller_still_decides():
@@ -253,10 +317,10 @@ def test_a_threshold_passed_by_the_caller_still_decides():
     bge-small store gets 0.97."""
     store = SQLiteStore(":memory:")
     try:
-        embedder = _AngledEmbedder("local:BAAI/bge-small-en-v1.5", 0.98, "8081")
+        embedder = _AngledEmbedder("local:BAAI/bge-small-en-v1.5", 0.98, "QZ")
         consolidator = Consolidator(store, embedder, PredicateRegistry())
-        add(store, "cl_a", "port 8080", predicate="listens_on")
-        add(store, "cl_b", "port 8081", predicate="listens_on")
+        add(store, "cl_a", "booking KLM7QX", predicate="holds")
+        add(store, "cl_b", "booking KLM7QZ", predicate="holds")
         assert consolidator.merge_duplicates(threshold=0.97) == 1
     finally:
         store.close()

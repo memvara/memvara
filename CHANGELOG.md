@@ -29,13 +29,35 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   MiniLM. bge-small scores an invented value against a turn it has nothing to do with at
   a median of 0.44, where MiniLM scores 0.02, so at the rescue's 0.40 it would keep 84%
   of the inventions the rescue exists to refuse. It scores two values one digit apart as
-  high as 0.985, so at the merge's 0.97 it would fold them into one claim.
+  high as 0.995, so at the merge's 0.97 it would fold them into one claim.
   `memvara/embed/calibration.py` holds the thresholds per embedding space: bge-small gets
-  0.65 and 0.99, and every other embedder keeps 0.40 and 0.97, so nothing moves for
-  them. `Consolidator.merge_duplicates()` and `merge_pass()` take `threshold=None` by
-  default, meaning the calibrated value; a threshold passed explicitly still decides.
+  0.65 and 0.99, MiniLM keeps 0.40 and merges at 0.985 (next entry), and every other
+  embedder keeps 0.40 and 0.97, so nothing moves for them.
+  `Consolidator.merge_duplicates()` and `merge_pass()` take `threshold=None` by default,
+  meaning the calibrated value; a threshold passed explicitly still decides.
   `bench/embedder_calibration.py` is the measurement, over pairs written for it, because
   the original eval behind 0.40 is not in this repository.
+- **The duplicate merge never folds two values whose numbers differ, and merges at 0.985
+  under MiniLM.** In a slot that holds many values, "appointment on 2023-05-01" and
+  "appointment on 2023-05-02" are both true, and a merge between them retired one. No
+  threshold prevents that: MiniLM scores those two dates at 0.997 and bge-small two numpy
+  versions at 0.995, and at 0.995 neither folds any of 26 restatements. So `merge_pass()`
+  now refuses two claims whose objects hold different numbers, in every embedding space
+  and whatever their cosine. It compares the numbers in order and without leading zeros,
+  so "09:30" and "9:30" can still fold and "85,000" and "85000" never can. That leaves
+  the threshold to separate values a letter or a word apart. MiniLM scores the closest of
+  those, two booking references, at 0.979, and at 0.97 folded 4 of 24 such pairs. Its
+  threshold is now 0.985, which folds none of them. The cost falls on restatements: under
+  MiniLM, 22 of the 24 that hold the same numbers score below 0.979, so at 0.985 the merge
+  folds 1 of them, "grey" and "gray", where 0.97 folded 4. bge-small keeps 0.99, which
+  folds none of the 24 different values and 3 of the 24 restatements.
+  `bench/embedder_calibration.py` grew from 14 to 69 pairs of different values for this,
+  and its 8 restatements are replaced by 26. None of the 8 could reach the merge: 6
+  differed only in case, punctuation or a leading article, which the write path already
+  treats as one value, and 2 changed the predicate. The script can now measure
+  `HashingEmbedder`, which folds none of the 69 and none of the 26 at any threshold
+  measured. A MiniLM store merges less from its next consolidation on, and merges already
+  made stay made; `docs/UPGRADING.md` shows how to find them.
 
 ## [0.15.0] — 2026-09-24
 

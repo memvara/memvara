@@ -2082,8 +2082,15 @@ class Consolidator:
   second record of the same fact. `derives` is for a claim inferred from other claims,
   and nothing in consolidation creates one. `threshold=None`, the default, and what
   `run()` uses, is the value measured for the embedder's space (`embed/calibration.py`):
-  0.97, or 0.99 for bge-small-en-v1.5, which scores two values one digit apart as high as
-  0.985 and would fold them into one claim at 0.97.
+  0.985 for all-MiniLM-L6-v2, 0.99 for bge-small-en-v1.5 and 0.97 for any other embedder.
+  The two measured values each sit above the closest pair of different values in their
+  space: two booking references at 0.979 under MiniLM, and two availability zones at
+  0.989 under bge-small. Two claims whose objects hold different numbers never merge,
+  whatever `threshold` says. The numbers are the runs of digits, compared in order as
+  strings without their leading zeros, so "09:30" and "9:30" can merge and "85,000" and
+  "85000" cannot. No threshold does this job: MiniLM scores two dates a day apart at
+  0.997 and bge-small two numpy versions at 0.995, above every restatement either model
+  was measured on.
 - `promote` turns a repeatedly-observed `EPISODIC` claim into a `SEMANTIC` one: seeing
   something happen once is an event, seeing it `min_observations` times is a pattern.
   The promoted claim gets `derivation=Derivation.CONSOLIDATION`.

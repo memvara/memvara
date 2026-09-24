@@ -22,6 +22,7 @@ two find exactly the same merges. See `NEIGHBOURHOOD`.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Sequence
 
@@ -50,6 +51,24 @@ from .sweep import Sweep
 #: the top N claims" cap cannot say, since it would re-examine the same N forever and
 #: never touch the tail.
 NEIGHBOURHOOD = 64
+
+_NUMBER = re.compile(r"\d+")
+
+
+def _numbers(text: str) -> tuple[str, ...]:
+    """The runs of digits in `text`, in order, each without its leading zeros.
+
+    Two values holding different numbers are two values, however close they embed, so
+    `merge_pass` never folds them. Compared as digit strings rather than as integers, so
+    a pasted value thousands of digits long costs no conversion and cannot exceed Python's
+    limit on one.
+
+    >>> _numbers("2023-05-01") == _numbers("2023-05-02")
+    False
+    >>> _numbers("09:30") == _numbers("9:30")
+    True
+    """
+    return tuple(run.lstrip("0") or "0" for run in _NUMBER.findall(text))
 
 
 def survivor_rank(claim: Claim) -> tuple[int, float, str]:
@@ -133,8 +152,14 @@ def merge_pass(sweep: Sweep, embedder: Embedder, registry: PredicateRegistry, *,
     """Fold near-identical live claims over a snapshot in hand. Returns claims retired.
 
     `threshold` is the cosine two claims must reach to merge. `None` takes the value
-    measured for this embedder's space (`embed/calibration.py`): 0.97, or 0.99 for
-    `bge-small-en-v1.5`, which scores two values one digit apart as high as 0.985.
+    measured for this embedder's space (`embed/calibration.py`): 0.985 for
+    `all-MiniLM-L6-v2`, 0.99 for `bge-small-en-v1.5` and 0.97 for any other embedder.
+
+    Two claims whose objects hold different numbers never merge, whatever their cosine.
+    No threshold can promise that: MiniLM scores two appointment dates a day apart at
+    0.997, and bge-small two numpy versions at 0.995, above anything a threshold can sit
+    at and still fold a restatement. In a slot that holds many values, both values of
+    such a pair can be true, and a merge would retire one.
     """
     if threshold is None:
         threshold = calibration_of(embedder).merge
@@ -152,6 +177,7 @@ def merge_pass(sweep: Sweep, embedder: Embedder, registry: PredicateRegistry, *,
             continue
         group.sort(key=survivor_rank)
         unit = _unit_vectors(sweep.store, embedder, group)
+        digits = [_numbers(c.object) for c in group]
         # Index into `group`, i.e. into survivor_rank order, ordered by blocking key.
         # Keeping the two orders separate is what lets the blocking decide *who is
         # compared* without letting it decide *who survives*.
@@ -166,7 +192,8 @@ def merge_pass(sweep: Sweep, embedder: Embedder, registry: PredicateRegistry, *,
             if not window:
                 continue
             sims = unit[window] @ unit[i]
-            cluster = [i] + [j for j, s in zip(window, sims) if float(s) >= threshold]
+            cluster = [i] + [j for j, s in zip(window, sims)
+                             if float(s) >= threshold and digits[j] == digits[i]]
             if len(cluster) < 2:
                 continue
             # Lowest index is the best `survivor_rank`. Taken over the whole cluster
