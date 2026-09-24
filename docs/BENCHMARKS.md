@@ -1232,6 +1232,44 @@ advantage — the offline `HashingEmbedder` is character-n-gram based and theref
 good at exact tokens, so the vector-only baseline finds them too. That claim needs a real
 semantic embedder to test, and is stated here rather than claimed.
 
+### One large scope
+
+`bench/perf.py` spreads its claims over fifty users, so no scope it searches holds more than
+a few hundred rows. `bench/scale.py` measures the other end: one user's scope holding all
+199,499 LongMemEval-S haystack turns, deduplicated by session, and 100,000 synthetic claims,
+written straight through the store with the hashing embedder. It times each store read a
+search runs, over 50 questions or five fixed claim queries, and then
+`search(k=12, include_episodes=True)` as a whole.
+
+```bash
+PYTHONPATH=. python3 bench/scale.py --path /tmp/scale.db
+```
+
+Both columns time copies of one store file, built once, on a 4-core Linux container, one
+run after the other. "Before" is `main` on 2026-09-24. "After" is the change that asks for
+each scope's candidates separately, reads the turn list from the covering index `ep_cover`,
+joins the text index to its table on rowid, and looks up vector rows in one vectorised pass:
+
+| read | before, median | after, median | before, p95 | after, p95 |
+|---|---:|---:|---:|---:|
+| `candidate_ids` | 86.7 ms | 70.6 ms | 124.5 ms | 77.4 ms |
+| `episode_candidate_ids` | 265.5 ms | 88.5 ms | 288.2 ms | 106.4 ms |
+| `lexical_search` | 323.3 ms | 120.0 ms | 360.6 ms | 131.8 ms |
+| `lexical_search_episodes` | 140.0 ms | 55.4 ms | 423.0 ms | 161.0 ms |
+| `vector_search` | 176.2 ms | 158.9 ms | 274.0 ms | 216.1 ms |
+| `vector_search_episodes` | 391.5 ms | 215.1 ms | 447.5 ms | 253.3 ms |
+| **`search()`** | **737.6 ms** | **469.8 ms** | **1,071.0 ms** | **556.5 ms** |
+
+Every read returns the same rows before and after; only how SQLite reaches them changed.
+The claim vector leg moved least. Measured on its own, about half its time is the
+candidate list, which no covering index answers because it reads the claim's state
+columns, and most of the rest is the product over 100,000 vectors, which is the floor for
+an exact index. The lexical legs are handed what
+`HybridRetriever` hands them, the query reduced to its content words. The mechanism behind
+each row, and the first open that builds `ep_cover`, are in
+[`docs/INTERNALS.md`](INTERNALS.md) under *Reading a whole scope, and joining the text
+index*.
+
 ---
 
 ## Answer quality, end to end (an authored corpus, an agent as the reader)

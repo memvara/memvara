@@ -64,6 +64,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from io import BufferedRandom
+from itertools import repeat
 from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Iterator,
                     Mapping, Sequence, cast)
 
@@ -552,6 +553,20 @@ CREATE INDEX IF NOT EXISTS cl_obj  ON claims(tenant, object_key, invalidated_at)
 -- expiry and costs nothing on a write that sets none. Down here for the reason the two
 -- above are: on a pre-v15 file the column does not exist until `_migrate_to_v15` adds it.
 CREATE INDEX IF NOT EXISTS cl_expiry ON claims(expires_at) WHERE expires_at IS NOT NULL;
+
+-- Every turn a scope can see, answered from the index alone. `episode_candidate_ids` is
+-- the vector leg's candidate list: every turn at a scope that had happened by an
+-- instant. `ep_scope` holds neither `project` nor `id`, so SQLite read every matching
+-- row from the table to check the one and return the other: 244 ms for the 189,520
+-- turns of the LongMemEval-S haystacks in one scope, against 70 ms for a plain scan of
+-- the table. With this index the same list takes 102 ms, and 84 ms with one index range
+-- per scope (`_scoped_union`). It costs +0.5 us on a batched `add_episode` and +7.9 us
+-- on one committed alone, over 20,000 turns of ~300 characters, and an existing store
+-- builds it once, on the first open: 1.7 s and 10 MB for those 189,520 turns. Down here
+-- because `project` does not exist on a pre-v12 file until `_migrate_to_v12` adds it.
+-- `ep_scope` stays: an older build creates it on every open, so dropping it here would
+-- make a file that both builds open rebuild it every other time.
+CREATE INDEX IF NOT EXISTS ep_cover ON episodes(tenant, usr, project, agent, session, ts, id);
 """
 
 _CLAIM_FIELDS = (
@@ -1287,19 +1302,22 @@ class _VecIndex:
         with self._lock:
             if self._mat is None or not self._row or limit <= 0:
                 return []
-            cids: list[str] = []
-            rows: list[int] = []
-            for c in allowed:
-                r = self._row.get(c)
-                if r is not None:
-                    cids.append(c)
-                    rows.append(r)
-            if not rows:
+            # Each id's row, -1 for an id with no vector, in one pass that never enters
+            # Python bytecode: `map` calls `dict.get` from C. For 199,499 candidates a
+            # loop appending to two lists took 79 ms and this takes 57, beside 45 ms for
+            # the product itself. What is left is the dictionary lookups themselves.
+            found = np.fromiter(map(self._row.get, allowed, repeat(-1)),
+                                dtype=np.int64, count=len(allowed))
+            keep = found >= 0
+            cids = (list(allowed) if keep.all()
+                    else [c for c, k in zip(allowed, keep) if k])
+            rows = found[keep]
+            if rows.size == 0:
                 return []
             qq = _unit(q)
             if qq.shape[0] != self.dim:
                 raise ValueError(f"query dim {qq.shape[0]} != index dim {self.dim}")
-            scores = self._scores(np.asarray(rows, dtype=np.int64), qq)
+            scores = self._scores(rows, qq)
         k = min(limit, scores.shape[0])
         part = (np.argpartition(-scores, k - 1)[:k]
                 if k < scores.shape[0] else np.arange(scores.shape[0]))
@@ -2442,6 +2460,43 @@ class SQLiteStore:
                          f"AND {a}agent IS ? AND {a}session IS ?)")
             params += [s.tenant, s.user, s.project, s.agent, s.session]
         return "(" + " OR ".join(parts) + ")", params
+
+    @staticmethod
+    def _scoped_union(select: str, scopes: Sequence[Scope], rest: str,
+                      binds: Sequence[Any]) -> tuple[str, list]:
+        """`select`, narrowed to one scope and to `rest`, once per scope, joined by
+        `UNION ALL`. The rows `_scope_clause` admits, for a query that returns every one.
+
+        `_scope_clause` ORs one term per ancestor scope, and SQLite plans that as a
+        MULTI-INDEX OR: each term is an index lookup, and every rowid a term returns goes
+        into a temporary set first, so that a row two terms both match comes back once.
+        For a capped query that set holds a page of rows. For the candidate lists, which
+        return every row a scope can see, it holds all of them. One `SELECT` per scope
+        needs no such set: over the 189,520 LongMemEval-S turns in one scope, the turn
+        list took 102 ms through the `OR` and 84 ms this way, both reading only
+        `ep_cover`, and the claim list over 100,000 claims 84 ms and 69 ms.
+
+        The set is unnecessary here because a row is stored at exactly one scope, so two
+        distinct scopes never return the same row. Two copies of one scope would, where
+        the `OR` returned the row once, so scopes are deduplicated by their five fields
+        first.
+
+        Fails closed like `_scope_clause`: no scope, no rows.
+        """
+        seen: set[tuple[Any, ...]] = set()
+        parts: list[str] = []
+        params: list[Any] = []
+        for s in scopes:
+            key = (s.tenant, s.user, s.project, s.agent, s.session)
+            if key in seen:
+                continue
+            seen.add(key)
+            parts.append(f"{select} WHERE tenant IS ? AND usr IS ? AND project IS ? "
+                         f"AND agent IS ? AND session IS ? AND {rest}")
+            params += [*key, *binds]
+        if not parts:
+            return f"{select} WHERE 1=0", []
+        return " UNION ALL ".join(parts), params
 
     def _state_clause(self, valid_at: datetime | None, known_at: datetime | None,
                       states: Collection[str] | None = None,
@@ -4031,17 +4086,19 @@ class SQLiteStore:
         leg page over, so a caller narrowing the population afterwards loses whatever
         fell past the page boundary and is told nothing about it.
         """
-        sc, sp = self._scope_clause(scopes)
         lv, lp = self._state_clause(
             valid_at, known_at, resolve_states(states, include_invalidated))
         wc, wp = _where_clause(where, "claims", _CLAIM_DOCUMENTS, self._json_functions)
+        # One index range per scope rather than an `OR` over them; see `_scoped_union`.
+        # 84 ms to 69 ms for 100,000 claims in one user's scope.
+        sql, params = self._scoped_union("SELECT id FROM claims", scopes,
+                                         f"{lv} AND {wc}", lp + wp)
         with self._read() as conn:
             cur = conn.cursor()
             # A whole-tenant scope returns every claim id; building a `Row` object for
             # each of them costs more than the query.
             cur.row_factory = None
-            cur.execute(f"SELECT id FROM claims WHERE {sc} AND {lv} AND {wc}",
-                        sp + lp + wp)
+            cur.execute(sql, params)
             return [r[0] for r in cur.fetchall()]
 
     def episode_candidate_ids(self, scopes: Sequence[Scope], *,
@@ -4051,19 +4108,21 @@ class SQLiteStore:
         """Every turn visible at these scopes. The episode half of `candidate_ids`.
 
         No `include_invalidated`: episodes have no end-of-life to lift. Scope, though,
-        is filtered exactly as claims are — the same `_scope_clause`, the same
+        is filtered exactly as claims are — the same `_scoped_union`, the same
         fail-closed on an empty list — because "which turns can this caller see" is
         precisely the same question for raw text as for a derived belief, and raw text
         is the more sensitive of the two.
         """
-        sc, sp = self._scope_clause(scopes)
         hp, hpp = self._happened_clause(valid_at, known_at)
         wc, wp = _where_clause(where, "episodes", _EPISODE_DOCUMENTS, self._json_functions)
+        # One range of `ep_cover` per scope, answered without reading the table; see
+        # `_scoped_union` and the note on `ep_cover`.
+        sql, params = self._scoped_union("SELECT id FROM episodes", scopes,
+                                         f"{hp} AND {wc}", hpp + wp)
         with self._read() as conn:
             cur = conn.cursor()
             cur.row_factory = None
-            cur.execute(f"SELECT id FROM episodes WHERE {sc} AND {hp} AND {wc}",
-                        sp + hpp + wp)
+            cur.execute(sql, params)
             return [r[0] for r in cur.fetchall()]
 
     def episodes_near(self, anchor: datetime, scopes: Sequence[Scope], limit: int, *,
@@ -4127,8 +4186,14 @@ class SQLiteStore:
         # The caller's filter goes inside the `LIMIT` too, for the same reason.
         wc, wp = _where_clause(where, "c", _CLAIM_DOCUMENTS, self._json_functions)
         sql = (
-            "SELECT f.claim_id AS cid, bm25(claims_fts) AS s "
-            "FROM claims_fts f JOIN claims c ON c.id = f.claim_id "
+            "SELECT c.id AS cid, bm25(claims_fts) AS s "
+            # On the rowid, which the FTS row mirrors (`put_claim` writes it with the
+            # claim's own rowid, as every release has since 0.1.0, and erasure finds the
+            # FTS row by it). Joining on `f.claim_id` read that column out of the FTS
+            # content table for every match, and the content table holds the whole text:
+            # a median of 323 ms against 120 ms over 100,000 claims (`bench/scale.py`),
+            # same rows back.
+            "FROM claims_fts f JOIN claims c ON c.rowid = f.rowid "
             f"WHERE claims_fts MATCH ? AND {sc} AND {lv} AND {wc} "
             # `value_key` before `id`, and neither is decoration: BM25 ties are common —
             # eight claims differing only in subject score identically for a query on
@@ -4163,8 +4228,13 @@ class SQLiteStore:
         hp, hpp = self._happened_clause(valid_at, known_at, alias="e")
         wc, wp = _where_clause(where, "e", _EPISODE_DOCUMENTS, self._json_functions)
         sql = (
-            "SELECT f.episode_id AS eid, bm25(episodes_fts) AS s "
-            "FROM episodes_fts f JOIN episodes e ON e.id = f.episode_id "
+            "SELECT e.id AS eid, bm25(episodes_fts) AS s "
+            # On the rowid, as `lexical_search` joins and for the same reason. A turn's
+            # FTS row holds the whole turn, so reading `episode_id` out of it for every
+            # match cost more here. Over the 199,499 LongMemEval-S turns in one scope
+            # (`bench/scale.py`), the median went from 140 ms to 55 and the 95th
+            # percentile from 423 ms to 161, same rows back.
+            "FROM episodes_fts f JOIN episodes e ON e.rowid = f.rowid "
             f"WHERE episodes_fts MATCH ? AND {sc} AND {hp} AND {wc} "
             # Same tie, same fix. A turn has no `value_key`; `hash` is the content hash
             # `find_episode_by_hash` dedupes on, so it plays the same role.
