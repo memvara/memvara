@@ -183,6 +183,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   tools add a note line for each. It ships off because its release bar, no fewer claims
   and no more duplicates than single-call extraction on `demo/harness.py` and judged
   LongMemEval accuracy within the reader's noise floor, has not been measured.
+- **`bench/extraction_bar.py`, the measurement for that release bar.** `claims` writes the
+  demo's support history into two stores with the same extraction model, one with
+  `agentic_extraction` off and one with it on, and reports claims written, duplicates
+  left, and every fallback and refused proposal by reason. `longmemeval` does the same over
+  the 199-question LongMemEval-S sample, whose ids are now in
+  `bench/samples/longmemeval_s_199.txt`, and compares judged accuracy against the
+  8-question noise floor. `--write-path worker` reproduces the hosted worker: store with no
+  model, then read through `reextract()`. `bench/longmemeval.py`'s `build_memory` takes
+  `options=`, further `Memvara` arguments, for it. No run against a model has been made.
 - **`llm.ToolChat`, a protocol for tool-using conversations.** `run_tools(system,
   messages, tools, *, max_steps, timeout, usage=None) -> ToolRun`, with `Message`,
   `ToolSpec`, `ToolRun`, `ToolRunError`, `ToolRunTimeout` and `MalformedToolOutput` in

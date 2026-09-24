@@ -120,7 +120,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import evalkit as ek
 
@@ -348,8 +348,13 @@ def fixture() -> list[Instance]:
 def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None,
                  read_k: int | None = None, embedder: Any = None,
                  w_graph: float = 0.0, w_temporal: float = 0.0,
-                 reranker: Any = None, rerank_top_n: int = 0) -> Memvara:
+                 reranker: Any = None, rerank_top_n: int = 0,
+                 options: Mapping[str, Any] | None = None) -> Memvara:
     """One store, scoped to a user.
+
+    `options` are further `Memvara` keyword arguments, for a caller that compares write
+    settings on this exact read path. `bench/extraction_bar.py` passes the
+    `agentic_extraction` switch, deferred extraction and a telemetry recorder through it.
 
     `read_max_episodes=k` for the same reason as in `bench/locomo.py`: raw turns are
     capped at 3 by default because they are meant to be a tail on a fact list, and a
@@ -386,7 +391,8 @@ def build_memory(user: str, budget: ek.RetrievalBudget, llm: Any = None,
     return Memvara(user=user, llm=llm if llm is not None else NullLLM(),
                   embedder=embedder, read_max_episodes=episodes,
                   read_reranker=reranker, read_rerank_top_n=window or 20,
-                  read_w_graph=w_graph, read_w_temporal=w_temporal, **PLAIN_READ)
+                  read_w_graph=w_graph, read_w_temporal=w_temporal, **PLAIN_READ,
+                  **(options or {}))
 
 
 @dataclass(slots=True)
