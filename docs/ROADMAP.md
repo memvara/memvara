@@ -613,7 +613,8 @@ this one.
 
 **An approximate vector index (HNSW/IVF).** Exact search over a scope is O(|scope| · d) and
 the matmul is already BLAS, so this is the floor, and it is correct. With 199,499 turns and
-100,000 claims in one scope, a whole search takes a median of 470 ms (`bench/scale.py`).
+100,000 claims in one scope, a whole search takes a median of 284 ms, and 471 ms when it is
+the first after a write (`bench/scale.py`).
 Beating it trades recall for speed, which belongs behind the `Store` protocol as a choice a
 deployment makes, not in the default path.
 

@@ -1587,6 +1587,38 @@ The vector leg then looks up each candidate's row in the matrix. `_VecIndex.sear
 that with `np.fromiter(map(dict.get, ...))`, which runs the lookups in C rather than in a
 Python loop: 79 ms to 57 ms for 199,499 candidates, beside 45 ms for the product itself.
 
+**Each scope's turns, kept in memory.** The turn list and those lookups are the same work
+on every search until something is written, so the vector leg over turns keeps them.
+`_scope_turns` holds, per scope, the ids of the turns that have a vector, their `ts` and
+their matrix rows, sorted by `(ts, id)`. A search takes, for each of its scopes, the prefix
+with `ts` at or before the instant asked about, found by binary search, and hands the rows
+to `_VecIndex.search_rows`, which ranks them exactly as `search` does. The candidates are
+the rows `_scoped_union` returns, in the order it returns them, so two turns whose cosines
+tie keep the same order and the same rows come back. `tests/test_store.py` checks that
+against the SQL path over every shape of scope, five pairs of instants and four limits,
+with half the vectors shared. Over the 199,499 turns in one scope of `bench/scale.py`, the
+vector leg's median went from 220 ms to 54 ms, and a whole search's from 450 ms to 284 ms.
+
+A list lives until `_changed` empties the cache. That runs after every commit this store
+makes, whatever it wrote, and whenever a search's `_ensure_index` finds that another
+connection committed. A list built while a change happened is returned to the search that
+built it and not kept. So the first search after any write rebuilds the lists it needs,
+which costs more than the SQL path it replaces: in `bench/scale.py` the vector leg took
+238 ms after a write against 220 ms before this change, and a whole search 471 ms against
+450 to 472 ms. Every search after it, until the next write, takes the 54 ms. Three reads
+still take the SQL path: a filtered one, because a filter can name any metadata field
+and the lists hold none; one inside `batch()`, because that thread must see its own
+uncommitted rows and a list shared with other threads must never hold them; and one before
+this process has seen any vector, because an index loaded then never learns a width.
+
+A write in another thread can still move a row between a search reading its lists and
+ranking them. `search_rows` therefore checks, under the index lock, that every row is
+inside the matrix and that each turn it returns still holds the row it was scored by, and
+returns `None` when one does not, which sends the search down the SQL path. A turn it
+does not return cannot change the answer by having moved. The lists hold at most
+`_SCOPE_TURNS_ROWS` turns, 1,000,000, across all scopes, dropping the least recently used
+scope first. Each turn costs about 100 bytes: 19.3 MB for those 199,499.
+
 ### Why a claim was closed
 
 The reason for a closure is stored on the closure witness, `meta["closure"]`, which

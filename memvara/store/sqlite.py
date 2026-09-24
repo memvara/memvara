@@ -60,11 +60,13 @@ import sqlite3
 import struct
 import threading
 import warnings
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from io import BufferedRandom
 from itertools import repeat
+from operator import itemgetter
 from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Iterator,
                     Mapping, Sequence, cast)
 
@@ -672,6 +674,28 @@ _EPISODE_VECS = _VecTable("episode_embeddings", "episode_id",
                           _vector_upsert("episode_embeddings", "episode_id"), "episodes")
 _VEC_TABLES = (_CLAIM_VECS, _EPISODE_VECS)
 
+
+@dataclass(frozen=True, slots=True)
+class _ScopeTurns:
+    """The turns stored at one scope that have a vector, in `(ts, id)` order.
+
+    What the vector leg over turns ranks, held in memory so that a search runs no SQL:
+    `ts` is ascending, so "happened by the instant asked about" is a prefix found by
+    binary search. See `SQLiteStore._scope_turns`.
+    """
+
+    ids: list[str]
+    #: Each turn's `ts`, ascending.
+    ts: np.ndarray
+    #: Each turn's row of the matrix, when the entry was built.
+    rows: np.ndarray
+
+
+#: How many turns `SQLiteStore._scope_turns` keeps across all scopes. Each costs about
+#: 100 bytes: 199,499 turns in one scope held 19.3 MB, and building them peaked at twice
+#: that. The least recently used scope goes first; one scope is kept whatever its size.
+_SCOPE_TURNS_ROWS = 1_000_000
+
 # Everything the index needs to know about what is on disk, in one query per open:
 # how many vectors, whether they agree on a width, the highest row in use, and how many
 # rows have no address yet. `SUM(n)`, not `COUNT(*)` — the outer query counts the two
@@ -903,6 +927,14 @@ def _object_key_of(meta: str, surface: str) -> str:
 _WALKABLE = ("{a}.polarity > 0 AND {a}.subject_key != '' AND {a}.object_key != '' "
              "AND {a}.subject_key != {a}.object_key "
              "AND ({a}.object_kind IS NULL OR {a}.object_kind = 'entity')")
+
+
+def _best(scores: np.ndarray, limit: int) -> list[int]:
+    """The positions of the `limit` highest scores, highest first."""
+    k = min(limit, scores.shape[0])
+    part = (np.argpartition(-scores, k - 1)[:k]
+            if k < scores.shape[0] else np.arange(scores.shape[0]))
+    return [int(i) for i in part[np.argsort(-scores[part])]]
 
 
 def _unit(vec: np.ndarray) -> np.ndarray:
@@ -1314,15 +1346,36 @@ class _VecIndex:
             rows = found[keep]
             if rows.size == 0:
                 return []
-            qq = _unit(q)
-            if qq.shape[0] != self.dim:
-                raise ValueError(f"query dim {qq.shape[0]} != index dim {self.dim}")
-            scores = self._scores(rows, qq)
-        k = min(limit, scores.shape[0])
-        part = (np.argpartition(-scores, k - 1)[:k]
-                if k < scores.shape[0] else np.arange(scores.shape[0]))
-        order = part[np.argsort(-scores[part])]
-        return [(cids[int(i)], float(scores[int(i)])) for i in order]
+            scores = self._cosines(q, rows)
+        return [(cids[i], float(scores[i])) for i in _best(scores, limit)]
+
+    def search_rows(self, q: np.ndarray, ids: Sequence[str], rows: np.ndarray,
+                    limit: int) -> list[tuple[str, float]] | None:
+        """`search` over candidates whose rows the caller already looked up.
+
+        `rows[i]` is the row `ids[i]` held when the caller read the map. Returns None when
+        a returned id no longer holds that row, or a row is past the end of the matrix:
+        a write since then moved it, so its score may be another vector's, and the
+        caller has to ask `search` instead. A candidate that is not returned cannot
+        change the answer by having moved, so only the returned ones are checked.
+        """
+        with self._lock:
+            if self._mat is None or not self._row or limit <= 0 or rows.size == 0:
+                return []
+            if int(rows.max()) >= self._high:
+                return None
+            scores = self._cosines(q, rows)
+            best = _best(scores, limit)
+            if any(self._row.get(ids[i], -1) != rows[i] for i in best):
+                return None
+        return [(ids[i], float(scores[i])) for i in best]
+
+    def _cosines(self, q: np.ndarray, rows: np.ndarray) -> np.ndarray:
+        """`q` against `rows`, refusing a query of another width. Under the lock."""
+        qq = _unit(q)
+        if qq.shape[0] != self.dim:
+            raise ValueError(f"query dim {qq.shape[0]} != index dim {self.dim}")
+        return self._scores(rows, qq)
 
     def get(self, item_id: str) -> np.ndarray | None:
         """The stored unit vector, or None if this item was never embedded."""
@@ -1579,6 +1632,13 @@ class SQLiteStore:
         # deadlocking on each other.
         self._index_lock = threading.RLock()
         self._data_version = -1
+        # Each scope's turns, as the vector leg ranks them; see `_scope_turns`. Least
+        # recently used first. `_writes` counts the changes that empty it, and an entry
+        # built across one of them is not kept.
+        self._turns: OrderedDict[tuple[Any, ...], _ScopeTurns] = OrderedDict()
+        self._turns_held = 0
+        self._writes = 0
+        self._turns_lock = threading.Lock()
         with self._lock:
             self._db.executescript(SCHEMA)
             self._migrate()
@@ -2376,6 +2436,7 @@ class SQLiteStore:
             if version != self._data_version:
                 self._data_version = version
                 self._read_map()
+                self._changed()
 
     def _ensure_dim(self) -> None:
         """Learn the store's dimension if another process wrote the first vector."""
@@ -2413,6 +2474,21 @@ class SQLiteStore:
     def _maybe_commit(self) -> None:
         if self._batch_depth == 0:
             self._db.commit()
+            self._changed()
+
+    def _changed(self) -> None:
+        """Drop every `_scope_turns` entry, because what they were read from moved.
+
+        Called after every commit this store makes, including the one that ends a
+        rolled-back `batch()`, and when a reader sees that another connection committed.
+        It does not ask what the change touched: a claim write empties the cache too,
+        which costs one rebuild, where missing a turn write would return an erased turn
+        or leave out a new one.
+        """
+        with self._turns_lock:
+            self._writes += 1
+            self._turns.clear()
+            self._turns_held = 0
 
     @contextmanager
     def batch(self) -> Iterator["SQLiteStore"]:
@@ -4290,13 +4366,105 @@ class SQLiteStore:
         Same matrix and same code path as `vector_search`; the candidate set is what
         differs, and it is what enforces isolation — an episode id the scope filter did
         not return is not passed to the index at all.
+
+        Without a filter, and outside `batch()`, the candidates come from
+        `_scope_turns` instead of from SQL: the same turns in the same order, so the same
+        rows come back. Over 199,499 turns in one scope the median went from 220 ms to
+        54 ms (`bench/scale.py`). A filtered read still asks SQL, because a filter can
+        name any metadata field and the cache holds none. Inside `batch()` the thread
+        must see its own uncommitted rows, which a cache shared with other threads must
+        never hold.
         """
+        # `dim` is None until this process has seen a vector. The SQL path below loads
+        # the index only once there is a candidate to rank, and an index loaded before
+        # any vector exists never learns a width from the refresh that later maps
+        # another worker's first vector, so that case keeps taking the SQL path.
+        if where is None and not self._batch_depth and self._vec.dim is not None:
+            hits = self._cached_turn_search(qvec, scopes, limit, valid_at, known_at)
+            if hits is not None:
+                return hits
         allowed = self.episode_candidate_ids(scopes, valid_at=valid_at,
                                              known_at=known_at, where=where)
         if not allowed:
             return []
         self._ensure_index()
         return self._vec.search(qvec, allowed, limit)
+
+    def _cached_turn_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int,
+                            valid_at: datetime | None, known_at: datetime | None,
+                            ) -> list[tuple[str, float]] | None:
+        """`vector_search_episodes` over `_scope_turns`, or None when a write moved a row
+        between reading the cache and ranking.
+
+        The candidates are each distinct scope's turns in the order `_scoped_union`
+        returns them, scope by scope and by `(ts, id)` within one, cut at the happened-by
+        bound by binary search. The order matters as well as the set: two turns with
+        equal cosines keep the order they arrived in, so a different order could put a
+        different one of them inside `limit`.
+        """
+        self._ensure_index()
+        bound = min(_clock(valid_at, known_at))
+        chosen: list[tuple[_ScopeTurns, int]] = []
+        seen: set[tuple[Any, ...]] = set()
+        for s in scopes:
+            key = (s.tenant, s.user, s.project, s.agent, s.session)
+            if key in seen:
+                continue
+            seen.add(key)
+            turns = self._scope_turns(key)
+            chosen.append((turns, int(np.searchsorted(turns.ts, bound, side="right"))))
+        if len(chosen) == 1:
+            # One scope, the common case: its list is passed whole rather than copied,
+            # since only the positions below `n` are ever read.
+            turns, n = chosen[0]
+            ids, rows = turns.ids, turns.rows[:n]
+        else:
+            ids = [i for turns, n in chosen for i in turns.ids[:n]]
+            rows = np.concatenate([turns.rows[:n] for turns, n in chosen]
+                                  or [np.empty(0, dtype=np.int64)])
+        return self._vec.search_rows(qvec, ids, rows, limit)
+
+    def _scope_turns(self, key: tuple[Any, ...]) -> _ScopeTurns:
+        """The turns stored at the scope `key` names, with their vectors' rows.
+
+        Built by one read of `ep_cover` and one pass over the name-to-row map, then kept
+        until `_changed` next runs, which is after any commit. An entry built while a
+        change happened is returned to the caller that built it, whose read it is
+        correct for, and not kept for anybody else.
+        """
+        with self._turns_lock:
+            hit = self._turns.get(key)
+            if hit is not None:
+                self._turns.move_to_end(key)
+                return hit
+            writes = self._writes
+        with self._read() as conn:
+            cur = conn.cursor()
+            cur.row_factory = None
+            cur.execute("SELECT id, ts FROM episodes WHERE tenant IS ? AND usr IS ? "
+                        "AND project IS ? AND agent IS ? AND session IS ? "
+                        "ORDER BY ts, id", key)
+            found = cur.fetchall()
+        # `itemgetter` and `map` keep every pass over the rows in C. For 189,520 turns the
+        # passes took 55 to 66 ms written as generator expressions, and 32 to 38 ms this way.
+        ids = list(map(itemgetter(0), found))
+        with self._vec._lock:
+            rows = np.fromiter(map(self._vec._row.get, ids, repeat(-1)),
+                               dtype=np.int64, count=len(ids))
+        ts = np.fromiter(map(itemgetter(1), found), dtype=np.float64, count=len(found))
+        keep = rows >= 0
+        if not keep.all():
+            ids = [i for i, k in zip(ids, keep) if k]
+            ts, rows = ts[keep], rows[keep]
+        turns = _ScopeTurns(ids=ids, ts=ts, rows=rows)
+        with self._turns_lock:
+            if self._writes == writes and key not in self._turns:
+                self._turns[key] = turns
+                self._turns_held += len(turns.ids)
+                while self._turns_held > _SCOPE_TURNS_ROWS and len(self._turns) > 1:
+                    _, old = self._turns.popitem(last=False)
+                    self._turns_held -= len(old.ids)
+        return turns
 
     # -- maintenance ---------------------------------------------------------
 

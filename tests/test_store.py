@@ -3,6 +3,7 @@ and the bitemporal SQL that makes time travel work."""
 
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import numpy as np
@@ -12,6 +13,7 @@ from memvara.embed import HashingEmbedder
 from memvara.store import (STATES, SQLStore, SQLiteStore, live_predicate,
                            state_predicate, stored_state_predicate,
                            unexpired_predicate)
+from memvara.store import sqlite as sqlite_store
 from memvara.store.base import Store
 from memvara.store.sqlite import _WALKABLE as _WALKABLE_SQL
 from memvara.store.sqlite import SCHEMA_VERSION, _fts_query
@@ -804,6 +806,167 @@ def test_reads_run_on_two_threads_only_where_each_thread_has_its_own_connection(
     assert file._parallel_reads()
     assert not SQLiteStore(":memory:")._parallel_reads()
     file.close()
+
+
+# --- The vector leg over turns, from each scope's cached list ------------------------
+
+def _sql_turn_search(store, qvec, scopes, limit, **at):
+    """What `vector_search_episodes` ranked before each scope's turns were cached: the
+    SQL candidate list, handed to the index."""
+    allowed = store.episode_candidate_ids(scopes, **at)
+    return store._vec.search(qvec, allowed, limit) if allowed else []
+
+
+def test_the_cached_turn_search_returns_what_the_sql_candidate_list_returns(store):
+    """The cache replaces a SQL candidate list, so it is checked against that list: the
+    same turns, in the same order, with the same scores, for every shape of scope asked
+    from its own ancestors, at instants before, among and after the turns, with the two
+    axes apart as well as together, and at limits from one to everything. Half the
+    turns share a vector with others, and many share a `ts`, because a tie is where a
+    candidate order other than SQL's would put a different turn inside the limit."""
+    rng = np.random.default_rng(7)
+    shapes = [Scope("acme", u, a, s) for u in (None, "alice") for a in (None, "bot")
+              for s in (None, "s1")]
+    shared = rng.standard_normal((6, 64)).astype(np.float32)
+    for i in range(240):
+        ep = turn(store, scope=shapes[i % len(shapes)],
+                  ts=datetime(2024, 1 + i % 12, 1 + i % 28, tzinfo=timezone.utc))
+        store.set_episode_embedding(
+            ep.id, shared[i % 6] if i % 2 else rng.standard_normal(64).astype(np.float32))
+    instants = [{}, {"valid_at": T0, "known_at": T0}, {"valid_at": TMID, "known_at": TMID},
+                {"valid_at": T1, "known_at": TMID}, {"valid_at": TMID, "known_at": T1}]
+    for shape in shapes:
+        asked = shape.ancestors()
+        for at in instants:
+            for limit in (1, 5, 17, 1000):
+                q = shared[limit % 6] if limit % 2 else rng.standard_normal(64)
+                got = store.vector_search_episodes(q, asked, limit, **at)
+                assert got == _sql_turn_search(store, q, asked, limit, **at), (shape, at)
+    assert store._turns, "the searches above were answered from the cache"
+
+
+def test_a_scope_listed_twice_ranks_its_turns_once_from_the_cache(store):
+    """The cached search drops a repeated scope as `_scoped_union` does. Two copies of
+    one scope's list would put each of its turns in the ranking twice."""
+    ep = turn(store)
+    store.set_episode_embedding(ep.id, onehot(1))
+    twice = [SCOPE, Scope("acme", "alice")]
+    assert [h[0] for h in store.vector_search_episodes(onehot(1), twice, 5)] == [ep.id]
+    assert store._turns, "the search was answered from the cache"
+
+
+def test_a_turn_written_after_a_search_is_found_by_the_next_one(store):
+    """Every commit empties the cache, so a turn written between two searches is a
+    candidate for the second."""
+    first = turn(store)
+    store.set_episode_embedding(first.id, onehot(1))
+    assert [h[0] for h in store.vector_search_episodes(onehot(2), [SCOPE], 5)] == [first.id]
+    later = turn(store)
+    store.set_episode_embedding(later.id, onehot(2))
+    assert store.vector_search_episodes(onehot(2), [SCOPE], 1)[0][0] == later.id
+
+
+def test_an_erased_turn_is_not_returned_with_the_vector_that_took_its_row(store):
+    """Erasing a turn frees its row, and the next vector written takes it. A cache
+    that still listed the erased turn at that row would return it, scored by a vector
+    written for another scope."""
+    gone = turn(store)
+    store.set_episode_embedding(gone.id, onehot(1))
+    row = store._vec._row[gone.id]
+    assert store.vector_search_episodes(onehot(1), [SCOPE], 5)[0][0] == gone.id
+    store.erase_episode(gone.id)
+    elsewhere = turn(store, scope=Scope("acme", "bob"))
+    store.set_episode_embedding(elsewhere.id, onehot(1))
+    assert store._vec._row[elsewhere.id] == row
+    assert store.vector_search_episodes(onehot(1), [SCOPE], 5) == []
+
+
+def test_a_warm_cache_sees_what_another_worker_writes_and_erases(tmp_path):
+    """Another process's commit reaches this one only as a new `data_version`, which
+    the vector leg reads before every search and which empties the cache."""
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    first = turn(a)
+    a.set_episode_embedding(first.id, onehot(1))
+    assert a.vector_search_episodes(onehot(1), [SCOPE], 5)[0][0] == first.id
+    ep = turn(b)
+    b.set_episode_embedding(ep.id, onehot(5))
+    assert a.vector_search_episodes(onehot(5), [SCOPE], 1)[0][0] == ep.id
+    b.erase_episode(first.id)
+    assert [h[0] for h in a.vector_search_episodes(onehot(1), [SCOPE], 5)] == [ep.id]
+    a.close()
+    b.close()
+
+
+def test_a_search_inside_a_batch_sees_its_own_turns_and_the_cache_keeps_none(store):
+    """Inside `batch()` a thread reads its own uncommitted rows. A cache shared with
+    other threads must never hold them, and after a rollback nothing may return a turn
+    that was never written."""
+    first = turn(store)
+    store.set_episode_embedding(first.id, onehot(1))
+    store.vector_search_episodes(onehot(1), [SCOPE], 5)
+    with pytest.raises(RuntimeError):
+        with store.batch():
+            ep = turn(store)
+            store.set_episode_embedding(ep.id, onehot(2))
+            assert store.vector_search_episodes(onehot(2), [SCOPE], 1)[0][0] == ep.id
+            raise RuntimeError("roll back")
+    assert [h[0] for h in store.vector_search_episodes(onehot(2), [SCOPE], 5)] == [first.id]
+
+
+def test_a_row_moved_after_the_cache_was_read_sends_the_search_to_sql(store):
+    """A write in another thread can change the index between a search reading the
+    cache and ranking, before its commit empties the cache. Here the index is changed
+    directly, as an erasure and a re-embedding change it before they commit: each
+    returned turn must still hold the row it was ranked by, and the matrix must still
+    reach every row, or the search asks SQL instead."""
+    a_ = turn(store)
+    store.set_episode_embedding(a_.id, onehot(1))
+    b_ = turn(store)
+    store.set_episode_embedding(b_.id, onehot(2))
+    store.vector_search_episodes(onehot(1), [SCOPE], 5)
+    store._vec.forget(a_.id)
+    assert [h[0] for h in store.vector_search_episodes(onehot(1), [SCOPE], 5)] == [b_.id]
+    store._vec.reset()
+    store._vec.put(b_.id, 0, onehot(2))
+    assert [h[0] for h in store.vector_search_episodes(onehot(2), [SCOPE], 5)] == [b_.id]
+
+
+def test_a_turn_list_built_across_a_commit_is_not_kept(store, monkeypatch):
+    """`_scope_turns` reads SQL and the map outside every lock, so a commit can land
+    between its read and its insert. The list is right for the search that built it,
+    which began before the commit, and wrong for any later one."""
+    ep = turn(store)
+    store.set_episode_embedding(ep.id, onehot(1))
+    key = ("acme", "alice", None, None, None)
+    real = store._read
+
+    @contextmanager
+    def committed_meanwhile():
+        with real() as conn:
+            yield conn
+        store._changed()
+
+    monkeypatch.setattr(store, "_read", committed_meanwhile)
+    assert store._scope_turns(key).ids == [ep.id]
+    assert key not in store._turns
+
+
+def test_the_turn_lists_stay_inside_their_row_budget(store, monkeypatch):
+    """The least recently used scope goes first once the lists hold more turns than
+    the budget, and one scope is kept whatever its size."""
+    monkeypatch.setattr(sqlite_store, "_SCOPE_TURNS_ROWS", 5)
+    scopes = [Scope("acme", u) for u in ("a", "b", "c")]
+    for i, s in enumerate(scopes):
+        for _ in range(3 + 2 * (i == 2)):
+            ep = turn(store, scope=s)
+            store.set_episode_embedding(ep.id, onehot(i))
+    for s in scopes[:2]:
+        store.vector_search_episodes(onehot(0), [s], 5)
+    assert list(store._turns) == [("acme", "b", None, None, None)]
+    store.vector_search_episodes(onehot(0), [scopes[2]], 5)
+    assert list(store._turns) == [("acme", "c", None, None, None)]
+    assert store._turns_held == 5
 
 
 def test_no_scopes_matches_nothing_rather_than_everything(store):

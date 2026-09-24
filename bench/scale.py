@@ -172,8 +172,18 @@ def measure(path: str, questions: list[str], embedder: HashingEmbedder,
         ("vector_search_episodes", timed(
             [lambda v=v: store.vector_search_episodes(v, scopes, LEG_LIMIT)
              for v in question_vecs])),
+        # The same read with the scope's cached turn list dropped first, as every commit
+        # drops it: what the first search after a write pays.
+        ("  after a write", timed(
+            [lambda v=v: (store._changed(),
+                          store.vector_search_episodes(v, scopes, LEG_LIMIT))
+             for v in question_vecs])),
         ("search(k=12, include_episodes)", timed(
             [lambda q=q: mem.search(q, k=12, include_episodes=True, **PLAIN_READ)
+             for q in questions])),
+        ("  after a write", timed(
+            [lambda q=q: (store._changed(),
+                          mem.search(q, k=12, include_episodes=True, **PLAIN_READ))
              for q in questions])),
     ]
     counts = store.stats()

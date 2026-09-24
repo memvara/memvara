@@ -67,10 +67,13 @@ JSON, under a header that names the text as data rather than instruction.
    weights accordingly.
 2. The lexical leg runs SQLite FTS5 and reads its `bm25()` score, flipped so that higher is
    better. The vector leg embeds the query and runs a cosine search. Each leg over-fetches
-   `k * candidate_multiplier` rows so that later filtering has something to work with. On
-   a store with a file, outside `batch()`, the vector leg runs on a pool thread while the
-   lexical leg runs on the calling thread, and the query is embedded on the calling thread
-   first (`HybridRetriever._beside`).
+   `k * candidate_multiplier` rows so that later filtering has something to work with. Over
+   turns, `SQLiteStore` ranks each scope's turn list from memory until the next commit
+   empties it (`_scope_turns`), and asks SQL for the list only for a filtered read, one
+   inside `batch()`, or one before this process has seen any vector. On a store with a
+   file, outside `batch()`, the vector leg runs on a pool thread while the lexical leg
+   runs on the calling thread, and the query is embedded on the calling thread first
+   (`HybridRetriever._beside`).
 3. `reciprocal_rank_fusion()` merges the ranked lists by position rather than by raw score,
    which is what lets two incomparable scoring scales be combined at all.
 4. `final_score()` re-scores the fused list using the claim's own properties: how fresh it
