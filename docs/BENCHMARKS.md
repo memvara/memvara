@@ -1264,9 +1264,11 @@ share almost no words with the synthetic claims, so the claim lexical leg takes 
 
 The first search after a write gains least. Timed on its own in the same runs, the vector
 leg that rebuilds the scope's turn list took 270 to 282 ms in this build against 250 ms in
-the one before, and `episode_candidate_ids` 110 to 118 ms against 96 ms. Both are long
-reads of one index, and both read slower in any process where another thread holds its
-own connection to the file, which the pool's threads now do.
+the one before, and `episode_candidate_ids` 110 to 118 ms against 96 ms. That difference is
+not the legs. `bench/scale.py` runs on one thread until a search starts the pool, and both
+reads run 11 to 16% slower in any process that has started a second thread, even one that
+opened no connection and has exited. A host that serves requests from more than one thread
+pays that with or without this change.
 
 ---
 
