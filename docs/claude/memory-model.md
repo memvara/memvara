@@ -148,12 +148,14 @@ either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/sto
   write that gave a row a new rowid would break both. That is why `put_claim` and
   `add_episode` upsert instead of `INSERT OR REPLACE`. `tests/test_store.py` checks the
   invariant after every write that moves or frees a rowid, and after a `VACUUM`.
-- **Every commit `SQLiteStore` makes goes through `_maybe_commit`.** That is what empties
-  `_scope_turns`, the vector leg's in-memory list of each scope's turns and their matrix
-  rows. A commit that went around it would leave searches missing a new turn, or returning
-  an erased one scored by the vector that took its row, until the next commit.
-  `tests/test_store.py` checks a turn written, erased, rolled back and written by another
-  process between two searches.
+- **Every commit `SQLiteStore` makes that can change a turn goes through `_maybe_commit`.**
+  That is what empties `_scope_turns`, the vector leg's in-memory list of each scope's turns
+  and their matrix rows. Another connection's commit, from another process or another
+  `SQLiteStore` on the same file, is seen by `_notice_commits`, which one connection
+  answers for the whole store, before the next search reads the lists. A commit that went
+  around both would leave searches missing a new turn, or returning an erased one scored by
+  the vector that took its row, until the next commit. `tests/test_store.py` checks a turn
+  written, erased, rolled back and written by another process between two searches.
 
 ## Read next
 

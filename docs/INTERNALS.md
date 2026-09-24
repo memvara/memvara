@@ -1569,9 +1569,15 @@ with half the vectors shared. Over the 199,499 turns in one scope of `bench/scal
 vector leg's median went from 220 ms to 54 ms, and a whole search's from 450 ms to 284 ms.
 
 A list lives until `_changed` empties the cache. That runs after every commit this store
-makes, whatever it wrote, and whenever a search's `_ensure_index` finds that another
-connection committed. A list built while a change happened is returned to the search that
-built it and not kept. So the first search after any write rebuilds the lists it needs,
+makes, whatever it wrote, and when the first search after another connection's commit
+sees it. That search asks one connection kept for the purpose, through `_notice_commits`,
+because `PRAGMA data_version` can only be compared with an earlier answer from the same
+connection: asked on each reading thread's own connection, it emptied the cache once per
+thread per commit, and on every thread's first read with nothing committed at all. The
+watch is read before `_ensure_index` refreshes the map, so a list rebuilt for a commit is
+built from a map that already holds that commit's rows. A list built while a change
+happened is returned to the search that built it and not kept. So the first search after
+any write rebuilds the lists it needs,
 which costs more than the SQL path it replaces: in `bench/scale.py` the vector leg took
 238 ms after a write against 220 ms before this change, and a whole search 471 ms against
 450 to 472 ms. Every search after it, until the next write, takes the 54 ms. Three reads

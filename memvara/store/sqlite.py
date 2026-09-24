@@ -1639,6 +1639,11 @@ class SQLiteStore:
         self._turns_held = 0
         self._writes = 0
         self._turns_lock = threading.Lock()
+        # The connection `_notice_commits` asks whether another connection has
+        # committed, opened on first use, and the `data_version` it last answered.
+        self._watch: sqlite3.Connection | None = None
+        self._watch_version = -1
+        self._watch_lock = threading.Lock()
         with self._lock:
             self._db.executescript(SCHEMA)
             self._migrate()
@@ -2417,7 +2422,6 @@ class SQLiteStore:
             if version != self._data_version:
                 self._data_version = version
                 self._read_map()
-                self._changed()
 
     def _ensure_dim(self) -> None:
         """Learn the store's dimension if another process wrote the first vector."""
@@ -2461,15 +2465,49 @@ class SQLiteStore:
         """Drop every `_scope_turns` entry, because what they were read from moved.
 
         Called after every commit this store makes, including the one that ends a
-        rolled-back `batch()`, and when a reader sees that another connection committed.
-        It does not ask what the change touched: a claim write empties the cache too,
-        which costs one rebuild, where missing a turn write would return an erased turn
-        or leave out a new one.
+        rolled-back `batch()`, and when `_notice_commits` sees that another connection
+        committed. It does not ask what the change touched: a claim write empties the
+        cache too, which costs one rebuild, where missing a turn write would return an
+        erased turn or leave out a new one.
         """
         with self._turns_lock:
             self._writes += 1
             self._turns.clear()
             self._turns_held = 0
+
+    def _notice_commits(self) -> None:
+        """Empty the `_scope_turns` lists if another connection has committed since the
+        last look.
+
+        One connection answers for the whole store, because `PRAGMA data_version` can
+        only be compared with an earlier answer from the same connection. When each
+        reading thread asked its own, a thread could not tell a commit the lists already
+        reflect from one they do not: every thread emptied them once per commit, and a
+        thread's first read emptied them with no commit at all, so a host that searched
+        from a new thread each time rebuilt them on every search.
+
+        This store's own commits move the number as well, after `_maybe_commit` has
+        emptied the lists for them, so the first search after one empties them again
+        before anything has been rebuilt. A database with no file has one connection,
+        and every commit on it that can change a turn goes through `_maybe_commit`.
+        """
+        if self.path in (":memory:", ""):
+            return
+        with self._watch_lock:
+            if self._watch is None:
+                conn = self._connect()
+                with self._readers_lock:
+                    if self._closed:
+                        # The read this search makes next raises the closed-database
+                        # error, as every read on a closed store does.
+                        conn.close()
+                        return
+                    self._readers.append(conn)
+                self._watch = conn
+            version = int(self._watch.execute("PRAGMA data_version").fetchone()[0])
+            if version != self._watch_version:
+                self._watch_version = version
+                self._changed()
 
     @contextmanager
     def batch(self) -> Iterator["SQLiteStore"]:
@@ -4383,6 +4421,9 @@ class SQLiteStore:
         equal cosines keep the order they arrived in, so a different order could put a
         different one of them inside `limit`.
         """
+        # In this order: the lists are emptied for every commit the watch has seen, and
+        # `_ensure_index` then folds those commits into the map a new list is built from.
+        self._notice_commits()
         self._ensure_index()
         bound = min(_clock(valid_at, known_at))
         chosen: list[tuple[_ScopeTurns, int]] = []

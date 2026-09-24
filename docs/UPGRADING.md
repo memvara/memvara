@@ -26,6 +26,10 @@ against 220 to 230 ms.
 turns**, budget about 100 bytes per turn per process on top of what it used before. A
 store whose scopes hold a few thousand turns each will not notice.
 
+**If you count open file handles per process**, allow one more SQLite connection per store
+that searches turns. The store uses it only to ask whether another connection has
+committed, and `close()` closes it.
+
 Nothing else changes. A filtered search, a search inside `batch()` and a store with no
 vectors yet read exactly as before.
 
