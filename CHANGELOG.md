@@ -11,6 +11,29 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Changed
 
+- **`recall()` shows the day each turn was said, and the part of a long turn the question
+  asks about.** Every line under the episode header now starts with the turn's day in
+  brackets, `- [8 May 2023] …`, written in the same form as the dated header. A turn is
+  evidence about *when* only next to its date: "I went to the support group yesterday"
+  answers "when did she go" only if the reader can see which day "yesterday" was. On 50
+  LOCOMO questions about when something happened, a reader given the blocks without the
+  days answered none correctly and a reader given them with the days answered 20, under
+  the harness's offline containment judge.
+  A turn longer than `RECALL_EPISODE_CHARS` (280) used to be cut to its first 280
+  characters. It is now cut to the window that matches the question: the sentence sharing
+  the most words with it, and as many of its neighbours as fit, with `…` where text was
+  left out (`memvara/retrieve/excerpt.py`). A turn that shares no word with the question is
+  cut from its start, exactly as before. Retrieval does not change: the same turns come
+  back in the same order. On the 470 answerable LongMemEval-S questions, the gold answer's
+  words now reach the 4,000-character context for 50.4% of them, against 44.9% with the
+  first 280 characters (`bench/recall_window.py`; the breakdown by question type is in
+  `docs/BENCHMARKS.md`). This also applies to document passages, which
+  are about 1,000 characters and were shown as their first 280. A ranked read's kept
+  turns are still shown whole, now with their day. Each episode line is longer by the
+  date, so a `budget=` block holds slightly fewer of them. `RemoteMemvara.recall()`, and
+  `memory_recall` on a server backed by the hosted service, return a block the service
+  renders, so what they show depends on the service rather than on this release. The
+  `include_episodes` description on `memory_recall` says so.
 - **`LocalEmbedder()` loads `BAAI/bge-small-en-v1.5`, and a store keeps the model that
   wrote it.** bge-small replaces `sentence-transformers/all-MiniLM-L6-v2` as the default
   local model. Over the 1,531 evidence-labelled LOCOMO questions with the local embedder,
