@@ -19,9 +19,9 @@ Putting the id in the *subject* rather than in the predicate is what makes
 of one per imported memory — which matters, because learned predicates are capped.
 
 **A synthetic subject must be opaque, not readable.** The subject is folded through
-`entity_key` before it keys a slot, and that fold strips punctuation — so
-`langgraph:a/b#c` and `langgraph:a#b/c` both become `langgraph a b c` and share one
-slot, superseding each other's data. `mem0:` and `note:` get away with putting an id
+`entity_key` before it keys a slot, and that fold strips every punctuation mark but a
+`+`, `#` or `-` ending a name — so `langgraph:a/b#c` and `langgraph:a#b/c` both become
+`langgraph a b c` and share one slot, superseding each other's data. `mem0:` and `note:` get away with putting an id
 straight in only because those ids are uuids and hex survives the fold. Any adapter
 minting a subject from structured parts (a namespace tuple, a path, anything with
 separators) has to hash the address rather than spell it out. The LangGraph adapter

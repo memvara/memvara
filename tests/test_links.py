@@ -94,7 +94,7 @@ def test_a_version_12_file_gains_the_link_table_and_keeps_its_claims(tmp_path):
     upgraded = SQLiteStore(path)
     try:
         assert int(upgraded._db.execute("PRAGMA user_version").fetchone()[0]) == \
-            SCHEMA_VERSION == 15
+            SCHEMA_VERSION == 16
         tables = {r[0] for r in upgraded._db.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')")}
         assert {"claim_links", "cl_link_to"} <= tables

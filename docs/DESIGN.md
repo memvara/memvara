@@ -181,6 +181,9 @@ from memvara import entity_key
 entity_key("Acme Corp.") == entity_key("ACME, Inc.") == entity_key("acme")   # True
 ```
 
+The one piece of punctuation the fold keeps is a `+`, `#` or `-` that ends a name,
+because `C++`, `C#` and `C` are three languages and `A+` and `A-` are two blood types.
+
 Over a 258-write simulation across 6 employers and 3 drinks: 516 resolutions, **98.1%
 settled by the fold alone, zero model calls**, and 41 distinct surface forms collapsed to
 exactly the 9 real entities. `history("user", "works_at")` went from 22 rows to 6 — five

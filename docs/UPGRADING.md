@@ -7,6 +7,73 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## "C++", "C#" and "C" are three values, and a store re-keys its claims on first open
+
+### What changed
+
+`entity_key()` used to drop every punctuation mark, so "C++", "C#" and "C" folded to one
+key, and so did the blood types "A+" and "A-". It now keeps a `+` at the end of any word,
+and a `#` or a single `-` at the end of a word of one or two letters. The minus sign U+2212
+counts as `-`. Inside a word the symbols still separate, so "x-ray" and "X ray" are one
+value, as before.
+
+Every claim's `subject_key`, `object_key`, `fact_key` and `value_key` is built from that
+fold, so `SQLiteStore` moves to schema version 16. The first open of an older file
+re-derives all four for every claim from the text you wrote. Text in which no word ends in
+one of these symbols keys exactly as before.
+
+### Who this changes, and in which direction
+
+**If your store holds such values, some may already have been lost to a repeat.** Before
+this release, a second value that folded to the same key as a live claim was recorded as
+another observation of that claim, not stored. So "C#" after "C++" counted as a second
+observation of "C++", and in a slot that holds one value, "A-" after "A+" counted as a
+second observation of "A+". Re-keying cannot bring such a value back, because it was
+never a claim. What remains is the turn it came from, among the sources of the claim it
+was folded into, and the listing below finds those claims. A value written by
+`remember()` without `sources` left no turn behind. To restore a value, write it again
+with `remember()`, which now stores it as a value of its own. In a slot that holds one
+value, that write also ends the value it was folded into, so first decide which of the
+two is current.
+
+**If you call `entity_key()` yourself, its output changes for these names.**
+`entity_key("C#")` returns `"c#"` where it returned `"c"`, so a key you saved from an
+earlier version no longer equals the key this version computes for the same text.
+
+**Aliases the entity registry learned stay filed under the old key.** A store whose
+registry learned aliases, through a model or `EntityRegistry.learn_alias()`, keeps each
+under the key its spelling folded to when it was learned. An alias learned for "C#" was
+filed under `c`, so it still answers for "C" and no longer answers for "C#".
+
+**`RemoteMemvara` computes no keys.** The hosted service does, so a hosted store changes
+when the service moves to this release, not when your client does.
+
+### How to find your instances
+
+After upgrading, this lists the live claims that absorbed a repeat whose source turn
+contains a word ending in `+`, `#` or `-`. It over-reports, since a turn can mention such
+a word without it being the value, so read each source before writing anything back:
+
+```python
+import re
+from memvara import Memvara
+
+# A word followed by `+`, `#` or `-`, where the fold now keeps the symbol.
+NAME_SYMBOL = re.compile(r"\w[+#\-\u2212]+(?!\w)")
+
+mem = Memvara("memory.db")
+for c in mem.store.iter_claims(states=["live"]):
+    if c.observation_count < 2 or not c.sources:
+        continue
+    turns = [ep.content for ep in mem.store.get_episodes(c.sources).values()]
+    if any(NAME_SYMBOL.search(t) for t in turns):
+        print(f"{c.id} {c.subject} {c.predicate} {c.object!r}")
+        for t in turns:
+            print("    ", t[:160])
+```
+
+---
+
 ## Consolidation never merges two values whose numbers differ, and merges less under MiniLM
 
 ### What changed

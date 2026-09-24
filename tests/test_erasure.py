@@ -254,9 +254,12 @@ def test_the_erasures_table_is_schema_seven():
     `expires_at` and `expire_reason`, and no table. The migration neither reads nor writes
     `erasures`; the expiry sweep writes a row there for each claim it erases, through the
     same `erase_claim` that `erase()` uses, and only after the upgrade. So an empty table
-    still means "nothing erased since the upgrade", and the sentence holds.
+    still means "nothing erased since the upgrade", and the sentence holds. Version 16
+    changed the entity fold and added no table or column. Its migration is the key
+    re-derivation `_migrate_to_v12` already runs on every upgrade, which neither reads nor
+    writes `erasures`, so the sentence holds.
     """
-    assert SCHEMA_VERSION == 15
+    assert SCHEMA_VERSION == 16
     store = SQLiteStore(":memory:")
     try:
         assert store.erasure_record("anything") is None

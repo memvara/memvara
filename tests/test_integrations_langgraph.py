@@ -522,9 +522,10 @@ def test_two_stores_on_one_memvara_cannot_see_each_other(mem, monkeypatch, clock
 
 def test_two_different_addresses_that_punctuation_alone_separates_get_different_slots():
     """The bug a readable subject would have shipped. Memvara folds a subject to its
-    entity identity before keying a slot, and that fold *drops* punctuation — so
-    `langgraph:a/b#c` and `langgraph:a#b/c` are one slot. Namespace ("a","b") key "c"
-    and namespace ("a",) key "b c" would supersede each other's data."""
+    entity identity before keying a slot, and that fold *drops* every punctuation mark but
+    a `+`, `#` or `-` ending a name — so `langgraph:a/b#c` and `langgraph:a#b/c` are one
+    slot. Namespace ("a","b") key "c" and namespace ("a",) key "b c" would supersede each
+    other's data."""
     from memvara.entities import entity_key
 
     one = lg.field_subject(("a", "b"), "c", "f")

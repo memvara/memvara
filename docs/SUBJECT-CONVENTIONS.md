@@ -230,10 +230,10 @@ types, and it is the strongest argument for adding them.
 Two operations with different risk profiles, which should never run together.
 
 **Normalization** is deterministic, cheap and low-risk: case, Unicode NFKD, combining marks,
-apostrophes, punctuation, leading articles, `.git` suffixes, URL syntax. `entity_key()` at
-`memvara/entities.py:140` is exactly this, and it is already correct in the ways that matter —
-it never folds on embedding similarity, only on an exact key match or an explicitly recorded
-alias.
+apostrophes, punctuation other than a `+`, `#` or `-` that ends a name, leading articles,
+`.git` suffixes, URL syntax. `entity_key()` in `memvara/entities.py` is exactly this, and it
+is already correct in the ways that matter — it never folds on embedding similarity, only on
+an exact key match or an explicitly recorded alias.
 
 **Entity resolution** is semantic and needs evidence: `Postgres` → `postgresql`, `FB` → Meta
 Platforms, `Big Blue` → IBM. Here that is `EntityRegistry.acquire()`, which asks a model once
@@ -814,7 +814,7 @@ fourth input.
 
 The evidence that decided it was measured rather than assumed: `entity_key("software:postgresql")`
 returns `"software postgresql"`. A `type:` prefix does not survive the fold, because
-`entity_key()` treats every non-alphanumeric character as a word boundary. Storing the type in
+`entity_key()` treats a colon as a word boundary. Storing the type in
 the key would therefore require making `entity_key()` structural, and that function's guarantee —
 a pure total fold giving any novel entity a correct stable identity for free, with no model call —
 is what the whole entity design's cost argument rests on.
@@ -852,8 +852,8 @@ intact. The objection to packing type and key into one column — that identity 
 be split on every read and would drift across backends — is answered by the codebase itself:
 `entity_id()` packs the owner into the identity string and `split_entity_id()` takes it apart,
 in both backends, and has not drifted. The split here is exact rather than best-effort,
-because `entity_key()` emits only alphanumerics and spaces, so a folded name never contains a
-colon.
+because `entity_key()` emits only letters, digits, spaces and a `+`, `#` or `-` that ends a
+name, so a folded name never contains a colon.
 
 Two things the revision gains that the split did not offer. Stripping a corporate form —
 named in section 1 as the one genuinely risky fold here — becomes safe within a namespace and

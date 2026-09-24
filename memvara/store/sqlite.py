@@ -184,7 +184,11 @@ if TYPE_CHECKING:  # pragma: no cover
 #    passes. Both nullable and nothing is backfilled, because no earlier version wrote an
 #    expiry and inventing one would erase data nobody asked to erase. A partial index
 #    over the non-null expiries keeps the sweep off the rest of the table.
-SCHEMA_VERSION = 15
+# 16: the entity fold keeps a `+`, `#` or `-` that ends a name, so `C++`, `C#` and `C` key
+#    to three values and the blood types `A+` and `A-` to two. No column changes. The
+#    version exists so that an older file re-derives every key once with the new fold,
+#    which `_migrate_to_v12` does on every upgrade; `_migrate` says why that is enough.
+SCHEMA_VERSION = 16
 
 # The two document tables, created by `_migrate_to_v14`.
 #
@@ -1927,6 +1931,14 @@ class SQLiteStore:
             self._migrate_to_v13()
             self._migrate_to_v14()
             self._migrate_to_v15()
+            # No `_migrate_to_v16`: version 16 changed the entity fold and nothing else,
+            # and `_migrate_to_v12` above already re-derived every claim's keys and both
+            # hashes from its surface text with the fold this build runs. Alias stamps are
+            # left as written, because a stamp records a merge and is meant to outlive a
+            # change to the fold. If `_migrate_to_v12` ever stops re-deriving on every
+            # upgrade, version 16 needs its own copy of those UPDATEs;
+            # `test_a_store_written_with_the_old_fold_is_rekeyed_when_opened` fails until
+            # it has one.
             # No `_migrate_to_v8`: version 8 added a table nothing had ever written to
             # and that holds no derived data, so its `CREATE TABLE IF NOT EXISTS` above
             # genuinely is the whole migration — the same shape as version 4. What it
