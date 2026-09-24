@@ -1079,6 +1079,31 @@ def test_open_store_still_uses_the_default_when_that_is_what_wrote_the_store(
         mem.close()
 
 
+def test_open_store_asks_the_default_for_the_model_the_store_records(tmp_path,
+                                                                     monkeypatch):
+    """`LocalEmbedder()`'s default moved to a different model of the same width, so
+    the default is asked for the model the store names, as `Memvara()` asks for it.
+    Asked for the default alone, it would hand back the new model and this bench would
+    refuse every store the old default wrote."""
+    db = tmp_path / "modelled.db"
+    ids = _store_on_disk(db, _NamedLikeAModel("local:pretend/tiny-model", 48))
+    asked = []
+
+    def default(dim=512, *, model=None):
+        asked.append(model)
+        return _NamedLikeAModel(f"local:{model or 'pretend/newer-model'}", 48)
+
+    monkeypatch.setattr("memvara.embed.default_embedder", default)
+    mem = hosted._open_store(_args(db))
+    try:
+        assert asked == ["pretend/tiny-model"]
+        found = [r.claim.id for r in
+                 mem.search("which suite needs -j1?", k=4, min_score=0.0)]
+        assert ids["larkspur"] in found
+    finally:
+        mem.close()
+
+
 @pytest.mark.parametrize("recorded_name, recorded_dim", [
     # Reconstructable: the pre-guard code built HashingEmbedder(dim=64) off this
     # name and opened a brand-new store at the stale width, silently.

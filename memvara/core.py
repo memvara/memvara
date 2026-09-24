@@ -40,9 +40,16 @@ from .embed.fingerprint import (
     EmbedderFingerprint,
     embedder_name,
     fingerprint_of,
+    local_model,
     read_fingerprint,
     stored_dim,
     write_fingerprint,
+)
+from .embed.local import (
+    DEFAULT_MODEL,
+    PREVIOUS_DEFAULT_DIM,
+    PREVIOUS_DEFAULT_MODEL,
+    LocalEmbedder,
 )
 from .llm import LLM, Chat, NullLLM, ReplacementJudge, Usage
 from .redact import Redactor, redact_episode
@@ -249,6 +256,16 @@ def _suggest(key: str, vocabulary: Sequence[str]) -> str:
     if not close:
         return repr(key)
     return f"{key!r} (did you mean {' or '.join(repr(c) for c in close)}?)"
+
+
+def _unnamed_local(embedder: object) -> bool:
+    """Whether this is `LocalEmbedder()` with no model named, through any wrapper."""
+    while not isinstance(embedder, LocalEmbedder):
+        inner = getattr(embedder, "inner", None)
+        if inner is None:
+            return False
+        embedder = inner
+    return not embedder.chosen
 
 
 def _drop_vectors(store: Store) -> None:
@@ -912,7 +929,7 @@ class Memvara:
         # environment; the MCP server passes the environment its configuration came from.
         self.store = store if store is not None else SQLiteStore(
             path or ":memory:", encryption=encryption, key_env=key_env)
-        self.embedder = embedder if embedder is not None else default_embedder()
+        self.embedder = embedder if embedder is not None else self._default_embedder()
         # Default to no LLM on purpose: the deterministic path is the product, and the
         # library must be fully usable with no API key. What is *not* on purpose is
         # doing that silently — see `_warn_if_degraded`.
@@ -1150,6 +1167,29 @@ class Memvara:
         _WARNED_DEGRADED = True
         warnings.warn(_degraded_message(), DegradedExtractionWarning, stacklevel=3)
 
+    def _default_embedder(self) -> Embedder:
+        """`default_embedder()`, loading the local model this store's vectors came from.
+
+        `LocalEmbedder()` loads `DEFAULT_MODEL`, and through 0.15 it loaded
+        `PREVIOUS_DEFAULT_MODEL`, a different model of the same width. No dimension check
+        can tell their vectors apart, so a store keeps the local model its fingerprint
+        names. A store with vectors of that width and no fingerprint at all keeps the
+        previous default, the one local model a default configuration could have written
+        it with. Any other store takes the default as before.
+
+        The record binds only while the store holds vectors, as in `_check_embedder`: a
+        store with none has nothing to be incompatible with, and a sidecar left behind by
+        a deleted store must not choose the model for the new one.
+        """
+        dim = stored_dim(self.store)
+        if dim is None:
+            return default_embedder()
+        recorded = read_fingerprint(self.store)
+        model = local_model(recorded)
+        if model is None and recorded is None and dim == PREVIOUS_DEFAULT_DIM:
+            model = PREVIOUS_DEFAULT_MODEL
+        return default_embedder(model=model) if model is not None else default_embedder()
+
     def _check_embedder(self, migrate: bool) -> None:
         """Refuse to open a store this embedder cannot read, before anything writes to it.
 
@@ -1180,6 +1220,13 @@ class Memvara:
         if actual != mine.dim:
             raise EmbedderMismatchError(self._mismatch_message(mine, recorded, actual))
 
+        if (recorded is not None and recorded.name != mine.name
+                and local_model(recorded) is not None and _unnamed_local(self.embedder)):
+            # `LocalEmbedder()` names no model, and the model it loads changed under
+            # stores that already exist. A warning would let every search compare two
+            # unrelated spaces, so it is refused, before anything writes.
+            raise EmbedderMismatchError(self._unnamed_local_message(mine, recorded))
+
         if recorded is not None and recorded.name != mine.name:
             warnings.warn(
                 f"{self._store_label()}: vectors were written by {recorded}, but this "
@@ -1189,6 +1236,18 @@ class Memvara:
                 "restore the original embedder.",
                 EmbedderChangedWarning, stacklevel=3,
             )
+
+    def _unnamed_local_message(self, mine: EmbedderFingerprint,
+                               recorded: EmbedderFingerprint) -> str:
+        return (
+            f"{self._store_label()}: these vectors were written by {recorded}, and "
+            f"LocalEmbedder() with no model now loads {DEFAULT_MODEL}, a different model "
+            f"of the same width, so every similarity between the two would be "
+            "meaningless. Name the model this store was written by:\n"
+            f"    LocalEmbedder({local_model(recorded)!r})\n"
+            "or migrate the store once, re-encoding everything with the new default:\n"
+            "    Memvara(..., embedder=LocalEmbedder(), reembed=True)"
+        )
 
     def _store_label(self) -> str:
         path = getattr(self.store, "path", None)

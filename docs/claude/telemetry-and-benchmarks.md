@@ -19,6 +19,8 @@ answer quality with no error, no exception and nothing in any log.
   `bench/twowiki.py`, `bench/multihop.py`, `bench/temporal.py`.
 - Comparison and cost: `bench/compare.py`, `bench/mem0_real.py`, `bench/baseline.py`,
   `bench/extract_cost.py`, `bench/perf.py`, `bench/evalkit.py`.
+- Where each embedder-dependent cosine threshold sits in each embedding space:
+  `bench/embedder_calibration.py`, the measurement behind `memvara/embed/calibration.py`.
 - Against a hosted store: `bench/hosted.py`.
 - The release bar for agentic extraction: `bench/extraction_bar.py`, which runs the same
   turns through two stores that differ only in the `agentic_extraction` switch, and the

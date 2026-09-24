@@ -15,11 +15,15 @@ __all__ = [
 ]
 
 
-def default_embedder(dim: int = 512) -> Embedder:
+def default_embedder(dim: int = 512, *, model: str | None = None) -> Embedder:
     """Best embedder available without forcing a dependency.
 
     Prefers a real sentence-transformers model when installed; otherwise falls back to
     the offline hashing embedder so `Memvara()` always constructs.
+
+    `model` names the sentence-transformers model to load, and `None` means
+    `LocalEmbedder`'s default. `Memvara()` passes the model an existing store's
+    fingerprint names, so a store keeps the model that wrote it when the default moves.
 
     Note what this means for an *existing* store: installing `memvara[local-embed]`
     changes what this returns, and the new vectors are incomparable with the old ones.
@@ -30,6 +34,6 @@ def default_embedder(dim: int = 512) -> Embedder:
     try:  # pragma: no cover - depends on optional install
         from .local import LocalEmbedder
 
-        return CachedEmbedder(LocalEmbedder())
+        return CachedEmbedder(LocalEmbedder(model))
     except Exception:
         return CachedEmbedder(HashingEmbedder(dim=dim))
