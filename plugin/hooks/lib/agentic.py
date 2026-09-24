@@ -841,7 +841,10 @@ def apply(store: Any, proposals: "Sequence[Proposal]", *, turn: str, hosted: boo
         kwargs = remember_kwargs(fact.memory_type, turn, hosted, sources)
         if p.expires_at:
             if can_expire:
-                kwargs["expires_at"] = p.expires_at
+                # The hosted tool takes the ISO string; the local library takes a
+                # `datetime` and fails inside the store on a string.
+                kwargs["expires_at"] = (p.expires_at if hosted
+                                        else datetime.fromisoformat(p.expires_at))
             else:
                 notes.append(f"{fact.predicate}: expires_at dropped, this store does not "
                              "take it yet")

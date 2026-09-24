@@ -932,12 +932,28 @@ def test_expires_at_reaches_a_store_that_takes_it_and_is_dropped_otherwise():
             "expires_at": "2026-10-31"}
     newer = ExpiringStore()
     done = agentic.apply(newer, _proposals(fact), turn=TURN, hosted=False)
-    assert newer.remembered[0]["expires_at"] == "2026-10-31T00:00:00+00:00"
+    assert newer.remembered[0]["expires_at"] == datetime(2026, 10, 31, tzinfo=timezone.utc)
     assert done.notes == []
     older = LocalStore()
     done = agentic.apply(older, _proposals(fact), turn=TURN, hosted=False)
     assert "expires_at" not in older.remembered[0] and older.remembered[0]["object"]
     assert done.notes == ["prefers: expires_at dropped, this store does not take it yet"]
+
+
+def test_the_installed_library_takes_an_expiry_and_the_proposal_carries_it():
+    """The library this checkout ships has `remember(expires_at=...)`, so a proposal with an
+    expiry is written with it rather than dropped. Checked against the real library, not a
+    fake: the library takes a `datetime`, and a string there fails inside the store."""
+    mem = _mem()
+    assert write.takes(mem, "expires_at", hosted=False) is True
+    done = agentic.apply(mem, _proposals(
+        {"kind": "fact", "subject": "user", "predicate": "timezone",
+         "object": "Europe/Lisbon", "expires_at": "2026-10-31"},
+        turn="User: I'm in Lisbon until 2026-10-31, so use Europe/Lisbon times."),
+        turn=TURN, hosted=False)
+    assert done.failed == [] and done.notes == [] and done.stored == 1
+    claim = mem.history("user", "timezone")[0]
+    assert claim.expires_at == datetime(2026, 10, 31, tzinfo=timezone.utc)
 
 
 def test_a_store_that_cannot_replace_by_id_gets_a_plain_write_and_a_note():

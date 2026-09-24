@@ -291,7 +291,9 @@ turn on a store with `MEMVARA_LLM` set, which would have been billed on that key
 counted in this table.
 
 **Open.** The hosted connection was tested against a fake transport, not against the live
-endpoint. `expires_at` is dropped on every store until stream P3-B ships it.
+endpoint. `expires_at` now reaches a local store: the library has it since P3-B (#238),
+and a test writes an expiring proposal to it. A hosted deployment gets it once it runs a
+server that lists the argument; until then the hook drops it with a log note.
 
 ## 4. Workstreams for the fan-out
 
