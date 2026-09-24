@@ -26,6 +26,8 @@ answer quality with no error, no exception and nothing in any log.
   `bench/extract_cost.py`, `bench/perf.py`, `bench/evalkit.py`.
 - Read latency when one scope holds a large store: `bench/scale.py`, which times each store
   read a search runs, and the whole search, over the LongMemEval-S haystacks in one scope.
+  Two of its rows empty `SQLiteStore`'s cached turn lists before each read, to time the
+  first search after a write as well as every later one.
 - Where each embedder-dependent cosine threshold sits in each embedding space:
   `bench/embedder_calibration.py`, the measurement behind `memvara/embed/calibration.py`.
 - Against a hosted store: `bench/hosted.py`.

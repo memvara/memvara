@@ -7,6 +7,34 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A process that searches a large scope keeps that scope's turn list in memory
+
+### What changed
+
+The vector leg over turns keeps, per scope, the ids, times and matrix rows of the turns
+that have a vector, and ranks those instead of asking SQLite for the list on every search.
+It returns the same turns. Each turn costs about 100 bytes, so 199,499 turns in one scope
+hold 19.3 MB, and building them peaks at about twice that. The lists across all scopes are
+capped at 1,000,000 turns, about 100 MB, and the least recently used scope goes first. Every
+commit empties them, so the first search after a write rebuilds the list it needs and costs
+a little more than a search did before: over 199,499 turns, 238 ms for the vector leg
+against 220 to 230 ms.
+
+### Who this changes, and in which direction
+
+**If you run memvara where memory is tight and one scope holds hundreds of thousands of
+turns**, budget about 100 bytes per turn per process on top of what it used before. A
+store whose scopes hold a few thousand turns each will not notice.
+
+**If you count open file handles per process**, allow one more SQLite connection per store
+that searches turns. The store uses it only to ask whether another connection has
+committed, and `close()` closes it.
+
+Nothing else changes. A filtered search, a search inside `batch()` and a store with no
+vectors yet read exactly as before.
+
+---
+
 ## `LocalEmbedder()` loads bge-small-en-v1.5
 
 ### What changed

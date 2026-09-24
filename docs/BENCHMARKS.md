@@ -1333,6 +1333,33 @@ each row, and the first open that builds `ep_cover`, are in
 [`docs/INTERNALS.md`](INTERNALS.md) under *Reading a whole scope, and joining the text
 index*.
 
+**Each scope's turns, kept in memory.** The next change keeps each scope's turn list and
+its matrix rows between searches, and empties them on every commit. Two stores this time:
+the one above, and the LongMemEval-S turns written with the benchmark harness, 189,520 in
+one scope with 1,168 claims, where the turns are nearly all of the work. "After a write"
+empties the lists before each search, which is what the first search after any commit
+pays. "Before" is the change above, timed at the start and again at the end of the run, and
+both columns give the two runs where they differ:
+
+| read | before, median | after, median | before, p95 | after, p95 |
+|---|---:|---:|---:|---:|
+| 100,000 claims: `vector_search_episodes` | 219.8 / 229.8 ms | 53.7 ms | 249.8 / 263.3 ms | 66.0 ms |
+| &nbsp;&nbsp;after a write | | 238.2 ms | | 270.0 ms |
+| 100,000 claims: **`search()`** | **449.7 / 471.5 ms** | **284.1 ms** | **567.6 / 570.9 ms** | **399.0 ms** |
+| &nbsp;&nbsp;after a write | | 471.4 ms | | 592.1 ms |
+| 1,168 claims: `vector_search_episodes` | 182.8 / 181.0 ms | 36.5 ms | 221.8 / 218.8 ms | 40.2 ms |
+| &nbsp;&nbsp;after a write | | 202.7 ms | | 217.3 ms |
+| 1,168 claims: **`search()`** | **257.5 / 258.0 ms** | **107.2 ms** | **360.3 / 353.1 ms** | **223.4 ms** |
+| &nbsp;&nbsp;after a write | | 267.9 ms | | 381.5 ms |
+
+The rows that come back are the same: 50 searches on each store returned the same 600
+rows with the same scores under both builds. The first search after a write costs slightly
+more than a search did before, because rebuilding a list also reads each turn's `ts` and
+builds three arrays, and every search after it, until the next write, costs the
+"after" column. On the turn-heavy store, what is left of a search is mostly the lexical leg
+over turns: 54 ms at the median and 158 ms at the 95th percentile, when a question's
+content words are common.
+
 ---
 
 ## Answer quality, end to end (an authored corpus, an agent as the reader)

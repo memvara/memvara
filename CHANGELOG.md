@@ -83,6 +83,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   default, meaning the calibrated value; a threshold passed explicitly still decides.
   `bench/embedder_calibration.py` is the measurement, over pairs written for it, because
   the original eval behind 0.40 is not in this repository.
+- **The vector leg over turns ranks each scope's turns from memory.** `SQLiteStore` keeps,
+  per scope, the ids, times and matrix rows of the turns that have a vector, in the order
+  SQL returns them, and cuts that list at the instant asked about by binary search instead
+  of asking SQLite for the candidates and looking each one up. It returns the same turns in
+  the same order. With 199,499 turns and 100,000 claims in one scope,
+  `vector_search_episodes` went from a median of 220 ms to 54 ms and `search(k=12,
+  include_episodes=True)` from 450 ms to 284 ms, and with 189,520 turns and few claims
+  from 258 ms to 107 ms (`bench/scale.py`). Every commit empties the lists, and so does
+  another process's commit once a search notices it, so the first search after a write
+  rebuilds what it needs and costs about what every search did before: 471 ms against
+  450 to 472 ms with 100,000 claims, and 268 ms against 258 ms with few.
+  A filtered read and a read inside `batch()` still ask SQLite. The lists hold at most
+  1,000,000 turns across all scopes, at about 100 bytes a turn; `docs/UPGRADING.md` has
+  the memory this costs.
 
 ## [0.15.0] — 2026-09-24
 
