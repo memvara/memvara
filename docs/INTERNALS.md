@@ -1871,6 +1871,16 @@ a write half done, raises `EncryptionError` naming the file and the row. A later
 after another process commits, reads the new rows' vectors from the database rather than
 from the file, because the file may already hold that process's next, uncommitted write.
 
+**The vector file is opened in binary mode on Windows.** `_VecIndex.attach` passes
+`os.O_BINARY` to `os.open` wherever that flag exists. Without it, Windows opens the file in
+text mode, and its C runtime deletes a final 0x1A byte from any file opened for reading and
+writing. That happens inside `os.open`, before `os.fdopen` switches the descriptor to
+binary. The last byte of the encrypted file is the last byte of a GCM tag, so it is 0x1A in
+about one write in 256. When it was, the next open cut the file by one byte, and loading
+raised `EncryptionError` because the last record ended early. The unencrypted file lost the
+top byte of its last float the same way. `tests/test_encryption.py` and
+`tests/test_vecindex.py` each write a file that ends in 0x1A and reopen it.
+
 **A damaged header is not an error**: it is rewritten and every row is rebuilt from the
 database, as a stale unencrypted file is. The database is the authority
 and authenticates its own pages, so a rebuild cannot load anything wrong.

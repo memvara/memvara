@@ -1015,7 +1015,14 @@ class _VecIndex:
             if self.path is None:
                 self._ensure_rows(max(rows, self._INITIAL_ROWS))
                 return False
-            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            # `O_BINARY` exists only on Windows, where `os.open` otherwise opens the file
+            # in text mode. The C runtime then deletes a final 0x1A byte from any file
+            # opened for reading and writing, before `fdopen` can switch the descriptor
+            # to binary. For the encrypted file that byte is the end of the last
+            # record's tag, so one reopen in 256 cut the file short and the store
+            # refused to open.
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0),
+                         0o600)
             self._fh = os.fdopen(fd, "r+b")
             size = os.fstat(fd).st_size
             head = _read_at(fd, _VEC_HEADER, 0) if size >= _VEC_HEADER else b""
