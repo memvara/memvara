@@ -1139,9 +1139,12 @@ def _local_memvara(config: ServerConfig, encryption: bool) -> Memvara:
         write_guidance=(_read_guidance(config.extract_guidance)
                         if config.extract_guidance is not None
                         and "extraction_guidance" not in config.features_off else None),
-        # `MEMVARA_FEATURE_EXPIRY_ERASURE=0` stops the sweep at open. The hourly one is the
-        # server's, and reads the same switch.
+        # `MEMVARA_FEATURE_EXPIRY_ERASURE=0` stops the sweep at open and the hiding of
+        # expired claims from reads. The hourly sweep is the server's, and reads the same
+        # switch.
         expiry_erasure="expiry_erasure" not in config.features_off,
+        # A read-only server writes nothing, and erasing is a write.
+        sweep_expired=not config.read_only,
         # Explicit at its own default, like `llm` and `embedder` above and for a related
         # reason: this is the one line that says which retrieval legs this store reads
         # with, and a reader of this function should not have to know that

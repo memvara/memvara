@@ -16,10 +16,11 @@ with `remember(expires_at=..., expire_reason=...)` or the `memory_remember` tool
 `expires_at` passes, `Memvara.erase_expired()` **erases** the claim: the row, its text
 index entry and its vector are deleted, an erasure record is written, and a proof is
 checked against the disk. It runs when a `Memvara` opens a store and hourly in the MCP
-server. This is the one case in which the engine deletes a claim on its own, and it
-reverses the old wording of invariant 3 in `docs/INTERNALS.md` for that case only. A claim
-written without `expires_at` is never erased by the engine, and ending or superseding a
-claim still deletes nothing.
+server, but not on a read-only server. Reads leave the claim out from the instant it
+expires, before the sweep deletes it. This is the one case in which the engine deletes a
+claim on its own, and it reverses the old wording of invariant 3 in `docs/INTERNALS.md`
+for that case only. A claim written without `expires_at` is never erased by the engine,
+and ending or superseding a claim still deletes nothing.
 
 Opening a store written by an earlier version upgrades it to schema 15, which adds the two
 nullable columns and an index. Nothing is backfilled. A store stamped 15 cannot be opened

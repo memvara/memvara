@@ -13,7 +13,7 @@ importable from the foundation modules:
 - `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`
 - `memvara/store/` — `Store` and `SQLStore` protocols, `SQLiteStore`, `STATES`,
   `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,
-  `live_predicate()`
+  `live_predicate()`, `unexpired_predicate()`
 - `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`
 - `memvara/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `RESOLVE_SCHEMA`,
   `PREDICATE_SCHEMA`, `EXTRACT_SYSTEM`, `RESOLVE_SYSTEM`, `PREDICATE_SYSTEM`,
@@ -188,10 +188,13 @@ was being read as holding further than it does.
    > source was the document is retired (see *Documents* under `memvara/store/`). A
    > re-ingest by `custom_id` erases the text of the chunks the new version no longer
    > has, under the same rule. The expiry sweep runs when a `Memvara` opens a store and
-   > hourly in the MCP server, so a claim can be read for up to an hour after its
-   > `expires_at`; `expiry_erasure=False` (`MEMVARA_FEATURE_EXPIRY_ERASURE=0`) stops both
-   > and leaves `expires_at` stored. The sweep keeps a claim's source turns, as `erase()`
-   > does by default.
+   > hourly in the MCP server, and not at all on a read-only server. Reads do not wait for
+   > it: from the instant `expires_at` passes the claim is left out of every read, in
+   > `SQLiteStore._state_clause` for the searched ones and in `Memvara._gone` for the ones
+   > addressed by id, so the sweep only deletes. `expiry_erasure=False`
+   > (`MEMVARA_FEATURE_EXPIRY_ERASURE=0`) stops the sweeps and the hiding and leaves
+   > `expires_at` stored. The sweep keeps a claim's source turns, as `erase()` does by
+   > default.
    > **Sketch.** `close_out` is the single place any claim ends and takes one `Closure`;
    > `Claim.state` derives `live`/`ended`/`retired` from which column is set.
    > `Memvara.erase_expired` lists due claims with `Store.expired_claims`, which reads
@@ -403,11 +406,34 @@ scope check: `erase_claim` (audit row, then delete, in one transaction) and then
 re-read is there because a write between the listing and the delete can move the expiry
 later; that claim is left alone. A failed proof raises `ErasureIncomplete`, and the claims
 erased before it stay erased and recorded. `erase_expired` runs when a `Memvara` opens a
-store, unless `expiry_erasure=False`, and hourly while the MCP server's `serve()` loop
-runs (`server.mcp.ExpirySweeper`, on a daemon thread, which warns and carries on when a
-sweep fails). A store with no `expired_claims` is skipped at open, and so is one whose
+store, unless `expiry_erasure=False` or `sweep_expired=False`, and hourly while the MCP
+server's `serve()` loop runs (`server.mcp.ExpirySweeper`, on a daemon thread, which warns
+and carries on when a sweep fails). A read-only server runs neither, because erasing is a
+write. A store with no `expired_claims` is skipped at open, and so is one whose
 `expired_claims` raises `NotImplementedError`, as `RemoteStore`'s does: the hosted
 deployment runs its own sweep. Called by name, `erase_expired` raises in both cases.
+
+**Reads do not wait for the sweep.** From the instant a claim's `expires_at` passes, no
+read returns it. `SQLiteStore._state_clause`, the clause every limited claim query runs,
+ANDs on `base.unexpired_predicate`, `expires_at IS NULL OR expires_at > <wall clock
+now>`, whatever instants the read
+asked about, so `search`, `recall`, `get_all`, `count`, the graph leg and the slot lookups
+of the write path all leave it out and `k` still counts visible rows (invariant 7).
+`Memvara._gone` does the same for the reads addressed by id: `get`, `why`, `history`,
+`produced`, and the claims `forget_matching` and `links` hydrate. The reconciler does not
+reinforce such a claim, so writing the fact again stores a new claim rather than one the
+sweep is about to erase. `erase()` by name still finds and erases it. With
+`expiry_erasure=False` the store's `hide_expired` is false and an expiry does nothing.
+
+**A repeat with an expiry stays in its own scope.** Writing a fact the store already
+holds normally reinforces the claim on record, which `value_key` finds by owner (tenant
+and user) and not by project, agent or session. A repeat that names an `expires_at`
+reinforces only a claim in exactly its own scope, and puts the expiry on it. With no such
+claim, it is written as its own claim in its own scope, so the expiry never reaches a
+claim another project or session relies on, and the claim beside it is not reported as an
+accumulation. Refusing the write was the other choice; it was not taken because it would
+lose the fact the caller asked to keep until the expiry, and its message would tell one
+project what another project holds.
 ### `write/reconcile.py`
 
 ```python

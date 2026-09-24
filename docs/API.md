@@ -15,9 +15,10 @@ mem = Memvara(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=
 # api_key= or base_url= instead returns a RemoteMemvara — see "A hosted deployment" below
 # encryption=True creates a new store file encrypted (pip install 'memvara[encrypt]');
 #   an existing file opens as whatever it already is — see "Encryption at rest" below
-# expiry_erasure=True (the default) erases, when the store opens, every claim whose
-#   expires_at has passed — see erase_expired below. False stores expires_at and erases
-#   nothing on its own.
+# expiry_erasure=True (the default) hides from every read, and erases when the store
+#   opens, every claim whose expires_at has passed — see erase_expired below. False stores
+#   expires_at and neither hides nor erases. sweep_expired=False keeps the hiding and skips
+#   the erasing at open, for a read-only process.
 # write_guidance=Guidance(context=, include=[...], exclude=[...]) adds per-project rules
 #   to every extraction prompt (memvara.llm.guidance): context at most 1,500 characters,
 #   each list at most 20 rules of 200 characters, anything longer refused (GuidanceError).
@@ -33,8 +34,11 @@ mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, s
              text=, confidence=, memory_type=, polarity=, extractor=, expires_at=,
              expire_reason=, **meta)
                                                   -> WriteReceipt
-#   expires_at= is when the claim is ERASED (not ended, not retired): after it passes,
-#   erase_expired() deletes the row, its text index entry and its vector, with a proof.
+#   expires_at= is when the claim is ERASED (not ended, not retired): from that instant
+#   no read returns it, and erase_expired() deletes the row, its text index entry and its
+#   vector, with a proof. A repeat carrying an expiry reinforces only a claim in exactly
+#   its own scope; otherwise it is stored as its own claim, so another project's copy is
+#   never given the expiry.
 #   It must be in the future (ValueError otherwise). expire_reason= says why, at most
 #   500 characters, and is a ValueError without expires_at. Repeating a fact the store
 #   holds puts the expiry on the claim on record. Not valid_to, which ends and keeps.

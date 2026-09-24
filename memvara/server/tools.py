@@ -608,8 +608,8 @@ _EXPIRES_AT = {
         "not be kept past a date, such as a temporary door code or a note the user wants "
         "gone after a trip, and only when the user asked for that. For a fact that will "
         "stop being true, send true_until instead, which keeps the history. The store "
-        "erases expired facts when it opens and then hourly, so the fact can still be "
-        "returned for up to an hour after this instant. Refused when the instant is not "
+        "stops returning the fact as soon as that instant passes, and deletes it from "
+        "disk when it next opens or at its hourly sweep. Refused when the instant is not "
         "in the future. Omit it for a fact that should be kept, which is almost every "
         "fact."
     ),
@@ -1744,10 +1744,10 @@ def _expiry_note(ctx: ToolContext, claims: Sequence[Claim]) -> str:
                 "is switched off on this server, so nothing will erase this fact.")
         else:
             lines.append(
-                f"note: this fact will be erased at {_stamp(c.expires_at)}, within an "
-                "hour after that instant. Erased means deleted: memory_recall, "
-                "memory_history and memory_why stop showing it, and it cannot be brought "
-                "back.")
+                f"note: this fact will be erased at {_stamp(c.expires_at)}. It stops being "
+                "returned at that instant and is deleted from disk within the hour after. "
+                "Erased means deleted: memory_recall, memory_history and memory_why stop "
+                "showing it, and it cannot be brought back.")
     return "\n".join(lines)
 
 

@@ -349,6 +349,7 @@ def test_the_tool_stores_the_expiry_and_says_the_fact_will_be_erased():
                                expire_reason="rental ends")
     assert not is_error, body
     assert "this fact will be erased at" in body and "cannot be brought back" in body
+    assert "stops being returned at that instant" in body
     claim = srv._memory.get_all()[0]
     assert (claim.expires_at, claim.expire_reason) == (when, "rental ends")
 
@@ -375,7 +376,8 @@ def test_the_expiry_arguments_say_what_erasing_means_and_how_it_differs_from_end
     props = next(t for t in TOOLS if t.name == "memory_remember").properties
     description = props["expires_at"]["description"]
     for phrase in ("ERASED", "not ended and not retired", "true_until",
-                   "up to an hour", "Refused when the instant is not in the future"):
+                   "stops returning the fact as soon as that instant passes",
+                   "Refused when the instant is not in the future"):
         assert phrase in description
     assert props["expire_reason"]["maxLength"] == 500
 
@@ -489,3 +491,118 @@ def test_a_store_that_cannot_list_expired_claims_gets_no_sweeper():
     m = Memvara(store=store, llm=NullLLM(), embedder=HashingEmbedder(dim=64))
     assert MemvaraMCPServer(m)._sweeper is None
     m.close()
+
+
+# --- review fixes: scope of a repeat, reads after the instant, read-only servers --------
+
+A, B = "github.com/acme/a", "github.com/acme/b"
+
+
+def test_a_repeat_with_an_expiry_in_another_project_writes_its_own_claim():
+    """Reinforcing across projects would put project A's expiry on project B's claim, and
+    the sweep would then erase a fact B relies on. The repeat is written as its own claim
+    in A instead, so the expiry is kept and B's claim is untouched."""
+    with mem() as m:
+        theirs = m.scope(project=B).remember("user", "door_code", "4411").added[0]
+        receipt = m.scope(project=A).remember("user", "door_code", "4411",
+                                              expires_at=utcnow() + DAY)
+        assert receipt.reinforced == []
+        mine = receipt.added[0]
+        assert mine.scope.project == A and mine.expires_at is not None
+        assert m.store.get_claim(theirs.id).expires_at is None
+        assert [e.claim_id for e in m.erase_expired(now=utcnow() + 2 * DAY)] == [mine.id]
+        assert m.store.get_claim(theirs.id) is not None
+
+
+def test_a_repeat_with_an_expiry_in_another_session_leaves_that_claim_alone_too():
+    """Agent and session are not in the value key either, so the same rule applies one
+    level down, and the new claim beside the old is not reported as a pile-up."""
+    with mem() as m:
+        theirs = m.remember("user", "door_code", "4411", session="s1").added[0]
+        receipt = m.remember("user", "door_code", "4411", session="s2",
+                             expires_at=utcnow() + DAY)
+        assert receipt.reinforced == [] and receipt.accumulated == []
+        assert receipt.added[0].scope.session == "s2"
+        assert m.store.get_claim(theirs.id).expires_at is None
+
+
+def test_a_repeat_with_an_expiry_in_the_same_project_reinforces_the_claim_on_record():
+    with mem() as m:
+        scoped = m.scope(project=A)
+        first = scoped.remember("user", "door_code", "4411").added[0]
+        later = utcnow() + 3 * DAY
+        other = m.scope(project=B).remember("user", "door_code", "4411",
+                                            expires_at=later).added[0]
+        assert other.id != first.id
+        soon = utcnow() + DAY
+        receipt = scoped.remember("user", "door_code", "4411", expires_at=soon)
+        assert [c.id for c in receipt.reinforced] == [first.id]
+        assert m.store.get_claim(first.id).expires_at == soon
+        assert m.store.get_claim(other.id).expires_at == later
+
+
+def _overdue(m: Memvara, **kw: Any) -> Any:
+    """A claim whose expiry has passed and that no sweep has erased yet."""
+    claim = m.remember("user", "door_code", "4411", expires_at=utcnow() + DAY,
+                       **kw).added[0]
+    claim.expires_at = utcnow() - timedelta(seconds=1)
+    m.store.put_claim(claim)
+    return claim
+
+
+def test_a_claim_stops_answering_the_moment_its_expiry_passes_before_any_sweep(m):
+    """The sweep only deletes. Reads leave the claim out as soon as the instant passes,
+    inside the store query where the limit is applied, so `k` still counts."""
+    kept = m.remember("user", "lives_in", "Lisbon").added[0]
+    code = _overdue(m)
+    assert m.store.get_claim(code.id) is not None, "not erased yet"
+    assert m.get(code.id) is None and m.why(code.id) is None
+    assert [c.id for c in m.get_all()] == [kept.id]
+    assert [c.id for c in m.get_all(states=["live", "ended", "retired"])] == [kept.id]
+    assert m.count() == 1
+    assert all(r.claim.id != code.id for r in m.search("user door code 4411", k=5))
+    assert "4411" not in str(m.recall("door code"))
+    assert m.history("user", "door_code") == []
+    assert m.store.candidate_ids([code.scope]) == [kept.id]
+    assert m.store.lexical_search("4411", [code.scope], 5) == []
+
+
+def test_an_expired_claim_is_not_reinforced_so_a_new_statement_survives_the_sweep(m):
+    """Reinforcing the doomed claim would hand the new statement to the sweep."""
+    old = _overdue(m)
+    receipt = m.remember("user", "door_code", "4411")
+    assert receipt.reinforced == [] and receipt.added[0].id != old.id
+    assert [e.claim_id for e in m.erase_expired()] == [old.id]
+    assert m.get(receipt.added[0].id) is not None
+
+
+def test_erase_by_name_still_erases_a_claim_whose_expiry_has_passed(m):
+    code = _overdue(m)
+    assert m.erase(code.id) is True
+    assert m.store.get_claim(code.id) is None
+
+
+def test_with_the_switch_off_an_expired_claim_is_still_returned(tmp_path):
+    """Off means the expiry does nothing: not erased, and not hidden either."""
+    with mem(expiry_erasure=False) as m:
+        code = _overdue(m)
+        assert m.get(code.id) is not None
+        assert [c.id for c in m.get_all()] == [code.id]
+
+
+def test_a_read_only_server_does_not_erase_at_open_or_hourly(tmp_path):
+    """Erasing is a write, and a read-only server writes nothing. The claim still stops
+    answering, because reads leave it out whether or not it has been erased."""
+    from memvara.server.config import ServerConfig, build_memvara
+
+    path = str(tmp_path / "m.db")
+    claim_id = _due(path)
+    config = ServerConfig(path=path, read_only=True, embedder="hashing:64",
+                          features_off=frozenset({"encryption"}))
+    memory = build_memvara(config)
+    try:
+        assert memory.store.get_claim(claim_id) is not None
+        assert memory.get(claim_id) is None
+        assert MemvaraMCPServer(memory, read_only=True)._sweeper is None
+    finally:
+        memory.close()

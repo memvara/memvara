@@ -83,8 +83,9 @@ The distinction is the product, and it appears in three places that must agree.
 - **Erased** is the only one that removes bytes. `erase()` deletes the row and its residue,
   and `prove_erased()` returns an `ErasureProof` with per-table counts as evidence. The
   engine erases on its own in one case only: a claim written with `expires_at`, once that
-  instant has passed. `erase_expired()` does it through the same path as `erase()`, when
-  the store opens and hourly in the MCP server. `expires_at` is not `valid_to`: a claim
+  instant has passed. From that instant no read returns the claim, and `erase_expired()`
+  deletes it through the same path as `erase()`, when the store opens and hourly in the
+  MCP server. `expires_at` is not `valid_to`: a claim
   whose `valid_to` has passed is ended and kept.
 
 A document sits beside this rather than inside it. `add_document()` stores a document's

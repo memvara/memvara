@@ -520,8 +520,8 @@ afterwards:**
 and are not the same finding. Only the third deletes anything.
 
 A fact can be written to be erased later. `remember(..., expires_at=...)` stores it as
-usual, and once that instant passes the store erases it with a proof, when it next opens
-and hourly in the MCP server. This is not `valid_to`: a fact whose `valid_to` has passed
+usual. Once that instant passes, no read returns it, and the store erases it with a proof
+when it next opens and hourly in the MCP server. This is not `valid_to`: a fact whose `valid_to` has passed
 is ended and kept, while a fact whose `expires_at` has passed is gone. Ending and
 superseding never delete anything.
 

@@ -306,6 +306,22 @@ def closure_reason(value: str | None) -> str | None:
     return text
 
 
+def expired(claim: "Claim", at: datetime) -> bool:
+    """Whether `claim` carries an `expires_at` at or before `at`.
+
+    Such a claim is gone to every read from that instant, and `Memvara.erase_expired`
+    deletes it at its next run. A claim with no `expires_at` never expires.
+
+    >>> c = Claim(subject="user", predicate="door_code", object="4411")
+    >>> expired(c, utcnow())
+    False
+    >>> c.expires_at = utcnow()
+    >>> expired(c, c.expires_at)
+    True
+    """
+    return claim.expires_at is not None and as_utc(claim.expires_at) <= as_utc(at)
+
+
 def closure_reasons(claim: "Claim") -> list[tuple[str, str]]:
     """Every reason recorded on this claim's closures, oldest first, as (close, reason).
 

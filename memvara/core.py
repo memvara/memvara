@@ -77,6 +77,7 @@ from .types import (
     Episode,
     ErasedClaim,
     ErasureProof,
+    expired,
     ForgetPreview,
     ForgetResult,
     Link,
@@ -842,6 +843,7 @@ class Memvara:
         encryption: bool = False,
         key_env: Mapping[str, str] | None = None,
         expiry_erasure: bool = True,
+        sweep_expired: bool = True,
         **tuning: Any,
     ) -> None:
         # Present so that a local construction that named them still binds. `__new__`
@@ -1029,6 +1031,11 @@ class Memvara:
         #: hourly sweep. Off, `expires_at` is still stored and nothing erases on its own;
         #: `erase_expired()` called directly still erases, because then the caller asked.
         self.expiry_erasure = expiry_erasure
+        # The store leaves an expired claim out of its own queries (`hide_expired`), and
+        # an expiry that erases nothing should hide nothing either, so the switch reaches
+        # it. A store without the attribute is left as it is.
+        if hasattr(self.store, "hide_expired"):
+            self.store.hide_expired = expiry_erasure
 
         # Last, because both need the fully wired object: the migration path calls
         # `reembed()`, and neither is worth doing if construction is going to fail.
@@ -1037,7 +1044,11 @@ class Memvara:
         # After everything else, because it erases: a construction that was going to fail
         # must not delete anything first. A store that cannot list expired claims is
         # skipped here, and `erase_expired()` says so if it is called.
-        if expiry_erasure and getattr(self.store, "expired_claims", None) is not None:
+        # `sweep_expired=False` skips it and leaves the switch's other half on: a
+        # read-only server passes it, because erasing is a write, while its reads still
+        # leave the expired claims out.
+        if (expiry_erasure and sweep_expired
+                and getattr(self.store, "expired_claims", None) is not None):
             self._erase_expired(utcnow(), at_open=True)
 
     # -- construction helpers ------------------------------------------------
@@ -2119,6 +2130,15 @@ class Memvara:
                 close_out(c, at, None, how, why)
                 self.store.put_claim(c)
 
+    def _gone(self, claim: Claim) -> bool:
+        """Whether `claim`'s expiry has passed, so no read returns it any more.
+
+        The id-addressed reads (`get`, `why`, `history`, `produced`) check this
+        themselves; the searched ones leave such a claim out inside the store query.
+        With `expiry_erasure` off an expiry does nothing, and this is always false.
+        """
+        return self.expiry_erasure and expired(claim, utcnow())
+
     def _visible(self, claim_ids: Sequence[str], scope: Scope) -> dict[str, Claim]:
         """The claims among `claim_ids` this scope may read, fetched in one call.
 
@@ -2127,7 +2147,7 @@ class Memvara:
         simply absent, as `get()` returns `None` for both.
         """
         return {cid: c for cid, c in bulk_claims(self.store, claim_ids).items()
-                if scope.sees(c.scope)}
+                if scope.sees(c.scope) and not self._gone(c)}
 
     def purge(self, *, tenant=None, user=None, agent=None, session=None) -> dict[str, int]:
         """Irreversibly erase a scope. The opposite of `forget`, and not undoable.
@@ -2467,7 +2487,7 @@ class Memvara:
         error would confirm the id exists.
         """
         claim = self.store.get_claim(claim_id)
-        if claim is None:
+        if claim is None or self._gone(claim):
             return None
         if not self._scope(tenant, user, agent, session).sees(claim.scope):
             return None
@@ -2684,8 +2704,10 @@ class Memvara:
         exact failure this method was added to remove, and reporting it from a return code
         left the door open at the last step.
         """
-        if self.get(claim_id, tenant=tenant, user=user, agent=agent,
-                    session=session) is None:
+        # Not `get()`, which hides a claim whose expiry has passed: erasing one of those
+        # by name is still an erasure, and must not report that nothing was there.
+        claim = self.store.get_claim(claim_id)
+        if claim is None or not self._scope(tenant, user, agent, session).sees(claim.scope):
             return False
         return self._erase_proved(claim_id, sources=sources) is not None
 
@@ -3876,7 +3898,8 @@ class Memvara:
             # project cleared, so a probe that kept one would look up a slot nothing was
             # ever written to and report that a claim `get_all()` returns has no history.
             probe = Claim(subject=key, predicate=pred, object="", scope=slot)
-            rows.extend(self.store.slot_history(scope.tenant, probe.fact_key))
+            rows.extend(c for c in self.store.slot_history(scope.tenant, probe.fact_key)
+                        if not self._gone(c))
         if len(subjects) > 1:
             # Two slots concatenated are not one timeline. `slot_history` promises
             # oldest-first *within* a slot, so the merge has to re-establish it across
@@ -4025,7 +4048,9 @@ class Memvara:
         known = {c.id: c for c in timeline}
         wanted = {c.invalidated_by for c in timeline
                   if c.invalidated_by is not None and c.invalidated_by not in known}
-        successors = {**known, **bulk_claims(self.store, sorted(wanted))}
+        successors = {**known, **{cid: c for cid, c in
+                                  bulk_claims(self.store, sorted(wanted)).items()
+                                  if not self._gone(c)}}
         return Reading(
             subject, predicate,
             now=tuple(c for c in timeline if c.is_live()),
@@ -4084,7 +4109,7 @@ class Memvara:
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
         scope = self._scope(tenant, user, agent, session)
         claim = self.store.get_claim(claim_id)
-        if claim is None:
+        if claim is None or self._gone(claim):
             return None
         if not scope.sees(claim.scope):
             return None
@@ -4103,7 +4128,7 @@ class Memvara:
         if _displaced_by(claim, known_at):
             superseded = [c for c in self.store.slot_history(claim.scope.tenant,
                                                              claim.fact_key)
-                          if c.invalidated_by == claim.id]
+                          if c.invalidated_by == claim.id and not self._gone(c)]
         # Links are dated on the belief clock only, like supersessions and for the same
         # reason: a link is something we recorded, not something that happened in the
         # world. `known_at` drops a link recorded after it, so the explanation reads as it
@@ -4168,7 +4193,8 @@ class Memvara:
         scope = self._scope(tenant, user, agent, session)
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
         return [c for c in self.store.claims_citing(scope.tenant, episode_id)
-                if scope.sees(c.scope) and _in_timeline(c, valid_at, known_at)]
+                if scope.sees(c.scope) and _in_timeline(c, valid_at, known_at)
+                and not self._gone(c)]
 
     # -- traversal -----------------------------------------------------------
     #

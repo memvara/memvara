@@ -86,7 +86,8 @@ from ..types import (
     resolved_entity,
     utcnow,
 )
-from .base import BELIEVED, resolve_states, state_predicate, stored_state_predicate
+from .base import (BELIEVED, resolve_states, state_predicate, stored_state_predicate,
+                   unexpired_predicate)
 from .encryption import (EncryptionError, EncryptionWarning, VectorSealer, file_kind,
                          require_sqlcipher, resolve_key)
 
@@ -1474,6 +1475,11 @@ class SQLiteStore:
     #: than the methods' presence; see `OMITTABLE`.
     holds_documents = True
 
+    #: Leave a claim whose `expires_at` has passed out of every read. True unless a
+    #: `Memvara` opened with `expiry_erasure=False` sets it false, where an expiry does
+    #: nothing at all: the claim is neither erased nor hidden.
+    hide_expired = True
+
     def __init__(self, path: str = ":memory:", *, encryption: bool = False,
                  key: bytes | None = None,
                  key_env: Mapping[str, str] | None = None) -> None:
@@ -2449,7 +2455,16 @@ class SQLiteStore:
         """
         v, k = _clock(valid_at, known_at)
         clause, axes = state_predicate("?", states=states, alias=alias)
-        return clause, [k if axis == "known" else v for axis in axes]
+        params = [k if axis == "known" else v for axis in axes]
+        if not self.hide_expired:
+            return clause, params
+        # A claim whose `expires_at` has passed is left out of every read at once, on
+        # the wall clock and whatever instants the read asked about: the caller asked for
+        # it to stop existing, and the sweep that deletes it can be an hour away.
+        # Here, in the one clause every limited query runs, so `k` still counts the rows
+        # a caller can see (invariant 7). See `base.unexpired_predicate`.
+        return (f"({clause} AND {unexpired_predicate('?', alias=alias)})",
+                params + [_ts(utcnow())])
 
     def _live_clause(self, valid_at: datetime | None, known_at: datetime | None,
                      include_invalidated: bool, alias: str = "") -> tuple[str, list]:

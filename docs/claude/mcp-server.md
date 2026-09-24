@@ -85,7 +85,9 @@ off by default. `MEMVARA_API_KEY` and `MEMVARA_SERVER_URL` are the cloud credent
 
 A local server erases facts whose `expires_at` has passed: once when the store opens, and
 then hourly on a daemon thread while `serve()` runs (`ExpirySweeper` in
-`memvara/server/mcp.py`). `MEMVARA_FEATURE_EXPIRY_ERASURE=0` stops both, and the
+`memvara/server/mcp.py`). The sweep only deletes: reads leave such a fact out from the
+instant it expires. A read-only server runs neither sweep, because erasing is a write.
+`MEMVARA_FEATURE_EXPIRY_ERASURE=0` stops both sweeps and the hiding, and the
 `memory_remember` argument descriptions then say that nothing is erased. A cloud-mode
 server runs no sweep, because the deployment runs its own.
 

@@ -294,6 +294,25 @@ def live_predicate(at: str = "?", *, include_invalidated: bool = False,
     )[0]
 
 
+def unexpired_predicate(at: str = "?", *, alias: str = "") -> str:
+    """SQL for "carries no `expires_at`, or one after `at`".
+
+    The companion of `state_predicate` for a store that keeps `expires_at`. A claim whose
+    expiry has passed is left out of every read at once, before the sweep deletes it, so
+    a store ANDs this onto its state clause in the one place its limited queries run
+    (invariant 7). `at` is always the **wall clock now**, never the read's `valid_at` or
+    `known_at`: the caller who set the expiry asked for the fact to stop existing, which
+    no read may rewind past. It is its own predicate rather than a term inside
+    `state_predicate` because a backend without the column (a hosted store before its
+    migration) must keep compiling that one unchanged.
+
+    >>> unexpired_predicate("?", alias="c")
+    '(c.expires_at IS NULL OR c.expires_at > ?)'
+    """
+    a = f"{alias}." if alias else ""
+    return f"({a}expires_at IS NULL OR {a}expires_at > {at})"
+
+
 def bulk_claims(store: "Store", claim_ids: Sequence[str]) -> dict[str, Claim]:
     """`get_claims` where the store has it, one `get_claim` per id where it does not.
 

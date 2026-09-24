@@ -148,18 +148,25 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   and no copy of the fact). It covers every tenant in the store, keeps the claim's source
   turns as `erase()` does by default, and re-reads each claim just before erasing it so a
   later write that moved the expiry wins. It runs when a `Memvara` opens a store and
-  hourly while the MCP server's `serve()` loop runs, so a claim can be returned for up to
-  an hour after its instant. `expires_at` must be in the future when written
+  hourly while the MCP server's `serve()` loop runs, except on a read-only server, which
+  writes nothing. Reads do not wait for it: from the instant `expires_at` passes, the
+  claim is left out of `search()`, `recall()`, `get()`, `get_all()`, `count()`,
+  `history()`, `why()` and every other read, inside the SQLite query where the limit is
+  applied, and a later write of the same fact is stored as a new claim rather than
+  reinforcing the one due for erasure. `expires_at` must be in the future when written
   (`ValueError`, and a tool error naming the argument), and `expire_reason` without it is
   refused; `expire_reason` is at most 500 characters. Writing a fact the store already
-  holds with an `expires_at` puts the expiry on the claim on record, and a repeat without
-  one leaves it. `expires_at` is not `valid_to`: a claim whose `valid_to` has passed is
+  holds with an `expires_at` puts the expiry on the claim on record when that claim is in
+  exactly the same scope, and a repeat without one leaves it. When the claim on record is
+  in another project, agent or session, the repeat is stored as its own claim in its own
+  scope, so the expiry never reaches a claim another scope relies on. `expires_at` is not `valid_to`: a claim whose `valid_to` has passed is
   ended and kept, and ended, superseded and retired claims are never erased by the engine
   unless they carry an `expires_at`. Invariant 3 in `docs/INTERNALS.md` is rewritten to
   say so. The `expiry_erasure` switch (`Memvara(expiry_erasure=False)`,
-  `MEMVARA_FEATURE_EXPIRY_ERASURE=0`) stops both sweeps; the date is still stored, the
-  tool's argument descriptions then say nothing will be erased, and `erase_expired()`
-  called by name still erases. `AsyncMemvara.erase_expired` is the async twin. The hosted
+  `MEMVARA_FEATURE_EXPIRY_ERASURE=0`) stops both sweeps and the hiding; the date is still
+  stored, the tool's argument descriptions then say nothing will be erased, and
+  `erase_expired()` called by name still erases. `Memvara(sweep_expired=False)` skips only
+  the sweep at open, which is what a read-only MCP server passes. `AsyncMemvara.erase_expired` is the async twin. The hosted
   clients send both fields only when set and hydrate them from a response that carries
   them; a deployment from before this refuses them with 422. `Store.expired_claims(now)`
   is a new optional store method (`OMITTABLE`); `RemoteStore` has it as a stub that

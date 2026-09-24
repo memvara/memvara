@@ -69,7 +69,7 @@ from ..entities import EntityRegistry, entity_key
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..types import (
-    NOTE_PREDICATE, PROJECT_SUBJECT_TYPE, SELF_SUBJECT,
+    NOTE_PREDICATE, PROJECT_SUBJECT_TYPE, SELF_SUBJECT, expired,
     ObjectKind,
     ENTITY_REKEY,
     PREDICATE_REKEY,
@@ -309,8 +309,23 @@ class Reconciler:
 
         # 1. Exact duplicate: the same assertion is already live. Re-observation is
         #    evidence, not a new fact.
+        separate = False
         if claim.polarity > 0:
             live_same = self._live(self.store.find_by_value(tenant, claim.value_key), t, owner)
+            if getattr(self.store, "hide_expired", True):
+                # A claim whose expiry has passed is gone to every read, and the sweep
+                # will erase it. Reinforcing it would hand this new statement to the
+                # sweep, so it does not count as the fact on record.
+                live_same = [c for c in live_same if not expired(c, t)]
+            if claim.expires_at is not None and live_same:
+                # A repeat that names an expiry reinforces only a claim in exactly its own
+                # scope. `value_key` covers the owner, not the project, agent or session,
+                # so the claim on record may belong to another project, and putting this
+                # expiry on it would have the sweep erase a fact that project relies on.
+                # With no claim in this scope, the repeat is written as its own claim
+                # below, so the expiry is kept and the other claim is left as it was.
+                live_same = [c for c in live_same if c.scope == claim.scope]
+                separate = not live_same
             if live_same:
                 keep = self._canonical_of(live_same)
                 # Decided before the write, because `reinforce` performs the single
@@ -323,11 +338,12 @@ class Reconciler:
                     asserted_type = MemoryType.SEMANTIC
                 retyped = self._retype(keep, asserted_type) or self.file_by_subject(keep)
                 if claim.expires_at is not None:
-                    # A repeat that names an expiry puts it on the claim on record,
-                    # which `reinforce` then writes. Otherwise the expiry would be
-                    # dropped with the candidate, and a fact the caller asked to have
-                    # erased would stay forever. A repeat that names none leaves an
-                    # existing expiry alone, as an omitted `memory_type` does.
+                    # A repeat that names an expiry puts it on the claim on record, which
+                    # is in this repeat's own scope (see above) and which `reinforce`
+                    # then writes. Otherwise the expiry would be dropped with the
+                    # candidate, and a fact the caller asked to have erased would stay
+                    # forever. A repeat that names none leaves an existing expiry alone,
+                    # as an omitted `memory_type` does.
                     keep.expires_at = claim.expires_at
                     keep.expire_reason = claim.expire_reason
                 return ReconcileResult(
@@ -347,7 +363,10 @@ class Reconciler:
         # the *unfiltered* list that short-circuits, and the distinction costs nothing:
         # a victim exists only under a registered predicate, and `_accumulation` returns
         # `None` for every one of those.
-        accumulated = None if superseded else self._accumulation(claim, t, owner)
+        # A repeat written beside the same value in another scope is not a second
+        # answer to the question, so it is not reported as one.
+        accumulated = (None if superseded or separate
+                       else self._accumulation(claim, t, owner))
         superseded, disputed = self._outranked(claim, superseded)
         if newer:
             # This claim is history: something already on record was true *later*. Close

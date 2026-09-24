@@ -10,7 +10,8 @@ import pytest
 
 from memvara.embed import HashingEmbedder
 from memvara.store import (STATES, SQLStore, SQLiteStore, live_predicate,
-                           state_predicate, stored_state_predicate)
+                           state_predicate, stored_state_predicate,
+                           unexpired_predicate)
 from memvara.store.base import Store
 from memvara.store.sqlite import _WALKABLE as _WALKABLE_SQL
 from memvara.store.sqlite import SCHEMA_VERSION
@@ -2451,8 +2452,14 @@ def test_the_store_takes_its_liveness_sql_from_the_exported_predicate(
     sql, params = store._live_clause(TMID, T1, include_invalidated, alias)
 
     marker = "?" if "?" in sql else "%s"
-    assert sql == live_predicate(marker, include_invalidated=include_invalidated,
-                                 alias=alias)
+    exported = live_predicate(marker, include_invalidated=include_invalidated, alias=alias)
+    if getattr(store, "hide_expired", False):
+        # A store that keeps `expires_at` ANDs the exported expiry predicate onto the
+        # exported state predicate, and binds the wall clock for it last. Both halves come
+        # from `memvara.store.base`; neither is a private copy.
+        assert sql == f"({exported} AND {unexpired_predicate(marker, alias=alias)})"
+    else:
+        assert sql == exported
     assert sql.count(marker) == len(params)
     if not include_invalidated:
         # Called as `_live_clause(valid_at=TMID, known_at=T1)`, and T1 is the later of
@@ -2524,7 +2531,14 @@ def test_the_state_predicate_names_one_bind_axis_per_marker(store, subset):
     assert axes == tuple(sorted(axes, key=["known", "valid"].index))
 
     clause, params = store._state_clause(TMID, T1, subset)
-    assert clause == sql and len(params) == len(axes)
+    if getattr(store, "hide_expired", False):
+        # The exported expiry predicate is ANDed on, with the wall clock bound last, after
+        # every marker the state predicate names.
+        assert clause == f"({sql} AND {unexpired_predicate('?')})"
+        assert len(params) == len(axes) + 1
+        assert params[-1] > T1.timestamp(), "the expiry marker reads the wall clock"
+    else:
+        assert clause == sql and len(params) == len(axes)
     # T1 is the later instant and is the *belief* one, so this reads "belief instant on
     # the belief markers" without depending on how the backend stores a timestamp.
     for axis, bound in zip(axes, params):

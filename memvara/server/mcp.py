@@ -299,11 +299,12 @@ class MemvaraMCPServer:
         if "expiry_erasure" in self.features_off:
             tools = without_expiry(tools)
         #: The hourly sweep `serve()` runs, or `None`. Only for a local store that can
-        #: list expired claims, and only with `expiry_erasure` on, both here and on the
-        #: `Memvara` this server was given; a hosted deployment runs its own.
+        #: list expired claims, only with `expiry_erasure` on, both here and on the
+        #: `Memvara` this server was given, and never on a read-only server, because
+        #: erasing is a write. A hosted deployment runs its own.
         self._sweeper: ExpirySweeper | None = None
         if (isinstance(memory, Memvara) and "expiry_erasure" not in self.features_off
-                and memory.expiry_erasure
+                and memory.expiry_erasure and not self.read_only
                 and getattr(memory.store, "expired_claims", None) is not None):
             self._sweeper = ExpirySweeper(memory, expiry_interval)
         self._tools: dict[str, Tool] = {
