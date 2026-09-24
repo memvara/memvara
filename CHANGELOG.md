@@ -152,14 +152,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   proposed end becomes a retraction with `close="ended"` and the model's reason, so it
   ends a memory and never retires or erases one. A proposed link becomes a `claim_links`
   row. A proposal is refused when it names a memory the model did not read in this run
-  (`not_read`), ends or replaces a memory with another owner (`out_of_scope`), cannot be
+  (`not_read`), ends or replaces a memory in a broader scope than the write, such as a
+  user-wide memory from a write inside one project (`broader_scope`), cannot be
   shaped (`invalid`), or restates the extractor's instructions (`instruction_echo`); a
   valid proposal the write path did not carry out, such as a replacement the reconciler
   stored beside the old value, is `not_applied`. All five land on the new
   `WriteReceipt.proposals_refused` as `RefusedProposal(tool, target, reason)`. The rules
   are the system message and the turns are a user message inside `<content>` tags,
   described as data, and a turn cannot close the tag. At most 12 answers, 8,192 output
-  tokens per answer, 180 seconds per run, one retry per answer; every request is counted
+  tokens per answer, one retry per answer, and 25 seconds per run in `add()`, where a
+  caller is waiting, or 180 seconds in `reextract()`, which a background worker runs;
+  the shorter budget keeps a synchronous `memory_add` inside an MCP client's tool
+  timeout; every request is counted
   in `llm_calls`. The batch falls back to the single call, and the new
   `WriteReceipt.agentic_fallback` says why, when the backend cannot run tools
   (`unsupported`), on `timeout`, on an answer that cannot be used twice in a row

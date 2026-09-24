@@ -6,7 +6,8 @@ can search the store and read a memory, and it proposes new memories, ends, repl
 and links. None of that writes anything by itself: every proposed memory goes through the
 same guards and the same `Reconciler.apply` as single-call output, an end becomes a
 retraction with `close="ended"`, and a link becomes a `claim_links` row. A proposal naming a
-memory the model never read, or one belonging to another owner, is refused and recorded.
+memory the model never read, or ending or replacing one in a broader scope than the write,
+is refused and recorded.
 
 The fakes here run a fixed script of tool calls through the real handlers, and count their
 own calls, because the cost of this feature is the number of model requests it makes.
@@ -42,8 +43,8 @@ from memvara.types import (
 from memvara.write import WritePipeline
 from memvara.write import agentic
 from memvara.write.agentic import (
-    AGENTIC_MAX_STEPS, AGENTIC_SYSTEM, AGENTIC_TIMEOUT, AgenticExtractor, echoes_instructions,
-    fence,
+    AGENTIC_MAX_STEPS, AGENTIC_SYNC_TIMEOUT, AGENTIC_SYSTEM, AGENTIC_TIMEOUT, AgenticExtractor,
+    echoes_instructions, fence,
 )
 
 SCOPE = Scope("acme", "alice")
@@ -216,10 +217,31 @@ def test_the_run_gets_the_limits_the_design_names():
     memory(llm).add(MOVE)
     (run,) = llm.runs
     assert run["max_steps"] == AGENTIC_MAX_STEPS == 12
-    assert run["timeout"] == AGENTIC_TIMEOUT
     assert TOOL_STEP_MAX_TOKENS == 8192
     assert run["tools"] == ["search_memories", "get_claim", "propose_claim", "propose_end",
                             "propose_supersede", "propose_link"]
+
+
+def test_a_write_the_caller_waits_for_gets_the_short_budget():
+    """`add()` runs tier 2 while its caller waits, and over MCP that caller is a client
+    with its own tool timeout. The run gets `AGENTIC_SYNC_TIMEOUT`, well under a minute,
+    so a slow loop falls back to one call instead of holding the write for three
+    minutes."""
+    llm = ScriptedChat()
+    memory(llm).add(MOVE)
+    (run,) = llm.runs
+    assert run["timeout"] == AGENTIC_SYNC_TIMEOUT == 25.0
+
+
+def test_a_background_sweep_gets_the_full_budget():
+    """`reextract()` is what a worker runs over stored turns, where nobody is waiting, so
+    the run gets the full `AGENTIC_TIMEOUT`."""
+    mem = memory(NullLLM())
+    mem.add(MOVE)
+    mem.writer.llm = llm = ScriptedChat()
+    mem.reextract()
+    (run,) = llm.runs
+    assert run["timeout"] == AGENTIC_TIMEOUT == 180.0
 
 
 def test_repeating_a_stored_fact_reinforces_it_rather_than_storing_a_second_row():
@@ -306,10 +328,65 @@ def test_another_users_memory_cannot_be_read_so_cannot_be_ended():
     assert mem.get(bobs.id, user="bob").state == "live"
 
 
+PROJECT = "github.com/acme/app"
+
+
+def test_a_project_write_cannot_end_or_replace_a_user_wide_memory():
+    """A write inside a project reads the user-wide memories above it, because reading
+    widens upward. It must not close one: a user-wide memory answers in every project and
+    session, and the deterministic path lets a project value shadow it, never end it. Both
+    proposals are refused as `broader_scope` and the memory stays live everywhere."""
+    user_wide = Memvara(embedder=HashingEmbedder(), llm=NullLLM(), tenant="acme",
+                        user="alice")
+    shared = user_wide.remember("user", "deploy_cluster", "Frankfurt").added[0]
+    assert shared.scope.project is None
+    llm = ScriptedChat([search("deploy cluster Frankfurt")], [
+        ("propose_end", {"claim_id": shared.id, "reason": "moved", "source_index": 0}),
+        ("propose_supersede", {"claim_id": shared.id, "reason": "moved",
+                               **fact("user", "deploy_cluster", "Dublin")})])
+    in_project = Memvara(store=user_wide.store, embedder=HashingEmbedder(), llm=llm,
+                         tenant="acme", user="alice", project=PROJECT,
+                         write_agentic_extraction=True)
+    receipt = in_project.add(CLUSTER)
+    assert shared.id in llm.results[0], "the project write could read it"
+    assert receipt.proposals_refused == [
+        RefusedProposal("propose_end", shared.id, "broader_scope"),
+        RefusedProposal("propose_supersede", shared.id, "broader_scope")]
+    assert "propose a new claim" in llm.results[1]
+    assert user_wide.get(shared.id).state == "live"
+    assert receipt.closed == []
+
+
+def test_a_project_write_can_end_a_memory_in_its_own_project():
+    llm = ScriptedChat()
+    in_project = memory(llm, project=PROJECT)
+    own = in_project.remember("user", "deploy_cluster", "Frankfurt").added[0]
+    assert own.scope.project == PROJECT
+    in_project.writer.llm = ScriptedChat([search("deploy cluster Frankfurt")], [(
+        "propose_end", {"claim_id": own.id, "reason": "retired the cluster",
+                        "source_index": 0})])
+    receipt = in_project.add(CLUSTER)
+    assert receipt.proposals_refused == []
+    assert [c.id for c in receipt.ended] == [own.id]
+
+
+def test_a_session_write_cannot_end_the_users_memory():
+    user_wide = Memvara(embedder=HashingEmbedder(), llm=NullLLM(), tenant="acme",
+                        user="alice")
+    old = user_wide.remember("user", "works_at", "Acme").added[0]
+    llm = ScriptedChat([search("Acme")], [
+        ("propose_end", {"claim_id": old.id, "reason": "finished", "source_index": 0})])
+    in_session = Memvara(store=user_wide.store, embedder=HashingEmbedder(), llm=llm,
+                         tenant="acme", user="alice", session="s1",
+                         write_agentic_extraction=True)
+    receipt = in_session.add(FINISHED)
+    assert [r.reason for r in receipt.proposals_refused] == ["broader_scope"]
+    assert user_wide.get(old.id).state == "live"
+
+
 def test_a_tenant_wide_memory_can_be_read_but_not_ended_from_one_users_turn():
     """Reading widens upward, so a user's write sees the tenant's memories. Closing does
-    not: the reconciler only ever closes the same owner's claims, and a proposal may reach
-    no further."""
+    not: a proposal may close only a memory in exactly the write's own scope."""
     mem = memory(ScriptedChat())
     tenant_wide = Memvara(store=mem.store, embedder=HashingEmbedder(), llm=NullLLM(),
                           tenant="acme")
@@ -320,7 +397,7 @@ def test_a_tenant_wide_memory_can_be_read_but_not_ended_from_one_users_turn():
                                **fact("acme", "lives_in", "Lisbon")})])
     receipt = mem.add(MOVE)
     assert shared.id in llm.results[0], "the model could read it"
-    assert [r.reason for r in receipt.proposals_refused] == ["out_of_scope", "out_of_scope"]
+    assert [r.reason for r in receipt.proposals_refused] == ["broader_scope", "broader_scope"]
     assert tenant_wide.get(shared.id).state == "live"
 
 

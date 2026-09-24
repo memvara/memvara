@@ -1850,7 +1850,7 @@ class Collapse:
 
 
 #: Why agentic extraction did not apply a proposal. See `RefusedProposal`.
-RefusalReason = Literal["not_read", "out_of_scope", "invalid", "instruction_echo",
+RefusalReason = Literal["not_read", "broader_scope", "invalid", "instruction_echo",
                         "not_applied"]
 
 
@@ -1864,8 +1864,10 @@ class RefusedProposal:
 
     - `not_read`: it named a stored memory the model had not read through
       `search_memories` or `get_claim` during this write.
-    - `out_of_scope`: it asked to end or replace a memory that belongs to a different
-      owner than this write, such as a tenant-wide memory seen from one user's write.
+    - `broader_scope`: it asked to end or replace a memory in a broader scope than this
+      write, such as a user-wide memory seen from a write inside one project or session,
+      or a tenant-wide memory seen from one user's write. Closing it would close it for
+      every project and session beneath it.
     - `invalid`: its arguments did not describe a memory or a link, for example a
       `source_index` that names no turn or a relation other than `extends` and `derives`.
     - `instruction_echo`: the proposed memory restates the extractor's own instructions

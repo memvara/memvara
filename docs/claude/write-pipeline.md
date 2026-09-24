@@ -71,7 +71,8 @@ the end of a stored memory, a replacement for one, or a link between two. The pr
 write nothing. A proposed memory goes through the same guards as single-call output and
 then `Reconciler.apply()`; a proposed end becomes a retraction with `close="ended"`; a
 proposed link becomes a `claim_links` row. A proposal naming a memory the model did not
-read in the run, or one with a different owner, is refused, and every refusal is on
+read in the run, or asking to end or replace one in a broader scope than the write, is
+refused, and every refusal is on
 `receipt.proposals_refused`. A backend without tools, a timeout, an answer that cannot be
 used, a run past 12 steps, a request that fails twice or a batch from two scopes sends the
 batch to the single call, and `receipt.agentic_fallback` says which. Off by default,

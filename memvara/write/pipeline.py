@@ -102,7 +102,9 @@ from ..types import (
     SELF_SUBJECT, Claim, Closure, Derivation, Episode, Link, MemoryType, WriteReceipt,
     utcnow,
 )
-from .agentic import AgenticExtractor, AgenticResult, ProposalPlan
+from .agentic import (
+    AGENTIC_SYNC_TIMEOUT, AGENTIC_TIMEOUT, AgenticExtractor, AgenticResult, ProposalPlan,
+)
 from .fast import FastExtractor
 from .when import normalize_unit, resolve
 from .gate import SalienceGate
@@ -295,6 +297,8 @@ class WritePipeline:
         #: A backend without `llm.ToolChat`, a timeout, an answer that cannot be used, a
         #: run past 12 steps or a batch spanning two scopes falls back to single-call
         #: extraction for that batch, and the receipt says why in `agentic_fallback`.
+        #: The run's time budget is `agentic.AGENTIC_SYNC_TIMEOUT` (25 s) in `add()`, where
+        #: a caller is waiting, and `agentic.AGENTIC_TIMEOUT` (180 s) in `reextract()`.
         #: `extraction_chunks` applies to the single-call path only. Off because the
         #: release bar in `docs/ROADMAP.md` (the "Reversed" list) has not been measured.
         self.agentic_extraction = bool(agentic_extraction)
@@ -396,7 +400,7 @@ class WritePipeline:
 
         kept = self._tier0_near_dupes(fresh, receipt, now, pending)
         gated, fast_claims = self._tier1(kept, receipt, pre_redaction_script)
-        llm_claims, plan = self._tier2(gated, receipt, now)
+        llm_claims, plan = self._tier2(gated, receipt, now, background=False)
 
         # Reconcile in input order so a batch containing two claims for the same slot
         # resolves the same way every run.
@@ -504,7 +508,7 @@ class WritePipeline:
         receipt.episode_ids = [ep.id for ep in fresh]
 
         gated, fast_claims = self._tier1(fresh, receipt)
-        llm_claims, plan = self._tier2(gated, receipt, now)
+        llm_claims, plan = self._tier2(gated, receipt, now, background=True)
 
         candidates: list[Claim] = []
         for ep in fresh:
@@ -575,10 +579,9 @@ class WritePipeline:
                 plan.refuse("propose_end", end.claim_id, "not_applied")
                 continue
             turn = plan.episodes[end.source_index]
-            # The stored claim's own scope, so the retraction addresses exactly the slot
-            # the claim is in. `agentic._Session._closable` has already checked that the
-            # claim has the same owner as this write, which is as far as the reconciler
-            # reaches on its own.
+            # The stored claim's own scope, which `agentic._Session._closable` has already
+            # checked is exactly this write's scope, so the retraction addresses the slot
+            # the claim is in and closes nothing for any other project or session.
             retraction = Claim(
                 subject=target.subject, predicate=target.predicate, object=target.object,
                 scope=target.scope, polarity=-1, memory_type=target.memory_type,
@@ -816,9 +819,12 @@ class WritePipeline:
 
     # -- tier 2 ---------------------------------------------------------------
 
-    def _tier2(self, episodes: Sequence[Episode], receipt: WriteReceipt,
-               now) -> tuple[dict[str, list[Claim]], ProposalPlan | None]:
+    def _tier2(self, episodes: Sequence[Episode], receipt: WriteReceipt, now, *,
+               background: bool) -> tuple[dict[str, list[Claim]], ProposalPlan | None]:
         """Model extraction for the turns tier 1 left, and an agentic run's plan, if any.
+
+        `background` is True for `reextract()`, where nobody waits for the write, and
+        chooses the agentic run's time budget.
 
         The plan is `None` unless agentic extraction ran and its proposals were used. It
         carries the proposed ends and links, and the reasons for proposed replacements,
@@ -852,7 +858,8 @@ class WritePipeline:
         usage = Usage() if getattr(self.llm, "reports_usage", False) else None
         # Once per batch, not once per piece: every call is offered the same vocabulary.
         vocabulary = self.registry.prompt_vocabulary()
-        result = (self._agentic(episodes, vocabulary, usage, receipt, now)
+        timeout = AGENTIC_TIMEOUT if background else AGENTIC_SYNC_TIMEOUT
+        result = (self._agentic(episodes, vocabulary, usage, receipt, now, timeout)
                   if self.agentic_extraction else None)
         plan = None if result is None else ProposalPlan(result, episodes)
         calls = None if plan is not None else self._plan_calls(episodes)
@@ -915,8 +922,8 @@ class WritePipeline:
         return out, plan
 
     def _agentic(self, episodes: Sequence[Episode], vocabulary: Sequence[str],
-                 usage: Usage | None, receipt: WriteReceipt,
-                 now: datetime) -> AgenticResult | None:
+                 usage: Usage | None, receipt: WriteReceipt, now: datetime,
+                 timeout: float) -> AgenticResult | None:
         """Run agentic extraction over `episodes`, or say why the batch falls back.
 
         Returns `None` for a fallback, after recording the reason on
@@ -934,7 +941,8 @@ class WritePipeline:
             # scopes in one run would let one scope's turns end another's memories.
             reason = "mixed_scope"
         else:
-            extractor = AgenticExtractor(self.llm, self.store, self.embedder)
+            extractor = AgenticExtractor(self.llm, self.store, self.embedder,
+                                         timeout=timeout)
             try:
                 result = extractor.run(episodes, vocabulary, now=now, usage=usage)
             except ToolRunTimeout as exc:

@@ -19,9 +19,14 @@ the reconciler's recorded outcomes, which is what `docs/INTERNALS.md` invariant 
 **The model can only name what it has read.** A proposal that names a stored memory the
 model did not read through `search_memories` or `get_claim` in this run is refused. The
 tools only return memories this write's scope can see, so a memory outside the scope can
-never be named. Ending or replacing a memory needs one more thing: it must belong to the
-same owner as the write (`types.owner_key`), which is the reach the reconciler itself has.
-Every refusal is recorded on the receipt as a `types.RefusedProposal`.
+never be named. Ending or replacing a memory needs one more thing: the memory must be in
+exactly the write's own scope. Reading widens upward, so a write inside a project or a
+session reads the user-wide memories above it, and a user-wide memory answers in every
+project and session. The deterministic path never closes one from below: a project's
+value shadows a user-wide single-valued slot and leaves it live. A proposal may reach no
+further, so ending or replacing a broader memory is refused as `broader_scope`, and the
+model is told to propose a new memory in its own scope instead. Every refusal is recorded
+on the receipt as a `types.RefusedProposal`.
 
 **Instructions and content are separate messages.** The rules are the system message. The
 turns go in the user message inside `<content>` tags and are described there as data, and
@@ -44,15 +49,23 @@ from ..llm.base import Message, ToolChat, ToolRun, ToolSpec, Usage
 from ..store.base import Store, bulk_claims
 from ..types import (
     REASON_CHARS, Claim, Episode, LinkRelation, RefusalReason, RefusedProposal, Scope,
-    link_relation, owner_key,
+    link_relation,
 )
 
 #: The most answers the model may give in one run. A run still calling tools after this
 #: many is abandoned and the batch goes to single-call extraction.
 AGENTIC_MAX_STEPS = 12
 
-#: Seconds one run may take, across all its steps.
+#: Seconds one run may take, across all its steps, when nobody is waiting for it:
+#: `WritePipeline.reextract()`, which a background worker runs over stored turns.
 AGENTIC_TIMEOUT = 180.0
+
+#: Seconds one run may take when a caller is waiting for the write: `WritePipeline.add()`,
+#: which is what `memory_add` over MCP calls. MCP clients give a tool call a limited time,
+#: often about a minute, and a write held for three minutes looks to them like a server
+#: that has hung. A run that does not finish in time falls back to one extraction call,
+#: so the whole write can take this budget plus that one call.
+AGENTIC_SYNC_TIMEOUT = 25.0
 
 #: The most memories one `search_memories` call returns. The model's `k` is clamped to
 #: between 1 and this.
@@ -502,9 +515,14 @@ class _Session:
             return self._refuse(tool, claim_id, "not_read",
                                 "you have not read that claim with search_memories or "
                                 "get_claim.")
-        if owner_key(claim.scope) != owner_key(self.scope):
-            return self._refuse(tool, claim_id, "out_of_scope",
-                                "that memory belongs to a different owner than these turns.")
+        if claim.scope.key() != self.scope.key():
+            # Read from a broader scope. Closing it would close it for every project and
+            # session under that scope, which the deterministic path never does from below.
+            return self._refuse(tool, claim_id, "broader_scope",
+                                "that memory belongs to a broader scope than these turns, "
+                                "so ending or replacing it would change it everywhere. "
+                                "To record a different value here, propose a new claim in "
+                                "this scope with propose_claim instead.")
         return ""
 
     def _ref(self) -> str:

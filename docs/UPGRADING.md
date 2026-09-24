@@ -32,7 +32,13 @@ switch was on), and `repr(receipt)` shows each only when it is set.
 MCP server refuses a `MEMVARA_FEATURE_*` name it does not know.
 
 **If you turn it on**, a write costs several model calls instead of one, and
-`receipt.llm_calls` counts every one of them. With a backend that does not implement
+`receipt.llm_calls` counts every one of them. It also takes longer. `add()`, and so
+`memory_add` over MCP, gives the tool loop 25 seconds, because a caller is waiting and an
+MCP client gives up on a tool call after a limited time; a loop that runs out falls back
+to one extraction call, so a write can take 25 seconds plus that call. `reextract()`,
+which a background worker runs, gives the loop 180 seconds. If your client's tool timeout
+is shorter than about 40 seconds, either leave the switch off or extract later with
+`reextract()`. With a backend that does not implement
 `llm.ToolChat`, every write falls back to one call and says `agentic_fallback=unsupported`,
 so the switch does nothing but add that line; switch it off again.
 

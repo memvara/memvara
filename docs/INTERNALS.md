@@ -55,7 +55,8 @@ was being read as holding further than it does.
    > check as `extract()` output and then `Reconciler.apply`; a proposed end becomes a
    > retraction through `Reconciler.apply(close="ended")`; a proposed link becomes a
    > `claim_links` row; and a proposal naming a memory the model did not read in that run,
-   > or one with a different owner, is refused and recorded as a `RefusedProposal`. A
+   > or asking to end or replace one in a broader scope than the write, is refused and
+   > recorded as a `RefusedProposal`. A
    > model can therefore choose *which* candidates the reconciler sees, and cannot choose
    > what the reconciler does with them. On the read path, a reranker is a
    > cross-encoder rather than a generative model, and it is off by default. The three
@@ -95,7 +96,8 @@ was being read as holding further than it does.
    > `search()` or `recall()` call that does not say whether it may rewrite. No
    > measurement of answer quality with the two new stages exists yet.
    > `tests/test_agentic_extraction.py` holds the write side of the agentic loop: a
-   > proposal naming an unread or another owner's memory changes nothing, a replacement
+   > proposal naming an unread memory, or closing a broader-scope one, changes nothing,
+   > a replacement
    > the reconciler does not accept leaves the named memory live, and a turn that quotes
    > the extractor's instructions yields no memory that restates them. The
    > identical-final-state result above was measured on the single-call path. With
@@ -697,11 +699,16 @@ suggestion must not turn it into an exception the caller retries.
   `amount` and `unit`. `source_index` and `confidence` are not in the design's argument
   list and are required here, because provenance and the authority rule depend on them.
   At most `AGENTIC_MAX_STEPS` (12) answers, `TOOL_STEP_MAX_TOKENS` (8,192) output tokens
-  per answer, `AGENTIC_TIMEOUT` (180 s) for the whole run, and one retry per answer
+  per answer, one retry per answer, and a budget for the whole run of
+  `AGENTIC_SYNC_TIMEOUT` (25 s) in `add()`, where a caller is waiting, or `AGENTIC_TIMEOUT`
+  (180 s) in `reextract()`, which a background worker runs
   (`llm/_tools.run_loop`, shared by both backends). A proposal is refused at once, and
   recorded on `receipt.proposals_refused`, when it names a memory the model did not read
-  in this run (`not_read`), asks to end or replace a memory with a different owner than
-  the write (`out_of_scope`), cannot be shaped into a claim or a link (`invalid`), or
+  in this run (`not_read`), asks to end or replace a memory whose scope is not exactly the
+  write's scope (`broader_scope`: reads widen upward, so this is a user-wide memory seen
+  from a project or a session, and closing it would close it everywhere, which the
+  deterministic path never does from below), cannot be shaped into a claim or a link
+  (`invalid`), or
   restates the instructions (`instruction_echo`, `write/agentic.echoes_instructions`).
   Accepted proposals do not write. Proposed memories go through the pollution guard, the
   closed vocabulary, acquisition and the grounding check like single-call output, then
