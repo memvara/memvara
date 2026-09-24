@@ -54,6 +54,7 @@ from .embed.local import (
 from .llm import LLM, Chat, NullLLM, ReplacementJudge, Usage
 from .redact import Redactor, redact_episode
 from .retrieve import EpisodeResult, GraphTraverser, HybridRetriever, Path, Retrieved
+from .retrieve.excerpt import excerpt
 from .retrieve.shadow import shadowed
 from .select.base import PLAIN_READ, Synthesis
 from .select.stages import QueryRewriter, Synthesizer, gate, run_stage
@@ -3054,7 +3055,10 @@ class Memvara:
     )
 
     #: Characters of a raw turn rendered into a prompt. Long enough for a decision and
-    #: its reason, short enough that a pasted stack trace cannot evict the facts.
+    #: its reason, short enough that a pasted stack trace cannot evict the facts. A longer
+    #: turn is shown as the window that best matches the question, not as its first 280
+    #: characters; see `retrieve/excerpt.py`. The day the turn was said is written in
+    #: front of it and is not counted here.
     RECALL_EPISODE_CHARS = 280
 
     #: The last line of a block `budget=` had to cut short. A model handed eight facts
@@ -3212,6 +3216,11 @@ class Memvara:
         becomes one; and the facts are the part that must survive a context squeeze, so
         they go first.
 
+        Each turn starts with the day it was said, in brackets, because a turn saying
+        "yesterday" answers a question about when only next to its date. A turn longer
+        than `RECALL_EPISODE_CHARS` is shown as the window of it that best matches
+        `query`, not as its first characters; see `retrieve/excerpt.py`.
+
         The slot arithmetic, stated because it is the one thing this could get wrong:
         `k` remains the total, so up to `HybridRetriever.max_episodes` of those slots
         can go to turns — but only to turns that beat the claim they displace by the
@@ -3227,7 +3236,7 @@ class Memvara:
 
         `ranked=True` runs the configured `read_selector` and renders every turn it kept
         whole, first in the turn block, ahead of the unkept turns at their usual
-        `RECALL_EPISODE_CHARS` cut — see `HybridRetriever.search` and `memvara.select`
+        `RECALL_EPISODE_CHARS` window — see `HybridRetriever.search` and `memvara.select`
         for the read order. It needs `include_episodes=True` and no `memory_types`,
         raising `ValueError` on either, for the reason `search` does. When the model did
         not actually rank the read — no selector configured, the operator's switch, a
@@ -3372,7 +3381,7 @@ class Memvara:
         def block(n: int, lead: str | None = None) -> str:
             if n not in rendered:
                 rendered[n] = self._recall_block(claims, past, kept_episodes, episodes, n,
-                                                 headers, unranked_line)
+                                                 headers, unranked_line, query=query)
             return rendered[n] if lead is None else f"{lead}\n{rendered[n]}"
 
         def fit(reserve: str | None) -> int:
@@ -3478,7 +3487,7 @@ class Memvara:
                       kept_episodes: Sequence[EpisodeResult],
                       episodes: Sequence[EpisodeResult], keep: int,
                       headers: tuple[str, str, str],
-                      unranked_line: str | None = None) -> str:
+                      unranked_line: str | None = None, *, query: str = "") -> str:
         """Render the first `keep` notes, and say so if that was not all of them.
 
         The priority order is the argument order: every claim is placed before any kept
@@ -3493,6 +3502,10 @@ class Memvara:
         A section's header appears only if something under it did. A header with nothing
         beneath it tells a model there are stored facts and then shows it none, which is
         worse than the section being absent.
+
+        `query` is the question the block answers. An unkept turn longer than
+        `RECALL_EPISODE_CHARS` is shown as the window that matches it best, and with no
+        query as its first characters. See `_episode_line`.
         """
         n = min(keep, len(claims))
         after_facts = max(0, keep - len(claims))
@@ -3512,17 +3525,41 @@ class Memvara:
             lines.append(episode_header)
             # Kept turns first, whole, in reranked order — the 280-character cut does
             # not apply to them: a cut turn is arm A's failure mode, and arm B's judged
-            # block rendered them whole. Unkept turns follow, cut as every turn a plain
-            # read renders always has been.
-            lines += [f"- {self._safe_line(r.text)}" for r in kept_episodes[:p]]
-            lines += [f"- {self._safe_line(r.text, self.RECALL_EPISODE_CHARS)}"
-                      for r in episodes[:m]]
+            # block rendered them whole. Unkept turns follow, cut to the window that
+            # matches the question.
+            lines += [self._episode_line(r, None) for r in kept_episodes[:p]]
+            lines += [self._episode_line(r, query) for r in episodes[:m]]
         dropped = len(claims) + len(kept_episodes) + len(episodes) - n - p - m
         if dropped:
             lines.append(self._dropped_line(dropped))
         if unranked_line is not None:
             lines.append(unranked_line)
         return "\n".join(lines)
+
+    def _episode_line(self, result: EpisodeResult, query: str | None) -> str:
+        """One turn as a bullet: the day it was said, in brackets, then what was said.
+
+        The day is there because a turn is only evidence about *when* if the reader can
+        see when it was said. "I went to the support group yesterday" answers "when did
+        she go" only next to the day it was said, and without it a reader can do nothing
+        but repeat "yesterday". LOCOMO asks 321 questions about when something happened,
+        and for 289 of them no single turn contains every word of the answer. On 50 of
+        the 321, drawn at random, a reader given the blocks with the days answered 20
+        correctly, and a reader given the same blocks without them answered none, under
+        the harness's offline containment judge.
+
+        The day is written after the text has been flattened, so its brackets are the
+        renderer's own. Stored text cannot forge them, because `_safe_line` turns every
+        bracket inside it into a full-width one.
+
+        `query` is `None` for a turn rendered whole, which is a ranked call's kept turn.
+        Otherwise the text is cut to `RECALL_EPISODE_CHARS` around the part that matches
+        the question; see `retrieve/excerpt.py`.
+        """
+        text = self._safe_line(result.text)
+        if query is not None:
+            text = excerpt(text, query, self.RECALL_EPISODE_CHARS)
+        return f"- [{_day(result.episode.ts)}] {text}"
 
     #: Marks a note nobody stated. Written as a suffix and only on the rows that need it,
     #: so a store of stated facts pays nothing — recall is on the per-prompt path and this
