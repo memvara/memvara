@@ -20,6 +20,9 @@ answer quality with no error, no exception and nothing in any log.
 - Comparison and cost: `bench/compare.py`, `bench/mem0_real.py`, `bench/baseline.py`,
   `bench/extract_cost.py`, `bench/perf.py`, `bench/evalkit.py`.
 - Against a hosted store: `bench/hosted.py`.
+- The release bar for agentic extraction: `bench/extraction_bar.py`, which runs the same
+  turns through two stores that differ only in the `agentic_extraction` switch, and the
+  199-question LongMemEval sample it reads, `bench/samples/longmemeval_s_199.txt`.
 - End-to-end answer quality: `demo/harness.py`, `demo/scenario.py`, `demo/distractors.py`
   (the second corpus size), `demo/baselines.py`, `demo/hosted.py` (the two memvara
   arms against a hosted deployment, under `--memory hosted`), and `demo/competitors.py`
