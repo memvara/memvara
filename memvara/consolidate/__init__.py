@@ -61,7 +61,7 @@ class Consolidator:
         return _decay(self.store, self.registry, tenant, now, self.window,
                       telemetry=self.telemetry)
 
-    def merge_duplicates(self, tenant: str | None = None, threshold: float = 0.97,
+    def merge_duplicates(self, tenant: str | None = None, threshold: float | None = None,
                          *, neighbourhood: int = NEIGHBOURHOOD) -> int:
         return _merge_duplicates(self.store, self.embedder, self.registry, tenant,
                                  threshold, neighbourhood=neighbourhood,

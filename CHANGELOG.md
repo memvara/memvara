@@ -47,6 +47,31 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   read). An existing store builds `ep_cover` the first time this version opens it, about
   1.7 s and 10 MB per 190,000 turns. `docs/UPGRADING.md` has that, and the repair for a
   store whose text index was copied out of line with its rows.
+- **`LocalEmbedder()` loads `BAAI/bge-small-en-v1.5`, and a store keeps the model that
+  wrote it.** bge-small replaces `sentence-transformers/all-MiniLM-L6-v2` as the default
+  local model. Over the 1,531 evidence-labelled LOCOMO questions with the local embedder,
+  R@12 rose from 62.7 to 68.2, R@1 from 28.5 to 33.2 and MRR from 44.4 to 49.4, ahead in
+  every category. Ingest took 192 s against 98 s and the median read 29.3 ms against
+  17.3 ms, on one CPU thread (`docs/BENCHMARKS.md`). Both models are 384 dimensions, so
+  only the name in a store's fingerprint tells their vectors apart. `Memvara()` with no
+  embedder, and the MCP server's `MEMVARA_EMBEDDER=local`, therefore load the local
+  model the store's fingerprint names, and the new default only for a store that names
+  none. A store with 384-wide vectors and no fingerprint keeps MiniLM. `LocalEmbedder()`
+  constructed by hand on a store another local model wrote now raises
+  `EmbedderMismatchError` naming the model to pass, where a same-width swap only warns,
+  and still does when the model is named. `docs/UPGRADING.md` has each case.
+- **The grounding rescue and the duplicate merge read a cosine on the embedder's own
+  scale.** Both compare a cosine with a fixed number, and both numbers were measured under
+  MiniLM. bge-small scores an invented value against a turn it has nothing to do with at
+  a median of 0.44, where MiniLM scores 0.02, so at the rescue's 0.40 it would keep 84%
+  of the inventions the rescue exists to refuse. It scores two values one digit apart as
+  high as 0.985, so at the merge's 0.97 it would fold them into one claim.
+  `memvara/embed/calibration.py` holds the thresholds per embedding space: bge-small gets
+  0.65 and 0.99, and every other embedder keeps 0.40 and 0.97, so nothing moves for
+  them. `Consolidator.merge_duplicates()` and `merge_pass()` take `threshold=None` by
+  default, meaning the calibrated value; a threshold passed explicitly still decides.
+  `bench/embedder_calibration.py` is the measurement, over pairs written for it, because
+  the original eval behind 0.40 is not in this repository.
 
 ## [0.15.0] — 2026-09-24
 

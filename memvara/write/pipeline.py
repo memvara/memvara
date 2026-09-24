@@ -60,6 +60,7 @@ from time import perf_counter
 from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
 from ..embed.base import Embedder
+from ..embed.calibration import calibration_of
 from ..llm._shape import finite_amount
 from ..llm.base import (
     LLM, MalformedToolOutput, ToolChat, ToolRunError, ToolRunTimeout, Usage,
@@ -171,27 +172,6 @@ def _wholly_ungrounded(obj: str, source: str) -> bool:
         return False
     return not any(w in src for w in words)
 
-
-#: Cosine floor for the embedding rescue under `reject_ungrounded="auto"`. A lexically
-#: ungrounded object whose best chunk-cosine against its source episode reaches this is
-#: kept -- read as a paraphrase rather than an invention.
-#:
-#: Measured, not guessed, on the 33 fabricated claims from the eval behind this feature
-#: plus 8 hand-built genuine paraphrases sharing zero vocabulary with their sources,
-#: under the MiniLM `LocalEmbedder`. Every wholesale invention -- the "Acme" employer,
-#: the fictional pet-and-pollen persona, the `"unknown"` template stubs -- scored 0.33
-#: or below; the paraphrases that rescue exists for scored 0.45 and up; the separating
-#: region on that data is [0.34, 0.42] and this sits inside it with margin on the side
-#: that matters. The only two fabrications above it (0.43, 0.46) were typo-variants of
-#: text genuinely in the source -- misreadings, not inventions, and the least dangerous
-#: thing this filter can miss.
-#:
-#: Under the default `HashingEmbedder` the same pairs score 0.0-0.11 -- character
-#: n-grams have nothing to say about meaning -- so nothing is ever rescued and "auto"
-#: degrades to the strict lexical check. That is graceful rather than accidental: the
-#: rescue's quality follows the embedder's, and a deployment that cares about paraphrase
-#: rescue is one that has configured a semantic embedder.
-_GROUNDING_RESCUE_COSINE = 0.40
 
 #: The rescue compares the object against the source in chunks this wide, taking the
 #: best score. MiniLM-class embedders truncate around 512 tokens, and episodes here run
@@ -1251,9 +1231,10 @@ class WritePipeline:
         """The embedder's veto over the lexical trigger, under `"auto"`.
 
         A lexically ungrounded object is kept anyway when its best chunk-cosine against
-        the source reaches `_GROUNDING_RESCUE_COSINE` -- that is what a genuine
-        paraphrase looks like and what a wholesale invention does not (the constant's
-        docstring carries the measurements). Chunked because MiniLM-class embedders
+        the source reaches the embedder's `grounding_rescue` threshold -- that is what a
+        genuine paraphrase looks like and what a wholesale invention does not. The value
+        depends on the embedding space; `embed/calibration.py` carries the measurements.
+        Chunked because MiniLM-class embedders
         truncate long input, and a fact grounded late in a 7,000-character turn must
         not be invisible to the comparison.
 
@@ -1279,7 +1260,7 @@ class WritePipeline:
                     RuntimeWarning, stacklevel=2,
                 )
             return True
-        return best >= _GROUNDING_RESCUE_COSINE
+        return best >= calibration_of(self.embedder).grounding_rescue
 
     def _claim_from_dict(self, item: Mapping[str, Any], episodes: Sequence[Episode],
                          now, receipt: WriteReceipt) -> Claim | None:
