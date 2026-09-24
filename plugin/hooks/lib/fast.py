@@ -187,6 +187,15 @@ def _spawn(root: str) -> None:
 #: importing anything to do it.
 QUOTA = "quota"
 
+#: The token for a plan's daily recall allowance being used up: `daily` alone,
+#: `daily:<seconds until it resets>`, or `daily:<HH:MM>` for the reset time in UTC when the
+#: refusal carried no wait. Paid plans meter recalls per day, and the service answers a
+#: spent daily allowance with HTTP 429 and code `rate_limited`, the same status and code as
+#: a plain rate limit. The two differ in `detail`: an allowance names its `reason`
+#: (`over_period_allowance`) and `resets_at`, and a rate limit names the `rule` that bound
+#: instead. Read from memvara-cloud's `rest/limits.py`.
+DAILY = "daily"
+
 
 def _reason(exc: "BaseException") -> str:
     """The short token for a failure, or `""` when there is nothing useful to add.
@@ -196,10 +205,25 @@ def _reason(exc: "BaseException") -> str:
     runs for every prompt against a ~30ms budget. `getattr` on an exception costs nothing
     and an exception that does not carry a code answers `""`.
     """
-    if getattr(exc, "code", "") != "quota_exhausted":
-        return ""
+    code = getattr(exc, "code", "")
     detail = getattr(exc, "detail", None)
-    when = str((detail or {}).get("resets_at") or "")[:10]
+    if not isinstance(detail, dict):
+        detail = {}
+    if code == "rate_limited" and detail.get("reason") == "over_period_allowance":
+        # The wait comes from `Retry-After`, which the service sends with this refusal as
+        # the seconds until the allowance resets. Without it, the reset time is read from
+        # `detail.resets_at`, and only in the UTC form the service writes, because a
+        # misread offset would show a person the wrong time.
+        wait = getattr(exc, "retry_after", None)
+        if isinstance(wait, int):
+            return f"{DAILY}:{wait}"
+        when = str(detail.get("resets_at") or "")
+        if len(when) >= 16 and when[10] == "T" and when.endswith(("+00:00", "Z")):
+            return f"{DAILY}:{when[11:16]}"
+        return DAILY
+    if code != "quota_exhausted":
+        return ""
+    when = str(detail.get("resets_at") or "")[:10]
     # The date rides along because it is the half that makes the banner actionable: "spent"
     # tells the reader to stop retrying, and only "resets on the 1st" tells them how long
     # for. Joined into the token rather than given its own slot -- one more slot for one
@@ -229,9 +253,11 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
       log that will tell them nothing.
 
     The third slot is `reason`: `""` when there is nothing to add, else a short token the
-    caller can turn into words -- `"quota"` today. It exists because `False` alone sent a
-    user to read a log about a store that was answering perfectly and telling him, in the
-    body of a 402, exactly which allowance was spent and when it resets.
+    caller can turn into words: `"quota"` for a spent monthly allowance and `"daily"` for a
+    spent daily one, each with its reset after a colon when the refusal said. It exists
+    because `False` alone sent a user to read a log about a store that was answering
+    perfectly and telling him, in the body of a 402, exactly which allowance was spent and
+    when it resets.
 
     A plain tuple rather than a NamedTuple on purpose: `typing` is not imported anywhere on
     this path, and this file runs on every prompt against a ~30ms budget. A third slot

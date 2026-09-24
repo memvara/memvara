@@ -84,13 +84,18 @@ def _project_header() -> "str | None":
 _STALE_SESSION = frozenset((401, 404))
 
 
-def _refusal(status: int, raw: bytes) -> "HostedError":
+def _refusal(status: int, raw: bytes, retry_after: "str | None" = None) -> "HostedError":
     """A `HostedError` carrying whatever the server said about why it refused.
 
     The API answers a refusal with `{"error": {"code": ..., "message": ..., "detail": ...}}`
     and this is the only frame that still holds it. A body that will not parse is not an
     error here -- plenty of statuses arrive with none, or with HTML from something in
     front of the API -- so the status alone is the fallback.
+
+    `retry_after` is the response's `Retry-After` header. The service sends it with every
+    429, including the one that says a plan's daily recall allowance is used up, where it is
+    the number of seconds until the allowance resets. A value that is not a whole number of
+    seconds is dropped rather than guessed at.
     """
     code, message, detail = "", "", {}
     try:
@@ -103,8 +108,9 @@ def _refusal(status: int, raw: bytes) -> "HostedError":
         pass
     if not isinstance(detail, dict):
         detail = {}
+    wait = int(retry_after) if retry_after and retry_after.strip().isdigit() else None
     return HostedError(message or f"the endpoint refused with HTTP {status}",
-                       status=status, code=code, detail=detail)
+                       status=status, code=code, detail=detail, retry_after=wait)
 
 
 class HostedError(RuntimeError):
@@ -114,6 +120,11 @@ class HostedError(RuntimeError):
     different questions. A caller that cannot tell them apart reports an unreachable store
     as an empty one, which is the failure this file spent thirty minutes at a time
     demonstrating.
+
+    `status` is the HTTP status of the refusal. It is 200 when the server answered the call
+    and the tool itself refused it (a JSON-RPC error or a result with `isError`), and `None`
+    when nothing came back at all. Only a refusal with status 200 can be about an argument:
+    a 429, a 402 or a 5xx is decided before the tool reads its arguments.
 
     `code` and `detail` carry the server's own account of the refusal when it sent one.
     They were thrown away until a quota-exhausted account spent a day reporting "recall
@@ -128,11 +139,14 @@ class HostedError(RuntimeError):
     """
 
     def __init__(self, message: str, *, status: "int | None" = None,
-                 code: str = "", detail: "dict | None" = None) -> None:
+                 code: str = "", detail: "dict | None" = None,
+                 retry_after: "int | None" = None) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.detail = detail or {}
+        #: Seconds from the refusal's `Retry-After` header, or `None` when it had none.
+        self.retry_after = retry_after
 
 
 def credentials() -> "dict | None":
@@ -274,7 +288,7 @@ class HostedRecall:
             # The body is the whole point of a refusal and this is the only frame that
             # still has it. Hand it back so `_call` can raise something a person can act
             # on rather than "no reply".
-            raise _refusal(response.status, raw)
+            raise _refusal(response.status, raw, response.getheader("retry-after"))
         return _decode(raw)
 
     def close(self) -> None:
@@ -364,14 +378,16 @@ class HostedRecall:
         reply = self._rpc("tools/call", {"name": tool, "arguments": arguments})
         if not isinstance(reply, dict):
             raise HostedError(f"no reply to {tool}")
+        # Both refusals below arrived inside an HTTP 200, so they carry that status: it is
+        # what tells `recall` that the tool read the arguments and refused the call.
         if reply.get("error") is not None:
-            raise HostedError(str(reply["error"]))
+            raise HostedError(str(reply["error"]), status=200)
         result = reply.get("result")
         if not isinstance(result, dict):
             raise HostedError(f"malformed reply to {tool}")
         text = _content_text(result)
         if result.get("isError"):
-            raise HostedError(text or f"{tool} reported an error")
+            raise HostedError(text or f"{tool} reported an error", status=200)
         return text
 
     def recall(self, query: str, *, k: int = 6, budget: int = 700,
@@ -384,6 +400,18 @@ class HostedRecall:
         Empty means this store had nothing relevant, which is information; a failure means
         the question was never asked, which is not. They used to be the same value. See the
         module docstring.
+
+        **One request per recall, whenever the server's schema is known.** The hosted
+        service counts every `memory_recall` it answers against the plan's recall
+        allowance, and that includes a call the tool refused because of an argument: the
+        refusal is a tool result inside an HTTP 200. So the optional arguments are checked
+        against the `tools/list` schema (`offers`) before the call, and an argument the
+        server does not declare is left off rather than sent and then retried without.
+
+        The reactive drop below is only the fallback for a probe that failed. It resends
+        only when the tool itself refused the call (status 200). A 429, a 402, a 5xx or no
+        reply at all is raised as it is, because none of them is about an argument and a
+        resend only asks the same refused question again.
         """
         if not query.strip():
             return ""
@@ -394,6 +422,9 @@ class HostedRecall:
         if not self._ensure_session():
             raise HostedError("no session on the hosted endpoint for memory_recall")
         offered = self.offers("memory_recall", "query_rewrite")
+        #: Whether the probe answered. When it did, `offers` is a plain yes or no for every
+        #: argument below, and the call is sent exactly once.
+        known = offered is not None
         if offered is not False:
             # Always a plain read. A server that offers query rewrite runs it by default,
             # with the organisation's own model key, and setup cannot check that key from
@@ -404,8 +435,12 @@ class HostedRecall:
             # what must not be lost, and a server that refuses it is handled below.
             args["query_rewrite"] = False
         if min_score:
-            args["min_score"] = min_score
-        if include_episodes:
+            if not known or self.offers("memory_recall", "min_score"):
+                args["min_score"] = min_score
+            else:
+                self._unfiltered("this server's memory_recall does not take min_score")
+        if include_episodes and (not known or self.offers("memory_recall",
+                                                          "include_episodes")):
             args["include_episodes"] = True
         if memory_types:
             # The tool has always taken this and this client never sent it, which is why
@@ -416,7 +451,9 @@ class HostedRecall:
         try:
             text = self._call("memory_recall", args)
         except HostedError as exc:
-            if offered is None and "query_rewrite" in str(exc):
+            if known or exc.status != 200:
+                raise
+            if "query_rewrite" in str(exc):
                 # The probe could not say, and the server named the argument: it does not
                 # know it, so it cannot rewrite either, and dropping the opt-out is safe.
                 # Any other failure keeps the opt-out, because a retry without it could
@@ -433,12 +470,29 @@ class HostedRecall:
             return ""
         return _reheader(text, header)
 
+    def _unfiltered(self, why: str) -> None:
+        """Record that this recall goes out without its `min_score` floor, and why.
+
+        Recorded where a person actually looks. The flag alone was not enough: nothing read
+        it, so a hosted store that cannot filter returned unfiltered memories while every
+        visible signal said the recall had succeeded normally.
+        """
+        self.unfiltered = True
+        log_line("recall", f"{why}; this recall is UNFILTERED -- the floor was not applied")
+
     def _without_optional(self, args: dict, refusal: HostedError) -> str:
         """`memory_recall` again after `refusal`, dropping the optional arguments.
 
+        Reached only when the `tools/list` probe failed, so the client cannot tell which
+        argument the server refused. Each resend is one more request counted against the
+        plan's allowance, which is why a known schema never comes here.
+
         Optional arguments are dropped one at a time, cumulatively, in the order that loses
         least -- the floor before the episodes, because unfiltered memories beat none and a
-        widened brief beats a narrow one. With nothing to drop, `refusal` is raised.
+        widened brief beats a narrow one. With nothing to drop, or when the refusal did not
+        come from the tool itself (its status is not 200), `refusal` is raised, and the
+        same rule stops the drops part way: a 429 on the second attempt is not a reason to
+        send a third.
 
         Written as a loop rather than as a chain of branches because the chain is what
         broke: `min_score` was added as the first branch and returned from inside it, so a
@@ -448,30 +502,22 @@ class HostedRecall:
         in sequence has no such ordering hazard: whatever the server objected to is gone by
         the end.
 
-        `include_episodes` is the only boolean argument anywhere in the tool surface, and
-        the server's own validator has no branch for that type: a boolean falls through to
-        the string check and dies on a `KeyError: 'boolean'` looking up the article for the
-        error message it was about to raise. So that argument has never worked on any
-        deployment, for either value. Both drops self-heal the day the server grows the
-        branch, with no release here.
+        Servers built before memvara 0.10.0 crashed on `include_episodes`: their validator
+        had no branch for a boolean. Every hosted deployment since then accepts it, and
+        declares it in `tools/list`.
         """
         optional = [key for key in ("min_score", "include_episodes") if key in args]
-        if not optional:
+        if not optional or refusal.status != 200:
             raise refusal
         for index, key in enumerate(optional):
             del args[key]
             if key == "min_score":
-                # Recorded where a person actually looks. The flag alone was not enough:
-                # nothing read it, so a hosted store that cannot filter returned unfiltered
-                # memories while every visible signal said the recall had succeeded
-                # normally.
-                self.unfiltered = True
-                log_line("recall", "hosted rejected min_score; this recall is "
-                                   "UNFILTERED -- the floor was not applied")
+                self._unfiltered("hosted refused the recall and its schema could not be "
+                                 "read, so it was sent again without min_score")
             try:
                 return self._call("memory_recall", args)
-            except HostedError:
-                if index == len(optional) - 1:
+            except HostedError as again:
+                if index == len(optional) - 1 or again.status != 200:
                     raise
         return ""  # not reached: the last drop returns or raises
 

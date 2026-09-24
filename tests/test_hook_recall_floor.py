@@ -19,7 +19,11 @@ from lib.hosted import HostedRecall, HostedError  # noqa: E402
 
 
 class Rejects:
-    """A server that refuses any call carrying one named argument."""
+    """A server that refuses any call carrying one named argument.
+
+    The refusal has status 200, as the real client reports a refusal from the tool itself:
+    the tool read the arguments and answered with an error inside an HTTP 200.
+    """
 
     def __init__(self, offending: str) -> None:
         self.offending = offending
@@ -28,16 +32,19 @@ class Rejects:
     def __call__(self, tool: str, args: dict) -> str:
         self.seen.append(dict(args))
         if self.offending in args:
-            raise HostedError(f"no branch for {self.offending}")
+            raise HostedError(f"no branch for {self.offending}", status=200)
         return "- a memory"
 
 
 def client(monkeypatch, server) -> HostedRecall:
     made = HostedRecall("key")
     monkeypatch.setattr(made, "_call", server)
-    # No network: the handshake and the `tools/list` probe answer here.
+    # No network: the handshake and the `tools/list` probe answer here. The probe fails
+    # (`None`), because the drops these tests are about are the fallback for a client that
+    # could not read the schema. With a schema, an argument the server does not declare is
+    # never sent; `tests/test_hook_recall_requests.py` counts the requests for that case.
     monkeypatch.setattr(made, "_ensure_session", lambda: True)
-    monkeypatch.setattr(made, "accepts", lambda tool, argument: False)
+    monkeypatch.setattr(made, "offers", lambda tool, argument: None)
     return made
 
 
@@ -67,6 +74,27 @@ def test_a_rejected_floor_is_dropped_and_recorded(monkeypatch):
     assert text.strip() == "- a memory"
     assert made.unfiltered is True, (
         "a hosted store that cannot filter must be distinguishable from one that did")
+
+
+@pytest.mark.parametrize("status", [429, 402, 500, None])
+def test_a_refusal_that_is_not_about_an_argument_is_not_sent_again(monkeypatch, status):
+    """Only the tool can refuse an argument, and it answers inside an HTTP 200.
+
+    A 429 or 402 is the allowance or the rate limit, a 500 is the server, and `None` is no
+    reply at all. Each used to be retried twice more without the floor and the episodes,
+    logged as "hosted rejected min_score" although nothing had rejected it.
+    """
+    seen: list[dict] = []
+
+    def refuses(tool: str, args: dict) -> str:
+        seen.append(dict(args))
+        raise HostedError("refused", status=status)
+
+    made = client(monkeypatch, refuses)
+    with pytest.raises(HostedError):
+        made.recall("q", include_episodes=True, min_score=0.29)
+    assert len(seen) == 1, seen
+    assert made.unfiltered is False
 
 
 def test_unfiltered_is_readable_before_any_call():

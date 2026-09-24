@@ -203,6 +203,29 @@ def _store_keys_never_touch_the_keychain(monkeypatch):
     monkeypatch.delenv("MEMVARA_DB_KEY", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _hook_logs_never_touch_home(tmp_path_factory, monkeypatch):
+    """Point the plugin hooks' home directory at a temporary one, for every test.
+
+    `plugin/hooks/lib/ipc.py` reads the home directory once, into `_HOME`, when it is
+    imported, and a hook test file imports it while pytest collects, before the fixture
+    above has moved `HOME`. So `log_line` wrote every test's log lines into the
+    developer's real `~/.memvara/.hooks/recall.log`. That is how the hosted client's
+    tests left lines saying "hosted rejected min_score" in a real log, three at a time,
+    where they read as evidence about the live service. `ipc._HOME` is read at call
+    time, so patching it here reaches `log_line` and every state file built from it.
+
+    Only when the hooks' `lib.ipc` has been imported, which is the only case with a
+    frozen path to correct. A test that sets `_HOME` itself still does; it runs after
+    this and wins.
+    """
+    import sys  # noqa: PLC0415 - only this fixture needs it
+
+    ipc = sys.modules.get("lib.ipc")
+    if ipc is not None and hasattr(ipc, "_HOME"):
+        monkeypatch.setattr(ipc, "_HOME", str(tmp_path_factory.mktemp("hook-home")))
+
+
 def pytest_configure(config: Any) -> None:
     config.addinivalue_line(
         "markers",
