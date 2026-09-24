@@ -19,6 +19,9 @@ answer quality with no error, no exception and nothing in any log.
   `bench/twowiki.py`, `bench/multihop.py`, `bench/temporal.py`.
 - What `recall()` shows of a long turn: `bench/recall_window.py`, which renders one search
   both ways and counts how often the gold answer reaches the reader's context.
+- The CI gate on published retrieval figures: `bench/retrieval_regression.py`, which runs
+  LOCOMO retrieval with no flags and compares each category's figures with
+  `bench/expected/locomo_retrieval.json`.
 - Comparison and cost: `bench/compare.py`, `bench/mem0_real.py`, `bench/baseline.py`,
   `bench/extract_cost.py`, `bench/perf.py`, `bench/evalkit.py`.
 - Against a hosted store: `bench/hosted.py`.
@@ -34,6 +37,7 @@ answer quality with no error, no exception and nothing in any log.
   `benchmarks/agent_memory/README.md` and adapters under
   `benchmarks/agent_memory/adapters/`.
 - Tests: `tests/test_telemetry.py`, `tests/test_bench_eval.py`, `tests/test_bench_hosted.py`,
+  `tests/test_bench_retrieval_regression.py`,
   `tests/test_agent_memory_bench.py`, `tests/test_demo.py`, `tests/test_demo_scenario.py`,
   `tests/test_demo_hosted.py`, `tests/test_demo_competitors.py`,
   `tests/test_plugin_recall_bench.py`.
@@ -57,7 +61,11 @@ project in its first week.
 
 The benchmark scripts under `bench/` are run by hand and write their numbers into
 [BENCHMARKS.md](../BENCHMARKS.md) alongside the caveats that make each number less than it
-looks. `demo/harness.py` is the end-to-end run: an authored corpus, a reader — a model
+looks. One table of them is also checked on every push: CI runs LOCOMO retrieval and
+fails when a figure moves by more than 0.1 points overall or 1.1 in a category, in either
+direction, so a change
+that moves retrieval has to commit the new figures with `bench/retrieval_regression.py
+--update` and correct the document in the same commit. `demo/harness.py` is the end-to-end run: an authored corpus, a reader — a model
 behind an API with its parameters pinned, or an agent through a blinded round trip —
 reading the memory block, and a scored answer file. `benchmarks/agent_memory/` is
 different in kind — it
