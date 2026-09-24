@@ -1210,6 +1210,21 @@ def test_recall_ranked_renders_the_kept_turn_whole() -> None:
     assert LONG_TURN in block
 
 
+def test_recall_ranked_dates_a_kept_turn_as_it_dates_every_other() -> None:
+    """A kept turn is rendered whole, and whole still means with the day it was said: the
+    model chose it as evidence, and evidence about *when* needs its date."""
+    embedder = HashingEmbedder(dim=64)
+    selector = FakeSelector(top_n=5, keep=1)
+    mem = Memvara(llm=NullLLM(), user="alice", embedder=embedder,
+                  read_selector=selector, read_rerank_top_n=20)
+    mem.add([{"role": "user", "content": "we booked the kayak tour yesterday",
+              "ts": datetime(2023, 5, 8, tzinfo=timezone.utc)}])
+
+    block = mem.recall("kayak", include_episodes=True, ranked=True)
+
+    assert "- [8 May 2023] we booked the kayak tour yesterday" in block.splitlines()
+
+
 def test_recall_ranked_renders_an_unkept_turn_at_280_characters() -> None:
     embedder = HashingEmbedder(dim=64)
     selector = FakeSelector(top_n=5, keep=0)  # the model kept nothing

@@ -697,7 +697,8 @@ that plan (a passage from a document).
 
 **It can also hold the documents themselves.** `add_document()` stores a policy, a README
 or a set of meeting notes whole and splits it into passages of about 1,000 characters,
-which `recall(include_episodes=True)` returns beside the facts. Give it a `custom_id` and
+which `recall(include_episodes=True)` returns beside the facts, each dated and cut to the
+part that matches the question. Give it a `custom_id` and
 adding the same document again updates it, keeping every passage that did not change.
 Deleting it erases its text and retires, rather than erases, any memory that came only
 from it. That is a home for the documents one agent works with, not a retrieval system
