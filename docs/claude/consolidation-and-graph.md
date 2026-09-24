@@ -41,9 +41,12 @@ the number of claims that pass changed.
 
 - `decay()` multiplies each claim's salience by its predicate's recency factor, floored so
   that nothing decays to zero and vanishes from ranking altogether.
-- `merge_duplicates()` finds live claims sharing a slot whose embeddings exceed the
+- `merge_duplicates()` finds live claims sharing a slot whose embeddings reach the
   threshold, keeps the one with the most observations, folds the others' sources and counts
-  into it, and invalidates them with `invalidated_by` pointing at the survivor.
+  into it, and invalidates them with `invalidated_by` pointing at the survivor. The
+  threshold defaults to the one measured for the embedder's space in
+  `memvara/embed/calibration.py`: 0.97, or 0.99 for bge-small-en-v1.5, which scores two
+  values one digit apart as high as 0.985.
 - `promote()` turns a repeatedly observed episodic claim into a semantic one. Seeing
   something happen once is an event; seeing it several times is a pattern. The promoted claim
   is marked `Derivation.CONSOLIDATION`.

@@ -622,9 +622,11 @@ def _store_embedder(store: Any) -> Any:
       asked whether the reconstruction *is* what the store records, so a sidecar
       whose name and dim disagree falls through rather than opening a store with an
       embedder that merely looks right.
-    * **Anything else**: `default_embedder()` is used only when it is itself what
-      wrote the store — the sentence-transformers case, which works today and must
-      keep working — and otherwise this refuses.
+    * **Anything else**: `default_embedder()`, told the local model the record names,
+      is used only when it is itself what wrote the store — the sentence-transformers
+      case, which works today and must keep working, including for a store written by
+      the model `LocalEmbedder()` loaded before its default moved — and otherwise this
+      refuses.
 
     **The record only binds while the store has vectors.** `_check_embedder` reads
     `stored_dim(self.store)` alongside the fingerprint and, when it is `None`,
@@ -644,7 +646,8 @@ def _store_embedder(store: Any) -> Any:
     `default_embedder()` already returns that model, the branch above covers it.
     """
     from memvara.embed import HashingEmbedder, default_embedder
-    from memvara.embed.fingerprint import fingerprint_of, read_fingerprint, stored_dim
+    from memvara.embed.fingerprint import (fingerprint_of, local_model, read_fingerprint,
+                                           stored_dim)
 
     recorded = read_fingerprint(store)
     if recorded is None or stored_dim(store) is None:
@@ -657,7 +660,8 @@ def _store_embedder(store: Any) -> Any:
         if fingerprint_of(candidate) == recorded:
             return candidate
 
-    fallback = default_embedder()
+    model = local_model(recorded)
+    fallback = default_embedder(model=model) if model else default_embedder()
     if fingerprint_of(fallback) == recorded:
         return fallback
 

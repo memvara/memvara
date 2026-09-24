@@ -205,6 +205,63 @@ def test_threshold_is_respected(consolidator):
     assert live_ids(store) == {"cl_coffee"}
 
 
+class _AngledEmbedder:
+    """Every text on one axis, except a text carrying `marker`, set `cosine` away from it.
+
+    `name` is the fingerprint name, which the merge threshold is looked up by, so one
+    fake stands in for any embedding space.
+    """
+
+    dim = 2
+
+    def __init__(self, name: str, cosine: float, marker: str) -> None:
+        self.name, self.marker = name, marker
+        self._off = [cosine, (1.0 - cosine * cosine) ** 0.5]
+
+    def encode(self, texts):
+        return np.array([self._off if self.marker in t else [1.0, 0.0] for t in texts],
+                        dtype=np.float32)
+
+
+@pytest.mark.parametrize("name, merged", [
+    ("hashing:256:3-5", 1),
+    ("local:sentence-transformers/all-MiniLM-L6-v2", 1),
+    ("local:BAAI/bge-small-en-v1.5", 0),
+])
+@pytest.mark.parametrize("sweep", ["merge_duplicates", "run"])
+def test_the_merge_threshold_is_the_one_measured_in_the_embedders_space(name, merged,
+                                                                        sweep):
+    """bge-small scores two values one digit apart as high as 0.985, so the 0.97 every
+    other space merges at would fold "port 8080" and "port 8081" into one claim under it.
+    Its threshold is 0.99. A pair at 0.98 merges under every other space and stays two
+    claims under bge-small, in `merge_duplicates()` and in the scheduled `run()` alike."""
+    store = SQLiteStore(":memory:")
+    try:
+        consolidator = Consolidator(store, _AngledEmbedder(name, 0.98, "8081"),
+                                    PredicateRegistry())
+        add(store, "cl_a", "port 8080", predicate="listens_on")
+        add(store, "cl_b", "port 8081", predicate="listens_on")
+        done = (consolidator.merge_duplicates() if sweep == "merge_duplicates"
+                else consolidator.run()["merged"])
+        assert done == merged
+    finally:
+        store.close()
+
+
+def test_a_threshold_passed_by_the_caller_still_decides():
+    """The calibrated value is the default, not a floor: a caller who passes 0.97 for a
+    bge-small store gets 0.97."""
+    store = SQLiteStore(":memory:")
+    try:
+        embedder = _AngledEmbedder("local:BAAI/bge-small-en-v1.5", 0.98, "8081")
+        consolidator = Consolidator(store, embedder, PredicateRegistry())
+        add(store, "cl_a", "port 8080", predicate="listens_on")
+        add(store, "cl_b", "port 8081", predicate="listens_on")
+        assert consolidator.merge_duplicates(threshold=0.97) == 1
+    finally:
+        store.close()
+
+
 def test_two_separate_clusters_in_one_slot_each_keep_a_survivor(consolidator):
     store = consolidator.store
     add(store, "cl_coffee_a", "coffee", predicate="likes", obs=5)

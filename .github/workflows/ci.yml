@@ -221,6 +221,40 @@ jobs:
           python -m benchmarks.agent_memory --quick --repeat-check --quiet \
             --system memvara --system naive --system vector-rag
 
+  retrieval-regression:
+    # The job above declines to gate on a score, because a gate that reports a score
+    # teaches everyone to make the score go up. This one gates on a score moving at all,
+    # in either direction, which is a different thing: an improvement fails it as surely
+    # as a regression, until the commit that caused it also updates the committed
+    # figures and the documentation that quotes them. What it protects is that a number
+    # in `docs/BENCHMARKS.md` is still the number the code produces. A graph-leg change
+    # once cost 1.6 points of a published LongMemEval figure and three commits carried
+    # it, because nothing asserted the figure.
+    #
+    # LOCOMO because it is the one public set small enough for every push: 2.8 MB, and
+    # about half a minute for all 1,531 evidence-labelled questions with the hashing
+    # embedder. It is fetched rather than vendored, as `bench/locomo.py --download`
+    # fetches it; the script checks its digest before it measures anything, so a change
+    # upstream fails as a changed dataset rather than as a regression.
+    name: retrieval regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+      - name: Fetch LOCOMO
+        run: |
+          mkdir -p ~/.cache/memvara-bench
+          curl -fsSL --retry 3 -o ~/.cache/memvara-bench/locomo10.json \
+            https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json
+      - name: LOCOMO retrieval matches the committed figures
+        run: PYTHONPATH=. python bench/retrieval_regression.py
+
   npm-bridge:
     # `npx memvara` is JavaScript, and until 0.1.0 no JavaScript ran in this workflow at
     # all — the npm tests were Python assertions about files, spawned through the matrix

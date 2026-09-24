@@ -451,7 +451,7 @@ image is not configured, it is guessed. Hence a named default.
 |---|---|
 | `hashing` | `HashingEmbedder(dim=512)`. The default, and identical to what a deployment with no extras installed has always had. |
 | `hashing:<dim>` | The same at another width. `hashing:384`, `hashing:768` — this is how you name a store that was written at a width other than the default. |
-| `local` | `LocalEmbedder()`, i.e. `all-MiniLM-L6-v2` at 384 dimensions. Needs `memvara[local-embed]`; **fails at startup if it is missing** rather than quietly falling back. |
+| `local` | The local model the store's fingerprint names, so a store keeps the model that wrote it. For a new store, and a store whose fingerprint names no local model, `LocalEmbedder()`: `BAAI/bge-small-en-v1.5` at 384 dimensions (`all-MiniLM-L6-v2` through 0.15). Needs `memvara[local-embed]`; **fails at startup if it is missing** rather than quietly falling back. |
 | `local:<model>` | Any sentence-transformers model id, spelled exactly as `memory.db.embedder.json` records it — `local:BAAI/bge-small-en-v1.5`. Case-sensitive. |
 | `auto` | Whichever of the above happens to be installed. The old behaviour, available on request; it is the right answer only if you do not mind which vector space you get. |
 
@@ -484,7 +484,10 @@ one is written in the message: the phrase after `written by` is the value to use
 
 If the `written by` clause is absent, the store predates the fingerprint sidecar or was
 copied without it. The width is still there and is still enough: `MEMVARA_EMBEDDER=hashing:<N>`
-if you never installed an embedding extra, `local` if you did.
+if you never installed an embedding extra. If you did, name the model the store was
+written with: `local:sentence-transformers/all-MiniLM-L6-v2` for a store written through
+0.15, when bare `local` meant that model and can no longer be told apart from the new
+default by its width.
 
 Set the variable in the same `env` block as `MEMVARA_DB` — and note that under Docker it
 has to cross into the container like every other one, as `-e MEMVARA_EMBEDDER=...`.

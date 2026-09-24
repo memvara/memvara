@@ -4041,6 +4041,49 @@ def test_the_local_embedder_is_selectable_and_keeps_its_model_id(monkeypatch):
     memory.close()
 
 
+def test_bare_local_keeps_the_model_its_store_was_written_by(tmp_path, monkeypatch):
+    """`MEMVARA_EMBEDDER=local` names no model, and the model `LocalEmbedder()` loads
+    moved from all-MiniLM-L6-v2 to bge-small-en-v1.5, a model of the same width. A
+    deployment that set `local` against a store MiniLM wrote must keep loading MiniLM:
+    without refusing to start, and without reaching the network for a model it will never
+    use. So `local` reads the model off the store's fingerprint before it builds anything.
+    A new store, and one whose record names no local model, gets the new default."""
+    _fake_sentence_transformers(monkeypatch)
+    from memvara.embed.local import LocalEmbedder
+
+    minilm = "sentence-transformers/all-MiniLM-L6-v2"
+    old = str(tmp_path / "old.db")
+    with Memvara(old, embedder=CachedEmbedder(LocalEmbedder(minilm)), llm=NullLLM(),
+                 user="alice") as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+
+    env = {"MEMVARA_EMBEDDER": "local", "MEMVARA_FEATURE_ENCRYPTION": "0"}
+    kept = build_memvara(ServerConfig.from_env({**env, "MEMVARA_DB": old}))
+    assert fingerprint_of(kept.embedder) == EmbedderFingerprint(f"local:{minilm}", 384)
+    kept.close()
+
+    new = build_memvara(ServerConfig.from_env({**env,
+                                               "MEMVARA_DB": str(tmp_path / "new.db")}))
+    assert fingerprint_of(new.embedder) == EmbedderFingerprint(
+        "local:BAAI/bge-small-en-v1.5", 384)
+    new.close()
+
+
+def test_a_record_left_by_a_deleted_store_does_not_choose_the_model(tmp_path,
+                                                                    monkeypatch):
+    """A sidecar beside no store file describes nothing, so bare `local` takes the
+    default for the store it is about to create."""
+    _fake_sentence_transformers(monkeypatch)
+    path = tmp_path / "memory.db"
+    (tmp_path / "memory.db.embedder.json").write_text(
+        '{"embedder": "local:sentence-transformers/all-MiniLM-L6-v2", "dim": 384}')
+    memory = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": str(path), "MEMVARA_EMBEDDER": "local",
+        "MEMVARA_FEATURE_ENCRYPTION": "0"}))
+    assert fingerprint_of(memory.embedder).name == "local:BAAI/bge-small-en-v1.5"
+    memory.close()
+
+
 def test_a_missing_local_embed_extra_is_a_startup_error_not_a_crash(monkeypatch):
     """The mirror of the anthropic case, and the reason `local` and `auto` both exist:
     `local` is a claim about the store and fails when it cannot be honoured, where `auto`

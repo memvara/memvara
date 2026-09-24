@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from ..core import Memvara
 from ..embed import CachedEmbedder, HashingEmbedder
+from ..embed.fingerprint import local_model, read_fingerprint_at
 from ..ingest.url import SafeFetcher, nat64_networks
 from ..llm import NullLLM
 from ..llm.guidance import Guidance, GuidanceError, load_guidance
@@ -950,30 +951,37 @@ def _openai(model: str | None, max_claims: int | None = None,
         ) from exc
 
 
-def _local(model: str) -> Any:
+def _local(model: str, db_path: str = "") -> Any:
     # Imported here so a hashing deployment — the default — never pays the torch import.
     from ..embed.local import LocalEmbedder
 
+    # `local` with no model means the local model this store was written by, read off
+    # its fingerprint before the store is opened, and `LocalEmbedder`'s default only for
+    # a store with none on record. The default moved after 0.15 to a model of the same
+    # width, so a deployment that set `local` must keep loading the model its store was
+    # written with, and must not need the network to fetch one it will never use.
+    recorded = model or local_model(read_fingerprint_at(db_path)) or ""
     try:
-        return CachedEmbedder(LocalEmbedder(model) if model else LocalEmbedder())
+        return CachedEmbedder(LocalEmbedder(recorded) if recorded else LocalEmbedder())
     except ImportError as exc:
         raise ConfigError(f"MEMVARA_EMBEDDER={model or 'local'} needs "
                           f"sentence-transformers: {exc}") from exc
 
 
-def _embedder(spec: str) -> Any:
+def _embedder(spec: str, db_path: str = "") -> Any:
     """Build the embedder named by `spec`, or `None` to let `Memvara()` pick one.
 
     `None` is what `auto` means, and it routes through `Memvara.__init__` rather than
     calling `default_embedder()` here on purpose: 'auto' is defined as "the constructor's
     own default", so there is one implementation of that default and not two that can
-    drift.
+    drift. `db_path` is the store the embedder is for; `local` reads the model it was
+    written by from there.
     """
     kind, _, argument = spec.partition(":")
     if kind == "auto":
         return None
     if kind == "local":
-        return _local(argument)
+        return _local(argument, db_path)
     return CachedEmbedder(
         HashingEmbedder(dim=int(argument) if argument else _DEFAULT_DIM))
 
@@ -1143,7 +1151,7 @@ def _local_memvara(config: ServerConfig, encryption: bool) -> Memvara:
         # pass the original embedder rather than migrating — had no door to come through
         # here. `MEMVARA_EMBEDDER` is that door, and naming a default rather than
         # discovering one is what keeps the store's vector space out of `pip`'s hands.
-        embedder=_embedder(config.embedder),
+        embedder=_embedder(config.embedder, config.path),
         # The door this server did not have. `Memvara` has always taken a registry, but
         # an MCP client can only set environment variables, so a server-backed store was
         # pinned to the builtins and everything outside them accumulated silently.
