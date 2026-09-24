@@ -384,6 +384,8 @@ OMITTABLE: dict[str, str] = {
     "put_link": "Memvara.link() raises NotImplementedError naming the store, rather "
                 "than reporting a link it did not keep.",
     "claim_links": "links() and why().links report no links. Nothing else reads them.",
+    "hide_expired": "Memvara cannot switch the store's own hiding of expired claims "
+                    "off. Reads by id still follow expiry_erasure.",
     "expired_claims": "erase_expired() raises NotImplementedError naming the store, and "
                       "the sweep when the store opens is skipped. A claim's expires_at "
                       "is kept if the store keeps it, and the claim is never erased.",
@@ -419,6 +421,11 @@ class Store(Protocol):
     #: that raise, as `RemoteStore` does. Optional, and read as false when absent; see
     #: `OMITTABLE`.
     holds_documents: bool = False
+    #: True on a store that leaves a claim whose `expires_at` has passed out of its own
+    #: queries (`unexpired_predicate`). `Memvara` sets it from `expiry_erasure`, so an
+    #: expiry that erases nothing hides nothing either. Optional, and read as true when
+    #: absent; see `OMITTABLE`.
+    hide_expired: bool = True
 
     # --- episodes ---------------------------------------------------------
     def add_episode(self, ep: Episode) -> None: ...

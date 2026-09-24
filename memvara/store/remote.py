@@ -414,6 +414,10 @@ class RemoteStore:
             method="erasure_record",
             why="No erasure-audit endpoint exists on the data plane today."))
 
+    #: The deployment decides what its reads return, so this client hides nothing
+    #: itself. Declared because it is on the `Store` protocol.
+    hide_expired = False
+
     def expired_claims(self, now: datetime) -> list[Claim]:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="expired_claims",
