@@ -389,6 +389,35 @@ def test_an_encrypted_store_reopens_and_its_vectors_still_answer(tmp_path, keyed
 
 
 @needs_extra
+def test_a_vector_file_that_ends_in_a_ctrl_z_byte_reopens_intact(tmp_path):
+    """Windows' C runtime deletes a final 0x1A byte from a file opened for reading and
+    writing in text mode, and `os.open` opens in text mode unless it is told otherwise.
+
+    The last byte of the encrypted vector file is the last byte of an authentication
+    tag, so it is 0x1A once in every 256 writes. When it was, reopening the store cut
+    the file by one byte and the store refused to open with "the record ends before
+    it". CI saw that as an intermittent failure; for a user it is a store that will not
+    open. Re-embedding the last claim seals it again under a new nonce, so this repeats
+    until the file ends in 0x1A and then checks that a reopen keeps the byte. It passes
+    on every platform, and fails on Windows if the file is opened in text mode.
+    """
+    path = str(tmp_path / "m.db")
+    with SQLiteStore(path, key=KEY) as store:
+        ids = [embed(store, i).id for i in range(3)]
+        size = os.path.getsize(path + ".vecs")
+        for _ in range(5000):
+            if Path(path + ".vecs").read_bytes()[-1] == 0x1A:
+                break
+            store.set_embedding(ids[-1], onehot(2))
+        # A re-embedded claim keeps its row, so the file did not grow while looking.
+        assert os.path.getsize(path + ".vecs") == size
+        assert Path(path + ".vecs").read_bytes()[-1] == 0x1A
+    with SQLiteStore(path, key=KEY) as store:
+        assert os.path.getsize(path + ".vecs") == size
+        assert [hits(store, i) for i in range(3)] == [[c] for c in ids]
+
+
+@needs_extra
 def test_memvara_end_to_end_with_encryption(tmp_path, keyed):
     path = str(tmp_path / "m.db")
     with Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="u",

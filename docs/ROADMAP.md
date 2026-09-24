@@ -811,10 +811,28 @@ and no more duplicates than today's single-call extractor on the same model. Sec
 judged accuracy on the 199-question LongMemEval sample (seed `20260903`) must be within
 the reader noise floor of the current production number. That floor is recorded in
 `docs/BENCHMARKS.md` under "Answer accuracy, judged": reader self-disagreement of 7.8%, so
-a single-run difference under about 8 questions is noise. Both need a model key, and none
-was available when this was built, so there are no numbers here, not even a partial one.
-The hosted half of the measurement, the extraction worker's switch and the benchmark runs,
-is a separate piece of work in the phase 3 plan (stream P3-F).
+a single-run difference under about 8 questions is noise.
+
+`bench/extraction_bar.py` measures both conditions, and was added on 2026-09-24. Its
+`claims` mode writes the support history that `demo/harness.py` runs on into two stores
+with the same model, one with the switch off and one with it on, and counts the claims
+each wrote and the duplicates each left. Its `longmemeval` mode runs the 199-question
+sample (`bench/samples/longmemeval_s_199.txt`) through both arms, judges the answers, and
+reports the difference against the 8-question floor. Both modes count every fallback by
+reason and every refused proposal, and both can write through `add()` or through the
+hosted worker's arrangement (`--write-path worker`: store with no model, then
+`reextract()`). The accuracy mode runs in this repository's harness, not in MemoryBench,
+so its single-call arm stands in for the production number, and only the difference
+between the two arms is the measurement.
+
+**Nothing has been measured yet.** Both modes need a model key, and neither
+`ANTHROPIC_API_KEY` nor `OPENAI_API_KEY` was set in the environment where the script was
+built, so it has run only as a rehearsal with a scripted model, which is not a
+measurement. There are no numbers here, not even partial ones, and the switch stays off.
+When the runs are made, the model, the command line and each arm's counts go in this
+entry. The hosted extraction worker reads the same switch from
+`MEMVARA_FEATURE_AGENTIC_EXTRACTION`, with this library's default, which is the cloud half
+of this work (phase 3 stream P3-F).
 
 The invariant as it was held:
 

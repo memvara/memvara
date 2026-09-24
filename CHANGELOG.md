@@ -26,9 +26,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `include_episodes`, whatever the failure was. The hosted service counts every recall it
   answers against the plan's allowance, including one it refused because of an argument,
   so on a server that does not take `include_episodes` the wider second recall the hook
-  makes on a thin prompt cost three recalls, and the whole prompt four. The client now checks each optional argument against the server's
-  `tools/list` schema, which it already fetched for `query_rewrite`, and leaves off any
-  argument the server does not declare. A 429, a 402, a server error and a timeout are
+  makes on a thin prompt cost three recalls, and the whole prompt four. The client now
+  checks each optional argument against the server's `tools/list` schema, which it already
+  fetched for `query_rewrite`, and leaves off any argument the server does not declare. A 429, a 402, a server error and a timeout are
   never sent again, because none of them is about an argument. Resending without an
   argument is now only the fallback for a client whose `tools/list` request failed, and
   only after the tool itself refused the call. Against `app.memvara.dev` today no argument
@@ -42,6 +42,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   own log. The hosted client's tests left "hosted rejected min_score" lines there, three
   at a time. `tests/conftest.py` now points `lib.ipc._HOME` at a temporary directory for
   every test.
+- **An encrypted store on Windows no longer refuses to open about once in 256 reopens.**
+  The store opened its vector file (`<db>.vecs`) with `os.open` and no `os.O_BINARY`, so
+  Windows opened it in text mode. In that mode, the C runtime deletes a final 0x1A byte
+  from a file opened for reading and writing. The encrypted file ends in 0x1A whenever the
+  last record's authentication tag does, so the reopen cut one byte and the store raised
+  `EncryptionError` saying the last record "ends before it". The file is now opened in
+  binary mode. A store that already failed this way can be fixed by deleting `<db>.vecs`;
+  the store rebuilds it from the database on its next open. An unencrypted vector file on
+  Windows could lose its last byte the same way. That byte is the top byte of the last
+  float in the file, and a float whose top byte is 0x1A is smaller than 1e-21, so the
+  change to search results was negligible; it is fixed too. Linux and macOS were not
+  affected.
 - **The plugin's capture hook can write to a local store again.** It passed a fact's
   memory type to the library as a string, and the library takes the `MemoryType` enum, so
   every fact the hook wrote to a local store failed with `AttributeError: 'str' object has
@@ -214,6 +226,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   tools add a note line for each. It ships off because its release bar, no fewer claims
   and no more duplicates than single-call extraction on `demo/harness.py` and judged
   LongMemEval accuracy within the reader's noise floor, has not been measured.
+- **`bench/extraction_bar.py`, the measurement for that release bar.** `claims` writes the
+  demo's support history into two stores with the same extraction model, one with
+  `agentic_extraction` off and one with it on, and reports claims written, duplicates
+  left, and every fallback and refused proposal by reason. `longmemeval` does the same over
+  the 199-question LongMemEval-S sample, whose ids are now in
+  `bench/samples/longmemeval_s_199.txt`, and compares judged accuracy against the
+  8-question noise floor. `--write-path worker` reproduces the hosted worker: store with no
+  model, then read through `reextract()`. `bench/longmemeval.py`'s `build_memory` takes
+  `options=`, further `Memvara` arguments, for it. No run against a model has been made.
 - **`llm.ToolChat`, a protocol for tool-using conversations.** `run_tools(system,
   messages, tools, *, max_steps, timeout, usage=None) -> ToolRun`, with `Message`,
   `ToolSpec`, `ToolRun`, `ToolRunError`, `ToolRunTimeout` and `MalformedToolOutput` in
