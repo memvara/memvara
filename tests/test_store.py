@@ -14,7 +14,7 @@ from memvara.store import (STATES, SQLStore, SQLiteStore, live_predicate,
                            unexpired_predicate)
 from memvara.store.base import Store
 from memvara.store.sqlite import _WALKABLE as _WALKABLE_SQL
-from memvara.store.sqlite import SCHEMA_VERSION
+from memvara.store.sqlite import SCHEMA_VERSION, _fts_query
 from memvara.types import Claim, Derivation, Episode, MemoryType, Scope
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -300,6 +300,88 @@ def test_include_invalidated_reveals_retired_claims(store):
     )[0][0] == a.id
 
 
+def _churn(store) -> None:
+    """Every write that rewrites, frees or reuses a rowid, on both indexed tables."""
+    claims = [put(store, predicate=f"p{i}", object=f"kayak trip {'river ' * (i % 4)}{i}")
+              for i in range(12)]
+    claims[3].object, claims[3].text = "canoe", "user p3 canoe"
+    store.put_claim(claims[3])                        # text rewritten in place
+    store.put_claim(claims[4])                        # unchanged, index left alone
+    store.reinforce(claims[5].id, salience=1.5, observation_count=2, sources=["ep_1"])
+    store.erase_claim(claims[7].id)                   # a gap in the middle
+    store.erase_claim(claims[-1].id)                  # frees the highest rowid,
+    put(store, predicate="late", object="kayak trip river late")   # which this reuses
+    turns = [turn(store, content=f"kayak trip {'river ' * (i % 4)}{i}") for i in range(12)]
+    store.add_episode(turns[4])                       # added again
+    turns[5].content = "canoe trip"
+    store.add_episode(turns[5])                       # edited
+    store.erase_episode(turns[7].id)
+    store.erase_episode(turns[-1].id)
+    turn(store, content="kayak trip river late")
+
+
+def test_a_lexical_hit_never_carries_another_rows_score(store):
+    """Both lexical legs join the text index to its table on rowid rather than on the id
+    the index row stores, because reading that id back out of the index cost more than
+    the rest of the query. That is only correct while each index row sits at its own
+    row's rowid. If the two ever parted, a claim would come back scored on another
+    claim's text, and nothing downstream could tell. So after every write that moves or
+    frees a rowid, each leg is checked against the index's own record of which row each
+    entry indexes: the same rows, with the same scores."""
+    _churn(store)
+    query = "kayak river canoe"
+    for search, fts, column in ((store.lexical_search, "claims_fts", "claim_id"),
+                                (store.lexical_search_episodes, "episodes_fts",
+                                 "episode_id")):
+        truth = {r[0]: -r[1] for r in store._db.execute(
+            f"SELECT {column}, bm25({fts}) FROM {fts} WHERE {fts} MATCH ?",
+            (_fts_query(query),))}
+        assert len(truth) > 10
+        assert dict(search(query, [SCOPE], limit=100)) == pytest.approx(truth)
+
+
+def _misfiled(path: str) -> dict[str, tuple[int, int]]:
+    """Per indexed table: index rows not at the rowid of the row they name, and rows
+    with no index row at their rowid."""
+    db = sqlite3.connect(path)
+    try:
+        counts = {}
+        for table, fts, column in (("claims", "claims_fts", "claim_id"),
+                                   ("episodes", "episodes_fts", "episode_id")):
+            astray = db.execute(
+                f"SELECT COUNT(*) FROM {fts} f LEFT JOIN {table} t "
+                f"ON t.rowid = f.rowid WHERE t.id IS NOT f.{column}").fetchone()[0]
+            unindexed = db.execute(
+                f"SELECT COUNT(*) FROM {table} t LEFT JOIN {fts} f "
+                f"ON f.rowid = t.rowid WHERE f.rowid IS NULL").fetchone()[0]
+            counts[table] = (astray, unindexed)
+        return counts
+    finally:
+        db.close()
+
+
+def test_every_index_row_sits_at_its_own_rows_rowid_in_every_copy(tmp_path):
+    """The invariant the join above rests on, checked directly: each index row is at the
+    rowid of the row it names, and every row has one. Then again after a `VACUUM`, which
+    SQLite documents as free to renumber the rowids of a table without an INTEGER
+    PRIMARY KEY, and in a `VACUUM INTO` copy. Both keep them for a table that has an
+    index, as these two do, and this test is what says so if that ever changes. Erasure
+    finds a row's index entry by the same rowid, so it would break too."""
+    path, copy = str(tmp_path / "s.db"), str(tmp_path / "copy.db")
+    with SQLiteStore(path) as s:
+        _churn(s)
+    aligned = {"claims": (0, 0), "episodes": (0, 0)}
+    assert _misfiled(path) == aligned
+    db = sqlite3.connect(path)
+    try:
+        db.execute("VACUUM")
+        db.execute("VACUUM INTO ?", (copy,))
+    finally:
+        db.close()
+    assert _misfiled(path) == aligned, "after VACUUM"
+    assert _misfiled(copy) == aligned, "in a VACUUM INTO copy"
+
+
 # --- Vector search ----------------------------------------------------------
 
 def test_vector_search_ranks_by_cosine(store, emb):
@@ -555,6 +637,46 @@ def test_a_future_turn_is_invisible_to_a_present_query(store):
     assert store.lexical_search_episodes("kafka", [SCOPE], limit=10) == []
 
 
+def test_the_turn_candidate_list_is_one_covering_index_range_per_scope(store):
+    """Every turn a scope can see is the vector leg's candidate list. `ep_cover` holds
+    every column that query reads, so no turn's row is read: 244 ms to 102 ms for the
+    189,520 LongMemEval-S turns in one scope. Asking once per scope, rather than through
+    the `OR` the capped reads use, also drops the temporary set SQLite keeps to return a
+    row two terms of an `OR` both match only once: 102 ms to 84 ms."""
+    turn(store)
+    statements: list[str] = []
+    store._db.set_trace_callback(statements.append)
+    try:
+        store.episode_candidate_ids(MINE.ancestors())
+    finally:
+        store._db.set_trace_callback(None)
+    (sql,) = [s for s in statements if s.startswith("SELECT id FROM episodes")]
+    # The trace fills in the bound values where SQLite can expand them. A marker left
+    # over is bound to NULL, which SQLite plans as the same `IS` lookup.
+    plan = [r[3] for r in store._db.execute("EXPLAIN QUERY PLAN " + sql,
+                                            [None] * sql.count("?"))]
+    reads = [step for step in plan if step.startswith(("SCAN", "SEARCH"))]
+    assert not any("MULTI-INDEX OR" in step for step in plan), plan
+    assert len(reads) == len(MINE.ancestors()), plan
+    assert all("COVERING INDEX ep_cover" in step for step in reads), plan
+
+
+def test_a_store_written_before_the_covering_index_gains_it_when_opened(tmp_path):
+    """`ep_cover` is created with the other late indexes on every open, so a store an
+    older build wrote gets it the first time this one opens it (1.7 s and 10 MB for
+    190,000 turns, once), not only on a schema migration it may never have. `ep_scope`
+    stays, because the older build creates it again on every open."""
+    path = str(tmp_path / "s.db")
+    with SQLiteStore(path) as s:
+        turn(s)
+        s._db.execute("DROP INDEX ep_cover")
+        s._db.commit()
+    with SQLiteStore(path) as s:
+        names = {r[0] for r in s._db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert {"ep_cover", "ep_scope"} <= names
+
+
 # --- Scoped episode listing --------------------------------------------------
 #
 # `iter_episodes` was the only listing, so a caller wanting one scope's turns walked the
@@ -637,6 +759,38 @@ def test_candidate_ids_matches_scopes_exactly(store):
     b = put(store, scope=Scope("acme", "alice", "bot", "s1"), predicate="likes")
     assert set(store.candidate_ids([Scope("acme", "alice")])) == {a.id}
     assert set(store.candidate_ids([Scope("acme", "alice"), Scope("acme", "alice", "bot", "s1")])) == {a.id, b.id}
+
+
+def test_the_candidate_lists_return_a_row_exactly_when_its_scope_is_asked_for(store):
+    """The candidate lists build one `SELECT` per scope instead of going through
+    `_scope_clause`, so they are checked against what that clause means, over every
+    shape a scope can take: each level below the tenant set or unset, in two tenants,
+    with a claim and a turn at each, asked from each shape's own ancestors. An unset
+    level is NULL in the table, so this is also where `=` written for `IS` would show,
+    as rows that never come back."""
+    shapes = [Scope(t, u, a, s, project=p)
+              for t in ("acme", "globex") for u in (None, "alice")
+              for p in (None, "gh/o/a") for a in (None, "bot") for s in (None, "s1")]
+    home = {}
+    for shape in shapes:
+        home[put(store, scope=shape).id] = shape
+        home[turn(store, scope=shape).id] = shape
+    for shape in shapes:
+        asked = shape.ancestors()
+        got = set(store.candidate_ids(asked)) | set(store.episode_candidate_ids(asked))
+        assert got == {i for i, at in home.items() if at in asked}, shape
+
+
+def test_a_scope_listed_twice_returns_its_rows_once(store):
+    """One `SELECT` per scope is joined by `UNION ALL`, where the scopes used to be
+    `OR`ed together. An `OR` returns a row once however many of its terms match it; two
+    identical branches of a `UNION ALL` return it twice, and the vector leg would rank
+    it twice. So a repeated scope is dropped before the SQL is built, including one
+    that is equal to another without being the same object."""
+    c = put(store)
+    ep = turn(store)
+    assert store.candidate_ids([SCOPE, Scope("acme", "alice")]) == [c.id]
+    assert store.episode_candidate_ids([SCOPE, Scope("acme", "alice")]) == [ep.id]
 
 
 def test_no_scopes_matches_nothing_rather_than_everything(store):

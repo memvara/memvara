@@ -21,6 +21,8 @@ answer quality with no error, no exception and nothing in any log.
   both ways and counts how often the gold answer reaches the reader's context.
 - Comparison and cost: `bench/compare.py`, `bench/mem0_real.py`, `bench/baseline.py`,
   `bench/extract_cost.py`, `bench/perf.py`, `bench/evalkit.py`.
+- Read latency when one scope holds a large store: `bench/scale.py`, which times each store
+  read a search runs, and the whole search, over the LongMemEval-S haystacks in one scope.
 - Where each embedder-dependent cosine threshold sits in each embedding space:
   `bench/embedder_calibration.py`, the measurement behind `memvara/embed/calibration.py`.
 - Against a hosted store: `bench/hosted.py`.

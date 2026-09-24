@@ -34,6 +34,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `memory_recall` on a server backed by the hosted service, return a block the service
   renders, so what they show depends on the service rather than on this release. The
   `include_episodes` description on `memory_recall` says so.
+- **A search over one large scope is faster, and returns the same results.** Four store
+  reads changed how SQLite reaches their rows, not which rows they return. The vector
+  leg's two candidate lists ask for each scope separately instead of through one `OR` of
+  all of them, and the turn list reads a new covering index, `ep_cover`, instead of the
+  table. Both lexical legs join the text index to its table on rowid instead of on the id
+  the index row stores, which meant reading each match's text back out of the index. The
+  vector index looks up its candidates' rows in one vectorised pass. With 199,499
+  LongMemEval-S turns and 100,000 claims in one scope, `search(k=12,
+  include_episodes=True)` went from a median of 738 ms to 470 ms, and from 1,071 ms to
+  557 ms at the 95th percentile (`bench/scale.py`, new; `docs/BENCHMARKS.md` has each
+  read). An existing store builds `ep_cover` the first time this version opens it, about
+  1.7 s and 10 MB per 190,000 turns. `docs/UPGRADING.md` has that, and the repair for a
+  store whose text index was copied out of line with its rows.
 - **`LocalEmbedder()` loads `BAAI/bge-small-en-v1.5`, and a store keeps the model that
   wrote it.** bge-small replaces `sentence-transformers/all-MiniLM-L6-v2` as the default
   local model. Over the 1,531 evidence-labelled LOCOMO questions with the local embedder,
