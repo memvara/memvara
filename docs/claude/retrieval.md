@@ -67,7 +67,10 @@ JSON, under a header that names the text as data rather than instruction.
    weights accordingly.
 2. The lexical leg runs SQLite FTS5 and reads its `bm25()` score, flipped so that higher is
    better. The vector leg embeds the query and runs a cosine search. Each leg over-fetches
-   `k * candidate_multiplier` rows so that later filtering has something to work with.
+   `k * candidate_multiplier` rows so that later filtering has something to work with. On
+   a store with a file, outside `batch()`, the vector leg runs on a pool thread while the
+   lexical leg runs on the calling thread, and the query is embedded on the calling thread
+   first (`HybridRetriever._beside`).
 3. `reciprocal_rank_fusion()` merges the ranked lists by position rather than by raw score,
    which is what lets two incomparable scoring scales be combined at all.
 4. `final_score()` re-scores the fused list using the claim's own properties: how fresh it
@@ -130,6 +133,11 @@ JSON, under a header that names the text as data rather than instruction.
 - **A store can only be opened by the embedder that wrote it.** `fingerprint_of()` records
   which embedder and dimension produced the vectors, and `Memvara` refuses a mismatch with a
   message naming the width to use. `reembed()` is the way through.
+- **A leg on another thread sees exactly what the calling thread would.** `_beside` hands
+  the vector leg to a pool thread only when `SQLiteStore._parallel_reads()` is true, which
+  it is not inside `batch()` or for a database with no file. The query is embedded on the
+  calling thread first, so the embedder is only called from the thread that searched.
+  `tests/test_hybrid.py` pins both, and that the results match the one-thread path.
 
 ## Read next
 

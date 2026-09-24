@@ -7,6 +7,27 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A search on a store with a file uses up to three more threads
+
+### What changed
+
+`HybridRetriever` runs each stage's vector leg on a pool thread beside its lexical leg,
+when the store is a `SQLiteStore` with a file and the calling thread is not inside
+`batch()`. The pool is made on the first such search and kept: up to three threads per
+retriever, and so per `Memvara`, each holding its own SQLite read connection, as the
+threads a rewritten read uses already do. Results are unchanged, and the embedder is still
+called only from the thread that called `search()`.
+
+### Who this changes, and in which direction
+
+**If you count threads or open file handles per process**, allow three more of each per
+`Memvara` that searches a file store. `close()` closes the connections.
+
+**If you pass your own `Store`**, nothing changes: a store without `SQLiteStore`'s private
+`_parallel_reads` keeps both legs on the calling thread.
+
+---
+
 ## The first open of an existing store builds one index
 
 ### What changed

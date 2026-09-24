@@ -24,6 +24,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   read). An existing store builds `ep_cover` the first time this version opens it, about
   1.7 s and 10 MB per 190,000 turns. `docs/UPGRADING.md` has that, and the repair for a
   store whose text index was copied out of line with its rows.
+- **A search runs each stage's vector leg beside its lexical leg.** On a `SQLiteStore` with
+  a file, outside `batch()`, the claim stage and the turn stage each hand their vector leg
+  to a pool thread and run their lexical leg themselves, so a stage costs the longer of its
+  two legs rather than their sum. Results are unchanged, and the query is still embedded
+  once, on the thread that called `search()`. With each scope's turns already kept in
+  memory, `search(k=12, include_episodes=True)` went from a median of 284 ms to 248 ms with
+  199,499 turns and 100,000 claims in one scope, and from 107 ms to 76 ms with 189,520
+  turns and few claims (`bench/scale.py`). Each retriever keeps up to three threads for
+  this, each with its own SQLite read connection, and runs the leg itself when all three
+  are busy; a `Store` of your own keeps both legs on one thread.
 
 ## [0.15.0] — 2026-09-24
 
