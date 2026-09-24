@@ -1902,6 +1902,49 @@ class Collapse:
                 f"true at no instant, both ends {self.at.isoformat()}>")
 
 
+#: Why agentic extraction did not apply a proposal. See `RefusedProposal`.
+RefusalReason = Literal["not_read", "broader_scope", "invalid", "instruction_echo",
+                        "not_applied"]
+
+
+@dataclass(frozen=True, slots=True)
+class RefusedProposal:
+    """A change the extraction model proposed that this write did not make.
+
+    Only agentic extraction produces these (`memvara.write.agentic`). The model proposes
+    changes through tools, and every proposal is checked before anything is written. The
+    `reason` says which check it failed:
+
+    - `not_read`: it named a stored memory the model had not read through
+      `search_memories` or `get_claim` during this write.
+    - `broader_scope`: it asked to end or replace a memory in a broader scope than this
+      write, such as a user-wide memory seen from a write inside one project or session,
+      or a tenant-wide memory seen from one user's write. Closing it would close it for
+      every project and session beneath it.
+    - `invalid`: its arguments did not describe a memory or a link, for example a
+      `source_index` that names no turn or a relation other than `extends` and `derives`.
+    - `instruction_echo`: the proposed memory restates the extractor's own instructions
+      rather than a fact from the conversation.
+    - `not_applied`: the proposal was valid, and the deterministic reconciler decided not
+      to make the change. A replacement whose new value the reconciler stored beside the
+      old one, an end that matched no live memory, and a link to a memory that was not
+      stored all land here.
+
+    `tool` is the tool the model called, and `target` is the claim id or reference it
+    named, or `""` when it named none.
+
+    >>> RefusedProposal("propose_end", "cl_1a2b", "not_read")
+    <RefusedProposal propose_end cl_1a2b: not_read>
+    """
+
+    tool: str
+    target: str
+    reason: RefusalReason
+
+    def __repr__(self) -> str:
+        return f"<RefusedProposal {self.tool} {self.target}: {self.reason}>"
+
+
 @dataclass(slots=True)
 class WriteReceipt:
     """What `add()` returns. Explicit about what the write path actually did.
@@ -2043,6 +2086,17 @@ class WriteReceipt:
     #: `ReplacementJudge`, and only on a write that added something and closed nothing.
     #: Each model consultation counts in `llm_calls`.
     may_replace: list[Claim] = field(default_factory=list)
+    #: Why this write used single-call extraction although agentic extraction was
+    #: switched on, or `None`. `None` means agentic extraction ran, or was not switched
+    #: on, or no turn reached the model. The reasons are `unsupported` (the backend does
+    #: not implement `llm.ToolChat`), `timeout`, `malformed` (the model's answer could not
+    #: be used twice in a row), `step_limit` (the model was still calling tools after 12
+    #: steps), `error` (a request failed twice), and `mixed_scope` (the batch held turns
+    #: from more than one scope). See `memvara.write.agentic`.
+    agentic_fallback: str | None = None
+    #: Changes the extraction model proposed during agentic extraction that this write
+    #: did not make, one entry each, with the reason. Empty for single-call extraction.
+    proposals_refused: list[RefusedProposal] = field(default_factory=list)
 
     # --- the two halves of `closed` -------------------------------------------
     # Derived rather than stored, so they cannot disagree with the claims themselves.
@@ -2108,10 +2162,13 @@ class WriteReceipt:
         piled = f" accumulated={len(self.accumulated)}" if self.accumulated else ""
         split = f" disputed={len(self.disputed)}" if self.disputed else ""
         empty = f" collapsed={len(self.collapsed)}" if self.collapsed else ""
+        fell = f" agentic_fallback={self.agentic_fallback}" if self.agentic_fallback else ""
+        declined = (f" proposals_refused={len(self.proposals_refused)}"
+                    if self.proposals_refused else "")
         return (
             f"<WriteReceipt +{len(self.added)} ~{len(self.reinforced)} "
-            f"-{len(self.closed)} skip={self.skipped}{lost}{refused}{piled}{split}{empty} "
-            f"llm={self.llm_calls} "
+            f"-{len(self.closed)} skip={self.skipped}{lost}{refused}{piled}{split}{empty}"
+            f"{fell}{declined} llm={self.llm_calls} "
             f"{self.latency_ms:.1f}ms{' deferred' if self.deferred else ''}>"
         )
 

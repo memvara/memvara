@@ -17,7 +17,11 @@ importable from the foundation modules:
 - `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`
 - `memvara/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `RESOLVE_SCHEMA`,
   `PREDICATE_SCHEMA`, `EXTRACT_SYSTEM`, `RESOLVE_SYSTEM`, `PREDICATE_SYSTEM`,
-  `MAX_CLAIMS`, `bounded_claim_schema()`
+  `MAX_CLAIMS`, `bounded_claim_schema()`, and for agentic extraction the `ToolChat`
+  protocol with `Message`, `ToolSpec`, `ToolRun`, `ToolRunError`, `ToolRunTimeout`,
+  `MalformedToolOutput` and `TOOL_STEP_MAX_TOKENS`
+- `memvara/write/agentic.py` — `AgenticExtractor`, `AGENTIC_SYSTEM`, the proposal types and
+  `ProposalPlan`
 
 ## Design invariants (do not violate)
 
@@ -34,15 +38,27 @@ for.
 holds somewhere and not everywhere, and the eighth invariant exists because one of them
 was being read as holding further than it does.
 
-1. **Deterministic stages never call a model, and the read path calls one only through
-   three named stages.**
+1. **Contradiction resolution is decided by the deterministic reconciler, and a model is
+   reached only through named stages.**
 
    > **Claim.** Deterministic stages (deduplication, contradiction resolution, ranking,
-   > decay, time travel) never call a model. The read path may call one only through the
-   > named stages `ranked`, `query_rewrite` and `synthesis`, each with a recorded outcome
-   > and a model-free fallback.
-   > **Scope.** The library. On the write path, only `extract()` and
-   > `resolve_predicate()` may touch a model. On the read path, a reranker is a
+   > decay, time travel) never call a model. Contradiction resolution is decided by the
+   > deterministic reconciler; a model may *propose* changes on the write path, and every
+   > applied change is one of the reconciler's recorded outcomes. The read path may call a
+   > model only through the named stages `ranked`, `query_rewrite` and `synthesis`, each
+   > with a recorded outcome and a model-free fallback.
+   > **Scope.** The library. On the write path, a model is reached by `extract()`,
+   > `resolve_predicate()` and, when `agentic_extraction` is on and the backend implements
+   > `llm.ToolChat`, by `run_tools()` in `memvara.write.agentic`. That loop's tools read
+   > the store and record proposals; none of them writes. Its proposed memories pass the
+   > same pollution guard, closed-vocabulary filter, predicate acquisition and grounding
+   > check as `extract()` output and then `Reconciler.apply`; a proposed end becomes a
+   > retraction through `Reconciler.apply(close="ended")`; a proposed link becomes a
+   > `claim_links` row; and a proposal naming a memory the model did not read in that run,
+   > or asking to end or replace one in a broader scope than the write, is refused and
+   > recorded as a `RefusedProposal`. A
+   > model can therefore choose *which* candidates the reconciler sees, and cannot choose
+   > what the reconciler does with them. On the read path, a reranker is a
    > cross-encoder rather than a generative model, and it is off by default. The three
    > model stages are: `search(ranked=True)` against a retriever configured with a
    > `read_selector` (`memvara.select`), one chat call per read over the turns of the
@@ -58,7 +74,10 @@ was being read as holding further than it does.
    > and a synthesis is text placed above notes that are still returned in full.
    > **Sketch.** `NullLLM` is the default `llm=` and cannot chat, so the shipped
    > configuration has no model to call on either path. `Reconciler` and `Consolidator`
-   > take no `llm` parameter at all. `HybridRetriever` takes a model only as `selector=`
+   > take no `llm` parameter at all. `AgenticExtractor.run` returns a list of proposals and
+   > writes nothing; `WritePipeline._reconcile` and `_apply_proposals` apply them inside
+   > the claim transaction, and every change they make comes back as a `ReconcileResult`
+   > action or a link row. `agentic_extraction` is off by default. `HybridRetriever` takes a model only as `selector=`
    > and `rewriter=`, both `None` by default; `Memvara` builds a `QueryRewriter` and a
    > `Synthesizer` (`memvara.select.stages`) only when its `llm=` implements `Chat`.
    > `query_rewrite=False` and `synthesis=False` on the constructor are the switches,
@@ -76,6 +95,17 @@ was being read as holding further than it does.
    > `test_every_read_in_this_repository_says_whether_it_may_call_a_model` fails on a
    > `search()` or `recall()` call that does not say whether it may rewrite. No
    > measurement of answer quality with the two new stages exists yet.
+   > `tests/test_agentic_extraction.py` holds the write side of the agentic loop: a
+   > proposal naming an unread memory, or closing a broader-scope one, changes nothing,
+   > a replacement
+   > the reconciler does not accept leaves the named memory live, and a turn that quotes
+   > the extractor's instructions yields no memory that restates them. The
+   > identical-final-state result above was measured on the single-call path. With
+   > `agentic_extraction` on, which candidates reach the reconciler depends on the model's
+   > proposals, so two runs over the same turns end in the same state only when the model
+   > proposes the same things. No measurement of agentic extraction's claim counts,
+   > duplicates or answer accuracy exists yet; its release bar is in the "Reversed" list
+   > of `docs/ROADMAP.md`.
 
    **What changed on 2026-09-23.** Until then this invariant said that nothing on the read
    path calls a model unless the caller opts in, and `ranked=True` was the one opt-in.
@@ -88,6 +118,21 @@ was being read as holding further than it does.
    stands on: the stages that decide what is stored, what contradicts what, and how
    results are ordered are still pure functions of stored state, and a store opened
    with the default `NullLLM` still makes no model call anywhere.
+
+   **What changed on 2026-09-24.** Until then this invariant said that contradiction
+   resolution is a pure function of stored state, and that on the write path only
+   `extract()` and `resolve_predicate()` may touch a model. The phase 3 parity design
+   (`docs/superpowers/specs/2026-09-23-parity-phase-3-extraction-and-cloud-design.md`,
+   §3.1) added agentic extraction, in which a model reads the store through tools and
+   proposes ends, replacements and links as well as new memories. What a model proposes
+   now decides which candidates the reconciler is shown, so the write path's input is no
+   longer only the turns and what is stored. What did not change: the reconciler still
+   takes no model, still decides every duplicate, conflict and supersession by the same
+   rules, and every change it applies is one of its recorded outcomes (`add`,
+   `reinforce`, `supersede`, `retract`, `noop`). A model still cannot retire or erase
+   anything, because a proposed end is a retraction with `close="ended"`. The switch
+   ships off by default. The old wording and the reason it was reversed are in the
+   "Reversed" list of `docs/ROADMAP.md`.
 
 2. **Unknown predicates default to `Cardinality.MANY`.** Wrongly retiring a true fact is
    worse than keeping two competing ones. The default is deliberate and stays; what
@@ -617,6 +662,7 @@ class WritePipeline:
                  reject_ungrounded: bool | str = "auto",
                  closed_vocabulary: bool = False,
                  extraction_chunks: bool = False,
+                 agentic_extraction: bool = False,
                  guidance: Guidance | None = None) -> None
 
     def add(self, episodes: Sequence[Episode]) -> WriteReceipt
@@ -654,7 +700,9 @@ suggestion must not turn it into an exception the caller retries.
   originating episode for provenance. Unknown predicates trigger one
   `llm.resolve_predicate(...)` per *new surface form*, cached via `registry.learn_alias`
   / `registry.learn` and persisted through `store.put_spec(spec, tenant)` so it is never
-  asked again — including after a restart, and including by another process.
+  asked again — including after a restart, and including by another process. With
+  `agentic_extraction` on, the single call is replaced by a tool loop; see the
+  `agentic_extraction` entry below.
 
   `reject_ungrounded` guards this tier's output, defaulting to `"auto"`: a proposed
   claim whose object shares not one content word with the episode it cites is a
@@ -721,6 +769,55 @@ suggestion must not turn it into an exception the caller retries.
   server turns it on with `MEMVARA_FEATURE_EXTRACTION_CHUNKS=1`; the feature is marked off
   by default in `FEATURE_DEFAULTS` in `server/config.py`, the one table of features and
   their defaults.
+- **`agentic_extraction`** (default `False`) replaces tier 2's single `llm.extract()`
+  call with `write/agentic.AgenticExtractor` when the backend implements `llm.ToolChat`.
+  The rules go in the system message (`AGENTIC_SYSTEM`, with the project's extraction
+  guidance appended by `llm.guidance.with_guidance` when there is some, exactly as the
+  single call appends it); the turns go in one user message
+  inside `<content>` tags, described as data, with any `<content` or `</content` inside a
+  turn defused so a turn cannot close the wrapper. The model gets six tools:
+  `search_memories(query, k)` (live memories this write's scope can see, lexical and vector
+  hits fused by rank, `k` clamped to 1–20), `get_claim(claim_id)` (one memory in any state,
+  the same answer for a missing id and another scope's id), `propose_claim`,
+  `propose_end(claim_id, reason, source_index)`, `propose_supersede(claim_id, reason, …)`
+  and `propose_link(from_ref, to_ref, relation)`. A proposed memory carries the fields of
+  a single-call claim: `subject`, `predicate`, `object`, `source_index`, `confidence`,
+  `memory_type`, `valid_from` (the turn's words, resolved by `write/when.py` like `when`),
+  `amount` and `unit`, and `propose_claim` also takes `expires_at`: an ISO 8601 date or
+  instant the turn names, read as UTC when it has no zone, refused as `invalid` when it
+  is not in the future (the rule `remember()` applies), and passed to the reconciler on
+  the claim, whose rule for a repeat that names an expiry then applies unchanged.
+  `source_index` and `confidence` are not in the design's argument
+  list and are required here, because provenance and the authority rule depend on them.
+  At most `AGENTIC_MAX_STEPS` (12) answers, `TOOL_STEP_MAX_TOKENS` (8,192) output tokens
+  per answer, one retry per answer, and a budget for the whole run of
+  `AGENTIC_SYNC_TIMEOUT` (25 s) in `add()`, where a caller is waiting, or `AGENTIC_TIMEOUT`
+  (180 s) in `reextract()`, which a background worker runs
+  (`llm/_tools.run_loop`, shared by both backends). A proposal is refused at once, and
+  recorded on `receipt.proposals_refused`, when it names a memory the model did not read
+  in this run (`not_read`), asks to end or replace a memory whose scope is not exactly the
+  write's scope (`broader_scope`: reads widen upward, so this is a user-wide memory seen
+  from a project or a session, and closing it would close it everywhere, which the
+  deterministic path never does from below), cannot be shaped into a claim or a link
+  (`invalid`), or
+  restates the instructions (`instruction_echo`, `write/agentic.echoes_instructions`).
+  Accepted proposals do not write. Proposed memories go through the pollution guard, the
+  closed vocabulary, acquisition and the grounding check like single-call output, then
+  `Reconciler.apply`; a replacement passes its reason to `apply`, which records it on
+  whatever the candidate closes, and a replacement whose new value closed nothing is
+  reported as `not_applied` with the named memory left live. A proposed end becomes a
+  retraction of exactly the named value through `Reconciler.apply(close="ended",
+  reason=…)`, filed in the named memory's own scope and citing the turn the model named.
+  A proposed link becomes a `claim_links` row when both sides name a stored claim. The
+  batch falls back to the single call, and says why on `receipt.agentic_fallback`, when
+  the backend is not a `ToolChat` (`unsupported`), the run times out (`timeout`), an answer
+  cannot be used twice in a row (`malformed`), the model is still calling tools after 12
+  answers (`step_limit`, and its proposals are discarded), a request fails twice
+  (`error`), or the batch holds turns from two scopes (`mixed_scope`). Every request the
+  run sent is billed in `llm_calls`, fallback or not. `extraction_chunks` applies to the
+  single-call path only. Off by default because its release bar is not measured: see the
+  "Reversed" list in `docs/ROADMAP.md`. The MCP server turns it on with
+  `MEMVARA_FEATURE_AGENTIC_EXTRACTION=1`.
 
 `reextract()` is `add()` with tier 0 removed, for turns already in the store: a
 deployment that ran without a model, or a batch a provider failure left `deferred` — or

@@ -275,7 +275,11 @@ mem.add("Actually, I moved to Lisbon last month")
 `{"role": ..., "content": ...}` transcripts, so an existing agent loop can pass its
 messages straight through. It runs three model-free tiers first — hash dedupe,
 near-duplicate detection, a salience gate and a rule-based extractor — and batches
-whatever survives into a single extraction call.
+whatever survives into a single extraction call. With `write_agentic_extraction=True` and
+an Anthropic or OpenAI backend, that call becomes a short tool loop instead: the model
+searches what is already stored and proposes new facts, ends, replacements and links, and
+the same deterministic reconciler decides what is written. It is off by default until it
+has been measured against the single call.
 
 **With no `llm=` configured there is no model tier at all**, so the two sentences above
 work (they are recognised forms) and an employer mentioned in passing does not. Dropped

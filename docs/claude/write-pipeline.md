@@ -26,11 +26,14 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
 - Cutting a long turn for extraction: `memvara/write/split.py` —
   `split_for_extraction()` and `EXTRACTION_CHUNK_CHARS`, used only when
   `extraction_chunks` is on.
+- Agentic extraction: `memvara/write/agentic.py` — `AgenticExtractor`, `AGENTIC_SYSTEM`,
+  the proposal types and `ProposalPlan`, used only when `agentic_extraction` is on. The
+  tool loop both backends share is `memvara/llm/_tools.py`.
 - Temporal expressions: `memvara/write/when.py` — `resolve()` turns "last March" into an
   instant and a `Precision`.
-- Model backends: `memvara/llm/base.py` — the `LLM` and `Chat` protocols, `ReplacementJudge`,
-  `Multimodal` (images, audio and video to text, used by `memvara/ingest/`),
-  `NullLLM`, `Usage`, `TruncatedResponse`, `bounded_claim_schema()`. Implementations are
+- Model backends: `memvara/llm/base.py` — the `LLM`, `Chat` and `ToolChat` protocols,
+  `ReplacementJudge`, `Multimodal` (images, audio and video to text, used by
+  `memvara/ingest/`), `NullLLM`, `Usage`, `TruncatedResponse`, `bounded_claim_schema()`. Implementations are
   `memvara/llm/anthropic.py` (`AnthropicLLM`) and `memvara/llm/openai.py` (`OpenAILLM`).
 - Per-project extraction guidance: `memvara/llm/guidance.py` — `Guidance`,
   `with_guidance()` and `load_guidance()`. `WritePipeline.guidance` holds it, and every
@@ -38,7 +41,8 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
   `tests/test_extraction_guidance.py`.
 - Tests: `tests/test_pipeline.py`, `tests/test_gate.py`, `tests/test_fast.py`,
   `tests/test_reconcile.py`, `tests/test_pollution.py`, `tests/test_when.py`,
-  `tests/test_llm.py`, `tests/test_advisory.py`, `tests/test_extraction_chunks.py`.
+  `tests/test_llm.py`, `tests/test_advisory.py`, `tests/test_extraction_chunks.py`,
+  `tests/test_agentic_extraction.py`.
 - Documentation: [INTERNALS.md](../INTERNALS.md), section *`memvara/write/`*, which carries
   the tier-by-tier contract and the measured constants.
 
@@ -63,6 +67,21 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
    whole episode, and a fact two pieces both state reaches the reconciler twice, as it
    would if the turn had stated it twice. The option is off by default, because the release bar recorded in the
    "Reversed" list of `docs/ROADMAP.md` has not been met.
+
+**With `agentic_extraction=True`, tier 2 is a tool loop instead of one call.** When the
+backend implements `llm.ToolChat`, `AgenticExtractor` gives the model six tools: it can
+search what this write's scope can see, read one memory by id, and propose a new memory,
+the end of a stored memory, a replacement for one, or a link between two. The system
+message carries the project's extraction guidance when there is some, and a proposed
+memory can carry an expiry the turn names. The proposals write nothing. A proposed memory goes through the same guards as single-call output and
+then `Reconciler.apply()`; a proposed end becomes a retraction with `close="ended"`; a
+proposed link becomes a `claim_links` row. A proposal naming a memory the model did not
+read in the run, or asking to end or replace one in a broader scope than the write, is
+refused, and every refusal is on
+`receipt.proposals_refused`. A backend without tools, a timeout, an answer that cannot be
+used, a run past 12 steps, a request that fails twice or a batch from two scopes sends the
+batch to the single call, and `receipt.agentic_fallback` says which. Off by default,
+because its release bar in the "Reversed" list of `docs/ROADMAP.md` has not been measured.
 
 Every claim that reaches the store passes through `Reconciler.apply()`, which decides one of
 four outcomes against the claims already in that slot: exact duplicate (do not insert),
@@ -120,6 +139,12 @@ exception the caller retries.
   content was accepted and nothing will ever extract from it. `extraction_deferred=True`
   counts it on `receipt.deferred` instead, for a deployment where a worker calls
   `reextract()` later. The option changes what is said, not what is stored.
+- **A model proposes and the reconciler applies.** Under `agentic_extraction`, nothing a
+  tool does writes to the store. Every change the write makes is one of the reconciler's
+  outcomes or a link row, a model can end a memory but never retire or erase one, and a
+  replacement the reconciler does not accept leaves the old memory live. The rules travel
+  as the system message and the turns as fenced data, and a proposed memory that restates
+  the rules is refused, so a turn quoting the extractor's prompt cannot become memories.
 - **A long turn is extracted whole or not at all.** Under `extraction_chunks`, if the call
   for any piece of a turn fails, that turn keeps no claim from its other pieces and is
   deferred. `reextract()` skips any turn that already has claims, so keeping part of a

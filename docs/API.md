@@ -47,6 +47,12 @@ mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, s
 #   with the nearest live claims in other slots the model judged it to be a newer
 #   version of. Advice only; nothing is closed. Up to three model calls per write.
 mem.supersede(old_claim_id, new_claim, *, at=, sources=)   -> WriteReceipt
+#   Memvara(write_agentic_extraction=True) with a backend that implements
+#   `llm.ToolChat` (AnthropicLLM, OpenAILLM) lets the extraction model search the store
+#   and propose memories, ends, replacements and links, which the reconciler applies or
+#   refuses. Off by default. `receipt.agentic_fallback` says why a write used one call
+#   instead; `receipt.proposals_refused` lists what the model proposed and the write did
+#   not do, as RefusedProposal(tool, target, reason).
 
 # retire — reversible, keeps history
 mem.forget(subject, predicate, *, at=None)        -> list[Claim]    # a whole slot
@@ -282,6 +288,11 @@ mem = Memvara("memory.db", llm=AnthropicLLM(model="claude-opus-5"))
 from memvara import OpenAILLM                     # pip install 'memvara[openai]'
 mem = Memvara("memory.db", llm=OpenAILLM(model="gpt-4.1"))
 ```
+
+Both also implement `llm.ToolChat` — `run_tools(system, messages, tools, *, max_steps,
+timeout, usage=None) -> ToolRun` — which agentic extraction uses. A backend of your own
+that lacks it still works; with agentic extraction on, each write falls back to one
+`extract()` call and says so.
 
 Both are lazy attributes: naming one does not import its SDK, so the default offline
 install stays a two-package install (`memvara` and `numpy`, verified in CI). Each backend

@@ -121,7 +121,9 @@ def test_exported_from_the_package_without_the_sdk_installed():
     assert set(pkg.__all__) == {
         "LLM", "Chat", "Multimodal", "NullLLM", "ReplacementJudge", "TruncatedResponse",
         "Usage", "AnthropicLLM",
-        "OpenAILLM", "Guidance", "GuidanceError", "load_guidance", "with_guidance"}
+        "OpenAILLM", "Guidance", "GuidanceError", "load_guidance", "with_guidance",
+        "ToolChat", "Message", "ToolSpec", "ToolRun", "ToolRunError",
+        "ToolRunTimeout", "MalformedToolOutput"}
     with pytest.raises(AttributeError):
         pkg.NotAThing
 

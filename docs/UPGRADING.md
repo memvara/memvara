@@ -7,6 +7,46 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A second feature switch is off by default: `agentic_extraction`
+
+### What changed
+
+`agentic_extraction` is a new feature name, off unless
+`MEMVARA_FEATURE_AGENTIC_EXTRACTION=1` turns it on, because its release bar has not been
+measured (`docs/ROADMAP.md`, the "Reversed" list). Nothing about extraction changes unless
+you turn it on. `WriteReceipt` gained two fields, `agentic_fallback` (`None` unless the
+switch was on and a batch fell back to one call) and `proposals_refused` (empty unless the
+switch was on), and `repr(receipt)` shows each only when it is set.
+
+### Who this changes, and in which direction
+
+**If you compare `FEATURES_OFF_BY_DEFAULT`, `ServerConfig().features_off` or a default
+`MemvaraMCPServer`'s `features_off` with a literal set**, it is now
+`{"agentic_extraction", "extraction_chunks"}`. Compare with `FEATURES_OFF_BY_DEFAULT`.
+
+**If you read `memory_stats` output**, a server with no feature variables now says
+`features switched off: agentic_extraction, extraction_chunks`.
+
+**If you keep a copy of the feature names**, as the plugin hooks do in
+`plugin/hooks/lib/settings.py`, add `agentic_extraction` with the default `False`; the
+MCP server refuses a `MEMVARA_FEATURE_*` name it does not know.
+
+**If you turn it on**, a write costs several model calls instead of one, and
+`receipt.llm_calls` counts every one of them. It also takes longer. `add()`, and so
+`memory_add` over MCP, gives the tool loop 25 seconds, because a caller is waiting and an
+MCP client gives up on a tool call after a limited time; a loop that runs out falls back
+to one extraction call, so a write can take 25 seconds plus that call. `reextract()`,
+which a background worker runs, gives the loop 180 seconds. If your client's tool timeout
+is shorter than about 40 seconds, either leave the switch off or extract later with
+`reextract()`. With a backend that does not implement
+`llm.ToolChat`, every write falls back to one call and says `agentic_fallback=unsupported`,
+so the switch does nothing but add that line; switch it off again.
+
+**If you implemented a `Reconciler` subclass that overrides `_retire` or `_retract`**,
+both now take a `reason` keyword argument, which `apply` passes.
+
+---
+
 ## The plugin's capture hook searches your memory before it writes
 
 ### What changed

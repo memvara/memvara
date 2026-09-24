@@ -362,7 +362,7 @@ LOCAL = {"MEMVARA_DB": ":memory:"}
 @pytest.mark.derives_project
 def test_every_feature_is_on_unless_switched_off_or_off_by_default(derive):
     assert ServerConfig.from_env(LOCAL).features_off == FEATURES_OFF_BY_DEFAULT
-    assert FEATURES_OFF_BY_DEFAULT == frozenset({"extraction_chunks"})
+    assert FEATURES_OFF_BY_DEFAULT == frozenset({"extraction_chunks", "agentic_extraction"})
 
 
 @pytest.mark.parametrize("value, off", [("0", True), ("off", True), ("1", False),
@@ -546,7 +546,8 @@ def test_a_fact_about_one_repository_stays_there_and_a_preference_follows_the_us
     stats = _tool(a, "memory_stats", {})
     assert "default/alice/github.com%2Facme%2Fapp/*/*" in stats
     assert "(tenant/user/project/agent/session; '*' means unbound)" in stats
-    assert "features switched off: extraction_chunks" in stats, "the default-off feature"
+    assert "features switched off: agentic_extraction, extraction_chunks" in stats, (
+        "the default-off features")
 
 
 def test_the_command_line_binds_the_project_and_the_switches(tmp_path):
@@ -566,7 +567,7 @@ def test_the_command_line_binds_the_project_and_the_switches(tmp_path):
     assert "memory_profile" not in [t["name"] for t in listed["result"]["tools"]]
     body = stats["result"]["content"][0]["text"]
     assert "github.com%2Facme%2Fapp" in body
-    assert "features switched off: extraction_chunks, profile" in body
+    assert "features switched off: agentic_extraction, extraction_chunks, profile" in body
 
 
 def test_a_view_for_the_instances_own_project_needs_no_twin():

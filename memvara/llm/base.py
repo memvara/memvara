@@ -18,7 +18,9 @@ a measured run produced 41 predicates for six questions and thirteen live answer
 to it and the conservative default keeps holding.
 
 Contradiction detection, deduplication, ranking, decay, and time travel are all
-deterministic and never call this interface. That is the design.
+deterministic and never call this interface. That is the design. `ToolChat`, below, lets
+agentic extraction (`memvara.write.agentic`) run a tool loop on the write path, and even
+there the model only proposes: the reconciler decides what is written.
 
 `NullLLM` is the default. The library must be fully functional with no API key: you
 get the deterministic fast path, and `add()` tells you honestly what it did - including
@@ -31,7 +33,8 @@ from __future__ import annotations
 import copy
 
 from dataclasses import dataclass
-from typing import Any, Protocol, Sequence, runtime_checkable
+from typing import (Any, Callable, Literal, Mapping, Protocol, Sequence,
+                    runtime_checkable)
 
 from ..types import Episode
 from .guidance import Guidance
@@ -228,6 +231,117 @@ class Multimodal(Protocol):
     def transcribe(self, data: bytes, mime: str) -> str:
         """A transcript of the speech in an audio recording or a video's audio track."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class Message:
+    """One message of the conversation handed to `ToolChat.run_tools`.
+
+    Only the opening messages are built by the caller. The tool calls and their results
+    that follow are added by the backend in its provider's own format, because that format
+    differs between providers and nothing outside the backend needs to read it.
+    """
+
+    role: Literal["user", "assistant"]
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSpec:
+    """One tool a model may call during `ToolChat.run_tools`, and the code that answers it.
+
+    `parameters` is a JSON schema for the arguments. It must list every property in
+    `required` and set `additionalProperties` to false, because both providers' strict
+    tool modes demand it; an argument the model may leave out is declared with a `null`
+    alternative in its type instead. `handler` receives the parsed arguments and returns
+    the text the model reads as the tool's result. A handler reports a bad argument in
+    that text rather than by raising, so the model can correct itself in its next step.
+    """
+
+    name: str
+    description: str
+    parameters: Mapping[str, Any]
+    handler: Callable[[dict[str, Any]], str]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRun:
+    """What one `ToolChat.run_tools` call did.
+
+    `steps` counts the model's answers that were used. `requests` counts every request
+    sent to the provider, including a retried one, so it is the number to bill.
+    `finished` is True when the model stopped calling tools on its own, and False when it
+    was still calling them after `max_steps` answers. `text` is the model's text from its
+    last answer.
+    """
+
+    steps: int
+    requests: int
+    finished: bool
+    text: str = ""
+
+
+class ToolRunError(Exception):
+    """`ToolChat.run_tools` stopped without a usable result.
+
+    Raised as itself when a request failed twice for a reason other than the two below,
+    with the provider's exception as its `__cause__`. `requests` is how many requests the
+    run had sent when it stopped, so the caller can bill every one of them.
+    """
+
+    def __init__(self, message: str, *, requests: int = 0) -> None:
+        super().__init__(message)
+        self.requests = requests
+
+
+class ToolRunTimeout(ToolRunError):
+    """`ToolChat.run_tools` ran out of time before the model finished.
+
+    Raised when the whole-run deadline passes between steps, and when the provider's own
+    client gives up on a request. Not retried, because the time a retry would need is the
+    time that has run out.
+    """
+
+
+class MalformedToolOutput(ToolRunError):
+    """A model's answer during `ToolChat.run_tools` could not be used.
+
+    The cases are: the answer was cut off at its token limit, the provider refused to
+    answer, a tool call named a tool that was not offered, or a tool call's arguments were
+    not a JSON object. Each is retried once, and the second occurrence is raised.
+    """
+
+
+@runtime_checkable
+class ToolChat(Protocol):
+    """A backend that can run a tool-using conversation with a model.
+
+    Its own protocol rather than a method on `LLM`, for the reason `Chat` is: adding a
+    member to a `runtime_checkable` protocol breaks `isinstance` for every implementation
+    that predates it. `WritePipeline` uses it for agentic extraction
+    (`memvara.write.agentic`) and falls back to `LLM.extract` for a backend without it.
+    """
+
+    def run_tools(self, system: str, messages: Sequence[Message],
+                  tools: Sequence[ToolSpec], *, max_steps: int, timeout: float,
+                  usage: "Usage | None" = None) -> ToolRun:
+        """Send `system` and `messages`, run every tool call through its handler, repeat.
+
+        The loop ends when the model answers without calling a tool, or after `max_steps`
+        answers. Each request may generate at most `TOOL_STEP_MAX_TOKENS` tokens.
+        `timeout` is the budget for the whole run, in seconds; when it runs out the call
+        raises `ToolRunTimeout`. An answer that cannot be used is retried once and then
+        raises `MalformedToolOutput`. A request that fails for another reason is retried
+        once and then raises `ToolRunError`. All three carry the number of requests sent.
+
+        Add every request's tokens to `usage` when it is not None and this backend sets
+        `reports_usage`, as `extract` does.
+        """
+        ...
+
+
+#: The most tokens one request of `ToolChat.run_tools` may generate.
+TOOL_STEP_MAX_TOKENS = 8192
 
 
 #: The instructions sent with an image. The description replaces the image in memory, so

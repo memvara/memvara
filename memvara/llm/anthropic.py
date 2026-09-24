@@ -14,9 +14,14 @@ from typing import Any, Sequence
 
 from ..ingest.errors import MediaUnsupported
 from ..types import Episode
-from . import _shape
+from . import _shape, _tools
 from .guidance import Guidance, with_guidance
 from .base import (
+    TOOL_STEP_MAX_TOKENS,
+    MalformedToolOutput,
+    Message,
+    ToolRun,
+    ToolSpec,
     CLAIM_SCHEMA,
     EXTRACT_SYSTEM,
     JUDGE_SCHEMA,
@@ -45,6 +50,11 @@ def _stop_reason(response: Any) -> Any:
     if isinstance(response, dict):
         return response.get("stop_reason")
     return getattr(response, "stop_reason", None)
+
+
+def _field(block: Any, name: str) -> Any:
+    """A content block's field, from an SDK object or a plain dict."""
+    return block.get(name) if isinstance(block, dict) else getattr(block, name, None)
 
 
 def _first_text(response: Any) -> str:
@@ -172,6 +182,53 @@ class AnthropicLLM:
         )
         _shape.record_usage(response, usage, "input_tokens", "output_tokens")
         return _first_text(response)
+
+    # -- ToolChat protocol ----------------------------------------------------
+
+    def run_tools(self, system: str, messages: Sequence[Message],
+                  tools: Sequence[ToolSpec], *, max_steps: int, timeout: float,
+                  usage: Usage | None = None) -> ToolRun:
+        """A tool-using conversation through the Messages API's native tool calling.
+
+        Each tool is sent with `strict: true`, so the model's arguments match the tool's
+        schema. The model's whole answer, thinking blocks included, goes back into the
+        conversation unchanged before the tool results, which is what the API requires
+        when adaptive thinking is on. An answer cut off at `TOOL_STEP_MAX_TOKENS`, or one
+        the model refused to give, cannot be used and raises `MalformedToolOutput`. The
+        loop itself, with its step limit, deadline and retry, is `_tools.run_loop`.
+        """
+        convo: list[dict[str, Any]] = [
+            {"role": m.role, "content": m.content} for m in messages]
+        specs = [{"name": t.name, "description": t.description,
+                  "input_schema": dict(t.parameters), "strict": True} for t in tools]
+
+        def send(remaining: float) -> _tools.Step:
+            response = self._client.messages.create(
+                model=self.model,
+                max_tokens=TOOL_STEP_MAX_TOKENS,
+                timeout=remaining,
+                system=system,
+                messages=convo,
+                tools=specs,
+                output_config={"effort": self.effort},
+            )
+            _shape.record_usage(response, usage, "input_tokens", "output_tokens")
+            stop = _stop_reason(response)
+            if stop in ("max_tokens", "refusal"):
+                raise MalformedToolOutput(f"{self.model} stopped with {stop!r}")
+            blocks = list(getattr(response, "content", None) or [])
+            calls = [_tools.Call(str(_field(b, "id")), str(_field(b, "name")),
+                                 _field(b, "input"))
+                     for b in blocks if _field(b, "type") == "tool_use"]
+            return _tools.Step(_first_text(response), calls, blocks)
+
+        def append(step: _tools.Step, results: list[tuple[str, str]]) -> None:
+            convo.append({"role": "assistant", "content": step.payload})
+            convo.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": call_id, "content": text}
+                for call_id, text in results]})
+
+        return _tools.run_loop(send, append, tools, max_steps=max_steps, timeout=timeout)
 
     # -- Multimodal protocol ------------------------------------------------
 

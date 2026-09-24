@@ -1287,8 +1287,10 @@ def test_a_dated_miss_names_the_day_the_rewrite_used() -> None:
 
 #: Every call in the package that can reach a model, as `module::function: receiver.method`.
 #: The read side is the three named stages and the one chat call they share; the write side
-#: is extraction, predicate acquisition and replacement advice, and ingestion reads media. A new entry here is a new
-#: way to reach a model, and `docs/INTERNALS.md` invariant 1 says where one may live.
+#: is extraction (one call, or the agentic tool loop, whose proposals the reconciler
+#: applies), predicate acquisition and replacement advice, and ingestion reads media. A new
+#: entry here is a new way to reach a model, and `docs/INTERNALS.md` invariant 1 says where
+#: one may live.
 MODEL_CALLS = {
     # read path: `ranked`, `query_rewrite`, `synthesis`, and their shared chat call
     "memvara/retrieve/hybrid.py::_run_ranked_stage: selector.select",
@@ -1301,6 +1303,7 @@ MODEL_CALLS = {
     "memvara/write/pipeline.py::_tier1: self.fast.extract",
     "memvara/write/pipeline.py::_extract: self.llm.extract",
     "memvara/write/pipeline.py::_acquire: self.llm.classify_predicate",
+    "memvara/write/agentic.py::run: self.llm.run_tools",
     # ingestion, when a document's media is turned into text
     "memvara/documents/service.py::_text: ingest.extract",
     "memvara/ingest/media.py::media_to_text: llm.describe_image",
@@ -1308,7 +1311,7 @@ MODEL_CALLS = {
 }
 _MODEL_METHODS = {"chat", "extract", "resolve_predicate", "classify_predicate",
                   "judge_replacement", "compose_relations", "select", "rewrite",
-                  "synthesize", "describe_image", "transcribe"}
+                  "synthesize", "describe_image", "transcribe", "run_tools"}
 
 
 def _model_calls() -> set[str]:

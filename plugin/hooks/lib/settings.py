@@ -3,7 +3,7 @@
 Every feature a user can turn off during `/memvara:setup` is read here. The switches live in
 `~/.memvara/settings.json`, a flat JSON object of `feature_name: true|false`. A missing key
 means the feature's default, which is `FEATURE_DEFAULTS` below: on for every feature except
-`extraction_chunks`.
+`extraction_chunks` and `agentic_extraction`.
 
 The file holds one entry that is not a switch. `/memvara:setup verify-key` records its test
 call to the read-path model under the key `read_model`, and `lib.read_model` reads it back
@@ -58,6 +58,7 @@ FEATURE_DEFAULTS = {
     "extraction_guidance": True,
     "expiry_erasure": True,
     "agentic_capture": True,
+    "agentic_extraction": False,
 }
 
 #: Every feature name, in the order `FEATURE_DEFAULTS` lists them.

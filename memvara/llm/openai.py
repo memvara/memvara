@@ -25,13 +25,19 @@ things here are genuinely OpenAI-specific and neither is optional:
 from __future__ import annotations
 
 import base64
+import json
 from typing import Any, Mapping, Sequence
 
 from ..ingest.errors import MediaUnsupported
 from ..types import Episode
-from . import _shape
+from . import _shape, _tools
 from .guidance import Guidance, with_guidance
 from .base import (
+    TOOL_STEP_MAX_TOKENS,
+    MalformedToolOutput,
+    Message,
+    ToolRun,
+    ToolSpec,
     CLAIM_SCHEMA,
     DESCRIBE_IMAGE_MAX_TOKENS,
     DESCRIBE_IMAGE_PROMPT,
@@ -114,6 +120,24 @@ def _get(obj: Any, name: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(name)
     return getattr(obj, name, None)
+
+
+def _arguments(raw: Any) -> Any:
+    """A tool call's arguments parsed from their JSON string, or the raw value.
+
+    The raw value is returned when it is not a string or does not parse, and
+    `_tools.run_loop` then refuses anything that is not an object, which is the one place
+    that decision is made.
+
+        >>> _arguments('{"k": 3}'), _arguments("{not json"), _arguments({"k": 3})
+        ({'k': 3}, '{not json', {'k': 3})
+    """
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
 
 
 class OpenAILLM:
@@ -314,6 +338,65 @@ class OpenAILLM:
         response = self._client.chat.completions.create(**kwargs)
         _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")
         return _first_text(response)
+
+    # -- ToolChat protocol ----------------------------------------------------
+
+    def run_tools(self, system: str, messages: Sequence[Message],
+                  tools: Sequence[ToolSpec], *, max_steps: int, timeout: float,
+                  usage: Usage | None = None) -> ToolRun:
+        """A tool-using conversation through Chat Completions' native function calling.
+
+        Each tool is sent as a `strict` function, so the model's arguments match the
+        tool's schema; the arguments still arrive as a JSON string, and one that does not
+        parse to an object cannot be used. So cannot an answer cut off at
+        `TOOL_STEP_MAX_TOKENS` (`finish_reason` of `"length"`) or a refusal, and each of
+        those raises `MalformedToolOutput`. `temperature` and `extra_body` are sent as on
+        every other request this backend makes. The loop itself, with its step limit,
+        deadline and retry, is `_tools.run_loop`.
+        """
+        convo: list[dict[str, Any]] = [{"role": "system", "content": system}]
+        convo += [{"role": m.role, "content": m.content} for m in messages]
+        specs = [{"type": "function", "function": {
+            "name": t.name, "description": t.description,
+            "parameters": dict(t.parameters), "strict": True}} for t in tools]
+
+        def send(remaining: float) -> _tools.Step:
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "max_completion_tokens": TOOL_STEP_MAX_TOKENS,
+                "temperature": self.temperature,
+                "timeout": remaining,
+                "messages": convo,
+                "tools": specs,
+            }
+            if self.extra_body is not None:
+                kwargs["extra_body"] = self.extra_body
+            response = self._client.chat.completions.create(**kwargs)
+            _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")
+            choices = _get(response, "choices") or []
+            message = _get(choices[0], "message") if choices else None
+            if message is None or _get(message, "refusal"):
+                raise MalformedToolOutput(f"{self.model} gave no usable message")
+            if _finish_reason(response) == "length":
+                raise MalformedToolOutput(
+                    f"{self.model} stopped at its {TOOL_STEP_MAX_TOKENS}-token limit")
+            raw_calls = list(_get(message, "tool_calls") or [])
+            calls = [_tools.Call(str(_get(c, "id")), str(_get(_get(c, "function"), "name")),
+                                 _arguments(_get(_get(c, "function"), "arguments")))
+                     for c in raw_calls]
+            return _tools.Step(str(_get(message, "content") or ""), calls, raw_calls)
+
+        def append(step: _tools.Step, results: list[tuple[str, str]]) -> None:
+            convo.append({"role": "assistant", "content": step.text or None,
+                          "tool_calls": [
+                              {"id": call.id, "type": "function",
+                               "function": {"name": call.name,
+                                            "arguments": json.dumps(call.arguments)}}
+                              for call in step.calls]})
+            convo.extend({"role": "tool", "tool_call_id": call_id, "content": text}
+                         for call_id, text in results)
+
+        return _tools.run_loop(send, append, tools, max_steps=max_steps, timeout=timeout)
 
     # -- Multimodal protocol ------------------------------------------------
 
