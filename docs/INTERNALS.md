@@ -919,9 +919,10 @@ thread (`_beside`) and runs its lexical leg, and on the turn side the time leg, 
 calling thread. The legs read the store independently, and on a large scope each spends
 most of its time inside SQLite or in a matrix product, both of which release the GIL, so a
 stage costs the longer of its legs rather than their sum. In `bench/scale.py`,
-`search(k=12, include_episodes=True)` went from a median of 284 ms to 248 ms with 199,499
-turns and 100,000 claims in one scope, and from 107 ms to 76 ms with 189,520 turns and few
-claims, and 50 searches on each store returned the same rows with the same scores.
+`search(k=12, include_episodes=True)` went from a median of 286 ms to 245 to 254 ms with
+199,499 turns and 100,000 claims in one scope, and from 100 ms to 64 to 65 ms with 189,520
+turns and few claims, and 50 searches on each store returned the same rows with the same
+scores. `docs/BENCHMARKS.md` has why the first gains less than the legs alone suggest.
 
 The query is embedded on the calling thread before the leg is handed over, and the pass's
 vectors go with it, so the embedder is still called once per pass and only from the thread
