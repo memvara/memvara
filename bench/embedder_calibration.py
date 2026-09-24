@@ -1,6 +1,9 @@
 """Where each cosine threshold in `embed/calibration.py` sits in each embedding space.
 
-Run:  PYTHONPATH=. python3 bench/embedder_calibration.py [--model ID ...]
+Run:  PYTHONPATH=. python3 bench/embedder_calibration.py [--model ID ...] [--show]
+
+`--model hashing` measures `HashingEmbedder`, and `--show` prints every merge pair with
+its cosine.
 
 Needs sentence-transformers (`pip install 'memvara[local-embed]'`) and the LongMemEval
 `s` file (`python3 bench/longmemeval.py --download --dataset s`), which supplies turns
@@ -16,8 +19,20 @@ Two thresholds read a cosine, and a cosine is not portable between models:
   against 20 turns it has nothing to do with, 300 pairs.
 * **The duplicate merge** (`consolidate/merge.py`) folds two live claims in one slot
   when their cosine reaches `merge`. It should fold restatements and never two different
-  values. The pairs: 14 claims that differ in one value, often one digit, and 8
-  restatements of one claim.
+  values: in a slot that holds many values, both are true, and a merge retires one. The
+  pairs: 69 that differ in one value and 26 restatements of one value. The first 14
+  different values are sentences written for 0.99 on bge-small. The rest are claims
+  rendered as the store renders them, `subject predicate object`: 55 different values
+  (dates, versions, quantities, codes one character apart, 8 with no number to tell them
+  apart, and 12 that hold the same numbers a letter or a word apart) and 26 restatements
+  whose `value_key` differs, so the write path's exact-duplicate check does not already
+  fold them and only the merge can. The 8 restatements measured before them could never
+  reach the merge: 6 differ only in case, punctuation or a leading article, which
+  `value_key` folds, and 2 change the predicate, which puts them in two slots.
+
+The report counts the merges at each threshold twice: all of them, and those between two
+values holding the same numbers in the same order, which are the only ones left once the
+merge refuses two values whose numbers differ.
 
 The original eval behind 0.40, 33 inventions from two 4B-class models over real turns,
 is not in this repository. These pairs are a reconstruction written for this script, so
@@ -39,8 +54,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import evalkit as ek  # noqa: E402
 import longmemeval as lme  # noqa: E402
 
+# The merge's own reading of a value's numbers, so the report counts what it refuses.
+from memvara.consolidate.merge import _numbers as numbers  # noqa: E402
+from memvara.embed import HashingEmbedder  # noqa: E402
+from memvara.types import Claim, Scope  # noqa: E402
+
 CHUNK = 1200
-MODELS = ("sentence-transformers/all-MiniLM-L6-v2", "BAAI/bge-small-en-v1.5")
+MODELS = ("sentence-transformers/all-MiniLM-L6-v2", "BAAI/bge-small-en-v1.5", "hashing")
+SCOPE = Scope("bench", "user")
 
 # (source turn, a fact it states, in words it does not use)
 PARAPHRASES = [
@@ -89,16 +110,99 @@ DIFFERENT = [
     ("user's employee id is E-10293", "user's employee id is E-10239"),
 ]
 
-# One claim, written twice: should merge.
-RESTATED = [
-    ("user lives in Berlin", "User lives in Berlin."),
-    ("user works at Google", "the user works at Google"),
-    ("server runs on port 8080", "Server runs on port 8080"),
-    ("user's dog is named Max", "user's dog is called Max"),
-    ("user prefers tea", "User prefers tea"),
-    ("app version is 1.2.3", "the app version is 1.2.3"),
-    ("dose is 5 mg", "Dose is 5 mg."),
-    ("user is allergic to peanuts", "user has a peanut allergy"),
+# One slot, two values, as `(predicate, one object, another)`: must never merge.
+DIFFERENT_CLAIMS = [
+    # dates
+    ("has_appointment_on", "2024-03-14", "2024-03-15"),
+    ("was_born_on", "1990-07-04", "1990-07-14"),
+    ("lease_ends_on", "31 August 2025", "31 August 2026"),
+    ("started_job_in", "2019", "2021"),
+    ("conference_is_on", "June 5", "June 6"),
+    ("flies_out_on", "12/03/2024", "13/03/2024"),
+    ("passport_expires_in", "2027", "2028"),
+    ("standup_is_at", "9:30", "10:30"),
+    # versions
+    ("runs_python", "3.11", "3.12"),
+    ("uses", "Postgres 15", "Postgres 16"),
+    ("app_targets", "iOS 17.2", "iOS 17.4"),
+    ("pinned", "numpy 1.26.4", "numpy 1.26.2"),
+    ("cluster_runs", "Kubernetes 1.28", "Kubernetes 1.29"),
+    ("library_version_is", "0.15.0", "0.15.1"),
+    ("uses", "Node 18", "Node 20"),
+    # quantities
+    ("monthly_rent_is", "1200 euros", "1250 euros"),
+    ("runs_each_morning", "5 km", "8 km"),
+    ("team_size_is", "12 engineers", "14 engineers"),
+    ("salary_is", "85000", "95000"),
+    ("sleeps", "7 hours a night", "6 hours a night"),
+    ("timeout_is", "30 seconds", "60 seconds"),
+    ("daughter_age_is", "7", "9"),
+    ("takes", "2 tablets a day", "3 tablets a day"),
+    ("batch_size_is", "32", "64"),
+    ("weight_goal_is", "70 kg", "75 kg"),
+    # codes one character apart
+    ("order_number_is", "88213", "88214"),
+    ("wifi_password_is", "kiwi2024", "kiwi2025"),
+    ("booking_reference_is", "QX7F2L", "QX7F2K"),
+    ("postcode_is", "10115", "10117"),
+    ("error_code_is", "E1042", "E1043"),
+    ("tracks_ticket", "JIRA-4411", "JIRA-4412"),
+    ("seat_is", "14C", "14D"),
+    ("deployed_commit", "a1b2c3d", "a1b2c3e"),
+    ("car_plate_is", "B-MX 4421", "B-MX 4427"),
+    ("gate_is", "A23", "A32"),
+    # no number to tell them apart
+    ("blood_type_is", "A positive", "A negative"),
+    ("injured", "left knee", "right knee"),
+    ("prefers_meetings_in", "the morning", "the evening"),
+    ("gym_day_is", "Monday", "Tuesday"),
+    ("is_allergic_to", "cats", "dogs"),
+    ("owns", "iPhone 15", "iPhone 15 Pro"),
+    ("booking_reference_is", "QXAFBL", "QXAFBK"),
+    ("drinks", "green tea", "black tea"),
+    # the same numbers, a letter or a word apart
+    ("availability_zone_is", "us-east-1a", "us-east-1b"),
+    ("instance_type_is", "m5.large", "m5.xlarge"),
+    ("seat_is", "22A", "22F"),
+    ("booking_reference_is", "KLM7QX", "KLM7QZ"),
+    ("office_is_in", "the north wing", "the south wing"),
+    ("parks_on", "level B", "level C"),
+    ("prefers_seat", "aisle", "window"),
+    ("default_branch_is", "main", "master"),
+    ("currency_is", "EUR", "USD"),
+    ("role_is", "admin", "viewer"),
+    ("temperature_unit_is", "Celsius", "Fahrenheit"),
+    ("doctor_is", "Dr. Smith", "Dr. Smyth"),
+]
+
+# One value, written twice in words the entity fold does not unify: should merge.
+RESTATED_CLAIMS = [
+    ("lives_in", "Berlin", "Berlin, Germany"),
+    ("lives_in", "NYC", "New York City"),
+    ("lives_in", "San Francisco", "SF"),
+    ("lives_in", "the UK", "United Kingdom"),
+    ("was_born_in", "Munich", "München"),
+    ("works_at", "Meta", "Meta Platforms"),
+    ("uses", "Postgres", "PostgreSQL"),
+    ("uses", "JS", "JavaScript"),
+    ("uses_editor", "VS Code", "Visual Studio Code"),
+    ("uses_os", "macOS", "Mac OS"),
+    ("prefers", "dark mode", "dark theme"),
+    ("prefers", "short answers", "brief answers"),
+    ("prefers", "email", "e-mail"),
+    ("is_allergic_to", "peanuts", "peanut"),
+    ("likes", "cats", "cat"),
+    ("favorite_color_is", "grey", "gray"),
+    ("job_title_is", "software engineer", "software developer"),
+    ("speaks", "Spanish", "the Spanish language"),
+    ("studied", "computer science", "CS"),
+    ("commutes_by", "bike", "bicycle"),
+    ("timezone_is", "CET", "Central European Time"),
+    ("dose_is", "5 mg", "5mg"),
+    ("standup_is_at", "9:30", "09:30"),
+    ("runs_version", "1.2.3", "v1.2.3"),
+    ("appointment_is_on", "2023-05-01", "May 1, 2023"),
+    ("salary_is", "85000", "85,000"),
 ]
 
 
@@ -111,13 +215,38 @@ def unrelated_turns() -> list[str]:
     return [t for t in turns if len(t) > 200][:20]
 
 
+def rendered(pairs: list[tuple[str, str, str]]) -> list[tuple[str, str]]:
+    """Each `(predicate, object, object)` as the two claim texts the store embeds.
+
+    Refuses a pair whose two claims share a `value_key`: the write path already treats
+    those as one value, so the merge never sees them and they would measure nothing.
+    """
+    out = []
+    for predicate, a, b in pairs:
+        one, other = (Claim(subject="user", predicate=predicate, object=obj, scope=SCOPE)
+                      for obj in (a, b))
+        if one.value_key == other.value_key:
+            raise ValueError(f"{a!r} and {b!r} are one value to the write path")
+        out.append((one.text, other.text))
+    return out
+
+
 def measure(model_id: str, sources: list[str]) -> dict[str, np.ndarray]:
-    from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
+    if model_id == "hashing":
+        embedder = HashingEmbedder()
 
-    model = SentenceTransformer(model_id, device="cpu")
+        def unit(texts: list[str]) -> np.ndarray:
+            v = np.asarray(embedder.encode(texts), dtype=np.float32)
+            norms = np.linalg.norm(v, axis=1, keepdims=True)
+            return v / np.where(norms > 0.0, norms, 1.0)
+    else:
+        from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
 
-    def unit(texts: list[str]) -> np.ndarray:
-        return np.asarray(model.encode(texts, normalize_embeddings=True), dtype=np.float32)
+        model = SentenceTransformer(model_id, device="cpu")
+
+        def unit(texts: list[str]) -> np.ndarray:
+            return np.asarray(model.encode(texts, normalize_embeddings=True),
+                              dtype=np.float32)
 
     def best_chunk(obj: str, source: str) -> float:
         chunks = [source[i:i + CHUNK] for i in range(0, max(len(source), 1), CHUNK)]
@@ -131,15 +260,27 @@ def measure(model_id: str, sources: list[str]) -> dict[str, np.ndarray]:
     return {
         "paraphrase": np.array([best_chunk(obj, src) for src, obj in PARAPHRASES]),
         "invention": np.array([best_chunk(obj, src) for obj in INVENTIONS for src in sources]),
-        "different": np.array([pair(a, b) for a, b in DIFFERENT]),
-        "restated": np.array([pair(a, b) for a, b in RESTATED]),
+        "different": np.array([pair(a, b) for a, b in DIFFERENT_PAIRS]),
+        "restated": np.array([pair(a, b) for a, b in RESTATED_PAIRS]),
     }
+
+
+def same_numbers(pairs: list[tuple[str, str]]) -> np.ndarray:
+    """Whether each pair's two texts hold the same numbers in the same order: the pairs
+    the merge can still fold once it refuses two values whose numbers differ."""
+    return np.array([numbers(a) == numbers(b) for a, b in pairs])
+
+
+DIFFERENT_PAIRS = DIFFERENT + rendered(DIFFERENT_CLAIMS)
+RESTATED_PAIRS = rendered(RESTATED_CLAIMS)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", action="append", default=[],
-                        help="a sentence-transformers model id; repeatable")
+                        help="a sentence-transformers model id, or `hashing`; repeatable")
+    parser.add_argument("--show", action="store_true",
+                        help="print every merge pair with its cosine, highest first")
     args = parser.parse_args()
     sources = unrelated_turns()
     for model_id in args.model or MODELS:
@@ -152,11 +293,21 @@ def main() -> int:
         for t in (0.40, 0.55, 0.60, 0.65):
             print(f"    {t:<12.2f} {np.mean(inv >= t):>15.1%} {np.mean(para >= t):>16.1%}")
         diff, same = m["different"], m["restated"]
-        print(f"    different values: highest {diff.max():.5f}")
-        print(f"    {'merge at':<12} {'different merged':>17} {'restated merged':>16}")
-        for t in (0.97, 0.98, 0.985, 0.99):
-            print(f"    {t:<12} {int((diff >= t).sum()):>11} of {len(diff):<3} "
-                  f"{int((same >= t).sum()):>10} of {len(same)}")
+        dn, sn = same_numbers(DIFFERENT_PAIRS), same_numbers(RESTATED_PAIRS)
+        print(f"    different values: highest {diff.max():.5f}, and with the same "
+              f"numbers {diff[dn].max():.5f}")
+        print(f"    {'merge at':<10} {'different merged':>17} {'same numbers':>14} "
+              f"{'restated merged':>16} {'same numbers':>14}")
+        for t in (0.97, 0.98, 0.985, 0.99, 0.995):
+            print(f"    {t:<10} {int((diff >= t).sum()):>11} of {len(diff):<3} "
+                  f"{int((diff[dn] >= t).sum()):>8} of {int(dn.sum()):<3} "
+                  f"{int((same >= t).sum()):>10} of {len(same):<3} "
+                  f"{int((same[sn] >= t).sum()):>8} of {int(sn.sum())}")
+        if args.show:
+            for label, pairs, scores in (("different", DIFFERENT_PAIRS, diff),
+                                         ("restated", RESTATED_PAIRS, same)):
+                for (a, b), s in sorted(zip(pairs, scores), key=lambda x: -x[1]):
+                    print(f"      {label:<9} {s:.5f}  {a!r} / {b!r}")
     print()
     return 0
 

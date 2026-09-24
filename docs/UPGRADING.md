@@ -7,6 +7,67 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Consolidation never merges two values whose numbers differ, and merges less under MiniLM
+
+### What changed
+
+The duplicate merge in consolidation folds two live claims in one slot when their
+embeddings are close enough, and retires the one it folds. It now refuses two claims whose
+values hold different numbers, whatever their cosine and whatever the embedder:
+"2023-05-01" and "2023-05-02", "numpy 1.26.4" and "numpy 1.26.2", "85,000" and "85000".
+Numbers are compared in order and without leading zeros, so "09:30" and "9:30" can still
+merge. A store written with `sentence-transformers/all-MiniLM-L6-v2` also merges at a
+cosine of 0.985 instead of 0.97.
+
+### Who this changes, and in which direction
+
+**If your store was written with MiniLM**, as every store `LocalEmbedder()` wrote through
+0.15 was, consolidation merges less from its next run. On the pairs in
+`bench/embedder_calibration.py`, MiniLM at 0.97 folded 22 of 69 pairs of different values
+and 4 of 24 restatements that hold the same numbers. Now it folds none of the 69 and 1 of
+the 24. Restatements it used to fold, such as "NYC" and "New York City", stay two live
+claims, and `recall()` can return both.
+
+**Under any embedder**, two values that write one number differently, such as "85,000"
+and "85000", now stay two claims. The two such pairs in the measurement scored below 0.96
+in all three spaces measured, so the default thresholds did not merge them either; only a
+lower `threshold=` did.
+
+**If you pass `threshold=` to `merge_duplicates()`**, the threshold still decides, but
+never for two values whose numbers differ.
+
+**Merges already made stay made.** A merge retires the claim it folds and does not delete
+it. The retired claim's `invalidated_by` names the claim it was folded into, and
+`mem.store.iter_claims(states=["retired"])` returns it. This lists every merge in a store,
+and marks the ones this release would refuse under any embedder:
+
+```python
+import re
+from memvara import Memvara
+
+def numbers(text):
+    return [n.lstrip("0") or "0" for n in re.findall(r"\d+", text)]
+
+mem = Memvara("memory.db")
+for c in mem.store.iter_claims(states=["retired"]):
+    # forget() and replaces= record a retirement under meta["closure"]; a merge does not.
+    if not c.invalidated_by or any(e.get("close") == "retired" for e in c.meta.get("closure", [])):
+        continue
+    kept = mem.store.get_claim(c.invalidated_by)
+    # A backfill also folds claims, but only two that hold one value.
+    if kept is None or kept.value_key == c.value_key:
+        continue
+    note = "  numbers differ" if numbers(kept.object) != numbers(c.object) else ""
+    print(f"{c.id} {c.object!r} was folded into {kept.id} {kept.object!r}{note}")
+```
+
+In a MiniLM store, an unmarked line may also be a merge this release refuses. Only a
+reader can tell a restatement, such as "NYC" and "New York City", from a different value,
+such as "left knee" and "right knee". To bring a value back, write it again with
+`remember()`, which stores it as a new live claim.
+
+---
+
 ## A process that searches a large scope keeps that scope's claim list in memory, and claim writes maintain one more index
 
 ### What changed
@@ -123,8 +184,9 @@ vectors yet read exactly as before.
 `sentence-transformers/all-MiniLM-L6-v2`. The two have the same width, 384, so no
 dimension check can tell their vectors apart; the name in the store's fingerprint,
 `<db>.embedder.json`, is what does. The grounding rescue and the duplicate merge read
-bge-small's cosines with thresholds measured for it, 0.65 and 0.99, and every other
-embedder keeps 0.40 and 0.97.
+bge-small's cosines with thresholds measured for it, 0.65 and 0.99. MiniLM keeps 0.40 and
+merges at 0.985 (see the consolidation entry above), and every other embedder keeps 0.40
+and 0.97.
 
 ### Who this changes, and in which direction
 
@@ -145,8 +207,8 @@ migrate it once with `Memvara(..., embedder=LocalEmbedder(), reembed=True)`. Fin
 instances by searching for `LocalEmbedder()`.
 
 **If you call `merge_duplicates()` without `threshold=`**, its default is now the
-calibrated value, which is 0.97, as before, for every embedder but bge-small. A threshold
-you pass is used as it is.
+calibrated value, which is 0.97, as before, for every embedder but bge-small and MiniLM. A
+threshold you pass is used as it is.
 
 **If ingest time matters**, bge-small encodes at about half MiniLM's speed on a CPU: 192 s
 against 98 s for LOCOMO's 5,882 turns, and 12 ms more for the median read.

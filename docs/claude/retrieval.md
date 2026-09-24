@@ -160,7 +160,8 @@ JSON, under a header that names the text as data rather than instruction.
 - **A cosine threshold belongs to an embedding space.** The grounding rescue and the
   duplicate merge read theirs through `calibration_of()`. A new default model, or any model
   a deployment adopts widely, needs its own row there, measured with
-  `bench/embedder_calibration.py`, or those two checks read its cosines on MiniLM's scale.
+  `bench/embedder_calibration.py`, or those two checks read its cosines with `BASELINE`'s
+  0.40 and 0.97, which were never measured in its space.
 - **A leg on another thread sees exactly what the calling thread would.** `_beside` hands
   the vector leg to a pool thread only when `SQLiteStore._parallel_reads()` is true, which
   it is not inside `batch()` or for a database with no file. The query is embedded on the

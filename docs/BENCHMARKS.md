@@ -421,20 +421,28 @@ PYTHONPATH=. python3 bench/embedder_calibration.py
 | inventions the rescue keeps at 0.40 | 0.0% | 83.7% |
 | inventions the rescue keeps at 0.65 | 0.0% | 0.0% |
 | paraphrases the rescue keeps at 0.40, and at 0.65 | 80.0%, 20.0% | 100.0%, 80.0% |
-| claim pairs with different values merged at 0.97, and at 0.99 | 3, 1 of 14 | 4, 0 of 14 |
-| restated claims merged at 0.97, and at 0.99 | 4, 3 of 8 | 7, 4 of 8 |
+| pairs of different values merged at 0.97, before the rule on numbers | 22 of 69 | 19 of 69 |
+| highest cosine between different values that hold the same numbers | 0.979 | 0.989 |
+| of those 24 pairs, merged at 0.97, at 0.985 and at 0.99 | 4, 0, 0 | 4, 2, 0 |
+| of 24 restatements that hold the same numbers, merged at 0.97, 0.985 and 0.99 | 4, 1, 1 | 15, 6, 3 |
 
-At MiniLM's thresholds, bge-small would keep 84% of invented values and fold two values
-one digit apart into one claim. So each space gets its own thresholds
-(`memvara/embed/calibration.py`), and bge-small's are 0.65 for the rescue and 0.99 for the
-merge. Those match MiniLM's behaviour at 0.40 and 0.97 on this data, with fewer wrong
-merges. Every other embedder keeps 0.40 and 0.97.
+At MiniLM's thresholds, bge-small would keep 84% of invented values. So each space gets
+its own thresholds (`memvara/embed/calibration.py`): the rescue reads bge-small at 0.65,
+and the merge reads bge-small at 0.99 and MiniLM at 0.985. Every other embedder keeps 0.40
+and 0.97; `HashingEmbedder` folds none of the 69 pairs and none of the restatements at
+any of these thresholds.
+
+The merge also refuses two values whose numbers differ, whatever their cosine, because no
+threshold keeps those apart: MiniLM scores two dates a day apart at 0.997, and bge-small
+two numpy versions at 0.995, each higher than that model scores any restatement. That
+leaves each threshold to separate values a letter or a word apart, and each sits above
+the closest such pair. Under MiniLM this leaves the merge little to fold, because 22 of
+the 24 restatements score below that pair's 0.979.
 
 Two caveats. The pairs are a reconstruction: the eval behind 0.40, 33 inventions from two
-4B-class models, is not in this repository. And the merge row shows that MiniLM at 0.97
-already folds 3 of the 14 different-value pairs, such as two dates a day apart. That is
-unchanged here, because changing it changes every existing MiniLM store, and it is a
-change that needs its own measurement.
+4B-class models, is not in this repository. And bge-small's 0.99 sits 0.001 above its
+closest pair of different values, two availability zones at 0.989, so a pair a little
+closer than any measured here would merge.
 
 ### The graph leg, and what it costs on the corpora above
 

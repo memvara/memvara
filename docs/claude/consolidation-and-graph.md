@@ -45,8 +45,12 @@ the number of claims that pass changed.
   threshold, keeps the one with the most observations, folds the others' sources and counts
   into it, and invalidates them with `invalidated_by` pointing at the survivor. The
   threshold defaults to the one measured for the embedder's space in
-  `memvara/embed/calibration.py`: 0.97, or 0.99 for bge-small-en-v1.5, which scores two
-  values one digit apart as high as 0.985.
+  `memvara/embed/calibration.py`: 0.985 for all-MiniLM-L6-v2, 0.99 for bge-small-en-v1.5
+  and 0.97 for any other embedder. The two measured values each sit above the closest
+  pair of different values that `bench/embedder_calibration.py` found in their space. Two
+  claims whose objects hold different numbers never merge, whatever the threshold: both
+  models score some pairs of values a digit apart above every restatement, and in a slot
+  that holds many values a merge would retire a true one.
 - `promote()` turns a repeatedly observed episodic claim into a semantic one. Seeing
   something happen once is an event; seeing it several times is a pattern. The promoted claim
   is marked `Derivation.CONSOLIDATION`.
