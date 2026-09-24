@@ -155,7 +155,17 @@ either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/sto
   answers for the whole store, before the next search reads the lists. A commit that went
   around both would leave searches missing a new turn, or returning an erased one scored by
   the vector that took its row, until the next commit. `tests/test_store.py` checks a turn
-  written, erased, rolled back and written by another process between two searches.
+  written, erased, rolled back and written by another process between two searches. The
+  same commits empty `_scope_claims`, the claim lists a read of the present ranks.
+- **A claim's state changes with the clock only at one of its five time columns.** Every
+  state predicate, and the expiry clause, compares `recorded_at`, `invalidated_at`,
+  `valid_from`, `valid_to` or `expires_at` with the instant read. `_scope_claims` relies on
+  that: it keeps a claim list until the earliest of those instants still ahead among the
+  tenant's claims, which `_LAST_CHANGE`, `_NEXT_CHANGE` and the index `cl_last_change`
+  find. A state that came to compare another column with the instant must join both
+  expressions, or a cached list will outlive the change.
+  `tests/test_store.py::test_every_column_a_state_compares_with_the_clock_is_one_the_cache_watches`
+  fails until it does.
 
 ## Read next
 

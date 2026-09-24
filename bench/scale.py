@@ -169,6 +169,11 @@ def measure(path: str, questions: list[str], embedder: HashingEmbedder,
         ("vector_search", timed(
             [lambda v=v: store.vector_search(v, scopes, LEG_LIMIT)
              for v in claim_vecs] * 4)),
+        # The same read with the scope's cached claim list dropped first, as every
+        # commit drops it: what the first search after a write pays.
+        ("  after a write", timed(
+            [lambda v=v: (store._changed(), store.vector_search(v, scopes, LEG_LIMIT))
+             for v in claim_vecs] * 4)),
         ("vector_search_episodes", timed(
             [lambda v=v: store.vector_search_episodes(v, scopes, LEG_LIMIT)
              for v in question_vecs])),

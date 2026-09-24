@@ -1673,6 +1673,39 @@ does not return cannot change the answer by having moved. The lists hold at most
 `_SCOPE_TURNS_ROWS` turns, 1,000,000, across all scopes, dropping the least recently used
 scope first. Each turn costs about 100 bytes: 19.3 MB for those 199,499.
 
+**Each scope's claims, kept in memory for a read of the present.** The vector leg over
+claims keeps its candidate list the same way, with one difference: a claim's state depends
+on the instant read, and a read of the present reads a new instant every time.
+`_scope_claims` holds, per scope, per set of states and per `hide_expired`, the ids and
+matrix rows of the claims that have a vector and are in those states. It reads them with
+the statement `candidate_ids` runs for that one scope, bound at the search's instant, so
+they come back in the order the SQL path returns them. Every state predicate, and the
+expiry clause, compares one of five columns with the instant read: `recorded_at`,
+`invalidated_at`, `valid_from`, `valid_to` and `expires_at`. So without a write, a claim's
+state can change only when the clock passes one of them. The same statement also asks for
+the earliest such instant still ahead among the tenant's claims, and the list answers reads
+from when it was built until then, or until the next commit empties it. `cl_last_change`
+indexes each claim's latest time column (`_LAST_CHANGE`), so that question reads only the
+claims whose last change is still ahead, usually none: 0.003 ms against 41 ms for a pass
+over 100,000 claims. A claim in another scope of the tenant can end a list early, which
+costs a rebuild and never a wrong list. The list answers from the clock read after its
+statement rather than from the instant it bound, because the expiry clause reads the wall
+clock a moment later than that instant.
+
+`tests/test_store.py` checks the lists against the SQL path over every shape of scope,
+every set of states and four limits, with the clock moved past a start, an end, a
+retirement, an expiry and a late recording, and then back. It also reads the state
+predicates and checks that every column they compare with the instant is one
+`_LAST_CHANGE` and `_NEXT_CHANGE` read, so a state that came to read a sixth column would
+fail there rather than leave a list in place past a change. A read pinned to an instant
+still asks SQL, because it would need a list per instant, and so do a filtered read and a
+read inside `batch()`, for the turn lists' reasons. Over 100,000 claims in one scope,
+`vector_search` went from 168 ms to 69 ms and a whole search from 233 ms to 132 ms. The
+first search after a write costs what it did before, because the list is the same SQL the
+leg ran before and the next instant is one seek. What is left of the leg is mostly the
+product over 100,000 vectors. Each claim held costs about 90 bytes: 8.9 MB for those
+100,000.
+
 **The lexical leg over turns ranks in the text index first.** The full query joins every
 matching turn to its row, because the scope, the time bound and the tie-break are columns of
 `episodes`. Those columns sit after `content`, so each long turn also costs its overflow

@@ -1,15 +1,17 @@
 """SQLite store: persistence, the indexed conflict lookup, hybrid search primitives,
 and the bitemporal SQL that makes time travel work."""
 
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
 
 from memvara.embed import HashingEmbedder
+from memvara.filters import SearchFilter
 from memvara.store import (STATES, SQLStore, SQLiteStore, live_predicate,
                            state_predicate, stored_state_predicate,
                            unexpired_predicate)
@@ -1344,6 +1346,299 @@ def test_the_two_axes_move_independently_in_candidate_ids(store):
     assert set(store.candidate_ids([SCOPE], valid_at=TMID, known_at=TMID)) == {a.id}
     assert set(store.candidate_ids([SCOPE], valid_at=TMID, known_at=T2)) == {b.id}
     assert store.candidate_ids([SCOPE], valid_at=T2, known_at=T2) == []
+
+
+# --- The vector leg over claims, from each scope's cached list -----------------------
+
+NOW = datetime(2025, 6, 1, tzinfo=timezone.utc)
+AHEAD = [NOW + timedelta(hours=h) for h in range(1, 6)]
+ALICE = ("acme", "alice", None, None, None)
+
+
+class _Clock:
+    """The wall clock the store reads for the present, set by the test."""
+
+    def __init__(self, monkeypatch, at):
+        self.at = at
+        monkeypatch.setattr(sqlite_store, "utcnow", lambda: self.at)
+
+
+def _sql_claim_search(store, qvec, scopes, limit, at, **kw):
+    """What `vector_search` ranks for a read of the present at `at` without the cache:
+    the SQL candidate list with both instants pinned there, handed to the index. The
+    expiry clause reads the wall clock, so that must be at `at` too."""
+    allowed = store.candidate_ids(scopes, valid_at=at, known_at=at, **kw)
+    store._ensure_index()
+    return store._vec.search(qvec, allowed, limit) if allowed else []
+
+
+def test_the_cached_claim_search_returns_what_the_sql_candidate_list_returns(
+        store, monkeypatch):
+    """The cache replaces a SQL candidate list, so it is checked against that list: the
+    same claims, in the same order, with the same scores, for every shape of scope asked
+    from its own ancestors, in every set of states, at limits from one to everything.
+    Half the claims share a vector with others, because a tie is where a candidate order
+    other than SQL's would put a different claim inside the limit.
+
+    The claims are live, ended, retired and expired, and some are due to start, end, be
+    retired, expire or become known in the hours after the first read. The clock then
+    stops half an hour past each of those instants in turn, and goes back to the start,
+    so every list is checked after the instant its `until` named, and against a clock
+    earlier than the one it was built at."""
+    clock = _Clock(monkeypatch, NOW)
+    rng = np.random.default_rng(11)
+    shapes = [Scope("acme", u, a, s) for u in (None, "alice") for a in (None, "bot")
+              for s in (None, "s1")]
+    shared = rng.standard_normal((6, 64)).astype(np.float32)
+    # Each claim is due to change at one instant at most, so each instant can be found
+    # only through the column that holds it.
+    kinds = [({}, None), ({"valid_to": TMID}, None), ({"expires_at": TMID}, None),
+             ({}, TMID), ({"valid_from": AHEAD[0]}, None), ({"valid_to": AHEAD[1]}, None),
+             ({"expires_at": AHEAD[2]}, None), ({"recorded_at": AHEAD[3]}, None),
+             ({}, AHEAD[4])]
+    for i in range(280):
+        fields, retired = kinds[i % len(kinds)]
+        c = put(store, object=f"city {i}", scope=shapes[i % len(shapes)], **fields)
+        if retired is not None:
+            store.invalidate(c.id, retired, None)
+        if i % 13 == 0:
+            continue  # never embedded, so never a candidate on either path
+        store.set_embedding(
+            c.id, shared[i % 6] if i % 2 else rng.standard_normal(64).astype(np.float32))
+    state_sets = [None, ["live"], ["retired"], ["ended"], ["live", "ended"],
+                  ["live", "retired"], ["ended", "retired"], list(STATES)]
+    for at in (NOW, *(due + timedelta(minutes=30) for due in AHEAD), NOW):
+        clock.at = at
+        for shape in shapes:
+            asked = shape.ancestors()
+            for states in state_sets:
+                for limit in (1, 5, 17, 1000):
+                    q = shared[limit % 6] if limit % 2 else rng.standard_normal(64)
+                    got = store.vector_search(q, asked, limit, states=states)
+                    want = _sql_claim_search(store, q, asked, limit, at, states=states)
+                    assert got == want, (at, shape, states, limit)
+    assert store._claims, "the searches above were answered from the cache"
+
+
+def test_a_warm_claim_search_asks_sqlite_nothing_about_claims(store):
+    """The point of the cache: once a scope's list is built, a read of the present reads
+    no claim until something is written or a claim is due to change state."""
+    c = put(store, object="Berlin")
+    store.set_embedding(c.id, onehot(1))
+    assert store.vector_search(onehot(1), [SCOPE], 5)[0][0] == c.id
+    statements: list[str] = []
+    store._db.set_trace_callback(statements.append)
+    try:
+        assert store.vector_search(onehot(1), [SCOPE], 5)[0][0] == c.id
+    finally:
+        store._db.set_trace_callback(None)
+    assert not any("claims" in s for s in statements), statements
+
+
+def test_the_cached_list_changes_when_the_clock_reaches_a_claims_next_instant(
+        store, monkeypatch):
+    """A claim's state can change with no write at all, when the clock reaches its
+    start, its end, its retirement or its expiry. A list is kept only until the first
+    such instant among its tenant's claims, and the entry built after it replaces the
+    one before."""
+    clock = _Clock(monkeypatch, NOW)
+    starts = put(store, object="Lisbon", valid_from=AHEAD[0])
+    expires = put(store, object="Berlin", expires_at=AHEAD[1])
+    for c in (starts, expires):
+        store.set_embedding(c.id, onehot(1))
+    key = (ALICE, ("live",), True)
+
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [expires.id]
+    assert store._claims[key].until == AHEAD[0].timestamp()
+    clock.at = AHEAD[0]
+    assert ({h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)}
+            == {starts.id, expires.id})
+    assert store._claims[key].until == AHEAD[1].timestamp()
+    clock.at = AHEAD[1]
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [starts.id]
+    assert store._claims[key].until == float("inf")
+    assert list(store._claims) == [key] and store._claims_held == 1
+
+
+def test_a_claim_due_in_another_scope_of_the_tenant_brings_the_list_forward(
+        store, monkeypatch):
+    """`until` is found per tenant rather than per scope, so another user's claim can
+    end this user's list early. That costs a rebuild and never a wrong answer."""
+    clock = _Clock(monkeypatch, NOW)
+    mine = put(store, object="Berlin")
+    store.set_embedding(mine.id, onehot(1))
+    put(store, object="Lisbon", scope=Scope("acme", "bob"), valid_from=AHEAD[0])
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [mine.id]
+    assert store._claims[(ALICE, ("live",), True)].until == AHEAD[0].timestamp()
+    clock.at = AHEAD[0]
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [mine.id]
+
+
+def test_every_column_a_state_compares_with_the_clock_is_one_the_cache_watches():
+    """A cached list is kept until the first instant a claim of the tenant changes state,
+    found from the columns `_LAST_CHANGE` and `_NEXT_CHANGE` read. A state that came to
+    compare another column with the instant would change as the clock moves, and the
+    cache would keep a list past the change. So every column any state predicate, and the
+    expiry clause, compares with the instant must be one those two read."""
+    compared: set[str] = set()
+    for states in (["live"], ["retired"], ["ended"], ["live", "ended"],
+                   ["live", "retired"], ["ended", "retired"], list(STATES)):
+        sql, _ = state_predicate("?", states=states)
+        compared |= set(re.findall(r"(\w+) (?:<=|>=|<|>) \?", sql))
+    compared |= set(re.findall(r"(\w+) (?:<=|>=|<|>) \?", unexpired_predicate("?")))
+    assert compared == {"recorded_at", "invalidated_at", "valid_from", "valid_to",
+                        "expires_at"}
+    for expression in (sqlite_store._LAST_CHANGE, sqlite_store._NEXT_CHANGE):
+        assert compared <= set(re.findall(r"\w+", expression)), expression
+
+
+def test_the_next_change_is_found_through_its_index(store):
+    """`until` costs one seek only while SQLite reads `cl_last_change` for it, which it
+    does only for the exact expression the index holds; and the list half of the
+    statement must read the claims as `candidate_ids` does, so they come back in the
+    same order."""
+    c = put(store)
+    store.set_embedding(c.id, onehot(1))
+    statements: list[str] = []
+    store._db.set_trace_callback(statements.append)
+    try:
+        store.vector_search(onehot(1), [SCOPE], 5)
+    finally:
+        store._db.set_trace_callback(None)
+    (sql,) = [s for s in statements if "UNION ALL SELECT min(" in s]
+    plan = [r["detail"] for r in store._db.execute("EXPLAIN QUERY PLAN " + sql,
+                                                   [None] * sql.count("?"))]
+    # The expression as a range, not only the tenant: an expression that differs from
+    # the index's still uses the index for `tenant`, and then reads every claim of it.
+    assert any("cl_last_change (tenant=? AND <expr>>?)" in step for step in plan), plan
+    assert any("cl_scope" in step for step in plan), plan
+
+
+def test_a_claim_written_or_retired_after_a_search_is_seen_by_the_next_one(store):
+    """Every commit empties the lists, so the next search sees what it wrote."""
+    first = put(store, object="Berlin")
+    store.set_embedding(first.id, onehot(1))
+    assert [h[0] for h in store.vector_search(onehot(2), [SCOPE], 5)] == [first.id]
+    later = put(store, object="Lisbon")
+    store.set_embedding(later.id, onehot(2))
+    assert store.vector_search(onehot(2), [SCOPE], 1)[0][0] == later.id
+    store.invalidate(later.id, T1, None)
+    assert [h[0] for h in store.vector_search(onehot(2), [SCOPE], 5)] == [first.id]
+
+
+def test_a_warm_claim_cache_sees_what_another_worker_writes_and_retires(tmp_path):
+    """Another process's commit reaches this one only as a new `data_version`, which
+    the cached search reads before every search and which empties the lists."""
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    first = put(a, object="Berlin")
+    a.set_embedding(first.id, onehot(1))
+    assert a.vector_search(onehot(1), [SCOPE], 5)[0][0] == first.id
+    c = put(b, object="Lisbon")
+    b.set_embedding(c.id, onehot(5))
+    assert a.vector_search(onehot(5), [SCOPE], 1)[0][0] == c.id
+    b.invalidate(first.id, T1, None)
+    assert [h[0] for h in a.vector_search(onehot(1), [SCOPE], 5)] == [c.id]
+    a.close()
+    b.close()
+
+
+def test_a_claim_search_inside_a_batch_sees_its_own_claims_and_the_cache_keeps_none(
+        store):
+    """Inside `batch()` a thread reads its own uncommitted rows, which a list shared
+    with other threads must never hold; after a rollback nothing may return a claim that
+    was never written."""
+    first = put(store, object="Berlin")
+    store.set_embedding(first.id, onehot(1))
+    store.vector_search(onehot(1), [SCOPE], 5)
+    with pytest.raises(RuntimeError):
+        with store.batch():
+            c = put(store, object="Lisbon")
+            store.set_embedding(c.id, onehot(2))
+            assert store.vector_search(onehot(2), [SCOPE], 1)[0][0] == c.id
+            raise RuntimeError("roll back")
+    assert [h[0] for h in store.vector_search(onehot(2), [SCOPE], 5)] == [first.id]
+
+
+def test_a_pinned_or_filtered_claim_search_asks_sql(store, monkeypatch):
+    """The lists answer a read of the present with no filter. A read pinned to an
+    instant would need a list per instant, and a filter can name any metadata field."""
+    c = put(store, object="Berlin", valid_from=T1)
+    store.set_embedding(c.id, onehot(1))
+    monkeypatch.setattr(store, "_cached_claim_search",
+                        lambda *a, **k: pytest.fail("answered from the cache"))
+    assert store.vector_search(onehot(1), [SCOPE], 5, valid_at=TMID, known_at=TMID) == []
+    assert store.vector_search(onehot(1), [SCOPE], 5, known_at=T2)[0][0] == c.id
+    assert store.vector_search(onehot(1), [SCOPE], 5,
+                               where=SearchFilter(meta=(), filepath_prefix="docs/")) == []
+
+
+def test_turning_expiry_hiding_off_is_not_answered_from_a_list_built_with_it_on(store):
+    """`hide_expired` decides which claims a list holds, so it is part of the key."""
+    gone = put(store, object="Berlin", expires_at=T1)
+    store.set_embedding(gone.id, onehot(1))
+    assert store.vector_search(onehot(1), [SCOPE], 5) == []
+    store.hide_expired = False
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [gone.id]
+
+
+def test_a_scope_listed_twice_ranks_its_claims_once_from_the_cache(store):
+    """The cached search drops a repeated scope as `_scoped_union` does. Two copies of
+    one scope's list would put each of its claims in the ranking twice."""
+    c = put(store)
+    store.set_embedding(c.id, onehot(1))
+    twice = [SCOPE, Scope("acme", "alice")]
+    assert [h[0] for h in store.vector_search(onehot(1), twice, 5)] == [c.id]
+    assert store._claims, "the search was answered from the cache"
+
+
+def test_a_claim_row_moved_after_the_cache_was_read_sends_the_search_to_sql(store):
+    """As for turns: a returned claim must still hold the row it was ranked by, or the
+    search asks SQL instead."""
+    a_ = put(store, object="Berlin")
+    store.set_embedding(a_.id, onehot(1))
+    b_ = put(store, object="Lisbon")
+    store.set_embedding(b_.id, onehot(2))
+    store.vector_search(onehot(1), [SCOPE], 5)
+    store._vec.forget(a_.id)
+    assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [b_.id]
+
+
+def test_a_claim_list_built_across_a_commit_is_not_kept(store, monkeypatch):
+    """`_scope_claims` reads SQL and the map outside every lock, so a commit can land
+    between its read and its insert. The list is right for the search that built it,
+    which began before the commit, and wrong for any later one."""
+    c = put(store)
+    store.set_embedding(c.id, onehot(1))
+    real = store._read
+
+    @contextmanager
+    def committed_meanwhile():
+        with real() as conn:
+            yield conn
+        store._changed()
+
+    monkeypatch.setattr(store, "_read", committed_meanwhile)
+    now = datetime.now(timezone.utc)
+    assert store._scope_claims(SCOPE, ALICE, ("live",), now).ids == [c.id]
+    assert not store._claims
+
+
+def test_the_claim_lists_stay_inside_their_row_budget(store, monkeypatch):
+    """The least recently used scope goes first once the lists hold more claims than
+    the budget, and one scope is kept whatever its size."""
+    monkeypatch.setattr(sqlite_store, "_SCOPE_CLAIMS_ROWS", 5)
+    scopes = [Scope("acme", u) for u in ("a", "b", "c")]
+    for i, s in enumerate(scopes):
+        for j in range(3 + 2 * (i == 2)):
+            c = put(store, object=f"city {i} {j}", scope=s)
+            store.set_embedding(c.id, onehot(i))
+    for s in scopes[:2]:
+        store.vector_search(onehot(0), [s], 5)
+    assert [k[0] for k in store._claims] == [("acme", "b", None, None, None)]
+    store.vector_search(onehot(0), [scopes[2]], 5)
+    assert [k[0] for k in store._claims] == [("acme", "c", None, None, None)]
+    assert store._claims_held == 5
 
 
 # --- Maintenance ------------------------------------------------------------

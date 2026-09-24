@@ -506,6 +506,21 @@ CREATE INDEX IF NOT EXISTS erasures_tenant ON erasures(tenant, erased_at);
 -- classification — and silently stops retiring superseded facts in the meantime.
 """ + _PREDICATES_DDL
 
+#: The last instant at which the clock moving on can change a claim's state: the latest of
+#: its five time columns, a missing one counted as the epoch. After it, every read of the
+#: present sees the claim in the same state until the row is written again.
+#: `cl_last_change` indexes this expression, and SQLite uses the index only for this exact
+#: text, so the index and `SQLiteStore._scope_claims` both read it from here.
+_LAST_CHANGE = ("max(recorded_at, valid_from, coalesce(invalidated_at, 0), "
+                "coalesce(valid_to, 0), coalesce(expires_at, 0))")
+#: The first instant after the one bound at each of its five markers at which a claim's
+#: state can change: the earliest of its time columns later than that, or 9e999, which
+#: SQLite reads as infinity, when none is.
+_NEXT_CHANGE = "min(" + ", ".join(
+    f"CASE WHEN {column} > ? THEN {column} ELSE 9e999 END"
+    for column in ("recorded_at", "invalidated_at", "valid_from", "valid_to", "expires_at")
+) + ")"
+
 # Created after the migration, not with the tables: on a v1 file the columns these
 # cover do not exist until `_migrate` has added them, and `executescript` would abort.
 #
@@ -569,7 +584,17 @@ CREATE INDEX IF NOT EXISTS cl_expiry ON claims(expires_at) WHERE expires_at IS N
 -- `ep_scope` stays: an older build creates it on every open, so dropping it here would
 -- make a file that both builds open rebuild it every other time.
 CREATE INDEX IF NOT EXISTS ep_cover ON episodes(tenant, usr, project, agent, session, ts, id);
-"""
+
+-- Each claim's `_LAST_CHANGE`, per tenant. `_scope_claims` keeps a scope's claim list for
+-- as long as no claim of the tenant can change state, and finds the next instant one can
+-- by seeking here to the claims whose last change is still ahead, which are few, rather
+-- than by reading every claim of the tenant: 0.003 ms against 41 ms over 100,000 claims.
+-- It costs +3.5 us on a batched `put_claim` (72.3 against 68.8) and +24 us on one
+-- committed alone (500.6 against 476.7), about 5% each, over 20,000 claims, medians of
+-- four runs. An existing store builds it the first time this version opens it: 0.1 s
+-- for 100,000 claims. Down here because `expires_at` does not exist on a pre-v15 file
+-- until `_migrate_to_v15` adds it.
+""" + f"CREATE INDEX IF NOT EXISTS cl_last_change ON claims(tenant, {_LAST_CHANGE});\n"
 
 _CLAIM_FIELDS = (
     "id", "tenant", "usr", "agent", "session", "subject", "predicate", "object", "text",
@@ -695,6 +720,33 @@ class _ScopeTurns:
 #: 100 bytes: 199,499 turns in one scope held 19.3 MB, and building them peaked at twice
 #: that. The least recently used scope goes first; one scope is kept whatever its size.
 _SCOPE_TURNS_ROWS = 1_000_000
+
+
+@dataclass(frozen=True, slots=True)
+class _ScopeClaims:
+    """The claims stored at one scope that have a vector and are in the states asked
+    for, as a read of the present sees them, in the order `candidate_ids` returns them.
+
+    What the vector leg over claims ranks, held in memory so that a search runs no SQL.
+    It answers a read at any instant from `since` up to, not including, `until`, and
+    only until the next commit empties it. See `SQLiteStore._scope_claims`.
+    """
+
+    ids: list[str]
+    #: Each claim's row of the matrix, when the entry was built.
+    rows: np.ndarray
+    #: The first instant the entry answers for: the clock read after the statement that
+    #: built it, so no instant that statement bound is later.
+    since: float
+    #: The first instant at which a claim of the scope's tenant changes state as the clock
+    #: moves on, or infinity when none will.
+    until: float
+
+
+#: How many claims `SQLiteStore._scope_claims` keeps across all scopes. Each costs about
+#: 90 bytes: 100,000 claims in one scope held 8.9 MB, and building them peaked at
+#: 14.5 MB. The least recently used scope goes first; one scope is kept whatever its size.
+_SCOPE_CLAIMS_ROWS = 1_000_000
 
 #: How many of the text index's best matches `SQLiteStore._episode_text_first` ranks for
 #: each row it is asked for, and the fewest it ranks in all. Four for each row proved the
@@ -1675,6 +1727,11 @@ class SQLiteStore:
         self._turns_held = 0
         self._writes = 0
         self._turns_lock = threading.Lock()
+        # Each scope's claims in the states asked for, as a read of the present sees
+        # them; see `_scope_claims`. Kept exactly as the turn lists are: least recently
+        # used first, under `_turns_lock`, and emptied by what empties them.
+        self._claims: OrderedDict[tuple[Any, ...], _ScopeClaims] = OrderedDict()
+        self._claims_held = 0
         # The connection `_notice_commits` asks whether another connection has
         # committed, opened on first use, and the `data_version` it last answered.
         self._watch: sqlite3.Connection | None = None
@@ -2521,22 +2578,25 @@ class SQLiteStore:
             self._changed()
 
     def _changed(self) -> None:
-        """Drop every `_scope_turns` entry, because what they were read from moved.
+        """Drop every `_scope_turns` and `_scope_claims` entry, because what they were
+        read from moved.
 
         Called after every commit this store makes, including the one that ends a
         rolled-back `batch()`, and when `_notice_commits` sees that another connection
         committed. It does not ask what the change touched: a claim write empties the
-        cache too, which costs one rebuild, where missing a turn write would return an
-        erased turn or leave out a new one.
+        turn lists too, and a turn write the claim lists, which costs one rebuild, where
+        missing a write would return an erased row or leave out a new one.
         """
         with self._turns_lock:
             self._writes += 1
             self._turns.clear()
             self._turns_held = 0
+            self._claims.clear()
+            self._claims_held = 0
 
     def _notice_commits(self) -> None:
-        """Empty the `_scope_turns` lists if another connection has committed since the
-        last look.
+        """Empty the `_scope_turns` and `_scope_claims` lists if another connection has
+        committed since the last look.
 
         One connection answers for the whole store, because `PRAGMA data_version` can
         only be compared with an earlier answer from the same connection. When each
@@ -4481,11 +4541,26 @@ class SQLiteStore:
                       include_invalidated: bool | None = None,
                       where: SearchFilter | None = None
                       ) -> list[tuple[str, float]]:
+        """Cosine over claim vectors, restricted to the claims these scopes may see in
+        the states asked for.
+
+        A read of the present, without a filter and outside `batch()`, takes its
+        candidates from `_scope_claims` instead of from SQL: the same claims in the same
+        order, so the same rows come back. A read pinned to an instant still asks SQL, and
+        so do a filtered read and a read inside `batch()`, for the reasons
+        `vector_search_episodes` gives.
+        """
+        wanted = resolve_states(states, include_invalidated)
+        # `dim` is None until this process has seen a vector; see `vector_search_episodes`.
+        if (where is None and valid_at is None and known_at is None
+                and not self._batch_depth and self._vec.dim is not None):
+            hits = self._cached_claim_search(qvec, scopes, limit, wanted)
+            if hits is not None:
+                return hits
         # The filter narrows the candidate set the index ranks inside, so the cap counts
         # only rows that match it.
         allowed = self.candidate_ids(
-            scopes, valid_at=valid_at, known_at=known_at,
-            states=resolve_states(states, include_invalidated), where=where)
+            scopes, valid_at=valid_at, known_at=known_at, states=wanted, where=where)
         if not allowed:
             return []
         self._ensure_index()
@@ -4603,6 +4678,104 @@ class SQLiteStore:
                     _, old = self._turns.popitem(last=False)
                     self._turns_held -= len(old.ids)
         return turns
+
+    def _cached_claim_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int,
+                             wanted: tuple[str, ...]) -> list[tuple[str, float]] | None:
+        """`vector_search` for a read of the present, over `_scope_claims`, or None when a
+        write moved a row between reading the cache and ranking.
+
+        The candidates are each distinct scope's list, scope by scope, which is the order
+        `candidate_ids` returns them in. The order matters as well as the set: two claims
+        with equal cosines keep the order they arrived in, so a different order could put
+        a different one of them inside `limit`.
+        """
+        # In this order, for the reason `_cached_turn_search` gives.
+        self._notice_commits()
+        self._ensure_index()
+        # `utcnow`, the clock the expiry clause reads, so that a test moving it moves every
+        # instant this path binds.
+        now = utcnow()
+        chosen: list[_ScopeClaims] = []
+        seen: set[tuple[Any, ...]] = set()
+        for s in scopes:
+            key = (s.tenant, s.user, s.project, s.agent, s.session)
+            if key in seen:
+                continue
+            seen.add(key)
+            chosen.append(self._scope_claims(s, key, wanted, now))
+        if len(chosen) == 1:
+            ids, rows = chosen[0].ids, chosen[0].rows
+        else:
+            ids = [i for claims in chosen for i in claims.ids]
+            rows = np.concatenate([claims.rows for claims in chosen]
+                                  or [np.empty(0, dtype=np.int64)])
+        return self._vec.search_rows(qvec, ids, rows, limit)
+
+    def _scope_claims(self, scope: Scope, key: tuple[Any, ...], wanted: tuple[str, ...],
+                      now: datetime) -> _ScopeClaims:
+        """The claims stored at `scope` that have a vector and are in `wanted` at `now`,
+        with their vectors' rows.
+
+        Read by the statement `candidate_ids` runs for one scope, bound at `now`, and kept
+        until `_changed` next runs or the clock reaches the entry's `until`. The same
+        statement finds `until`: the first instant after `now` at which a claim of the
+        tenant changes state as the clock moves on. Every state compares a time column
+        with the instant read, so before then, and before the next write, no claim can
+        enter or leave the list. `cl_last_change` answers it with one seek over the few
+        claims whose last change is still ahead. A claim in another scope of the tenant
+        can bring `until` forward, which costs a rebuild and never a wrong list.
+
+        One statement, so the list and `until` come from the same snapshot. The entry
+        answers for instants from the clock read after it, and not before, because the
+        statement binds its expiry instant after `now`. An entry built while a change
+        happened is returned to the caller that built it, whose read it is correct for,
+        and not kept for anybody else.
+        """
+        ck = (key, wanted, self.hide_expired)
+        instant = now.timestamp()
+        with self._turns_lock:
+            hit = self._claims.get(ck)
+            if hit is not None and hit.since <= instant < hit.until:
+                self._claims.move_to_end(ck)
+                return hit
+            writes = self._writes
+        lv, lp = self._state_clause(now, now, wanted)
+        wc, wp = _where_clause(None, "claims", _CLAIM_DOCUMENTS, self._json_functions)
+        sql, params = self._scoped_union("SELECT id FROM claims", [scope], f"{lv} AND {wc}",
+                                         lp + wp)
+        sql += (f" UNION ALL SELECT min({_NEXT_CHANGE}) FROM claims "
+                f"WHERE tenant IS ? AND {_LAST_CHANGE} > ?")
+        with self._read() as conn:
+            cur = conn.cursor()
+            cur.row_factory = None
+            found = cur.execute(
+                sql, params + [instant] * 5 + [scope.tenant, instant]).fetchall()
+        since = utcnow().timestamp()
+        # The last row is the second `SELECT`'s, NULL when no claim of the tenant can
+        # change state again.
+        until = found.pop()[0]
+        ids = list(map(itemgetter(0), found))
+        with self._vec._lock:
+            rows = np.fromiter(map(self._vec._row.get, ids, repeat(-1)),
+                               dtype=np.int64, count=len(ids))
+        keep = rows >= 0
+        if not keep.all():
+            ids = [i for i, k in zip(ids, keep) if k]
+            rows = rows[keep]
+        claims = _ScopeClaims(ids=ids, rows=rows, since=since,
+                              until=math.inf if until is None else float(until))
+        with self._turns_lock:
+            if self._writes == writes:
+                # An entry the clock has run past is replaced rather than kept beside.
+                old = self._claims.pop(ck, None)
+                if old is not None:
+                    self._claims_held -= len(old.ids)
+                self._claims[ck] = claims
+                self._claims_held += len(claims.ids)
+                while self._claims_held > _SCOPE_CLAIMS_ROWS and len(self._claims) > 1:
+                    _, old = self._claims.popitem(last=False)
+                    self._claims_held -= len(old.ids)
+        return claims
 
     # -- maintenance ---------------------------------------------------------
 

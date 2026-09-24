@@ -1455,6 +1455,34 @@ median the vector leg, 36 to 55 ms, is now the longer on both stores, which caps
 fell by 80 to 100 ms on both stores. The first search after a write does not change,
 because it waits for the vector leg to rebuild the scope's turn list.
 
+**Each scope's claims, kept in memory.** The change after that keeps each scope's claim
+list for a read of the present, as the turn lists are kept, until the next commit or until
+the clock reaches the next instant at which a claim of the tenant changes state. Same two
+stores, timed four times in a row: the change above, this change, the change above again,
+and this change again. The change above ran first so that its first run is on a store
+without `cl_last_change`, which this change built on its first open, in 0.1 s for the
+first store's 100,000 claims.
+
+| read | before, median | after, median | before, p95 | after, p95 |
+|---|---:|---:|---:|---:|
+| 100,000 claims: `vector_search` | 168.3 / 166.3 ms | 69.4 / 68.3 ms | 206.8 / 199.1 ms | 114.9 / 94.9 ms |
+| &nbsp;&nbsp;after a write | | 166.8 / 169.6 ms | | 261.4 / 195.1 ms |
+| 100,000 claims: **`search()`** | **233.1 / 233.5 ms** | **132.0 / 135.7 ms** | **275.3 / 281.3 ms** | **163.5 / 169.1 ms** |
+| &nbsp;&nbsp;after a write | 453.0 / 451.7 ms | 462.5 / 472.9 ms | 506.3 / 500.6 ms | 495.8 / 502.5 ms |
+| 1,168 claims: `vector_search` | 1.9 / 1.7 ms | 0.9 / 1.0 ms | 3.8 / 3.9 ms | 3.3 / 2.9 ms |
+| 1,168 claims: **`search()`** | **50.8 / 49.6 ms** | **48.9 / 47.1 ms** | **95.8 / 89.8 ms** | **93.0 / 88.8 ms** |
+| &nbsp;&nbsp;after a write | 244.2 / 247.1 ms | 246.0 / 242.6 ms | 288.2 / 298.6 ms | 293.9 / 277.8 ms |
+
+The rows that come back are the same: 50 searches on each store returned the same 600 rows
+with the same scores under both builds. On the first store the claim vector leg takes about
+40% of the time it took, and a whole search about 57%, because the claim stage was the
+longest part of a search there. What is left of the leg is mostly the product over 100,000
+vectors. The claim leg after a write, timed on its own, costs what it did before: the
+rebuild runs the same SQL the leg ran on every search, and finding the next instant is one
+seek. A whole search after a write read 2 to 4% slower at the median in these runs and no
+slower at the 95th percentile. The second store holds 1,168 claims, so its claim leg took
+under 2 ms either way.
+
 ---
 
 ## Answer quality, end to end (an authored corpus, an agent as the reader)
