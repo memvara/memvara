@@ -642,11 +642,25 @@ def _standing_refresh(session: str, now: float, cwd: str = "") -> "tuple[str, tu
 #: `quota:2026-09-01` when the refusal named the instant the period rolls over.
 _QUOTA = "quota"
 
+#: A plan's daily recall allowance used up, as `lib.fast` hands it over: `daily` alone,
+#: `daily:12600` with the seconds until it resets, or `daily:00:00` with the reset time in
+#: UTC.
+_DAILY = "daily"
+
 #: Month names for the one date this file renders. `datetime.strftime` would do it in a
 #: line and cost an import on a path measured at ~30ms, where `import datetime` is a
 #: measurable share of the budget. Twelve strings are cheaper than a module.
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _wait(seconds: int) -> str:
+    """`3 h 30 min`, `2 h`, `5 min`: a wait in the units a person reads, rounded up."""
+    minutes = max(1, -(-seconds // 60))
+    hours, minutes = divmod(minutes, 60)
+    if not hours:
+        return f"{minutes} min"
+    return f"{hours} h {minutes} min" if minutes else f"{hours} h"
 
 
 def _quota_line(why: str) -> str:
@@ -655,7 +669,20 @@ def _quota_line(why: str) -> str:
     Says *retrieval* rather than the metric's own name: `retrieval.query` is what the
     server meters and not a phrase anyone reads. Says the reset date because "spent" on
     its own reads as "broken, retry later", and retrying is precisely what will not work.
+
+    A paid plan's allowance is per day, and used to be reported as "recall failed": the
+    service refuses it with the same 429 and code as a plain rate limit, and nothing here
+    looked further. It now says the allowance for today is used up, and how long until it
+    resets when the refusal said.
     """
+    if why.startswith(_DAILY):
+        _, _, when = why.partition(":")
+        line = "today's recall allowance is used up"
+        if when.isdigit():
+            return f"{line} — resets in {_wait(int(when))}"
+        if len(when) == 5 and when[2] == ":":
+            return f"{line} — resets at {when} UTC"
+        return line
     if not why.startswith(_QUOTA):
         return ""
     _, _, when = why.partition(":")
@@ -865,11 +892,10 @@ def main() -> int:
         # The structured layer had little to say. Ask again for the raw turns too --
         # narrative excerpts cannot outrank claims that are not there.
         #
-        # On the hosted endpoint this is currently a no-op: `include_episodes` is the only
-        # boolean argument in the tool surface and the server's validator has no branch for
-        # that type, so it raises and the client retries without it. It costs one round
-        # trip on an already-thin prompt, and it starts working the day the server is
-        # fixed, with no release here.
+        # On the hosted endpoint this is one more request, and one more recall counted
+        # against the plan's allowance. The hosted client sends it once: it leaves off any
+        # argument the server's `tools/list` does not declare, rather than sending it and
+        # retrying without it (`lib.hosted.HostedRecall.recall`).
         if time.monotonic() - start < OVERALL_BUDGET_SEC:
             try:
                 # Plain: a rewrite here would be a second model call on one prompt.

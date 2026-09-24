@@ -11,6 +11,37 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The recall hook says when a paid plan's daily recall allowance is used up.** On a
+  paid plan the hosted service meters recalls per day, and it refuses a recall over that
+  allowance with HTTP 429 and code `rate_limited`, which is the same status and code as a
+  plain rate limit. The hook read only the code, so the banner said
+  "⋈ Memvara · recall failed". It now reads the refusal's `detail.reason`
+  (`over_period_allowance`) and says "today's recall allowance is used up", followed by
+  "resets in 3 h 30 min" from the `Retry-After` header, or by "resets at 00:00 UTC" from
+  `detail.resets_at` when the header is missing. A plain rate limit, a server error and a
+  timeout are still reported as "recall failed". The monthly allowance on Free, which the
+  service refuses with 402 `quota_exhausted`, keeps its message.
+- **A hosted recall is sent once, not up to three times.** When a recall failed, the
+  hooks' hosted client sent it again without `min_score`, and then again without
+  `include_episodes`, whatever the failure was. The hosted service counts every recall it
+  answers against the plan's allowance, including one it refused because of an argument,
+  so on a server that does not take `include_episodes` the wider second recall the hook
+  makes on a thin prompt cost three recalls, and the whole prompt four. The client now checks each optional argument against the server's
+  `tools/list` schema, which it already fetched for `query_rewrite`, and leaves off any
+  argument the server does not declare. A 429, a 402, a server error and a timeout are
+  never sent again, because none of them is about an argument. Resending without an
+  argument is now only the fallback for a client whose `tools/list` request failed, and
+  only after the tool itself refused the call. Against `app.memvara.dev` today no argument
+  is refused: its schema declares `min_score` and `include_episodes`, and `query_rewrite`,
+  which it does not declare, is not sent. The resends there came from refusals such as a
+  spent allowance, and each one was logged as "hosted rejected min_score" although the
+  server had not rejected it.
+- **The test suite no longer writes into the real `~/.memvara/.hooks/recall.log`.** The
+  hooks' `lib.ipc` reads the home directory once, when it is imported, and hook test files
+  import it before any fixture runs, so every test that logged wrote into the developer's
+  own log. The hosted client's tests left "hosted rejected min_score" lines there, three
+  at a time. `tests/conftest.py` now points `lib.ipc._HOME` at a temporary directory for
+  every test.
 - **The plugin's capture hook can write to a local store again.** It passed a fact's
   memory type to the library as a string, and the library takes the `MemoryType` enum, so
   every fact the hook wrote to a local store failed with `AttributeError: 'str' object has

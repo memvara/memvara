@@ -2400,6 +2400,31 @@ check. The daemon's address, the store the hooks open and the rewrite decision a
 the client's configuration through `lib/ipc.client_env`, which reads the file once per
 process.
 
+**The hooks' hosted client sends each recall once.** The hosted service counts every
+`memory_recall` it answers against the plan's recall allowance, and that includes a call
+the tool refused because of an argument, since the refusal is a tool result inside an
+HTTP 200. So `lib/hosted.HostedRecall.recall` checks `query_rewrite`, `min_score` and
+`include_episodes` against the server's `tools/list` schema before the call, and leaves
+off any argument the server does not declare. The schema is fetched once per client and
+kept; a fetch that fails is not kept, and the next call asks again. Only when the fetch
+failed does the client fall back to resending: first without `query_rewrite` when the
+refusal names it, then without `min_score`, then without `include_episodes`, and only
+while the tool itself is the one refusing (status 200). A 429, a 402, a server error or
+no reply is raised at once, because none of them is about an argument. A recall that goes
+out without its `min_score` floor writes a line containing `UNFILTERED` to `recall.log`.
+
+**The recall hook tells a spent allowance from a failure.** The hosted service refuses a
+recall over a paid plan's daily allowance with HTTP 429 and code `rate_limited`, with
+`Retry-After` set to the seconds until the allowance resets and a `detail` holding
+`metric`, `limit`, `used`, `resets_at` and `reason: over_period_allowance`. A plain rate
+limit is also 429 `rate_limited`, but its `detail` names the `rule` that bound. Free's
+monthly allowance is refused with 402 `quota_exhausted` and `detail.resets_at`, and no
+`Retry-After`. `lib/fast._reason` turns the first into the token `daily` and the last into
+`quota`, and `recall._quota_line` turns the tokens into the banner: "today's recall
+allowance is used up — resets in 3 h 30 min" (or "resets at 00:00 UTC" when there was no
+`Retry-After`), and "retrieval quota spent — resets 1 Oct". Every other failure, including
+a plain rate limit, is "recall failed".
+
 **A hook may never fail a turn.** Every path out of `run.py` returns 0, including the ones
 it does not know about — the `__main__` block catches `BaseException`. That is the rule
 that outranks reporting a problem: a hook that fails a prompt is worse than a hook that

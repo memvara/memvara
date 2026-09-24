@@ -770,7 +770,10 @@ def test_a_server_that_refuses_the_opt_out_is_asked_again_without_it(monkeypatch
     def call(tool, args):
         sent.append(dict(args))
         if "query_rewrite" in args:
-            raise HostedError("memory_recall: unknown argument(s) query_rewrite.")
+            # Status 200: the tool read the arguments and refused, which is how the
+            # real client reports a refusal from the tool itself.
+            raise HostedError("memory_recall: unknown argument(s) query_rewrite.",
+                              status=200)
         return "- a memory"
 
     monkeypatch.setattr(client, "_call", call)
