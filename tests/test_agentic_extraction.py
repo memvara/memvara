@@ -24,7 +24,7 @@ import pytest
 
 from memvara import Memvara
 from memvara.embed import HashingEmbedder
-from memvara.llm import LLM, NullLLM
+from memvara.llm import LLM, Guidance, NullLLM, with_guidance
 from memvara.llm import _tools
 from memvara.llm.anthropic import AnthropicLLM
 from memvara.llm.base import (
@@ -77,6 +77,7 @@ class ScriptedChat:
     name = "fake/tools"
     is_noop = False
     reports_usage = False
+    accepts_guidance = True
 
     def __init__(self, *steps: Sequence[tuple[str, dict[str, Any]]] | Step,
                  finished: bool = True, raises: BaseException | None = None,
@@ -105,7 +106,7 @@ class ScriptedChat:
         n = len(self.steps) + 1
         return ToolRun(steps=n, requests=n, finished=self.finished, text="done")
 
-    def extract(self, episodes, known_predicates):
+    def extract(self, episodes, known_predicates, guidance=None):
         self.extracted.append(list(episodes))
         return list(self.fallback)
 
@@ -1053,3 +1054,75 @@ def test_an_end_the_reconciler_does_not_carry_out_is_reported_as_not_applied(mon
     assert receipt.proposals_refused == [
         RefusedProposal("propose_end", old.id, "not_applied")]
     assert mem.get(old.id).state == "live"
+
+
+# -- per-project guidance and expiry (phase 3 §3.2 and §3.4) --------------------------------
+
+
+def test_the_agentic_system_message_carries_the_projects_guidance():
+    """Guidance is appended to every extraction prompt, and the tool loop's system message
+    is one. It goes in the system message, with the rules, and never in the fenced turns."""
+    guidance = Guidance(context="A payments service.", include=["decisions about retries"])
+    llm = ScriptedChat()
+    memory(llm, write_guidance=guidance).add(MOVE)
+    (run,) = llm.runs
+    assert run["system"] == with_guidance(AGENTIC_SYSTEM, guidance)
+    assert run["system"] != AGENTIC_SYSTEM
+    assert "decisions about retries" not in run["messages"][0].content
+
+
+def test_without_guidance_the_system_message_is_the_shipped_one_byte_for_byte():
+    llm = ScriptedChat()
+    memory(llm).add(MOVE)
+    assert llm.runs[0]["system"] == AGENTIC_SYSTEM
+
+
+def test_a_proposed_memory_can_carry_an_expiry_the_turn_names():
+    llm = ScriptedChat([("propose_claim", fact(
+        "user", "door_code", "4411", expires_at="2999-01-01T00:00:00+00:00"))])
+    receipt = memory(llm).add("The door code is 4411 until 1 January 2999.")
+    (claim,) = receipt.added
+    assert claim.expires_at == datetime(2999, 1, 1, tzinfo=timezone.utc)
+
+
+def test_an_expiry_without_a_zone_is_read_as_utc():
+    llm = ScriptedChat([("propose_claim", fact(
+        "user", "door_code", "4411", expires_at="2999-01-01"))])
+    (claim,) = memory(llm).add("The door code is 4411 until 1 January 2999.").added
+    assert claim.expires_at == datetime(2999, 1, 1, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("expires_at, words", [
+    ("2001-01-01T00:00:00+00:00", "not in the future"),
+    ("in two weeks", "ISO 8601"),
+    (17, "ISO 8601"),
+])
+def test_an_expiry_in_the_past_or_unreadable_is_refused(expires_at, words):
+    """Core refuses an expiry that is not in the future, because the next sweep would
+    erase the fact as soon as it was written. A proposal is held to the same rule, and one
+    the library cannot read as an instant is refused too."""
+    llm = ScriptedChat([("propose_claim", fact(
+        "user", "door_code", "4411", expires_at=expires_at))])
+    receipt = memory(llm).add("The door code is 4411 until 1 January 2999.")
+    assert receipt.added == []
+    assert receipt.proposals_refused == [RefusedProposal("propose_claim", "", "invalid")]
+    assert words in llm.results[0]
+
+
+def test_a_proposed_expiry_goes_through_the_reconcilers_own_scope_rule():
+    """A repeat that names an expiry puts it only on a claim in exactly its own scope.
+    Here the same fact is on record user-wide, and the proposal comes from a write inside
+    a project, so the user-wide claim keeps no expiry and the repeat is stored beside it
+    with its own."""
+    user_wide = Memvara(embedder=HashingEmbedder(), llm=NullLLM(), tenant="acme",
+                        user="alice")
+    shared = user_wide.remember("user", "deploy_cluster", "Frankfurt").added[0]
+    llm = ScriptedChat([("propose_claim", fact(
+        "user", "deploy_cluster", "Frankfurt", expires_at="2999-01-01T00:00:00Z"))])
+    in_project = Memvara(store=user_wide.store, embedder=HashingEmbedder(), llm=llm,
+                         tenant="acme", user="alice", project=PROJECT,
+                         write_agentic_extraction=True)
+    receipt = in_project.add(CLUSTER)
+    assert user_wide.get(shared.id).expires_at is None
+    (own,) = receipt.added
+    assert own.scope.project == PROJECT and own.expires_at is not None

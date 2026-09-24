@@ -74,13 +74,22 @@ refused.
 `MEMVARA_LLM` chooses the extraction backend from `none`, `anthropic` and `openai`, with the
 `MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_TOKENS`, `MEMVARA_LLM_MAX_CLAIMS`,
 `MEMVARA_LLM_TERSE_CLAIMS`, `MEMVARA_LLM_EXTRACT_SYSTEM` and `MEMVARA_LLM_EXTRA_BODY`
-variables tuning it. `MEMVARA_EMBEDDER` chooses the embedder. `MEMVARA_PREDICATES` loads
+variables tuning it. `MEMVARA_EXTRACT_GUIDANCE` names a TOML file of per-project guidance
+that is added to the extraction prompt of either backend. `MEMVARA_EMBEDDER` chooses the embedder. `MEMVARA_PREDICATES` loads
 declared vocabularies. `MEMVARA_READ_ONLY` hides every tool that writes.
 `MEMVARA_ADVISE_REPLACEMENTS` turns on replacement advice. `MEMVARA_CLOSED_VOCABULARY`
 makes the write pipeline refuse a model-proposed claim whose predicate nothing declared. `MEMVARA_ANCHORED` makes
 `anchored` the default on the three read tools, and `MEMVARA_READ_W_GRAPH` sets the weight
 on the graph leg of retrieval — the two settings that decide how this server reads, both
 off by default. `MEMVARA_API_KEY` and `MEMVARA_SERVER_URL` are the cloud credentials.
+
+A local server erases facts whose `expires_at` has passed: once when the store opens, and
+then hourly on a daemon thread while `serve()` runs (`ExpirySweeper` in
+`memvara/server/mcp.py`). The sweep only deletes: reads leave such a fact out from the
+instant it expires. A read-only server runs neither sweep, because erasing is a write.
+`MEMVARA_FEATURE_EXPIRY_ERASURE=0` stops both sweeps and the hiding, and the
+`memory_remember` argument descriptions then say that nothing is erased. A cloud-mode
+server runs no sweep, because the deployment runs its own.
 
 ## Invariants and assumptions
 

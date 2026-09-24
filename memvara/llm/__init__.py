@@ -7,6 +7,7 @@ from typing import Any
 from .base import (LLM, Chat, MalformedToolOutput, Message, Multimodal, NullLLM,
                    ReplacementJudge, ToolChat, ToolRun, ToolRunError, ToolRunTimeout,
                    ToolSpec, TruncatedResponse, Usage)
+from .guidance import Guidance, GuidanceError, load_guidance, with_guidance
 
 # `Usage` is exported because implementing `LLM` outside this package requires it:
 # a backend that sets `reports_usage` is handed one and has to type against it. `Chat`
@@ -19,13 +20,16 @@ from .base import (LLM, Chat, MalformedToolOutput, Message, Multimodal, NullLLM,
 # `Memvara.remember` to give replacement advice implements this beside `LLM`.
 # `Multimodal` is exported for the same reason: a backend that wants
 # `memvara.ingest.extract` to read images, audio or video implements it beside `LLM`.
-# `ToolChat` is exported for the same reason again: a backend that wants agentic
+# `Guidance` and `with_guidance` are exported so an extractor outside this package, or one
+# that sends its own system message, adds per-project guidance the way the two backends do.
+# `ToolChat` is exported for the same reason as `Chat`: a backend that wants agentic
 # extraction (`memvara.write.agentic`) implements it, and `Message`, `ToolSpec`, `ToolRun`
 # and the three `ToolRunError` classes are the types its one method takes, returns and
 # raises.
-__all__ = ["LLM", "Chat", "MalformedToolOutput", "Message", "Multimodal", "NullLLM",
-           "ReplacementJudge", "ToolChat", "ToolRun", "ToolRunError", "ToolRunTimeout",
-           "ToolSpec", "TruncatedResponse", "Usage", "AnthropicLLM", "OpenAILLM"]
+__all__ = ["LLM", "Chat", "Guidance", "GuidanceError", "MalformedToolOutput", "Message",
+           "Multimodal", "NullLLM", "ReplacementJudge", "ToolChat", "ToolRun",
+           "ToolRunError", "ToolRunTimeout", "ToolSpec", "TruncatedResponse", "Usage",
+           "AnthropicLLM", "OpenAILLM", "load_guidance", "with_guidance"]
 
 
 def __getattr__(name: str) -> Any:

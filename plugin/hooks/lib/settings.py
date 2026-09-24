@@ -55,6 +55,8 @@ FEATURE_DEFAULTS = {
     "synthesis": True,
     "metadata_filters": True,
     "encryption": True,
+    "extraction_guidance": True,
+    "expiry_erasure": True,
     "agentic_extraction": False,
 }
 

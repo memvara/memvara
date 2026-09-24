@@ -523,3 +523,44 @@ def test_every_hosted_purge_refuses_a_project_with_one_message():
             purge()
         messages.append(str(refused.value))
     assert len(set(messages)) == 1 and project in messages[0]
+
+
+# --- expiry -------------------------------------------------------------------
+
+
+def test_remember_sends_an_expiry_and_its_reason_when_given(recorded):
+    """`expires_at` rides on `POST /v1/facts` beside the rest of the fact."""
+    mem = recorded(_receipt())
+    when = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    mem.remember("user", "door_code", "4411", expires_at=when, expire_reason=" rental ")
+    body = _sent(recorded.calls[-1])
+    assert recorded.calls[-1].url.path == "/v1/facts"
+    assert body["expires_at"] == "2030-01-01T00:00:00+00:00"
+    assert body["expire_reason"] == "rental"
+
+
+def test_remember_without_an_expiry_sends_neither_field(recorded):
+    """A deployment from before expiry refuses a field it does not know, so a write that
+    sets none must send none."""
+    mem = recorded(_receipt())
+    mem.remember("user", "lives_in", "Lisbon")
+    assert not {"expires_at", "expire_reason"} & set(_sent(recorded.calls[-1]))
+
+
+def test_a_reason_without_an_expiry_is_refused_before_any_request(recorded):
+    mem = recorded(_receipt())
+    with pytest.raises(ValueError, match="no expires_at= was given"):
+        mem.remember("user", "door_code", "4411", expire_reason="rental")
+    assert recorded.calls == []
+
+
+def test_a_claim_sent_back_with_an_expiry_carries_it_and_one_without_has_none():
+    from memvara.remote import hydrate
+
+    with_expiry = {**_memory(), "expires_at": "2030-01-01T00:00:00Z",
+                   "expire_reason": "rental"}
+    claim = hydrate.claim(with_expiry)
+    assert claim.expires_at == datetime(2030, 1, 1, tzinfo=timezone.utc)
+    assert claim.expire_reason == "rental"
+    older = hydrate.claim(_memory())
+    assert older.expires_at is None and older.expire_reason is None

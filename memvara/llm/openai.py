@@ -31,6 +31,7 @@ from typing import Any, Mapping, Sequence
 from ..ingest.errors import MediaUnsupported
 from ..types import Episode
 from . import _shape, _tools
+from .guidance import Guidance, with_guidance
 from .base import (
     TOOL_STEP_MAX_TOKENS,
     MalformedToolOutput,
@@ -145,6 +146,8 @@ class OpenAILLM:
     #: A real backend, so every call it makes is billed to `WriteReceipt.llm_calls`.
     is_noop = False
     reports_usage = True
+    #: `extract` appends `guidance=` to its system message. See `llm.guidance`.
+    accepts_guidance = True
 
     def __init__(
         self,
@@ -464,12 +467,15 @@ class OpenAILLM:
 
     def extract(
         self, episodes: Sequence[Episode], known_predicates: Sequence[str],
-        *, usage: Usage | None = None,
+        *, usage: Usage | None = None, guidance: Guidance | None = None,
     ) -> list[dict[str, Any]]:
         if not episodes:
             return []  # nothing to extract from, and a call we should not pay for
         response = self._call(
-            self._extract_system,
+            # Appended to whichever prompt is in use, the shipped one or the replacement
+            # `extract_system` names: guidance adds a project's rules and never decides
+            # which base prompt a deployment runs.
+            with_guidance(self._extract_system, guidance),
             _shape.extract_prompt(episodes, known_predicates),
             self._claim_schema,
             usage,

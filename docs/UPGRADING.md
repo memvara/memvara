@@ -47,6 +47,62 @@ both now take a `reason` keyword argument, which `apply` passes.
 
 ---
 
+## Claims can expire and be erased, stores move to schema 15, and extraction takes guidance
+
+### What changed
+
+Claims have two new fields, `expires_at` and `expire_reason`, which only a caller sets,
+with `remember(expires_at=..., expire_reason=...)` or the `memory_remember` tool. Once
+`expires_at` passes, `Memvara.erase_expired()` **erases** the claim: the row, its text
+index entry and its vector are deleted, an erasure record is written, and a proof is
+checked against the disk. It runs when a `Memvara` opens a store and hourly in the MCP
+server, but not on a read-only server. Reads leave the claim out from the instant it
+expires, before the sweep deletes it. This is the one case in which the engine deletes a
+claim on its own, and it reverses the old wording of invariant 3 in `docs/INTERNALS.md`
+for that case only. A claim written without `expires_at` is never erased by the engine,
+and ending or superseding a claim still deletes nothing.
+
+Opening a store written by an earlier version upgrades it to schema 15, which adds the two
+nullable columns and an index. Nothing is backfilled. A store stamped 15 cannot be opened
+by an earlier version, which refuses rather than guessing.
+
+`LLM.extract()` takes a new keyword, `guidance`, which appends per-project rules to the
+extraction prompt. The MCP server reads them from a TOML file named by
+`MEMVARA_EXTRACT_GUIDANCE`.
+
+Two feature switches are new, both on by default: `extraction_guidance` and
+`expiry_erasure`.
+
+### Who this changes, and in which direction
+
+**If you implement `Store`**, add `expired_claims(now)` to have expiring claims erased. It
+is optional: without it the sweep at open is skipped and `erase_expired()` raises
+`NotImplementedError` naming your store. If your store persists `Claim` fields one by one,
+persist `expires_at` and `expire_reason` too, or an expiry a caller set is lost.
+
+**If you implement `LLM`**, nothing breaks: the write path passes `guidance=` only to a
+backend with `accepts_guidance = True`, and only when guidance is configured. Configuring
+guidance for a backend without it raises `TypeError` when the `Memvara` is built. To
+support it, take `guidance=` in `extract()` and pass your system message through
+`memvara.llm.with_guidance`.
+
+**If you keep a copy of the feature names**, as the plugin hooks do in
+`plugin/hooks/lib/settings.py`, add `extraction_guidance` and `expiry_erasure`.
+
+**If you downgrade**, an earlier version refuses a schema 15 store. Keep a copy of the file
+from before the upgrade if you may need to roll back. Find your stores with
+`grep -rn MEMVARA_DB ~/.claude.json .mcp.json`.
+
+**If you run the MCP server on Python 3.10**, `MEMVARA_EXTRACT_GUIDANCE` makes it refuse to
+start, because the file is TOML and Python's TOML reader arrives in 3.11. Everything else
+works on 3.10, and a guidance built in Python (`Memvara(write_guidance=Guidance(...))`)
+works there too.
+
+**If you use the hosted client**, `remember(expires_at=...)` is sent to the deployment,
+and a deployment from before expiry refuses the field with 422.
+
+---
+
 ## The MCP server creates new stores encrypted, and needs the `encrypt` extra to do it
 
 ### What changed

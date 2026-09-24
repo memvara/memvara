@@ -86,7 +86,8 @@ from ..types import (
     resolved_entity,
     utcnow,
 )
-from .base import BELIEVED, resolve_states, state_predicate, stored_state_predicate
+from .base import (BELIEVED, resolve_states, state_predicate, stored_state_predicate,
+                   unexpired_predicate)
 from .encryption import (EncryptionError, EncryptionWarning, VectorSealer, file_kind,
                          require_sqlcipher, resolve_key)
 
@@ -175,7 +176,12 @@ if TYPE_CHECKING:  # pragma: no cover
 #    so the episode text index and vectors serve documents with no second index. Two new
 #    tables and nothing else; nothing is backfilled, because no earlier version stored a
 #    document. `_migrate_to_v14` builds both tables on a new file and an old one alike.
-SCHEMA_VERSION = 14
+# 15: claims gained `expires_at` and `expire_reason`, the explicit expiry a caller sets with
+#    `remember(expires_at=...)`. `Memvara.erase_expired` erases a claim once the instant
+#    passes. Both nullable and nothing is backfilled, because no earlier version wrote an
+#    expiry and inventing one would erase data nobody asked to erase. A partial index
+#    over the non-null expiries keeps the sweep off the rest of the table.
+SCHEMA_VERSION = 15
 
 # The two document tables, created by `_migrate_to_v14`.
 #
@@ -379,7 +385,12 @@ CREATE TABLE IF NOT EXISTS claims (
     -- scan that takes every key apart. They are not identity: the key is, and it already
     -- contains the namespace -- see `entities.typed_entity_key`.
     subject_type       TEXT NOT NULL DEFAULT '',
-    object_type        TEXT NOT NULL DEFAULT ''
+    object_type        TEXT NOT NULL DEFAULT '',
+    -- Version 15. When the claim is erased, and why, or NULL for a claim that never
+    -- expires, which is almost every claim. Not `valid_to`: that one also closes ended
+    -- and superseded claims, which are kept.
+    expires_at         REAL,
+    expire_reason      TEXT
 );
 -- The index that makes contradiction detection O(1) instead of a similarity search.
 CREATE INDEX IF NOT EXISTS cl_fact  ON claims(tenant, fact_key, invalidated_at);
@@ -536,6 +547,11 @@ CREATE INDEX IF NOT EXISTS epemb_dim ON episode_embeddings(dim, slot);
 -- unbatched path.
 CREATE INDEX IF NOT EXISTS cl_subj ON claims(tenant, subject_key, invalidated_at);
 CREATE INDEX IF NOT EXISTS cl_obj  ON claims(tenant, object_key, invalidated_at);
+
+-- The expiry sweep's index. Partial, so it holds only the few claims that carry an
+-- expiry and costs nothing on a write that sets none. Down here for the reason the two
+-- above are: on a pre-v15 file the column does not exist until `_migrate_to_v15` adds it.
+CREATE INDEX IF NOT EXISTS cl_expiry ON claims(expires_at) WHERE expires_at IS NOT NULL;
 """
 
 _CLAIM_FIELDS = (
@@ -544,7 +560,7 @@ _CLAIM_FIELDS = (
     "invalidated_by", "confidence", "salience", "obs_count", "sources", "derivation",
     "extractor", "meta", "fact_key", "value_key", "subject_key", "object_key",
     "temporal_precision", "amount", "unit", "object_kind", "project",
-    "subject_type", "object_type",
+    "subject_type", "object_type", "expires_at", "expire_reason",
 )
 _CLAIM_COLS = ", ".join(_CLAIM_FIELDS)
 _CLAIM_VALUES = ", ".join("?" * len(_CLAIM_FIELDS))
@@ -1459,6 +1475,11 @@ class SQLiteStore:
     #: than the methods' presence; see `OMITTABLE`.
     holds_documents = True
 
+    #: Leave a claim whose `expires_at` has passed out of every read. True unless a
+    #: `Memvara` opened with `expiry_erasure=False` sets it false, where an expiry does
+    #: nothing at all: the claim is neither erased nor hidden.
+    hide_expired = True
+
     def __init__(self, path: str = ":memory:", *, encryption: bool = False,
                  key: bytes | None = None,
                  key_env: Mapping[str, str] | None = None) -> None:
@@ -1699,6 +1720,7 @@ class SQLiteStore:
             self._migrate_to_v12()
             self._migrate_to_v13()
             self._migrate_to_v14()
+            self._migrate_to_v15()
             # No `_migrate_to_v8`: version 8 added a table nothing had ever written to
             # and that holds no derived data, so its `CREATE TABLE IF NOT EXISTS` above
             # genuinely is the whole migration — the same shape as version 4. What it
@@ -1737,6 +1759,21 @@ class SQLiteStore:
         """
         for statement in _DOCUMENTS_DDL:
             self._db.execute(statement)
+
+    def _migrate_to_v15(self) -> None:
+        """Add the two expiry columns, and backfill nothing into them.
+
+        Shape-driven like every migration here: a new file already has both columns from
+        `SCHEMA` and passes through untouched, and running it twice changes nothing. No
+        earlier version wrote an expiry, so every existing claim keeps `expires_at IS
+        NULL` and is never erased on its own. The sweep's index is built with
+        `_LATE_INDEXES`, after this has run.
+        """
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(claims)")}
+        if "expires_at" not in have:
+            self._db.execute("ALTER TABLE claims ADD COLUMN expires_at REAL")
+        if "expire_reason" not in have:
+            self._db.execute("ALTER TABLE claims ADD COLUMN expire_reason TEXT")
 
     def _migrate_to_v12(self) -> None:
         """Add the project and type columns, re-fold both keys, and rehash both hashes.
@@ -2418,7 +2455,16 @@ class SQLiteStore:
         """
         v, k = _clock(valid_at, known_at)
         clause, axes = state_predicate("?", states=states, alias=alias)
-        return clause, [k if axis == "known" else v for axis in axes]
+        params = [k if axis == "known" else v for axis in axes]
+        if not self.hide_expired:
+            return clause, params
+        # A claim whose `expires_at` has passed is left out of every read at once, on
+        # the wall clock and whatever instants the read asked about: the caller asked for
+        # it to stop existing, and the sweep that deletes it can be an hour away.
+        # Here, in the one clause every limited query runs, so `k` still counts the rows
+        # a caller can see (invariant 7). See `base.unexpired_predicate`.
+        return (f"({clause} AND {unexpired_predicate('?', alias=alias)})",
+                params + [_ts(utcnow())])
 
     def _live_clause(self, valid_at: datetime | None, known_at: datetime | None,
                      include_invalidated: bool, alias: str = "") -> tuple[str, list]:
@@ -2718,6 +2764,7 @@ class SQLiteStore:
                     claim.object_kind.value if claim.object_kind else None,
                     claim.scope.project,
                     claim.subject_type, claim.object_type,
+                    _ts(claim.expires_at), claim.expire_reason,
                 ),
             )
             # Mirror the claim's rowid into the FTS table so the index entry can be
@@ -2834,6 +2881,8 @@ class SQLiteStore:
             amount=r["amount"],
             unit=r["unit"],
             object_kind=ObjectKind(r["object_kind"]) if r["object_kind"] else None,
+            expires_at=_dt(r["expires_at"]),
+            expire_reason=r["expire_reason"],
         )
 
     def get_claim(self, claim_id: str) -> Claim | None:
@@ -3288,6 +3337,19 @@ class SQLiteStore:
                 "erased_at": datetime.fromtimestamp(row["erased_at"], tz=timezone.utc),
                 "sources": int(row["sources"]),
                 "counts": json.loads(row["counts"])}
+
+    def expired_claims(self, now: datetime) -> list[Claim]:
+        """Every claim, in every tenant, whose `expires_at` is at or before `now`.
+
+        Oldest expiry first, then by id, so two sweeps over the same rows agree. Read
+        through the partial index `cl_expiry`, which holds only the claims that carry an
+        expiry, so a store where nothing expires answers from an empty index.
+        """
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT * FROM claims WHERE expires_at IS NOT NULL AND expires_at <= ? "
+                "ORDER BY expires_at, id", (_ts(now),)).fetchall()
+        return [self._row_to_claim(r) for r in rows]
 
     def put_link(self, tenant: str, link: Link) -> Link:
         """Record one typed link. Returns the stored row, which is the earlier one when the

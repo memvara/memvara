@@ -64,6 +64,7 @@ from ..llm._shape import finite_amount
 from ..llm.base import (
     LLM, MalformedToolOutput, ToolChat, ToolRunError, ToolRunTimeout, Usage,
 )
+from ..llm.guidance import Guidance
 from ..redact import Redactor, redact_claim, redact_episode
 from . import pollution, split
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
@@ -242,7 +243,8 @@ class WritePipeline:
                  reject_polluted: bool = True,
                  closed_vocabulary: bool = False,
                  extraction_chunks: bool = False,
-                 agentic_extraction: bool = False) -> None:
+                 agentic_extraction: bool = False,
+                 guidance: Guidance | None = None) -> None:
         self.store = store
         self.embedder = embedder
         self.registry = registry
@@ -302,6 +304,20 @@ class WritePipeline:
         #: `extraction_chunks` applies to the single-call path only. Off because the
         #: release bar in `docs/ROADMAP.md` (the "Reversed" list) has not been measured.
         self.agentic_extraction = bool(agentic_extraction)
+        #: Per-project extraction guidance, or `None`. Every tier-2 model call appends it
+        #: to its system message (`llm.guidance.with_guidance`); another extractor that
+        #: sends its own system message reads it from here. Refused for a backend that
+        #: does not say it accepts it, because the other outcome is a guidance file the
+        #: operator wrote that no extraction ever sees.
+        if guidance is not None and guidance.is_empty:
+            guidance = None
+        if guidance is not None and not getattr(llm, "accepts_guidance", False):
+            raise TypeError(
+                f"{getattr(llm, 'name', type(llm).__name__)} does not accept extraction "
+                "guidance: its extract() has no guidance argument, and it does not set "
+                "accepts_guidance. Use AnthropicLLM or OpenAILLM, or leave the guidance "
+                "unset.")
+        self.guidance = guidance
         if not (reject_ungrounded is True or reject_ungrounded is False
                 or reject_ungrounded == "auto"):
             raise TypeError(
@@ -944,7 +960,8 @@ class WritePipeline:
             extractor = AgenticExtractor(self.llm, self.store, self.embedder,
                                          timeout=timeout)
             try:
-                result = extractor.run(episodes, vocabulary, now=now, usage=usage)
+                result = extractor.run(episodes, vocabulary, now=now, usage=usage,
+                                       guidance=self.guidance)
             except ToolRunTimeout as exc:
                 reason, spent = "timeout", exc.requests
             except MalformedToolOutput as exc:
@@ -1021,10 +1038,14 @@ class WritePipeline:
 
     def _extract(self, episodes: Sequence[Episode], vocabulary: Sequence[str],
                  usage: Usage | None) -> list[dict[str, Any]]:
-        """One `llm.extract()` call, passing `usage` only to a backend that fills it."""
-        if usage is None:
-            return self.llm.extract(episodes, vocabulary)
-        return self.llm.extract(episodes, vocabulary, usage=usage)
+        """One `llm.extract()` call, passing `usage` only to a backend that fills it, and
+        `guidance` only when there is some."""
+        kwargs: dict[str, Any] = {}
+        if usage is not None:
+            kwargs["usage"] = usage
+        if self.guidance is not None:
+            kwargs["guidance"] = self.guidance
+        return self.llm.extract(episodes, vocabulary, **kwargs)
 
     def _plan_calls(self, episodes: Sequence[Episode]) -> list[_Call] | None:
         """The extraction calls tier 2 makes for `episodes`, or `None` for one call.
@@ -1337,6 +1358,10 @@ class WritePipeline:
             sources=[ep.id],
             derivation=Derivation.LLM_EXTRACT,
             extractor=getattr(self.llm, "name", "llm"),
+            # Only an agentic proposal carries one, already checked to be a future UTC
+            # instant (`agentic._Session._expiry`); single-call output never does.
+            expires_at=expiry if isinstance(expiry := item.get("expires_at"), datetime)
+            else None,
         )
 
     # -- shared ---------------------------------------------------------------

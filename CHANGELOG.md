@@ -151,14 +151,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `Reconciler.apply`, which decides duplicates, conflicts and supersession as before. A
   proposed end becomes a retraction with `close="ended"` and the model's reason, so it
   ends a memory and never retires or erases one. A proposed link becomes a `claim_links`
-  row. A proposal is refused when it names a memory the model did not read in this run
+  row. `propose_claim` also takes `expires_at`, an ISO 8601 date or instant the turn
+  names, refused when it is not in the future as `remember()` refuses it, and carried to
+  the reconciler on the claim. A proposal is refused when it names a memory the model did
+  not read in this run
   (`not_read`), ends or replaces a memory in a broader scope than the write, such as a
   user-wide memory from a write inside one project (`broader_scope`), cannot be
   shaped (`invalid`), or restates the extractor's instructions (`instruction_echo`); a
   valid proposal the write path did not carry out, such as a replacement the reconciler
   stored beside the old value, is `not_applied`. All five land on the new
   `WriteReceipt.proposals_refused` as `RefusedProposal(tool, target, reason)`. The rules
-  are the system message and the turns are a user message inside `<content>` tags,
+  are the system message, with the project's extraction guidance appended as for the
+  single call, and the turns are a user message inside `<content>` tags,
   described as data, and a turn cannot close the tag. At most 12 answers, 8,192 output
   tokens per answer, one retry per answer, and 25 seconds per run in `add()`, where a
   caller is waiting, or 180 seconds in `reextract()`, which a background worker runs;
@@ -182,6 +186,58 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **`Reconciler.apply(..., reason=None)`** records a closure reason on whatever the
   candidate closes, by supersession or by retraction. It changes nothing the reconciler
   decides.
+- **A claim can be written to be erased at a set time.** `remember()` takes `expires_at`
+  and `expire_reason`, and so does the `memory_remember` tool. Once `expires_at` passes,
+  `Memvara.erase_expired(now=None)` erases the claim through the path `erase()` uses: the
+  row, its text index entry and its vector are deleted, the store's erasure record is
+  written in the same transaction, and `prove_erased` checks the disk. It returns one
+  `ErasedClaim` per claim (`claim_id`, `scope`, `expires_at`, `expire_reason`, `proof`,
+  and no copy of the fact). It covers every tenant in the store, keeps the claim's source
+  turns as `erase()` does by default, and re-reads each claim just before erasing it so a
+  later write that moved the expiry wins. It runs when a `Memvara` opens a store and
+  hourly while the MCP server's `serve()` loop runs, except on a read-only server, which
+  writes nothing. Reads do not wait for it: from the instant `expires_at` passes, the
+  claim is left out of `search()`, `recall()`, `get()`, `get_all()`, `count()`,
+  `history()`, `why()` and every other read, inside the SQLite query where the limit is
+  applied, and a later write of the same fact is stored as a new claim rather than
+  reinforcing the one due for erasure. `expires_at` must be in the future when written
+  (`ValueError`, and a tool error naming the argument), and `expire_reason` without it is
+  refused; `expire_reason` is at most 500 characters. Writing a fact the store already
+  holds with an `expires_at` puts the expiry on the claim on record when that claim is in
+  exactly the same scope, and a repeat without one leaves it. When the claim on record is
+  in another project, agent or session, the repeat is stored as its own claim in its own
+  scope, so the expiry never reaches a claim another scope relies on. `expires_at` is not `valid_to`: a claim whose `valid_to` has passed is
+  ended and kept, and ended, superseded and retired claims are never erased by the engine
+  unless they carry an `expires_at`. Invariant 3 in `docs/INTERNALS.md` is rewritten to
+  say so. The `expiry_erasure` switch (`Memvara(expiry_erasure=False)`,
+  `MEMVARA_FEATURE_EXPIRY_ERASURE=0`) stops both sweeps and the hiding; the date is still
+  stored, the tool's argument descriptions then say nothing will be erased, and
+  `erase_expired()` called by name still erases. `Memvara(sweep_expired=False)` skips only
+  the sweep at open, which is what a read-only MCP server passes. `AsyncMemvara.erase_expired` is the async twin. The hosted
+  clients send both fields only when set and hydrate them from a response that carries
+  them; a deployment from before this refuses them with 422. `Store.expired_claims(now)`
+  is a new optional store method (`OMITTABLE`); `RemoteStore` has it as a stub that
+  raises, because the deployment runs its own sweep. SQLite stores move to schema 15,
+  which adds the two nullable columns and a partial index over `expires_at`; nothing is
+  backfilled.
+- **Per-project extraction guidance.** `Guidance(context=..., include=[...],
+  exclude=[...])` (`memvara.llm.guidance`, exported as `memvara.Guidance`) describes what
+  one project wants extracted: `context` at most 1,500 characters, and each list at most
+  20 rules of 200 characters. Anything longer, a blank rule, or a string where a list
+  belongs raises `GuidanceError` rather than being cut. `with_guidance(system, guidance)`
+  appends it to a system message under a fixed heading and returns the message unchanged
+  for `None` or an empty guidance; any extractor that sends its own system message can
+  call it. `LLM.extract()` takes `guidance=`, and `AnthropicLLM` and `OpenAILLM` append it
+  to their extraction prompt, which for `OpenAILLM` includes a replacement prompt from
+  `MEMVARA_LLM_EXTRACT_SYSTEM`. The guidance goes in the system message only, never beside
+  the turns. `Memvara(write_guidance=...)` hands it to the write pipeline
+  (`WritePipeline.guidance`), which passes it to a backend that sets
+  `accepts_guidance = True` and refuses it with `TypeError` for one that does not. The
+  MCP server reads a TOML file with the three fields from `MEMVARA_EXTRACT_GUIDANCE`,
+  checks it at startup, refuses an unknown key, refuses the variable with
+  `MEMVARA_LLM=none` and under `MEMVARA_MODE=cloud`, and needs Python 3.11 or later for
+  the file. The `extraction_guidance` switch (`MEMVARA_FEATURE_EXTRACTION_GUIDANCE=0`)
+  leaves the guidance out.
 - **Query rewrite on `search()` and `recall()`.** Before retrieval, one call to the
   configured chat backend sends the query and today's date, and reads back JSON with up
   to three alternative queries and an optional date range. The original query and each

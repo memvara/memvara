@@ -46,10 +46,11 @@ from typing import Any, Mapping, Sequence, Union
 from ..embed.base import Embedder
 from ..llm import _shape
 from ..llm.base import Message, ToolChat, ToolRun, ToolSpec, Usage
+from ..llm.guidance import Guidance, with_guidance
 from ..store.base import Store, bulk_claims
 from ..types import (
     REASON_CHARS, Claim, Episode, LinkRelation, RefusalReason, RefusedProposal, Scope,
-    link_relation,
+    as_utc, link_relation,
 )
 
 #: The most answers the model may give in one run. A run still calling tools after this
@@ -123,6 +124,10 @@ a point in time, "procedural" for how the user wants an assistant to behave.
 gives no time.
 - amount and unit: a measured quantity the turn states, such as 30 and "minutes". null \
 when nothing is measured.
+- expires_at (propose_claim only): when the turn says a fact stops mattering at a stated \
+date or time, such as a door code valid until 1 October, that instant as an ISO 8601 date \
+or date and time; the store erases the fact then. null otherwise, and null when the turn \
+gives only a relative time, because you must never compute a date.
 
 Propose nothing when the turns hold no durable fact. That is the common case."""
 
@@ -166,7 +171,7 @@ TOOL_SCHEMAS: dict[str, tuple[str, dict[str, Any]]] = {
     "propose_claim": (
         "Propose a durable fact from the turns. Returns a ref you can use in "
         "propose_link. The store decides whether it is new, a repeat or a replacement.",
-        _schema(**_FACT_FIELDS)),
+        _schema(**_FACT_FIELDS, expires_at=_nullable("string"))),
     "propose_end": (
         "Propose that a stored memory you have read stopped being true, because a turn "
         "says so. It is ended, not deleted: it stays in the history.",
@@ -335,8 +340,14 @@ class AgenticExtractor:
         self.timeout = timeout
 
     def run(self, episodes: Sequence[Episode], known_predicates: Sequence[str], *,
-            now: datetime, usage: Usage | None = None) -> AgenticResult:
+            now: datetime, usage: Usage | None = None,
+            guidance: Guidance | None = None) -> AgenticResult:
         """One tool loop over `episodes`, which must share one scope.
+
+        `guidance` is the project's extraction guidance, appended to the system message
+        with `llm.guidance.with_guidance` exactly as single-call extraction appends it, so
+        it travels with the rules and never inside the fenced turns. With none, the system
+        message is `AGENTIC_SYSTEM` byte for byte.
 
         Raises whatever `ToolChat.run_tools` raises; `WritePipeline` turns that into a
         fallback to single-call extraction.
@@ -344,7 +355,8 @@ class AgenticExtractor:
         session = _Session(self, episodes, now)
         kw: dict[str, Any] = {} if usage is None else {"usage": usage}
         run = self.llm.run_tools(
-            AGENTIC_SYSTEM, [Message("user", agentic_prompt(episodes, known_predicates))],
+            with_guidance(AGENTIC_SYSTEM, guidance),
+            [Message("user", agentic_prompt(episodes, known_predicates))],
             session.tools(), max_steps=self.max_steps, timeout=self.timeout, **kw)
         return AgenticResult(session.proposals, session.refused, session.read, run)
 
@@ -439,6 +451,11 @@ class _Session:
         item, problem = self._fact(args, "propose_claim", "")
         if item is None:
             return problem
+        expires, problem = self._expiry(args.get("expires_at"))
+        if problem:
+            return self._refuse("propose_claim", "", "invalid", problem)
+        if expires is not None:
+            item["expires_at"] = expires
         ref = self._ref()
         self.proposals.append(ClaimProposal(ref, item))
         return (f"Recorded as {ref}. The store decides whether it is new, a repeat or a "
@@ -507,6 +524,31 @@ class _Session:
                 tool, target, "instruction_echo",
                 "this restates your instructions, which are not a fact from the turns.")
         return item, ""
+
+    def _expiry(self, raw: Any) -> tuple[datetime | None, str]:
+        """The proposed expiry as a UTC instant, or the reason it cannot be used.
+
+        Held to the rule `Memvara.remember` applies: an expiry that is not in the future
+        is refused, because the next sweep would erase the fact as soon as it was written.
+        A date or time with no zone is read as UTC, as `types.as_utc` reads every stored
+        instant.
+        """
+        if raw is None:
+            return None, ""
+        unreadable = ("expires_at must be an ISO 8601 date or date and time, such as "
+                      "2026-10-01 or 2026-10-01T09:00:00+00:00.")
+        if not isinstance(raw, str):
+            return None, unreadable
+        try:
+            # `Z` spelled out, because `fromisoformat` reads it only from Python 3.11.
+            when = as_utc(datetime.fromisoformat(raw.strip().replace("Z", "+00:00")))
+        except ValueError:
+            return None, unreadable
+        if when <= self.now:
+            return None, (f"expires_at ({when.isoformat()}) is not in the future, so the "
+                          "fact would be erased as soon as it was written. Leave it null "
+                          "unless the turn names a later date.")
+        return when, ""
 
     def _closable(self, tool: str, claim_id: str) -> str:
         """The refusal text when `claim_id` may not be ended or replaced, else `""`."""
