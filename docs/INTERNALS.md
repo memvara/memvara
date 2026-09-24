@@ -15,7 +15,8 @@ importable from the foundation modules:
   `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,
   `live_predicate()`, `unexpired_predicate()`
 - `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`,
-  and `calibration_of()`, the cosine thresholds measured for each embedding space
+  `encode_queries()`, which embeds a search query in the form its model expects, and
+  `calibration_of()`, the cosine thresholds measured for each embedding space
 - `memvara/llm/base.py` — `LLM` protocol, `NullLLM`, `CLAIM_SCHEMA`, `RESOLVE_SCHEMA`,
   `PREDICATE_SCHEMA`, `EXTRACT_SYSTEM`, `RESOLVE_SYSTEM`, `PREDICATE_SYSTEM`,
   `MAX_CLAIMS`, `bounded_claim_schema()`, and for agentic extraction the `ToolChat`
@@ -901,6 +902,11 @@ class HybridRetriever:
 Search must:
 - expand `scope` via `scope.ancestors()` so a session query also sees user-level memory;
 - run vector and lexical retrieval over `k * candidate_multiplier` candidates each;
+- embed the query through `embed.encode_queries`, once per pass, so that both vector legs
+  and every phrasing of a rewritten read compare a query's vector with the stored
+  passages'. An embedder that embeds a query differently from a passage says so with an
+  `encode_queries` method: `LocalEmbedder` puts the instruction bge's English models are
+  trained on before the query. Every other embedder embeds it through `encode`, as before;
 - fuse with RRF, then rescore with recency/confidence/salience;
 - resolve the three time keywords through `types.time_axes` **before anything else**, so
   `as_of` + `valid_at` raises whatever else the call would have done;

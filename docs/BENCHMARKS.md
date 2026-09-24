@@ -353,6 +353,50 @@ bge-small is ahead in every category at every cut-off the report prints. It cost
 ingesting the 5,882 turns took 192 s against 98 s, and the median read 29.3 ms against
 17.3 ms, both on one CPU thread, because the model is larger.
 
+**The query instruction.** bge's English models are trained to see "Represent this
+sentence for searching relevant passages: " before a search query and nothing before a
+passage, and the table above was measured without it. Since `LocalEmbedder` embeds a
+search query with it, the same LOCOMO command reads:
+
+| category | n | R@1 before | R@1 after | R@12 before | R@12 after | MRR before | MRR after |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| single-hop | 840 | 38.6 | 39.0 | 74.7 | 74.9 | 51.7 | 51.8 |
+| temporal | 320 | 45.6 | 45.0 | 78.3 | 78.4 | 58.8 | 58.2 |
+| multi-hop | 279 | 9.6 | 9.9 | 46.2 | 45.4 | 39.2 | 39.9 |
+| open-domain | 92 | 13.2 | 13.8 | 41.2 | 40.4 | 27.7 | 28.3 |
+| **all** | **1531** | **33.2** | **33.5** | **68.2** | **68.2** | **49.4** | **49.6** |
+
+LOCOMO's turns are a sentence or two, and the instruction changes little there. It is
+written for a short query against a long passage, and LongMemEval-S's sessions run to
+thousands of words. Over 100 of its questions, drawn with `--shuffle 7`, each in its own
+store:
+
+```bash
+PYTHONPATH=. python3 bench/longmemeval.py --dataset s --score retrieval --embedder local \
+    --shuffle 7 --limit 100
+```
+
+| category | n | R@1 before | R@1 after | R@5 before | R@5 after | MRR before | MRR after |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| single-session-user | 9 | 22.2 | 22.2 | 77.8 | 88.9 | 43.3 | 49.5 |
+| single-session-assistant | 18 | 27.8 | 33.3 | 77.8 | 83.3 | 49.6 | 53.2 |
+| single-session-preference | 2 | 0.0 | 0.0 | 50.0 | 100.0 | 19.6 | 25.0 |
+| multi-session | 25 | 8.0 | 12.0 | 57.3 | 59.3 | 46.0 | 51.8 |
+| knowledge-update | 12 | 16.7 | 16.7 | 66.7 | 75.0 | 51.5 | 52.2 |
+| temporal-reasoning | 26 | 9.6 | 9.6 | 67.6 | 68.2 | 43.0 | 43.2 |
+| abstention | 8 | 12.5 | 12.5 | 70.8 | 70.8 | 41.4 | 43.0 |
+| **all** | **100** | **14.5** | **16.5** | **67.5** | **72.2** | **45.4** | **48.4** |
+
+R@12, the stated budget, went from 94.2 to 94.4, and `in ctx` from 42.4 to 43.5. A hundred
+questions is a small sample, and in the categories with 2 to 12 questions one question
+moves a figure by several points.
+
+It costs a search 0.75 ms: one query embeds in 24.16 ms with the instruction against
+23.41 ms without, at the median over 300 LOCOMO questions on one CPU thread. It lowers the
+cosines a search reads by about 0.03. Over LOCOMO's questions, the median cosine to the
+best turn went from 0.746 to 0.713, to the twelfth from 0.664 to 0.630, and to the
+evidence turn from 0.697 to 0.665, so a `min_score` tuned under bge-small admits less.
+
 **Its cosines run higher, and two checks read cosines.** The grounding rescue keeps a
 model-proposed claim that shares no word with its source when the two embed close enough,
 and the duplicate merge folds two claims in one slot when they embed close enough. Both

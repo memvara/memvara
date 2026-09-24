@@ -2275,3 +2275,40 @@ def test_the_bounds_of_the_range_are_allowed(store, embedder) -> None:
     for floor in (0.0, 1.0):
         assert HybridRetriever(store, embedder, PredicateRegistry(),
                                episode_score_floor=floor).episode_score_floor == floor
+
+
+# ===========================================================================
+# The query is embedded as a query
+# ===========================================================================
+
+
+class _QueryForm(HashingEmbedder):
+    """Embeds every query as the vector of one fixed text, so a leg that ranked by the
+    query's passage form would rank differently."""
+
+    def __init__(self, as_if: str) -> None:
+        super().__init__(dim=512)
+        self.as_if = as_if
+        self.queries: list[list[str]] = []
+
+    def encode_queries(self, texts):
+        self.queries.append(list(texts))
+        return self.encode([self.as_if] * len(texts))
+
+
+def test_both_vector_legs_rank_by_the_vector_encode_queries_gives(store) -> None:
+    """A model that embeds a query differently from a passage has to be asked for the
+    query's form, once per pass, and both legs have to rank by it: here that form is the
+    lunch text's vector, where the query's own words are the kafka rows'."""
+    emb = _QueryForm(as_if="lunch was a sandwich")
+    add(store, emb, "kafka pipeline ordering guarantees", EP_SCOPE)
+    lunch = add(store, emb, "lunch was a sandwich", EP_SCOPE)
+    turn(store, emb, "we moved the kafka pipeline to a new cluster", EP_SCOPE)
+    eaten = turn(store, emb, "lunch was a sandwich", EP_SCOPE)
+    hits = HybridRetriever(store, emb, PredicateRegistry()).search(
+        "kafka pipeline", EP_SCOPE, k=10, include_episodes=True)
+    assert emb.queries == [["kafka pipeline"]]
+    claims = [r for r in hits if not isinstance(r, EpisodeResult)]
+    turns = [r for r in hits if isinstance(r, EpisodeResult)]
+    assert min(claims, key=lambda r: r.explain.vector_rank).claim.id == lunch.id
+    assert min(turns, key=lambda r: r.explain.vector_rank).episode.id == eaten.id
