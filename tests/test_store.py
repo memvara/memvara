@@ -972,8 +972,10 @@ def test_the_text_first_leg_looks_up_only_the_ranked_turns(store):
     plan = [r["detail"] for r in store._db.execute(
         "EXPLAIN QUERY PLAN " + sqlite_store._text_first_sql(sc, hp),
         [_fts_query("kafka"), 100] + sp + hpp)]
-    assert "SEARCH e USING INTEGER PRIMARY KEY (rowid=?)" in plan
-    assert not any("ep_cover" in step or "ep_scope" in step for step in plan)
+    # A substring, not the whole step: before 3.36 SQLite wrote the same step as
+    # "SEARCH TABLE episodes AS e USING ...", and this package supports 3.35.
+    assert any("INTEGER PRIMARY KEY (rowid=?)" in step for step in plan), plan
+    assert not any("ep_cover" in step or "ep_scope" in step for step in plan), plan
 
 
 # --- The vector leg over turns, from each scope's cached list ------------------------
