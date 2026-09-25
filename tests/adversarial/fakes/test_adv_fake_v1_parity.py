@@ -6,9 +6,10 @@ from __future__ import annotations
 import ast
 import asyncio
 import dataclasses
+import pathlib
 import re
 from datetime import timedelta
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import pytest
 
@@ -44,10 +45,10 @@ def _template(node: ast.expr) -> str | None:
     return None
 
 
-def client_routes() -> set[str]:
-    """Every `METHOD /v1/...` route the two clients call, read from their source."""
+def client_routes(sources: Sequence[pathlib.Path] = CLIENTS) -> set[str]:
+    """Every `METHOD /v1/...` route the clients in `sources` call, read from their source."""
     found: set[str] = set()
-    for source in CLIENTS:
+    for source in sources:
         for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
                 continue
@@ -60,8 +61,11 @@ def client_routes() -> set[str]:
             else:
                 continue
             template = _template(path)
-            if template is not None and isinstance(method, ast.Constant):
-                found.add(f"{method.value} {template}")
+            if template is None:
+                continue
+            assert isinstance(method, ast.Constant), (
+                f"{source.name}:{node.lineno}: a method this test cannot read")
+            found.add(f"{method.value} {template}")
     return found
 
 
@@ -71,6 +75,16 @@ def test_the_fake_serves_exactly_the_routes_the_clients_call() -> None:
     assert called, "the scan found no calls, so it no longer reads the clients"
     assert sorted(called - served) == [], "routes the clients call that FakeV1 lacks"
     assert sorted(served - called) == [], "routes FakeV1 serves that no client calls"
+
+
+def test_a_call_the_scan_cannot_read_stops_it(tmp_path: pathlib.Path) -> None:
+    """A route whose method is not written out in the call would otherwise slip past the
+    scan, and the fake could fall behind the client with nothing failing."""
+    source = tmp_path / "client.py"
+    source.write_text("def call(self, verb):\n    return self._request(verb, '/v1/new')\n",
+                      encoding="utf-8")
+    with pytest.raises(AssertionError, match="cannot read"):
+        client_routes([source])
 
 
 def _shape(claim: Claim) -> tuple[Any, ...]:
