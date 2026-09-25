@@ -7,6 +7,45 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `reembed()` needs the store to itself, and every store keeps a `<db>.lock` file
+
+### What changed
+
+`SQLiteStore.clear_embeddings()`, which `Memvara.reembed()` and `Memvara(...,
+reembed=True)` call first, now raises `StoreInUseError` while another process, or another
+`SQLiteStore` in the same process, has the store open. It changes nothing when it
+refuses. Before, it truncated the vector file under them, and a process that still mapped
+the file died with SIGBUS on its next vector search, with no exception anyone could catch.
+An encrypted store did not crash, but went on returning the vectors that had been
+cleared.
+
+To make that visible, every store that opens a file-backed database now keeps
+`<db>.lock` beside it: for `memory.db`, `memory.db.lock`. It holds no data. Each open store
+holds a shared lock on it until `close()`, and a clear takes it exclusively. A store that
+opens while another store is clearing waits for the clear to finish, for up to 60 seconds,
+and then raises `StoreInUseError`.
+
+### Who this changes
+
+**If you re-embed a store that an MCP server, a worker or a notebook has open,** stop them
+first, then run `reembed()` and restart them with the new embedder. They had to restart
+anyway: each process embeds new writes with the model it started with.
+
+**If a test or a script opens a second `SQLiteStore` on the same file and clears the
+vectors through one of them,** close the other first.
+
+**If you back up or copy a store's directory,** `memory.db.lock` can be copied or left
+out; the next open recreates it. Do not delete it while anything has the store open,
+because a clear would then stop seeing that store.
+
+### How to find it in your code
+
+Search for `reembed(`, `reembed=True` and `clear_embeddings(` in code that runs while
+another process may have the store open, and catch `StoreInUseError` there if a refusal
+should not end the program.
+
+---
+
 ## "C++", "C#" and "C" are three values, and a store re-keys its claims on first open
 
 ### What changed

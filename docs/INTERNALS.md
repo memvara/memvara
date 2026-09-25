@@ -2101,6 +2101,34 @@ opened a store and erased a claim before searching used to leave the vector in `
 `tests/test_vecindex.py::test_an_erasure_before_any_search_still_blanks_the_row_on_disk`
 reads the file.
 
+### Clearing the vectors needs the store to itself
+
+Every process that has an unencrypted store open maps `<db>.vecs`, and they share its
+pages, so a vector one process writes is visible to the others without a re-read.
+`clear_embeddings()` empties the matrix by truncating that file to zero bytes. A process
+that still mapped it read past the end of the file on its next vector search and died with
+SIGBUS: exit code -7 on Linux, no Python exception, nothing any caller could catch.
+`reembed()` starts with `clear_embeddings()`, so re-embedding a store while an MCP server
+had it open killed the server.
+
+So `clear_embeddings()` raises `StoreInUseError`, having changed nothing, while any other
+store has the database open, in another process or in the same one. Every file-backed
+`SQLiteStore` holds a shared lock on `<db>.lock` from before it opens the vector file until
+`close()` has unmapped it, and a clear first takes that lock exclusively (`_claim_alone`).
+The lock is SQLite's own, on a file that holds no data, so it behaves the same on every
+platform and between two stores in one process. While a clear holds it, a store that is
+opening waits in `_hold_presence`, for up to `_PRESENCE_WAIT` (60 seconds), instead of
+mapping a file that is about to shrink. Inside `batch()` the clear keeps the lock until the
+batch ends, because a store that opened before the commit would map vectors the batch is
+about to delete.
+
+An encrypted store keeps its matrix on the heap, so a truncated file cannot crash it. It is
+refused all the same: another encrypted store went on returning every cleared vector at
+its old score, even after the store had been re-embedded at another width. A re-embed needs
+the other processes stopped in any case, because each embeds new writes with the model it
+started with. `tests/test_store.py` reproduces the crash with a second process, because a
+SIGBUS in the test process would end the suite.
+
 ### Encryption at rest
 
 `SQLiteStore(path, encryption=True)` creates a new store encrypted. An existing file is

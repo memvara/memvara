@@ -4468,6 +4468,12 @@ class Memvara:
 
         Not scoped: vectors are one index shared by every tenant, so a partial migration
         would leave exactly the mixed-dimension store this exists to fix.
+
+        Needs the store to itself. On a `SQLiteStore`, `clear_embeddings()` raises
+        `StoreInUseError`, having changed nothing, while another process or another
+        `SQLiteStore` in this one has the store open, because it truncates the vector
+        file they map. Stop them first: each embeds new writes with the model it started
+        with, so they need restarting with the new embedder anyway.
         """
         if embedder is not None:
             self.embedder = embedder

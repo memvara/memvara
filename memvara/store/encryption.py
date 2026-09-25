@@ -474,7 +474,7 @@ def encrypt_store(path: str, *, key: StoreKey | None = None) -> EncryptResult:
     Refuses while another process has the store open, because a write that lands in the
     original after the export would be lost at the rename. Stop the MCP server first.
     """
-    from .sqlite import SQLiteStore, _vec_path
+    from .sqlite import SQLiteStore, _lock_path, _vec_path
 
     kind = file_kind(path)
     if kind == "new":
@@ -517,7 +517,8 @@ def encrypt_store(path: str, *, key: StoreKey | None = None) -> EncryptResult:
     fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".encrypting-",
                                dir=os.path.dirname(os.path.abspath(path)))
     os.close(fd)
-    leftovers = (tmp, tmp + "-wal", tmp + "-shm", tmp + "-journal", _vec_path(tmp) or "")
+    leftovers = (tmp, tmp + "-wal", tmp + "-shm", tmp + "-journal", _vec_path(tmp) or "",
+                 _lock_path(tmp) or "")
     try:
         conn = sqlcipher.connect(path)
         try:
@@ -566,8 +567,9 @@ def encrypt_store(path: str, *, key: StoreKey | None = None) -> EncryptResult:
         raise
     # SQLite removes these when the copy's last connection closes. If a platform left
     # one behind, it would never be read again, because a write-ahead log is found by
-    # the database's name and the database now has another one.
-    _remove(tmp + "-wal", tmp + "-shm")
+    # the database's name and the database now has another one. The copy's lock file
+    # is found the same way, and the store keeps its own beside the original.
+    _remove(tmp + "-wal", tmp + "-shm", _lock_path(tmp) or "")
     # The database is encrypted from here on. If this rename fails, the store still
     # opens: the old vector file's header is not one an encrypted store writes, so the
     # next open rebuilds it from the database.

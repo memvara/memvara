@@ -1,8 +1,11 @@
 """SQLite store: persistence, the indexed conflict lookup, hybrid search primitives,
 and the bitemporal SQL that makes time travel work."""
 
+import pathlib
 import re
 import sqlite3
+import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -12,8 +15,8 @@ import pytest
 
 from memvara.embed import HashingEmbedder
 from memvara.filters import SearchFilter
-from memvara.store import (STATES, SQLStore, SQLiteStore, live_predicate,
-                           state_predicate, stored_state_predicate,
+from memvara.store import (STATES, SQLStore, SQLiteStore, StoreInUseError,
+                           live_predicate, state_predicate, stored_state_predicate,
                            unexpired_predicate)
 from memvara.store import sqlite as sqlite_store
 from memvara.store.base import Store
@@ -2028,6 +2031,99 @@ def test_a_turn_indexed_by_another_worker_is_findable_by_text_immediately(tmp_pa
     assert len(a.lexical_search_episodes("kafka", [SCOPE], limit=5)) == 1
     a.close()
     b.close()
+
+
+# `clear_embeddings()` truncates the vector file, so it needs the store to itself.
+
+_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+# Another process: open the store, search, wait for a line, search again.
+_MAPPER = """
+import sys
+import numpy as np
+from memvara.store import SQLiteStore
+from memvara.types import Scope
+q = np.zeros(16, dtype=np.float32)
+q[3] = 1.0
+store = SQLiteStore(sys.argv[1])
+print(len(store.vector_search_episodes(q, [Scope("acme", "alice")], 5)), flush=True)
+sys.stdin.readline()
+print(len(store.vector_search_episodes(q, [Scope("acme", "alice")], 5)), flush=True)
+store.close()
+"""
+
+
+def test_clearing_vectors_another_process_maps_is_refused_rather_than_fatal_to_it(
+        tmp_path):
+    """A process that still mapped the vector file died with SIGBUS on its next vector
+    search after another process cleared the vectors: exit code -7, no exception, and
+    nothing any caller could catch. It runs in a subprocess, because a SIGBUS in this
+    one would end the whole suite."""
+    path = str(tmp_path / "shared.db")
+    with SQLiteStore(path) as writer:
+        for i in range(300):
+            writer.set_episode_embedding(turn(writer, content=f"turn {i}").id,
+                                         onehot(i, 16))
+    mapper = subprocess.Popen([sys.executable, "-c", _MAPPER, path], cwd=_ROOT,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    refused = ""
+    try:
+        assert mapper.stdout is not None and mapper.stdout.readline().strip() == "5"
+        with SQLiteStore(path) as other:
+            try:
+                other.clear_embeddings()
+            except StoreInUseError as exc:
+                refused = str(exc)
+                assert len(other.vector_search_episodes(onehot(3, 16), [SCOPE], 5)) == 5
+        out, err = mapper.communicate("go\n", timeout=120)
+    finally:
+        mapper.kill()
+    assert mapper.returncode == 0, f"the other process died ({mapper.returncode}): {err}"
+    assert out.strip() == "5"
+    assert "open in another process" in refused and "Nothing was changed" in refused
+    with SQLiteStore(path) as alone:
+        assert alone.clear_embeddings() == 300
+
+
+def test_clearing_vectors_another_store_in_this_process_maps_is_refused(tmp_path):
+    """Two stores in one process map the file separately, so each counts as another.
+    Nothing changes, and once the other store closes, the clear goes through."""
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    ep = turn(a)
+    a.set_episode_embedding(ep.id, onehot(1))
+    assert a.vector_search_episodes(onehot(1), [SCOPE], 1)[0][0] == ep.id
+    with pytest.raises(StoreInUseError, match="another SQLiteStore in this one"):
+        b.clear_embeddings()
+    assert a.vector_search_episodes(onehot(1), [SCOPE], 1)[0][0] == ep.id
+    assert b.vector_search_episodes(onehot(1), [SCOPE], 1)[0][0] == ep.id
+    a.close()
+    assert b.clear_embeddings() == 1
+    assert b.vector_search_episodes(onehot(1), [SCOPE], 1) == []
+    b.close()
+
+
+def test_a_clear_inside_a_batch_keeps_the_store_to_itself_until_the_batch_ends(
+        tmp_path, monkeypatch):
+    """A store that opened between the clear and the commit would map vectors the batch
+    is about to delete, so it waits, and gives up after `_PRESENCE_WAIT` seconds."""
+    monkeypatch.setattr(sqlite_store, "_PRESENCE_WAIT", 0.05)
+    path = str(tmp_path / "c.db")
+    with SQLiteStore(path) as store:
+        store.set_episode_embedding(turn(store).id, onehot(1))
+        with store.batch():
+            assert store.clear_embeddings() == 1
+            assert store.clear_embeddings() == 0  # already its own
+            with pytest.raises(StoreInUseError, match="having its vectors cleared"):
+                SQLiteStore(path)
+        SQLiteStore(path).close()
+
+
+def test_a_lock_file_that_is_not_a_database_is_named(tmp_path):
+    (tmp_path / "c.db.lock").write_bytes(b"not a database " * 100)
+    with pytest.raises(RuntimeError, match=r"c\.db\.lock cannot be used"):
+        SQLiteStore(str(tmp_path / "c.db"))
 
 
 def write_v2(path: str) -> str:

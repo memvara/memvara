@@ -43,7 +43,7 @@ from memvara.cli import main as cli_main
 from memvara.retrieve import EpisodeResult
 from memvara.server.config import ConfigError, ServerConfig, build_memvara
 from memvara.server.mcp import MemvaraMCPServer, _storage_fact
-from memvara.store import SQLiteStore
+from memvara.store import SQLiteStore, StoreInUseError
 from memvara.store.encryption import (EncryptionError, EncryptionUnavailable,
                                       EncryptionWarning, StoreKey, VectorSealer,
                                       encrypt_store, export_key, file_kind, key_file,
@@ -793,6 +793,22 @@ def test_another_process_write_is_seen_after_a_commit(tmp_path):
         assert hits(reader, 0) == [ids[0]]
         late = embed(writer, 5).id
         assert hits(reader, 5) == [late]
+
+
+@needs_extra
+def test_clearing_vectors_another_encrypted_store_holds_is_refused(tmp_path):
+    """An encrypted store keeps its matrix on the heap, so truncating the file cannot
+    crash another store the way it crashes one that maps it. The other store went on
+    finding every cleared vector at its old score, even after the store was re-embedded
+    at another width. So the refusal is the same."""
+    path, ids = _written(tmp_path, n=2)
+    with SQLiteStore(path, key=KEY) as reader, SQLiteStore(path, key=KEY) as clearer:
+        assert hits(reader, 0) == [ids[0]]
+        with pytest.raises(StoreInUseError, match="Nothing was changed"):
+            clearer.clear_embeddings()
+        assert hits(reader, 0) == [ids[0]] and hits(clearer, 1) == [ids[1]]
+    with SQLiteStore(path, key=KEY) as alone:
+        assert alone.clear_embeddings() == 2
 
 
 @needs_extra

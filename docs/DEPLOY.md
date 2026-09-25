@@ -620,6 +620,7 @@ mistake. After a write to `memory.db` the directory holds:
 | `memory.db` | claims, episodes, predicates, the FTS index, and every vector | everything |
 | `memory.db.vecs` | the vector matrix: memory-mapped in an unencrypted store, one encrypted record per row in an encrypted one | nothing that cannot be rebuilt: the next open rewrites it from the vectors in `memory.db`, which takes a while on a large store |
 | `memory.db.embedder.json` | which embedder wrote those vectors | the ability to detect a model swap, which then goes undetected |
+| `memory.db.lock` | an empty file each open store holds a lock on, so that clearing the vectors can tell whether anything else has the store open | nothing once every process has closed the store: the next open recreates it. Deleted while a store is open, it stops `reembed()` from seeing that store |
 | `memory.db-wal`, `memory.db-shm` | SQLite write-ahead log, while open | recently committed writes |
 
 So **mount, back up and copy the directory, not the file.** A Docker bind mount of
@@ -797,6 +798,12 @@ embedder makes them. Budget for it: against a hosted embedder this is a network 
 per batch across the whole store. It is not scoped and cannot be — the vector matrix is
 one index shared by every tenant, so a partial migration leaves exactly the mixed-width
 store the error exists to prevent.
+
+Stop every other process using the store first: the MCP server, workers, notebooks. The
+migration starts by clearing the vectors, which truncates the vector file those processes
+map, so `reembed()` raises `StoreInUseError`, having changed nothing, while any of them
+has the store open. Restart them with the new embedder afterwards; each embeds new writes
+with the model it started with.
 
 ### Scope, and what a shared store isolates
 

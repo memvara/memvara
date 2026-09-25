@@ -213,6 +213,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   name that starts with "the" twice once legal forms such as "Inc" are dropped, and has a
   third word, changes key, and the schema 16 re-derivation above re-keys it on the first
   open.
+- **Re-embedding a store no longer crashes the other processes that have it open.**
+  `SQLiteStore.clear_embeddings()`, which `reembed()` calls first, truncated the vector
+  file, and a process that still mapped it died with SIGBUS on its next vector search: exit
+  code -7 on Linux, with no exception to catch. An encrypted store did not crash, but kept
+  returning the vectors that had been cleared. `clear_embeddings()` now raises the new
+  `StoreInUseError`, having changed nothing, while another process or another
+  `SQLiteStore` in the same process has the store open. To tell, every file-backed store
+  holds a shared lock on a new, empty `<db>.lock` file while it is open, and a clear takes
+  it exclusively. A store that opens during a clear waits for it, for up to 60 seconds.
+  `docs/UPGRADING.md` says what to stop before re-embedding.
 
 ## [0.15.0] — 2026-09-24
 

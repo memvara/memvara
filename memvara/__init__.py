@@ -65,7 +65,7 @@ from .retrieve import (
     calibrate_min_score,
 )
 from .schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
-from .store import SQLiteStore, Store
+from .store import SQLiteStore, Store, StoreInUseError
 from .store.encryption import EncryptionError, EncryptionWarning
 from .types import (
     Accumulation,
@@ -168,6 +168,8 @@ __all__ = [
     "PredicateRegistry", "PredicateSpec", "Cardinality", "Volatility",
     # pluggable backends
     "Store", "SQLiteStore",
+    # `clear_embeddings()`, and so `reembed()`, while another store has it open
+    "StoreInUseError",
     "Embedder", "HashingEmbedder", "CachedEmbedder", "default_embedder",
     "EmbedderFingerprint",
     "LLM", "NullLLM", "AnthropicLLM", "OpenAILLM",

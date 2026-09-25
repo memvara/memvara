@@ -4,9 +4,9 @@
 from .base import (BELIEVED, LIVE_ONLY, OMITTABLE, STATES, ClaimState, SQLStore, Store,
                    bulk_claims, live_predicate, resolve_states, state_predicate,
                    stored_state_predicate, transaction, unexpired_predicate)
-from .sqlite import SQLiteStore
+from .sqlite import SQLiteStore, StoreInUseError
 
 __all__ = ["BELIEVED", "LIVE_ONLY", "OMITTABLE", "SQLStore", "STATES", "ClaimState",
-           "Store", "SQLiteStore", "bulk_claims", "live_predicate", "resolve_states",
-           "state_predicate", "stored_state_predicate", "transaction",
+           "Store", "SQLiteStore", "StoreInUseError", "bulk_claims", "live_predicate",
+           "resolve_states", "state_predicate", "stored_state_predicate", "transaction",
            "unexpired_predicate"]
