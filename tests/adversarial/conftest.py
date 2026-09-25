@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterator
 import pytest
 
 from harness.hooks import HookRunner
-from harness.stdio import McpProcess
+from harness.stdio import McpProcess, kill_all
 
 
 @pytest.fixture
@@ -31,8 +31,7 @@ def mcp(tmp_path: pathlib.Path,
         return server
 
     yield start
-    for server in started:
-        server.kill()
+    kill_all(started)
 
 
 @pytest.fixture

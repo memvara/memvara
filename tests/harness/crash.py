@@ -63,7 +63,12 @@ class Child:
             stderr=subprocess.PIPE, env=child_env(home, env), text=True, encoding="utf-8")
         threading.Thread(target=self._pump_stdout, daemon=True).start()
         threading.Thread(target=self._pump_stderr, daemon=True).start()
-        self._send(json.dumps(dict(program)))
+        try:
+            self._send(json.dumps(dict(program)))
+        except BaseException:
+            # No Child exists yet for a `with` block to clean up, so kill it here.
+            self.kill()
+            raise
 
     def __enter__(self) -> Child:
         return self
