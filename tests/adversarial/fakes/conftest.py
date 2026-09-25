@@ -8,9 +8,16 @@ from typing import Iterator
 import pytest
 
 from harness.fakes.fake_v1 import FakeV1
+from harness.fakes.hosted_mcp import FakeHostedMcp
 
 
 @pytest.fixture
 def fake_v1() -> Iterator[FakeV1]:
     with FakeV1() as fake:
+        yield fake
+
+
+@pytest.fixture
+def hosted_mcp() -> Iterator[FakeHostedMcp]:
+    with FakeHostedMcp() as fake:
         yield fake

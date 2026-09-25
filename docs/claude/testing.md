@@ -244,4 +244,10 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 - What it leaves out: allowances and rate limits (inject a 402 or a 429 instead), legal holds, the audit trail, OAuth, and a document added by `url`, which it refuses because the suite runs offline. `POST /v1/maintenance/consolidate` runs the pass before it answers, where the cloud answers first.
 - `/v1` does not carry a claim's `temporal_precision`, `object_kind`, `amount` or `unit`, so a claim read through the remote client has the default in each of them. A test that compares a local store with a remote one leaves those four out.
 
+**`FakeHostedMcp` is the hosted `/mcp` endpoint** that the hooks' hosted client (`plugin/hooks/lib/hosted.py`) and the npm bridge reach. It answers with the real `MemvaraMCPServer` over a local store, bound to the credential's scope, which is the user `tester` unless the test names another. It checks what those clients send the way memvara-cloud's `rest/mcp.py` does. A request needs a bearer token, and without one it gets a 401 whose `WWW-Authenticate` header tells an MCP client where to sign in. `initialize` issues a session id, and every later request must carry one: none is a 400 and an unknown one a 404. A notification gets a 202 with no body, and a `memvara-project` header binds the project. A hook run reaches the fake when its environment sets `MEMVARA_API_KEY` to `fake.api_key` and `MEMVARA_SERVER_URL` to `fake.serve()`.
+
+- `FakeHostedMcp(sse=True)` sends each reply as a server-sent event, which both clients must be able to read.
+- `expire_sessions()` forgets every session, as a restarted deployment does, so a test can watch a client shake hands again. `fake.issued` lists every session id the fake has issued.
+- A fault is keyed by JSON-RPC method, and a tool call by `tools/call <tool>`, so `fake.fail("tools/call memory_recall", 402)` refuses one tool and leaves the handshake alone.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
