@@ -187,15 +187,20 @@ def test_a_lookup_question_pays_nothing_for_it():
         mem.close()
 
 
-def test_a_store_that_cannot_rank_on_time_simply_runs_the_other_two_legs():
+def test_a_store_that_cannot_rank_on_time_simply_runs_the_other_two_legs(monkeypatch):
     """Optional on the protocol, exactly like `vector_search_episodes`. A narrower answer
     beats refusing to search, and unlike the graph leg there is no raising implementation
     to catch: the one store that would raise cannot serve any episode search at all and
     is refused a whole server before it gets here."""
     mem = memory(read_w_temporal=1.0)
     try:
-        del type(mem.store).episodes_near
-        results = mem.search("what happened recently", k=6, include_episodes=True)
+        # Through `monkeypatch`, which puts the method back after this test. A bare `del`
+        # removed it from `SQLiteStore` for every test that ran later in the session.
+        monkeypatch.delattr(type(mem.store), "episodes_near")
+        # An instant the leg ranks turns around when the store has the method, so the
+        # assertion fails if the leg runs. With no `valid_at` it ranked nothing either way.
+        results = mem.search("what happened recently", k=6, include_episodes=True,
+                             valid_at=JAN + timedelta(days=5))
         assert results and all(r.explain.temporal_rank is None for r in results)
     finally:
         mem.close()

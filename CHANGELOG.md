@@ -213,6 +213,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   name that starts with "the" twice once legal forms such as "Inc" are dropped, and has a
   third word, changes key, and the schema 16 re-derivation above re-keys it on the first
   open.
+- **A test no longer removes `SQLiteStore.episodes_near` for the rest of the test run.**
+  `test_a_store_that_cannot_rank_on_time_simply_runs_the_other_two_legs` in
+  `tests/test_temporal.py` hid the method with `del type(mem.store).episodes_near` and never
+  put it back. Every later test file saw a `SQLiteStore` without it: a direct call raised
+  `AttributeError`, and `search()` ran without the temporal leg without saying so. The full
+  suite passed only because no later file called the method directly. The test now hides it
+  through `monkeypatch`, which restores it afterwards, and searches at an instant the
+  temporal leg would rank, so it fails if the leg runs.
 - **The check that compares the hosted deployment's tools with this library's skips when
   any of its requests fails.** `test_the_deployment_serves_the_tools_this_library_declares`
   asks `app.memvara.dev` for its tool list in three requests, and is meant to skip when the
