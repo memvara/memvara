@@ -53,6 +53,11 @@ PROVIDES = frozenset({"tools", "hooks.session_start", "hooks.recall", "hooks.app
 #: such runs select. A run with --tier local or --tier quarantine never collects them.
 RUN_TIERS = frozenset().union(*(wanted for wanted in tiers.SELECTS.values() if "fast" in wanted))
 
+#: The least time, in seconds, that a mark used as an `expires_at` must leave before the
+#: fact expires. The turn that checks the fact before it expires makes round trips after
+#: the mark, and on a loaded machine one round trip can take more than a second.
+EXPIRY_WINDOW = 4.0
+
 #: The JSON Schema keywords `schema_errors` implements, annotations included.
 KEYWORDS = frozenset({
     "$schema", "$id", "$defs", "$ref", "title", "description", "type", "properties",
@@ -326,6 +331,8 @@ def _script_problems(scenario: Mapping[str, Any]) -> list[str]:
              for name in sorted(files) if not _inside(name)]
     known: set[str] = set()
     used: set[str] = set()
+    # Each mark's offset, to check a mark used as an expiry against EXPIRY_WINDOW.
+    offsets: dict[str, float] = {}
     for where, step in _steps(scenario):
         for key in ("args", "fields", "claim_id"):
             for kind, name in _references(step.get(key)):
@@ -333,6 +340,14 @@ def _script_problems(scenario: Mapping[str, Any]) -> list[str]:
                     found.append(f"{where}: {{file:{name}}} names no workspace file")
                 elif kind == "value" and name not in known:
                     found.append(f"{where}: {{{name}}} is used before any step sets it")
+        expiry = _VALUE.fullmatch(str(step.get("args", {}).get("expires_at", "")))
+        offset = offsets.get(expiry.group(1)) if expiry else None
+        if expiry and offset is not None and offset < EXPIRY_WINDOW:
+            found.append(f"{where}: expires_at uses the mark {expiry.group(1)!r}, which is only "
+                         f"{offset:g} seconds ahead; make it at least {EXPIRY_WINDOW:g}, so "
+                         "the steps before the expiry cannot race it on a slow machine")
+        if "mark" in step:
+            offsets[step["mark"]] = step.get("offset_seconds", 0.0)
         if "tool" in step:
             used.add("tools")
             if step["tool"] not in BY_NAME:

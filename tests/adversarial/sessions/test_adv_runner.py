@@ -234,6 +234,18 @@ def test_a_hook_step_takes_only_the_payload_fields_a_host_sends() -> None:
     assert any("unknown field 'timeout'" in error for error in errors(scenario))
 
 
+def test_an_expiry_leaves_room_for_the_steps_before_it() -> None:
+    """The turn that checks a fact before it expires makes round trips after the mark, and
+    on a loaded machine one can take more than a second, so a short window races them."""
+    scenario = sample()
+    script(scenario)[:0] = [{"mark": "soon", "offset_seconds": 1.5}]
+    script(scenario)[1]["args"]["expires_at"] = "{soon}"
+    assert any("expires_at uses the mark 'soon', which is only 1.5 seconds ahead" in error
+               for error in errors(scenario))
+    script(scenario)[0]["offset_seconds"] = runner.EXPIRY_WINDOW
+    assert errors(scenario) == []
+
+
 def test_store_gold_refuses_an_empty_project() -> None:
     """An empty project would be read as no project, and its failure message would say
     user level. null is how an item reads at user level."""
@@ -380,8 +392,10 @@ def test_the_operators_erase_touches_only_its_claim_on_a_real_server(
     scenario = sample()
     del scenario["sessions"][1]
     script(scenario)[0]["capture"] = {"lisbon_id": r"\[(cl_[0-9a-f]+)\]"}
+    # Two seconds, not runner.EXPIRY_WINDOW: only the one write below has to land before
+    # the code expires, and nothing reads it before then.
     script(scenario)[:0] = [
-        {"mark": "soon", "offset_seconds": 0.5},
+        {"mark": "soon", "offset_seconds": 2.0},
         {"tool": "memory_remember", "args": {"predicate": "door_code", "object": "4417",
                                              "expires_at": "{soon}"}}]
     script(scenario).extend([{"wait_until": "soon"},

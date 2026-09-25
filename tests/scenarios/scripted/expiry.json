@@ -8,7 +8,7 @@
     {"turns": [
       {"id": "tell", "user": "The door code for the rental is 4417. Only keep it until we check out.",
        "script": [
-         {"mark": "checkout", "offset_seconds": 1.5},
+         {"mark": "checkout", "offset_seconds": 4},
          {"tool": "memory_remember", "args": {"predicate": "rental_door_code", "object": "4417", "expires_at": "{checkout}", "expire_reason": "temporary door code for the rental"}}
        ]},
       {"id": "before", "user": "What's the door code again?",
