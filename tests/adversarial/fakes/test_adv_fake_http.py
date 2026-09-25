@@ -116,7 +116,7 @@ def test_the_async_transport_waits_without_blocking_the_event_loop(echo: Echo) -
     echo.delay("GET /echo", 0.3, times=1)
     echo.hang("POST /echo", times=1)
 
-    async def main() -> tuple[int, list[float]]:
+    async def main() -> tuple[int, float, list[float]]:
         started = time.monotonic()
         ticks: list[float] = []
 
@@ -127,14 +127,20 @@ def test_the_async_transport_waits_without_blocking_the_event_loop(echo: Echo) -
 
         async with httpx.AsyncClient(base_url=echo.MOCK_URL, timeout=0.2,
                                      transport=echo.async_transport()) as client:
-            waited, _ = await asyncio.gather(client.get("/echo", timeout=5), tick())
+
+            async def get() -> tuple[int, float]:
+                answer = await client.get("/echo", timeout=5)
+                return answer.status_code, time.monotonic() - started
+
+            (status, answered), _ = await asyncio.gather(get(), tick())
             with pytest.raises(httpx.ReadTimeout):
                 await client.post("/echo", json={})
-        return waited.status_code, ticks
+        return status, answered, ticks
 
-    status, ticks = asyncio.run(main())
-    assert status == 200
-    assert len(ticks) == 3 and ticks[0] < 0.25, "the delay blocked the event loop"
+    status, answered, ticks = asyncio.run(main())
+    assert status == 200 and len(ticks) == 3
+    # A wait that blocked the event loop would hold every tick back until the answer.
+    assert ticks[0] < answered, "the delay blocked the event loop"
 
 
 def test_over_a_socket_a_hang_ends_at_the_client_s_timeout_and_close_releases_it(
