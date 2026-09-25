@@ -1,10 +1,13 @@
 """Bugs the adversarial suite has found and not yet fixed, one entry per GitHub issue.
 
 A test that reproduces one of these carries `xfail("B2")`, a strict expected failure
-that cites the issue. When the fix lands, the test passes, and strict mode fails the run
-until the fix PR removes the marker. So a fixed bug cannot keep its marker, and the marker
-cannot hide a different failure: `raises` names the exception the bug produces, and any
-other exception fails the test.
+that cites the issue. The test raises `Reproduced` only after it has seen that bug's own
+symptom, and the marker accepts nothing else:
+
+* A different failure in the same test is a real failure, even an AssertionError or an
+  exception of the same type the bug raises, so a new bug cannot hide behind a known one.
+* When the fix lands, the test passes, and strict mode fails the run until the fix PR
+  removes the marker, so a marker cannot outlive its bug.
 
 Security-class findings are not listed here. They follow SECURITY.md, and their tests
 land together with their fixes.
@@ -15,6 +18,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+
+
+class Reproduced(Exception):
+    """A known bug's own symptom, seen by the test that pins it."""
 
 
 @dataclass(frozen=True)
@@ -34,11 +41,9 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
 )}
 
 
-def xfail(bug_id: str, *,
-          raises: type[BaseException] | tuple[type[BaseException], ...] = AssertionError,
-          ) -> pytest.MarkDecorator:
+def xfail(bug_id: str) -> pytest.MarkDecorator:
     """The strict expected-failure marker for a registered bug."""
     bug = KNOWN_BUGS[bug_id]
     return pytest.mark.xfail(
-        strict=True, raises=raises,
+        strict=True, raises=Reproduced,
         reason=f"{bug.id}, memvara/memvara#{bug.issue}: {bug.title}")
