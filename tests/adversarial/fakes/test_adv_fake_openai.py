@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 import pytest
 
-from harness.fakes.openai_compat import FakeOpenAI, FakeOpenAIError
+from harness.fakes.openai_compat import COMPLETIONS, FakeOpenAI, FakeOpenAIError
 from memvara import Memvara
 from memvara.embed import HashingEmbedder
 from memvara.llm.base import Message, ToolSpec, TruncatedResponse
@@ -136,3 +136,15 @@ def test_a_route_fault_applies_before_the_script_and_leaves_it_alone(
     fake_openai.add_reply("still first")
     assert _post(fake_openai, "1").status_code == 503
     assert _post(fake_openai, "2").json()["choices"][0]["message"]["content"] == "still first"
+
+
+def test_a_delay_waits_and_then_answers_with_the_next_scripted_reply(
+        fake_openai: FakeOpenAI) -> None:
+    fake_openai.delay(COMPLETIONS, 0.2, times=1)
+    fake_openai.add_reply("after the wait")
+    started = time.monotonic()
+    answer = _post(fake_openai, "1")
+    assert time.monotonic() - started >= 0.2
+    assert answer.status_code == 200
+    assert answer.json()["choices"][0]["message"]["content"] == "after the wait"
+    assert fake_openai.pending == 0

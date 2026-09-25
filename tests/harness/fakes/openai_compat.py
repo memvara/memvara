@@ -63,8 +63,11 @@ class FakeOpenAI(HttpFake):
     """An OpenAI-compatible chat-completions endpoint with scripted replies.
 
     `client()` and `base_url` reach it over a socket, and start serving it if it is not
-    serving yet. A route fault injected with `fail`, `delay` or `hang` applies before the
-    script, and does not use up a scripted reply.
+    serving yet. A route fault from `fail` or `hang` answers, or holds, the request in
+    place of the script, and does not use up a scripted reply. A `delay` waits, and the
+    request is then answered with the next scripted reply. Replies are handed out in the
+    order requests arrive, so a request whose client gives up during a delay still uses
+    up its reply.
     """
 
     ROUTES = (COMPLETIONS,)
@@ -153,8 +156,15 @@ class FakeOpenAI(HttpFake):
 
     def plan(self, request: Request) -> Step:
         fault = super().plan(request)
-        if fault != Step() or request.route is None:
+        # A fault that answers, or never answers, takes the request's turn in the script.
+        # A delay only waits, and the request is then answered from the script as usual.
+        if fault.hang or fault.reply is not None or request.route is None:
             return fault
+        scripted = self._next_scripted(request)
+        return Step(hang=scripted.hang, wait=fault.wait, reply=scripted.reply)
+
+    def _next_scripted(self, request: Request) -> Step:
+        """The next scripted answer, used up by this request."""
         with self._script_lock:
             self._answered += 1
             number = self._answered
