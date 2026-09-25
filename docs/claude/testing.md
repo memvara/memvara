@@ -212,6 +212,8 @@ After the last session the store is read once more with expiry switched off, so 
 2. Run `pytest tests/adversarial/sessions -k <id>` and read every failure. A scenario mistake is fixed in the scenario. A failure that shows memvara doing the wrong thing is a bug, handled as "Known bugs and security findings" above describes.
 3. Keep it deterministic and offline. A scenario that needs a model, the network or the capture hook belongs to the real-agent layer.
 
+A read that finds nothing repeats its query in its reply. So keep a value that `must_not_contain` forbids out of the queries of the turn it checks, or the check fails on the echo.
+
 Each session starts a server, which takes about 0.2 seconds on a laptop and longer on Windows. The scripted layer's budget on the fast tier is about 25 seconds, so use as few sessions as the story allows.
 
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
