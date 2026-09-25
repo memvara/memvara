@@ -17,7 +17,7 @@ third.
 | The hosted client and its relationship to memvara-cloud | [remote-and-cloud.md](remote-and-cloud.md) | `memvara/remote/` |
 | Background maintenance, predicate vocabularies, the graph leg | [consolidation-and-graph.md](consolidation-and-graph.md) | `memvara/consolidate/`, `memvara/packs/`, `memvara/retrieve/traverse.py` |
 | Counters, benchmark scripts, the demo harness | [telemetry-and-benchmarks.md](telemetry-and-benchmarks.md) | `memvara/telemetry.py`, `bench/`, `demo/` |
-| The adversarial test suite: tiers, the harness, the skip ledger, known bugs, the reference model, crash tests, scripted scenarios, fakes | [testing.md](testing.md) | `tests/harness/`, `tests/adversarial/`, `tests/scenarios/` |
+| The adversarial test suite: tiers, the harness, the skip ledger, known bugs, the reference model, crash tests, scripted scenarios, fakes, documentation checks | [testing.md](testing.md) | `tests/harness/`, `tests/adversarial/`, `tests/scenarios/` |
 | Cutting a release, the npm bridge, the seven plugin repositories | [release-and-plugins.md](release-and-plugins.md) | `release/`, `npm/`, `plugin/`, `scripts/sync_plugin_repos.py` |
 | How work is done here, with the incident behind each rule | [working-here.md](working-here.md) | none — this is process, not code |
 

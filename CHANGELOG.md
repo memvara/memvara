@@ -51,6 +51,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     store, for an OpenAI-compatible model endpoint, and for the two agent executables the
     capture hook starts. A test can make any route fail, answer slowly or never answer,
     and each fake is checked by driving it with the real client code it stands in for.
+
+  - **Documentation that must match the code.** `tests/adversarial/docs/` checks that the
+    tool descriptions, the server's instructions and the packaged skill name only tools
+    and arguments that exist in each configuration, that a default stated in words equals
+    the schema's, and that each console script's help names what it accepts. Three kinds
+    of drift it found are pinned as strict expected failures: #295, #296 and #297.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed
