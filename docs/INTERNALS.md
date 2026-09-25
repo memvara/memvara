@@ -672,9 +672,9 @@ strip only the first, and "the the band" folded to "the band", which folds again
 `band`. A key that does not fold to itself breaks what `fact_key_for` and
 `default_entity` assume, and it showed: `Claim.fact_key` folds `subject_key` again, so a
 claim about "The The Band" had the key `the band` and sat in the slot of `band`. Only a
-name that starts with "the" twice and has a third word changes key, and the same schema
-version 16 re-derives it. `_bounded` has no article rule of its own, because no leading
-article reaches it.
+name that starts with "the" twice once legal forms such as "Inc" are dropped, and has a
+third word, changes key, and the same schema version 16 re-derives it. `_bounded` has no
+article rule of its own, because no leading article reaches it.
 
 `WritePipeline` copies that list onto `WriteReceipt.closed`, where `receipt.ended` and
 `receipt.retired` split it by `Claim.state`. Anything rendering the list as one word is

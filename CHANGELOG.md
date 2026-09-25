@@ -210,8 +210,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `Claim.fact_key` folds the subject's key again, so a claim about "The The Band" had the
   key `the band` while it sat in the slot of `band`. Every leading "the" now goes until one
   word is left: "The The Band" folds to `band`, and "The The" still folds to `the`. Only a
-  name that starts with "the" twice and has a third word changes key, and the schema 16
-  re-derivation above re-keys it on the first open.
+  name that starts with "the" twice once legal forms such as "Inc" are dropped, and has a
+  third word, changes key, and the schema 16 re-derivation above re-keys it on the first
+  open.
 
 ## [0.15.0] — 2026-09-24
 

@@ -21,8 +21,9 @@ itself.
 
 Every claim's `subject_key`, `object_key`, `fact_key` and `value_key` is built from that
 fold, so `SQLiteStore` moves to schema version 16. The first open of an older file
-re-derives all four for every claim from the text you wrote. Text in which no word ends in
-one of these symbols, and which does not start with "the" twice, keys exactly as before.
+re-derives all four for every claim from the text you wrote. Text keys exactly as before
+unless a word ends in one of these symbols, or it starts with "the" twice once legal forms
+such as "Inc" are dropped.
 
 ### Who this changes, and in which direction
 
@@ -80,8 +81,8 @@ for c in mem.store.iter_claims(states=["live"]):
 ```
 
 Claims whose subject or object starts with "the" twice, which re-key to the name without
-them. `LIKE` ignores ASCII case in SQLite, and a spelling with punctuation between the two,
-such as "The, the Band", is not caught:
+them. `LIKE` ignores ASCII case in SQLite. A spelling with punctuation or a legal form
+between the two, such as "The, the Band" or "The Inc The Band", is not caught:
 
 ```sql
 SELECT id, subject, predicate, object FROM claims
