@@ -234,7 +234,7 @@ alongside a behaviour change *is* the surgical change, not scope creep.
 | The hosted client and its relation to memvara-cloud | `docs/claude/remote-and-cloud.md` | `memvara/remote/` |
 | Background maintenance, predicate vocabularies, the graph leg | `docs/claude/consolidation-and-graph.md` | `memvara/consolidate/`, `memvara/packs/`, `memvara/retrieve/traverse.py` |
 | Counters, benchmark scripts, the demo harness | `docs/claude/telemetry-and-benchmarks.md` | `memvara/telemetry.py`, `bench/`, `demo/` |
-| The adversarial test suite: tiers, the harness, the skip ledger, known bugs | `docs/claude/testing.md` | `tests/harness/`, `tests/adversarial/` |
+| The adversarial test suite: tiers, the harness, the skip ledger, known bugs, the reference model | `docs/claude/testing.md` | `tests/harness/`, `tests/adversarial/` |
 | Cutting a release, the npm bridge, the seven plugin repositories | `docs/claude/release-and-plugins.md` | `release/`, `npm/`, `plugin/`, `scripts/sync_plugin_repos.py` |
 | How work is done here, with the incident behind each rule | `docs/claude/working-here.md` | none — this is process |
 | Nothing; these load themselves | `.claude/rules/tool-descriptions.md` on `memvara/server/tools.py`; `.claude/rules/packaged-skill.md` on `memvara/skills/**` and `plugin/**`; `.claude/rules/doctests.md` on `memvara/**/*.py` | as listed |

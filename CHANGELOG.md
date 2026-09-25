@@ -9,6 +9,28 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **An adversarial test suite that tries to break memvara the way agents use it.** It
+  lives in `tests/adversarial/`, with its support code in `tests/harness/`, and
+  `docs/claude/testing.md` describes it. This entry covers the suite's foundation and its
+  first stage. None of it changes the library.
+  - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
+    and the new `--tier nightly`, `--tier weekly`, `--tier local` and `--tier quarantine`
+    options select the others.
+  - **Skips need a reason on record.** A skip anywhere in the repository must match a rule
+    in `tests/harness/skips.py`, or the run fails.
+  - **Real processes.** The suite drives the MCP server as a real child process and runs
+    the plugin's hook scripts the way each host runs them.
+  - **Known bugs stay visible.** Each bug the suite finds lands at once as a strict
+    expected failure that cites its issue.
+  - **A reference model.** `tests/harness/model.py` is a small model of what a store must
+    hold, over both clocks. A Hypothesis state machine runs random sequences of writes on
+    a real store and on the model, and after every step compares every row and every read,
+    including reads at past instants. `tests/harness/invariants.py` checks a store file
+    for the damage a crash or a bad write leaves.
+  - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
+
 ## [0.16.0] — 2026-09-25
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store moves to schema 16 on

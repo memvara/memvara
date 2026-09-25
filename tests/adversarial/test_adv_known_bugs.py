@@ -183,3 +183,89 @@ def test_a_session_inside_a_project_reads_the_global_facts_it_writes() -> None:
         raise known_bugs.Reproduced("B7: the claim sits where the session's reads never look")
     assert seen == [claim.id]
     assert session.why(claim.id) is not None
+
+
+# -- B9: a future-dated retraction's tombstone ends before it begins ---------------------
+
+@known_bugs.xfail("B9")
+def test_a_future_retraction_leaves_a_tombstone_that_does_not_end_before_it_begins(
+        ) -> None:
+    """Every closure goes through `close_out`, which never ends a row before its own
+    start, except the tombstone a retraction writes (#275)."""
+    from harness.clock import FAR_FUTURE
+
+    m = stores.memory()
+    user = m.scope(user="u")
+    user.remember("user", "likes", "tea")
+    user.remember("user", "likes", "tea", polarity=-1, valid_from=FAR_FUTURE)
+    [tombstone] = [c for c in m.store.iter_claims(None, True) if c.polarity < 0]
+    assert tombstone.valid_from == FAR_FUTURE and tombstone.valid_to is not None
+    if tombstone.valid_to < tombstone.valid_from:
+        raise known_bugs.Reproduced("B9: the tombstone ends before it begins")
+    assert tombstone.valid_to == tombstone.valid_from
+
+
+# -- B16: forget leaves a scheduled value believed ---------------------------------------
+
+@known_bugs.xfail("B16")
+def test_forget_retires_a_scheduled_value_too() -> None:
+    """`forget` retires everything the store currently believes in the slot, and a value
+    scheduled to start later is believed (#282)."""
+    from datetime import timedelta
+
+    from harness.clock import FAR_FUTURE
+
+    user = stores.memory().scope(user="u")
+    user.remember("user", "lives_in", "Berlin")
+    user.remember("user", "lives_in", "Paris", valid_from=FAR_FUTURE)
+    user.forget("user", "lives_in")
+    later = [c.object for c in user.get_all(valid_at=FAR_FUTURE + timedelta(days=1))]
+    if later == ["Paris"]:
+        raise known_bugs.Reproduced("B16: the scheduled value survived forget")
+    assert later == []
+
+
+# -- B17: a restatement with an earlier start loses the earlier start --------------------
+
+@known_bugs.xfail("B17")
+def test_restating_a_fact_with_an_earlier_start_keeps_the_earlier_start() -> None:
+    """The earlier start is new information. It must be kept, and what the store believed
+    before the restatement must not change (#283)."""
+    from harness.clock import INSTANTS
+
+    user = stores.memory().scope(user="u")
+    user.remember("user", "likes", "tea", valid_from=INSTANTS[3], recorded_at=INSTANTS[3])
+    user.remember("user", "likes", "tea", valid_from=INSTANTS[0], recorded_at=INSTANTS[4])
+    now_view = [c.object for c in user.get_all(valid_at=INSTANTS[1])]
+    earlier_view = [c.object for c in user.get_all(valid_at=INSTANTS[1],
+                                                   known_at=INSTANTS[3])]
+    if now_view == []:
+        raise known_bugs.Reproduced("B17: the earlier start was dropped")
+    assert now_view == ["tea"]
+    assert earlier_view == []
+
+
+# -- B18: a repeated retraction is folded into an expired tombstone ----------------------
+
+@known_bugs.xfail("B18")
+def test_a_retraction_repeated_after_the_first_expired_keeps_its_own_record() -> None:
+    """The positive path leaves expired claims out of its duplicate lookup. A retraction
+    must too, or the sweep erases the repeat with the tombstone it was folded into
+    (#284)."""
+    from datetime import timedelta
+
+    from memvara.types import utcnow
+
+    mem = stores.memory()
+    mem.remember("user", "likes", "tea", user="u")
+    mem.remember("user", "likes", "tea", polarity=-1, user="u",
+                 expires_at=utcnow() + timedelta(minutes=5))
+    [tombstone] = [c for c in mem.store.iter_claims(None, True) if c.polarity < 0]
+    tombstone.expires_at = utcnow() - timedelta(seconds=1)
+    mem.store.put_claim(tombstone)
+    mem.remember("user", "likes", "tea", polarity=-1, user="u")
+    mem.erase_expired()
+    left = [c for c in mem.store.iter_claims(None, True) if c.polarity < 0]
+    if left == []:
+        raise known_bugs.Reproduced("B18: the repeat was erased with the expired tombstone")
+    assert len(left) == 1 and left[0].expires_at is None
