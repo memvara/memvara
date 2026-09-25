@@ -640,6 +640,31 @@ bound stays under it. And `retrieve/anchor.py` compares a question against the w
 a key with the digest left out (`entities.key_words`), because a question repeats a
 value by its words and never by the digest.
 
+**A symbol that ends a name stays in the key.** `entities._tokens` splits a surface on
+every character that is not a letter or a digit, except that a run of `+`, `#` or `-`
+ending a word can stay on it, and `entities._suffix` decides whether it does. A `+` stays
+on any word, and a `#` or a single `-` on a word of one or two letters, because that is
+where the symbol names something: `C++`, `Disney+`, `C#`, `A-`. After a longer word, a `#`
+or `-` is more likely the one in "Room# 5" or the "pre-" of "pre- and post-war", and
+inside a word every symbol still separates, so "x-ray" folds to `x ray`. The minus sign
+U+2212, which NFKD leaves alone, is read as `-`. None of the three is a colon, so
+`typed_entity_key` still finds the namespace at the first colon. The anchor leg folds a
+question through the same `entity_key` (`retrieve/anchor.query_tokens`), so a question
+about "C#" matches the key `c#`. Before this, "C++", "C#" and "C" shared the key `c`, so a
+second of them in one slot was recorded as a repeat of the first. Schema version 16 exists
+only for this change: an older file re-derives every claim's keys and both hashes on its
+first open, through the UPDATEs that `_migrate_to_v12` runs on every upgrade, and
+`test_a_store_written_with_the_old_fold_is_rekeyed_when_opened` fails if that stops. Three
+things keep what the old fold gave them. A claim's alias stamp is read before the fold, so
+a merge made at write time survives. An alias in the `entities` table stays filed under
+the key its spelling folded to when it was learned: one learned for "C#" is still filed
+under `c`, so it answers for "C" and no longer for "C#". And an `entities` row keeps its
+key and its first spelling, so a row first spelled "C++" still sits at `c`; nothing
+outside the tests reads that spelling. The rule still folds some different names
+together: "C++11" folds like "C 11", and a three-letter credit rating such as "BBB-" loses
+its `-`. It also keeps one hyphen it should drop. In "in- and outbound" the suspended
+hyphen stays on the two-letter "in", so that value no longer matches "in and outbound".
+
 `WritePipeline` copies that list onto `WriteReceipt.closed`, where `receipt.ended` and
 `receipt.retired` split it by `Claim.state`. Anything rendering the list as one word is
 wrong for one of the two closures; a supersession is `ended`.

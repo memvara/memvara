@@ -102,6 +102,23 @@ _APOSTROPHES = frozenset("'‘’ʼ´`")
 #: and Word emit U+02BC, and "Bobʼs" has to name Bob exactly as "Bob's" does.
 POSSESSIVE = re.compile("[" + "".join(re.escape(ch) for ch in sorted(_APOSTROPHES)) + r"]s\b")
 
+#: The symbols that can end a name: `C++`, `C#`, `F#`, `A+`, `A-`, `Disney+`. Every other
+#: punctuation mark separates words. These did too, which gave `C++`, `C#` and `C` one
+#: identity and the blood type `A-` the identity of `A+`, so the second of two values was
+#: recorded as a repeat of the first. `_suffix` decides where each one belongs to a name.
+_NAME_SYMBOLS = frozenset("+#-")
+
+#: The minus sign, U+2212, which NFKD leaves as it is and which looks exactly like `-`.
+#: Typeset text uses it for a minus, as in a blood type, so the fold reads it as `-`.
+_MINUS_TO_HYPHEN = {"\u2212": "-"}
+
+#: One pass over the text that deletes the apostrophes and turns the minus sign into `-`.
+_TRANSLATE = str.maketrans({**dict.fromkeys(_APOSTROPHES), **_MINUS_TO_HYPHEN})
+
+#: A word and the run of name symbols straight after it. A word is a run of letters and
+#: digits: `[^\W_]` is `\w` without the underscore, which is what `str.isalnum` accepts.
+_WORD = re.compile(r"([^\W_]+)([" + re.escape("".join(sorted(_NAME_SYMBOLS))) + r"]*)")
+
 #: How many known entities to offer a model asked to merge a surface form. Bounded for
 #: the same reason the predicate shortlist is: an owner's entity set has no ceiling worth
 #: relying on, and shipping all of it would be an unbounded per-call token tax.
@@ -203,6 +220,17 @@ def entity_key(surface: str) -> str:
     >>> entity_key("Acme Labs") == entity_key("Acme")
     False
 
+    The one piece of punctuation kept is a symbol that ends a name, because `C++`, `C#`
+    and `C` are three languages and `A+` and `A-` are two blood types. Inside a word the
+    symbol still separates, so "x-ray" and "X ray" are one value (see `_suffix`):
+
+    >>> entity_key("C++"), entity_key("C#"), entity_key("C")
+    ('c++', 'c#', 'c')
+    >>> entity_key("A+") == entity_key("A-")
+    False
+    >>> entity_key("x-ray") == entity_key("X ray")
+    True
+
     Returns "" for a surface form with no content at all, which callers read as "no
     entity here" — an empty object is meaningful for retraction, where it means "clear
     the whole slot".
@@ -285,8 +313,8 @@ def typed_entity_key(surface: str) -> str:
     An identity that packs two things into one string and is taken apart by a pure function
     is the shape `entity_id` already uses for the owner, split by `split_entity_id`, in
     both backends. The split is exact rather than best-effort: `entity_key` emits only
-    alphanumerics and spaces, so a folded name never contains a colon and the first colon
-    is always the namespace boundary.
+    letters, digits, spaces and the three symbols `_suffix` keeps, so a folded name never
+    contains a colon and the first colon is always the namespace boundary.
 
     Folding is therefore idempotent, which `fact_key_for` and `history()` both rely on:
 
@@ -354,20 +382,50 @@ def key_words(key: str) -> list[str]:
 
 
 def _tokens(surface: str) -> list[str]:
-    decomposed = unicodedata.normalize("NFKD", surface).casefold()
+    text = unicodedata.normalize("NFKD", surface).casefold()
+    if not text.isascii():
+        # "Zoë" -> "zoe". ASCII holds no combining mark, so most text skips this loop.
+        text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.translate(_TRANSLATE)          # "O'Reilly" -> "oreilly"
     out: list[str] = []
-    word: list[str] = []
-    for ch in decomposed:
-        if unicodedata.combining(ch) or ch in _APOSTROPHES:
-            continue          # "Zoë" -> "zoe", "O'Reilly" -> "oreilly"
-        if ch.isalnum():
-            word.append(ch)
-        elif word:
-            out.append("".join(word))
-            word = []
-    if word:
-        out.append("".join(word))
+    for match in _WORD.finditer(text):
+        word, run = match.groups()
+        # Only a run that ends the word can belong to it: in "x-ray" or "C++11" the
+        # symbols are followed by more of the text and separate it, as they always did.
+        if run and not text[match.end():match.end() + 1].isalnum():
+            word += _suffix(word, run)
+        out.append(word)
     return out
+
+
+def _suffix(word: str, run: str) -> str:
+    """The part of `run`, the symbols ending `word`, that belongs to its name, or "".
+
+    `_tokens` asks only about a run that ends the word, one with no letter or digit
+    after it. Each symbol is kept only on the words it names something on:
+
+    * `+`, one or more, on any word: `C++`, `Notepad++`, `Disney+`, `18+`. A plus never
+      spells a name the same way as the name without it.
+    * `#`, one or more, on a word of one or two letters: `C#`, `F#`, `J#`. After a longer
+      word it is closer to "Room# 5", which is the same room as "Room 5".
+    * `-`, exactly one, on a word of one or two letters: `A-`, `AB-`, `O-`. After a longer
+      word it is closer to the "pre-" of "pre- and post-war", which is not a name.
+
+    >>> _suffix("c", "++"), _suffix("disney", "+"), _suffix("18", "+")
+    ('++', '+', '+')
+    >>> _suffix("c", "#"), _suffix("room", "#")
+    ('#', '')
+    >>> _suffix("ab", "-"), _suffix("pre", "-"), _suffix("a", "+-")
+    ('-', '', '')
+    """
+    short = len(word) <= 2 and word.isalpha()
+    if set(run) == {"+"}:
+        return run
+    if set(run) == {"#"} and short:
+        return run
+    if run == "-" and short:
+        return run
+    return ""
 
 
 def entity_id(owner: str, key: str) -> str:

@@ -192,6 +192,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   The digit reader behind the rule moves from `consolidate/merge.py` to
   `embed/calibration.numbers`. `docs/UPGRADING.md` shows how to find values an earlier
   version lost this way.
+- **Two values that differ only by a `+`, `#` or `-` at the end of a name are two values.**
+  `entity_key()` dropped every punctuation mark, so "C++", "C#" and "C" folded to one key,
+  and so did the blood types "A+" and "A-". `value_key` and `fact_key` are built from that
+  key. So `remember("user", "uses", "C#")` after "C++" recorded a second observation of
+  "C++" instead of a second value, and in a slot that holds one value, "A-" after "A+"
+  reinforced "A+" instead of replacing it. The fold now keeps a trailing `+` on any word
+  (`C++`, `Disney+`, `18+`), a trailing `#` on a word of one or two letters (`C#`, `F#`),
+  and one trailing `-` on a word of one or two letters (`A-`, `AB-`). The minus sign U+2212
+  counts as `-`. Inside a word the symbols still separate, so "x-ray" and "X ray" are still
+  one value, and nothing else about the fold changes. `SQLiteStore` moves to schema version
+  16, and the first open of an older file re-derives every claim's keys with the new fold.
+  A value that an earlier version recorded as a repeat of another stays recorded that way;
+  `docs/UPGRADING.md` shows how to find those.
 
 ## [0.15.0] — 2026-09-24
 

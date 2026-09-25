@@ -166,6 +166,12 @@ either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/sto
   expressions, or a cached list will outlive the change.
   `tests/test_store.py::test_every_column_a_state_compares_with_the_clock_is_one_the_cache_watches`
   fails until it does.
+- **A change to the entity fold bumps `SCHEMA_VERSION`.** `subject_key`, `object_key`,
+  `fact_key` and `value_key` are all built from `entity_key`, and an older file re-derives
+  them only when it is upgraded, through the UPDATEs that `_migrate_to_v12` runs on every
+  upgrade. A fold change without a bump leaves every file written before it on the old
+  keys, so the next write of a stored value no longer matches it. Version 16 is the bump
+  for keeping a `+`, `#` or `-` that ends a name.
 
 ## Read next
 

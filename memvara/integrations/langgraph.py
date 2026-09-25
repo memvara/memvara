@@ -380,12 +380,12 @@ def field_subject(namespace: Sequence[str], key: str, field: str) -> str:
     """The slot-owning subject for one field of one item.
 
     A digest, and it has to be. Memvara folds a subject to its *entity* identity before
-    keying a slot (`entity_key`), and that fold drops punctuation — so the readable
-    spelling `langgraph:a/b#c` collides with `langgraph:a#b/c`, which is namespace
-    `("a", "b")` key `"c"` colliding with namespace `("a",)` key `"b c"`. Two unrelated
-    items would share one slot and supersede each other. Hex survives the fold intact,
-    so the address is hashed and the readable form is carried in `Claim.meta` for
-    anything that wants to display it.
+    keying a slot (`entity_key`), and that fold drops every punctuation mark but a `+`,
+    `#` or `-` ending a name — so the readable spelling `langgraph:a/b#c` collides with
+    `langgraph:a#b/c`, which is namespace `("a", "b")` key `"c"` colliding with
+    namespace `("a",)` key `"b c"`. Two unrelated items would share one slot and
+    supersede each other. Hex survives the fold intact, so the address is hashed and the
+    readable form is carried in `Claim.meta` for anything that wants to display it.
     """
     address = json.dumps([list(namespace), key, field], separators=(",", ":"))
     return f"{SUBJECT_PREFIX}{content_hash(address)}"

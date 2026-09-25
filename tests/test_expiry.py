@@ -309,7 +309,7 @@ def test_a_version_14_file_gains_the_expiry_columns_and_keeps_its_claims(tmp_pat
 
     with mem(path) as upgraded:
         db = upgraded.store._db
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION == 15
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION == 16
         columns = {r["name"] for r in db.execute("PRAGMA table_info(claims)")}
         assert {"expires_at", "expire_reason"} <= columns
         indexes = {r[0] for r in db.execute(

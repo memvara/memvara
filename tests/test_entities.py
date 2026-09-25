@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import random
+import sqlite3
 
 import pytest
 
@@ -77,7 +78,8 @@ def test_fold_is_the_expected_string(surface, expected):
 
 
 def test_fold_is_idempotent():
-    for surface in ("Acme, Inc.", "The Acme Corporation", "Inc", "Co", "Zoë", ""):
+    for surface in ("Acme, Inc.", "The Acme Corporation", "Inc", "Co", "Zoë", "",
+                    "C++", "C#", "A-", "A\u2212", "Disney+", "C++/CLI", "A- grade"):
         assert entity_key(entity_key(surface)) == entity_key(surface)
 
 
@@ -91,6 +93,57 @@ def test_a_legal_form_alone_survives_stripping():
 def test_fold_keeps_genuinely_different_names_apart():
     keys = {entity_key(s) for s in ("Acme", "Acme Labs", "Sun", "Sun Microsystems")}
     assert len(keys) == 4
+
+
+@pytest.mark.parametrize("names", [
+    ("C++", "C#", "C"),
+    ("F#", "F"),
+    ("A+", "A-", "A"),
+    ("O+", "O-"),
+    ("AB+", "AB-"),
+    ("Disney+", "Disney"),
+    ("Notepad++", "Notepad"),
+])
+def test_a_symbol_that_ends_a_name_keeps_the_names_apart(names):
+    """`C++`, `C#` and `C` are three languages and `A+` and `A-` two blood types. The fold
+    used to drop the symbol with the rest of the punctuation, so the second of two such
+    values was recorded as a repeat of the first."""
+    assert len({entity_key(name) for name in names}) == len(names)
+
+
+@pytest.mark.parametrize("surface, expected", [
+    ("C#.", "c#"),                  # sentence punctuation after the symbol
+    ("(C#)", "c#"),
+    ("C/C++", "c c++"),
+    ("C++/CLI", "c++ cli"),
+    ("A- grade", "a- grade"),
+    ("A\u2212", "a-"),              # U+2212, the typeset minus sign
+    ("Ｃ＃", "c#"),                  # full-width, which NFKD folds to ASCII
+    ("18+", "18+"),
+])
+def test_where_a_symbol_that_ends_a_name_is_kept(surface, expected):
+    assert entity_key(surface) == expected
+
+
+@pytest.mark.parametrize("one, other", [
+    ("x-ray", "X ray"),                     # inside a word the symbol separates
+    ("e-mail", "e mail"),
+    ("A+B", "A B"),
+    ("A - B", "A B"),                       # a dash with spaces round it separates
+    ("Room# 5", "Room 5"),                  # `#` names only a word of one or two letters
+    ("pre- and post-war", "pre and post war"),  # and so does `-`
+])
+def test_a_symbol_that_does_not_end_a_short_name_still_separates(one, other):
+    """The symbols are kept only where they name something, so every spelling the fold
+    already treated as one value still is."""
+    assert entity_key(one) == entity_key(other)
+
+
+def test_a_typed_name_keeps_its_symbol_and_its_namespace():
+    """`typed_entity_key` splits the namespace off at the first colon, which is exact only
+    while a folded name holds no colon. The kept symbols are not colons."""
+    assert typed_entity_key("language:C#") == "language:c#"
+    assert split_entity_type(typed_entity_key("language:C#")) == ("language", "c#")
 
 
 def test_id_round_trips():
@@ -1357,3 +1410,61 @@ def test_an_alias_within_one_namespace_is_still_learned():
     spec = reg.learn_alias(OWNER, "company:apple", "company:apple incorporated")
     assert spec.key == "company:apple"
     assert reg.resolve(OWNER, "company:apple incorporated").key == "company:apple"
+
+
+# --- a symbol that ends a name, through the write path and the store -----------
+
+def test_c_plus_plus_then_c_sharp_in_a_many_valued_slot_is_two_claims():
+    """`value_key` hashes the folded object, and the write path reads a live claim with the
+    same `value_key` as a repeat. Folded to `c`, `C#` after `C++` was stored as a second
+    observation of `C++`, and the store never held `C#` at all."""
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64)) as mem:
+        mem.remember("user", "uses", "C++")
+        receipt = mem.remember("user", "uses", "C#")
+        assert [c.object for c in receipt.added] == ["C#"]
+        assert receipt.reinforced == []
+        assert sorted(c.object for c in mem.get_all()) == ["C#", "C++"]
+
+
+def test_a_blood_type_written_after_another_replaces_it():
+    """In a single-valued slot the old fold did worse than store one value: `A-` after
+    `A+` reinforced `A+`, so the store went on holding the blood type it had just been
+    told was wrong."""
+    registry = PredicateRegistry()
+    registry.register(PredicateSpec("blood_type", Cardinality.ONE))
+    with Memvara(llm=NullLLM(), embedder=HashingEmbedder(dim=64),
+                 registry=registry) as mem:
+        mem.remember("user", "blood_type", "A+", valid_from=J18, recorded_at=J18)
+        receipt = mem.remember("user", "blood_type", "A-", valid_from=J19, recorded_at=J19)
+        assert [c.object for c in receipt.added] == ["A-"]
+        assert [c.object for c in receipt.ended] == ["A+"]
+        assert [c.object for c in mem.get_all()] == ["A-"]
+
+
+def test_a_store_written_with_the_old_fold_is_rekeyed_when_opened(tmp_path):
+    """Version 16 changed the fold and nothing else, and `_migrate_to_v12` re-derives
+    every claim's keys from its surface text on every upgrade. Without that, a store
+    written before this version keeps `C++` keyed as `c`: the next `C++` is no repeat of
+    it, and the next `C` is.
+
+    The old file is reconstructed rather than imported: the claim's key columns are set
+    to what the old fold produced for `C++`, which is exactly what it produced for `C`,
+    and the version is wound back to 15.
+    """
+    path = str(tmp_path / "old.db")
+    with Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=64)) as mem:
+        written = mem.remember("user", "uses", "C++").added[0]
+    old = Claim(subject="user", predicate="uses", object="C", scope=written.scope)
+    raw = sqlite3.connect(path)
+    raw.execute("UPDATE claims SET object_key = ?, value_key = ? WHERE id = ?",
+                (old.object_key, old.value_key, written.id))
+    raw.execute("PRAGMA user_version = 15")
+    raw.commit()
+    raw.close()
+
+    with Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=64)) as mem:
+        stored = mem.store._db.execute(
+            "SELECT object_key, value_key FROM claims WHERE id = ?", (written.id,)).fetchone()
+        assert (stored["object_key"], stored["value_key"]) == ("c++", written.value_key)
+        assert [c.id for c in mem.remember("user", "uses", "C++").reinforced] == [written.id]
+        assert [c.object for c in mem.remember("user", "uses", "C").added] == ["C"]

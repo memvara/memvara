@@ -949,7 +949,7 @@ def test_a_version_13_file_gains_the_document_tables_and_keeps_its_rows(tmp_path
     upgraded = mem(path=path)
     try:
         assert int(upgraded.store._db.execute("PRAGMA user_version").fetchone()[0]) == \
-            SCHEMA_VERSION == 15
+            SCHEMA_VERSION == 16
         names = {r[0] for r in upgraded.store._db.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')")}
         assert {"documents", "document_chunks", "doc_custom", "doc_created",
