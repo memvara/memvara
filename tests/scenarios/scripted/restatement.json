@@ -1,0 +1,34 @@
+{
+  "id": "restatement",
+  "description": "The user repeats a fact in a later session, in other words that name the same fact: 'allergy' is another spelling of 'allergic_to'. The store reinforces the claim it already has instead of adding a second one, and recall names the allergy once.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "sessions": [
+    {"turns": [
+      {"user": "I'm allergic to penicillin.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "allergic_to", "object": "penicillin"}}
+       ]}
+    ]},
+    {"turns": [
+      {"id": "restate", "user": "Just so you know, I have a penicillin allergy.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "allergy", "object": "penicillin"}}
+       ]},
+      {"id": "ask", "user": "What am I allergic to?",
+       "script": [{"tool": "memory_recall", "args": {"query": "what is the user allergic to"}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "one-claim", "text": "user allergic to penicillin", "state": "live", "count": 1}
+  ],
+  "answer_gold": [
+    {"id": "restatement-adds-nothing", "turn": "restate", "must_contain": "added 0"},
+    {"id": "restatement-is-already-known", "turn": "restate", "must_contain": "already-known 1"},
+    {"id": "recall-names-it", "turn": "ask", "must_contain": "penicillin"},
+    {"id": "recall-names-it-once", "turn": "ask", "must_not_match": "(?s)penicillin.*penicillin"}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}

@@ -1,0 +1,43 @@
+{
+  "id": "time-travel",
+  "description": "The user corrects where they moved in March 2024: Porto, not Lisbon. valid_at asks what was true in the world on a date, judged by everything known now, so April 2024 answers Porto. as_of asks what the store believed at an earlier instant, so an instant before the correction answers Lisbon. Before March 2024 nothing held, and the read says so.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "sessions": [
+    {"turns": [
+      {"user": "I moved to Lisbon in March 2024.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "lives_in", "object": "Lisbon", "true_since": "2024-03-01"}},
+         {"mark": "before_correction"}
+       ]}
+    ]},
+    {"turns": [
+      {"user": "Sorry, I got that wrong: I moved to Porto in March 2024, not Lisbon.",
+       "script": [
+         {"tool": "memory_search", "args": {"query": "where does the user live"}, "capture": {"lisbon_id": "id=(cl_[0-9a-f]+) [^\\]]*\\] user lives in Lisbon"}},
+         {"tool": "memory_forget", "args": {"claim_id": "{lisbon_id}", "reason": "the user moved to Porto, not Lisbon"}},
+         {"tool": "memory_remember", "args": {"predicate": "lives_in", "object": "Porto", "true_since": "2024-03-01"}}
+       ]},
+      {"id": "believed-then", "user": "Before I corrected you, where did you think I lived?",
+       "script": [{"tool": "memory_search", "args": {"query": "where does the user live", "as_of": "{before_correction}"}}]},
+      {"id": "true-in-april", "user": "Where was I actually living in April 2024?",
+       "script": [{"tool": "memory_search", "args": {"query": "where does the user live", "valid_at": "2024-04-01"}}]},
+      {"id": "before-the-move", "user": "And in January 2024?",
+       "script": [{"tool": "memory_search", "args": {"query": "where does the user live", "valid_at": "2024-01-15"}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "lisbon-retired", "text": "user lives in Lisbon", "state": "retired", "count": 1},
+    {"id": "porto-live", "text": "user lives in Porto", "state": "live", "count": 1}
+  ],
+  "answer_gold": [
+    {"id": "believed-lisbon", "turn": "believed-then", "must_contain": "Lisbon"},
+    {"id": "believed-not-porto", "turn": "believed-then", "must_not_contain": "Porto"},
+    {"id": "true-porto", "turn": "true-in-april", "must_contain": "Porto"},
+    {"id": "true-not-lisbon", "turn": "true-in-april", "must_not_contain": "Lisbon"},
+    {"id": "nothing-before-the-move", "turn": "before-the-move", "abstain": true}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}
