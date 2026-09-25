@@ -2873,11 +2873,11 @@ TOOLS: tuple[Tool, ...] = (
         ),
         properties={
             "k": {
-                "type": "integer",
+                "type": "integer", "minimum": 1,
                 "description": (
                     "Most preferences to return: the ones the user stated first, then "
                     "the ones a model or a hook derived, each half most-trusted and "
-                    "newest first. "
+                    "newest first. At least 1; a smaller value is refused. "
                     "Defaults to enough for the whole set; raise it only if the reply "
                     "says some were not shown."
                 ),

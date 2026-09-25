@@ -43,6 +43,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   interpreter's stack allows, and the server let it escape, so a single such line ended
   the agent's memory for the rest of the session. The line is now answered with a JSON-RPC
   parse error (`-32700`, "nested too deeply to parse"), and the server carries on. #268.
+- **`memory_standing` refuses a `k` below 1.** With `k=0` it used to reply that no standing
+  preferences were stored, in a scope that held some, and a caller could not tell that
+  reply from a really empty store. `k` now has a minimum of 1, like every other tool's
+  `k`, and a smaller value is refused with `memory_standing.k must be >= 1`. #269.
 
 ## [0.16.0] — 2026-09-25
 
