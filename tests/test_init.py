@@ -24,6 +24,7 @@ guard there is against that.
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import os
@@ -697,17 +698,23 @@ def _hosted_tools() -> list[str]:
             conn.request("POST", "/mcp", _json.dumps(body), {**headers, **(extra or {})})
             reply = conn.getresponse()
             return reply.status, dict(reply.getheaders()), reply.read()
+        except (OSError, http.client.IncompleteRead, http.client.BadStatusLine) as exc:
+            # Every request, not only `initialize`: a deployment that answers the first and
+            # times out on the second has still not been asked. `IncompleteRead` and
+            # `BadStatusLine` mean the answer broke off or was not HTTP, so it was not asked
+            # either. Any other `HTTPException` still fails. The likely ones, such as
+            # `CannotSendRequest`, mean this helper misused the connection, and a skip would
+            # hide that bug on every run.
+            raise HostedEndpointUnreachable(
+                f"{body['method']}: {type(exc).__name__}: {exc}") from exc
         finally:
             conn.close()
 
-    try:
-        status, got, raw = call({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                       "clientInfo": {"name": "memvara-library-tests", "version": "1"}},
-        })
-    except OSError as exc:
-        raise HostedEndpointUnreachable(f"{type(exc).__name__}: {exc}") from exc
+    status, got, raw = call({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                   "clientInfo": {"name": "memvara-library-tests", "version": "1"}},
+    })
     if status != 200:
         raise HostedEndpointUnreachable(f"initialize answered HTTP {status}: {raw[:120]!r}")
     session = next((v for k, v in got.items() if k.lower() == "mcp-session-id"), None)
@@ -773,6 +780,107 @@ def test_the_deployment_serves_the_tools_this_library_declares() -> None:
         "app.memvara.dev serves a different tool surface than this library declares. The "
         "deployment is the referent for what `references/hosted-mcp.md` promises: either "
         "the deployment is behind this library, or this library is behind it")
+
+
+def _deployment(monkeypatch, *answers) -> None:
+    """Answer `_hosted_tools`'s requests from `answers`, in order, instead of the network.
+
+    Each answer is an exception to raise or a `(status, headers, body)` reply. The helper
+    imports `http.client` inside the function, so patching the module attribute reaches it.
+    """
+    script = list(answers)
+
+    class Reply:
+        def __init__(self, status, headers, body):
+            self.status, self._headers, self._body = status, headers, body
+
+        def getheaders(self):
+            return list(self._headers.items())
+
+        def read(self):
+            return self._body
+
+    class Connection:
+        def __init__(self, *args, **kwargs):
+            self.answer = None
+
+        def request(self, *args):
+            self.answer = script.pop(0)
+
+        def getresponse(self):
+            if isinstance(self.answer, BaseException):
+                raise self.answer
+            return Reply(*self.answer)
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("MEMVARA_API_KEY", "dummy")
+    monkeypatch.setattr(http.client, "HTTPSConnection", Connection)
+
+
+_INITIALIZED = (200, {"Mcp-Session-Id": "s"}, b"{}")
+_NOTIFIED = (202, {}, b"")
+
+
+def _listed(names: Iterable[str]) -> tuple[int, dict, bytes]:
+    result = {"tools": [{"name": n} for n in names]}
+    return 200, {}, json.dumps({"jsonrpc": "2.0", "id": 2, "result": result}).encode()
+
+
+@pytest.mark.parametrize("at, error", [
+    (0, lambda: TimeoutError("The read operation timed out")),
+    (1, lambda: TimeoutError("The read operation timed out")),
+    (2, lambda: TimeoutError("The read operation timed out")),
+    (2, lambda: http.client.RemoteDisconnected("Remote end closed connection")),
+    (2, lambda: http.client.IncompleteRead(b"{")),
+    (1, lambda: http.client.BadStatusLine("HTTP/1.1 ???")),
+], ids=["timeout-initialize", "timeout-initialized", "timeout-tools-list",
+        "disconnected-tools-list", "incomplete-tools-list", "bad-status-initialized"])
+def test_a_deployment_that_stops_answering_skips_the_guard(monkeypatch, at, error) -> None:
+    """Whichever of the three requests fails, the deployment has not been asked, so the
+    guard skips and names the request. On 2026-09-25 a timeout on
+    `notifications/initialized` failed CI instead, because only `initialize` turned a
+    network error into a skip."""
+    answers = [_INITIALIZED, _NOTIFIED, _listed(t.name for t in TOOLS)]
+    answers[at] = error()
+    _deployment(monkeypatch, *answers)
+    method = ("initialize", "notifications/initialized", "tools/list")[at]
+    with pytest.raises(pytest.skip.Exception,
+                       match=f"NOT checked: {method}: {type(answers[at]).__name__}"):
+        test_the_deployment_serves_the_tools_this_library_declares()
+
+
+def test_a_deployment_serving_another_tool_surface_still_fails_the_guard(
+        monkeypatch) -> None:
+    """A skip is for a deployment that could not be asked, never for a wrong answer."""
+    names = [t.name for t in TOOLS]
+    _deployment(monkeypatch, _INITIALIZED, _NOTIFIED, _listed(names))
+    test_the_deployment_serves_the_tools_this_library_declares()
+    _deployment(monkeypatch, _INITIALIZED, _NOTIFIED, _listed(names[::-1]))
+    with pytest.raises(AssertionError, match="different tool surface"):
+        test_the_deployment_serves_the_tools_this_library_declares()
+
+
+@pytest.mark.parametrize("answers, reason", [
+    ([(500, {}, b"oops")], "initialize answered HTTP 500"),
+    ([_INITIALIZED, _NOTIFIED, (503, {}, b"down")], "tools/list answered HTTP 503"),
+    ([_INITIALIZED, _NOTIFIED, (200, {}, b"<html>")], "nothing parseable"),
+], ids=["initialize-500", "tools-list-503", "unparseable"])
+def test_a_deployment_that_answers_badly_is_still_unreachable(
+        monkeypatch, answers, reason) -> None:
+    """An answer that is not a usable tool list is reported as unreachable, with why."""
+    _deployment(monkeypatch, *answers)
+    with pytest.raises(HostedEndpointUnreachable, match=reason):
+        _hosted_tools()
+
+
+def test_a_connection_the_helper_misused_fails_rather_than_skips(monkeypatch) -> None:
+    """`CannotSendRequest` means the helper used a connection wrongly, which is a bug in
+    the helper. As a skip it would retire the guard on every run without anything red."""
+    _deployment(monkeypatch, _INITIALIZED, http.client.CannotSendRequest("Request-sent"))
+    with pytest.raises(http.client.CannotSendRequest):
+        _hosted_tools()
 
 
 def test_the_skill_states_the_tool_surface_and_names_all_of_it() -> None:

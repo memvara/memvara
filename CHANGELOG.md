@@ -221,6 +221,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   suite passed only because no later file called the method directly. The test now hides it
   through `monkeypatch`, which restores it afterwards, and searches at an instant the
   temporal leg would rank, so it fails if the leg runs.
+- **The check that compares the hosted deployment's tools with this library's skips when
+  any of its requests fails.** `test_the_deployment_serves_the_tools_this_library_declares`
+  asks `app.memvara.dev` for its tool list in three requests, and is meant to skip when the
+  deployment cannot be asked. Only the first request turned a network error into a skip,
+  so a timeout on the second failed a CI job on a pull request that did not touch the test.
+  All three requests now do, and so does an answer that breaks off (`IncompleteRead`) or is
+  not HTTP (`BadStatusLine`). The skip message names the request. A different tool list
+  still fails the test.
 
 ## [0.15.0] — 2026-09-24
 
