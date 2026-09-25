@@ -10,6 +10,7 @@ from typing import Any, Callable
 import httpx
 import pytest
 
+from harness.fakes import fake_v1 as v1
 from harness.fakes._http import Request
 from harness.fakes.fake_v1 import FakeV1
 from harness.stdio import McpProcess
@@ -198,7 +199,7 @@ def test_a_read_only_deployment_says_so_and_refuses_every_write() -> None:
 
 
 def test_a_field_the_route_does_not_take_is_refused_as_the_cloud_refuses_it(
-        fake_v1: FakeV1) -> None:
+        fake_v1: FakeV1, monkeypatch: pytest.MonkeyPatch) -> None:
     """The client counts on this: a read that sends `query_rewrite` to a deployment that
     predates the field gets a 422, and is sent again without it."""
     with httpx.Client(base_url=fake_v1.MOCK_URL, transport=fake_v1.transport(),
@@ -211,6 +212,18 @@ def test_a_field_the_route_does_not_take_is_refused_as_the_cloud_refuses_it(
     assert missing.status_code == 404
     with pytest.raises(InvalidRequest):
         fake_v1.remote().search("")
+
+    # A deployment from before `query_rewrite`: neither read's request model has it.
+    for fields in ("_SEARCH", "_RECALL"):
+        monkeypatch.setattr(v1, fields, getattr(v1, fields) - {"query_rewrite"})
+    first = len(fake_v1.requests)
+    remote = fake_v1.remote(user="alice")
+    assert remote.search("where does the user live", query_rewrite=False) == []
+    assert isinstance(remote.recall("where does the user live", query_rewrite=False), str)
+    assert [(r.route, r.status, "query_rewrite" in r.json())
+            for r in fake_v1.requests[first:]] == [
+        ("POST /v1/search", 422, True), ("POST /v1/search", 200, False),
+        ("POST /v1/recall", 422, True), ("POST /v1/recall", 200, False)]
 
 
 def test_a_cloud_mode_server_process_reaches_the_fake_over_a_real_url(
