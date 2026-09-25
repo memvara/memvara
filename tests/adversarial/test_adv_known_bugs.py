@@ -14,7 +14,7 @@ import pytest
 
 from harness import known_bugs, stores
 from harness.hooks import HOOKS_DIR, HookRunner
-from harness.stdio import McpProcess, McpProcessError
+from harness.stdio import McpProcess
 from memvara import MemoryType
 from memvara.server.tools import TOOLS
 
@@ -114,22 +114,17 @@ def test_the_approve_hook_allows_the_read_only_document_tools(
     assert result.reply["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
-# -- B4: deeply nested JSON kills the server ------------------------------------------
+# -- B4, fixed: deeply nested JSON no longer kills the server ---------------------------
 
-@known_bugs.xfail("B4")
 def test_one_deeply_nested_request_does_not_kill_the_server(
         mcp: Callable[..., McpProcess]) -> None:
+    """Over the real pipe: the reply is a parse error, and the server still answers."""
     server = mcp()
     server.initialize()
     depth = 100_000
     server.send_raw('{"jsonrpc":"2.0","id":99,"method":"ping","params":'
                     + "[" * depth + "]" * depth + "}")
-    try:
-        reply = server.recv(timeout=20)
-    except McpProcessError as exc:
-        if "RecursionError" in str(exc):
-            raise known_bugs.Reproduced("B4: the server died of a RecursionError") from exc
-        raise
+    reply = server.recv(timeout=20)
     assert "error" in reply and reply.get("id") in (None, 99), reply
     assert server.request("ping") == {}
 

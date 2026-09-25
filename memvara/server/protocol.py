@@ -61,6 +61,11 @@ def encode(message: Mapping[str, Any]) -> str:
 def decode(line: str) -> Any:
     try:
         return json.loads(line)
+    except RecursionError:
+        # Nesting deeper than the interpreter's stack allows. The decoder raises this
+        # rather than a ValueError, and uncaught it ended the stdio loop, so one broken or
+        # hostile line cost the agent its memory for the rest of the session (#268).
+        raise ProtocolError(PARSE_ERROR, "invalid JSON: nested too deeply to parse") from None
     except ValueError as exc:
         # The id is unknowable — the message did not parse — and JSON-RPC says to answer
         # a parse error with a null id rather than staying silent, so the client learns
