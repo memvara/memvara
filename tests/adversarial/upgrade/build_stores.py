@@ -25,12 +25,12 @@ the program passes is a whole day in 2024, or 1 January 2100. The instants a rel
 reads from the clock, such as when a fast-path claim was recorded or when a claim was
 erased, differ between builds, and `golden.mask_clock` hides exactly those.
 
-The database and the vector file are committed gzip-compressed. Uncompressed, even an
-almost empty store is over the fixture size limit of 256 KB: at SQLite's default page
-size each of today's sixty or so tables and indexes takes at least one 4 KB page, and
-the vector file reserves room for 256 vectors, 512 KB at width 512. Compressed, a store
-is about 20 KB. A smaller page size or embedder width would also fit, but would make the
-fixtures unlike any store a real user has.
+The database and the vector file are committed gzip-compressed. Uncompressed, every
+store is over the fixture size limit of 256 KB: at SQLite's default page size each of
+today's 53 tables and indexes takes at least one 4 KB page, so an empty database is
+already 228 KB, and the vector file reserves room for 256 vectors, 512 KB at width 512.
+Compressed, a store is about 20 KB. A smaller page size or embedder width would also
+fit, but would make the fixtures unlike any store a real user has.
 """
 
 from __future__ import annotations
