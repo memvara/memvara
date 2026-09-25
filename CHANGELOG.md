@@ -9,6 +9,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-09-25
+
+Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store moves to schema 16 on
+its first open, which re-derives every claim's keys; a build older than this one refuses a
+store this one has opened.
+
 ### Added
 
 - **CI fails when a published LOCOMO retrieval figure moves.** A new job,
