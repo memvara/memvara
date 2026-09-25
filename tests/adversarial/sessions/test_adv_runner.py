@@ -416,7 +416,9 @@ def test_the_operators_erase_touches_only_its_claim_on_a_real_server(
 ])
 def test_answer_phrases_match_whole_words_ignoring_case_and_punctuation(
         text: str, phrase: str, found: bool) -> None:
-    assert runner.contains_phrase(text, phrase) is found
+    """must_contain uses the benchmark's own token rule, normalization.phrase_in."""
+    gold = runner.Gold(sample(), "item", "answer", {"id": "item", "must_contain": phrase})
+    assert runner.check(gold, fabricated({}, text)).passed is found
 
 
 def turn_of(*steps: runner.Step) -> runner.Turn:

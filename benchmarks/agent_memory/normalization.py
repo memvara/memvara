@@ -84,6 +84,22 @@ def _phrase_in(haystack: Sequence[str], needle: Sequence[str]) -> bool:
                for i, token in enumerate(haystack) if token == first)
 
 
+def phrase_in(text: str | None, phrase: str) -> bool:
+    """Does `phrase` appear in `text` as whole words, once both are normalized?
+
+    This is rule 2's containment test on its own, without the length ceiling or the
+    competitor check that `matches_value` adds. Those two guard a short answer; a caller
+    grading a long text by design, such as a tool reply in the adversarial suite's scripted
+    scenarios, uses this. A phrase with no words left after normalization matches nothing.
+
+    >>> phrase_in("Known about the user:\\n- user lives in Lisbon.", "lisbon")
+    True
+    >>> phrase_in("She moved to Yorkshire.", "York")
+    False
+    """
+    return _phrase_in(tokens(text), tokens(phrase))
+
+
 def matches_value(answer: str | None, gold: str, aliases: Iterable[str] = (),
                   competitors: Iterable[str] = (), *, lenient: bool = True) -> bool:
     """Is `answer` the gold value?

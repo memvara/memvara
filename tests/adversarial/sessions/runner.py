@@ -36,7 +36,7 @@ from memvara.server.tools import BY_NAME
 
 if str(REPO) not in sys.path:  # `benchmarks` is not an installed package
     sys.path.insert(0, str(REPO))
-from benchmarks.agent_memory.normalization import normalize  # noqa: E402
+from benchmarks.agent_memory.normalization import normalize, phrase_in  # noqa: E402
 
 #: Where the scenario files and their schema live, and the scripted ones this module plays.
 SCENARIOS = REPO / "tests" / "scenarios"
@@ -885,21 +885,6 @@ def gold_params(scenarios: Iterable[Mapping[str, Any]]) -> list[Any]:
             for scenario in scenarios for gold in gold_items(scenario)]
 
 
-def contains_phrase(text: str, phrase: str) -> bool:
-    """Whether `phrase` appears in `text` as whole words, ignoring case and punctuation.
-
-    The normalization is the one the real-agent layer grades answers with
-    (benchmarks/agent_memory/normalization.py), so both layers agree on what a match is.
-
-    >>> contains_phrase("- user lives in Lisbon.", "lisbon")
-    True
-    >>> contains_phrase("She moved to Yorkshire.", "York")
-    False
-    """
-    wanted = normalize(phrase)
-    return bool(wanted) and f" {wanted} " in f" {normalize(text)} "
-
-
 def abstained(turn: Turn) -> bool:
     """Whether memvara showed the agent nothing in this turn: its answer is empty.
 
@@ -940,13 +925,17 @@ def _check_store(item: Mapping[str, Any], outcome: Outcome) -> Verdict:
 
 
 def _check_answer(item: Mapping[str, Any], outcome: Outcome) -> Verdict:
+    """must_contain and must_not_contain use the benchmark's own token rule, `phrase_in`:
+    whole words, ignoring case and punctuation. They leave out the length ceiling and the
+    competitor check that `matches_value` adds for a short answer, because memvara's
+    replies are long by design and a history reply names every value a slot has held."""
     turn = outcome.turn(item.get("turn"))
     text = turn.answer
     if "must_contain" in item:
-        passed, wanted = contains_phrase(text, item["must_contain"]), \
+        passed, wanted = phrase_in(text, item["must_contain"]), \
             f"contain {item['must_contain']!r}"
     elif "must_not_contain" in item:
-        passed, wanted = not contains_phrase(text, item["must_not_contain"]), \
+        passed, wanted = not phrase_in(text, item["must_not_contain"]), \
             f"not contain {item['must_not_contain']!r}"
     elif "must_not_match" in item:
         passed = re.search(item["must_not_match"], text, re.MULTILINE) is None
