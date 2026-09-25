@@ -271,6 +271,38 @@ def test_a_telemetry_table_with_no_rows_is_an_error(tmp_path: pathlib.Path) -> N
         checklist.silent_items(path)
 
 
+_EXAMPLE_TABLE = """\
+A row is written like this:
+
+====  =====
+key   value
+====  =====
+the   rest
+====  =====
+
+"""
+
+
+def test_an_earlier_table_does_not_stand_in_for_the_failure_table(
+        tmp_path: pathlib.Path) -> None:
+    """Only the table whose header names the failure and signal columns lists the modes.
+    An example table earlier in the docstring must not be read in its place."""
+    path = tmp_path / "telemetry.py"
+    path.write_text(_TELEMETRY.replace("The failures, and", _EXAMPLE_TABLE + "The failures, and"),
+                    encoding="utf-8")
+    assert checklist.silent_items(path) == [
+        "silent:first-mode", "silent:second-mode-that-wraps", "silent:new-seam"]
+
+
+def test_a_table_without_the_failure_and_signal_columns_is_an_error(
+        tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "telemetry.py"
+    path.write_text(_TELEMETRY.replace("failure       signal", "mode          series"),
+                    encoding="utf-8")
+    with pytest.raises(checklist.ChecklistError, match="failure and signal"):
+        checklist.silent_items(path)
+
+
 _INTERNALS = """\
 # Internals
 

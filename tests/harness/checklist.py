@@ -222,30 +222,41 @@ def bug_items() -> list[str]:
 
 _BORDER = re.compile(r"=+(?: +=+)+")
 _ANNOUNCED = re.compile(r"\*\*An? \w+ arrived with the (.+?)\*\*", re.S)
+#: The header of the failure-mode table, which is how the table is found. Any other
+#: table in the docstring, an example of the format for instance, is not read.
+_COLUMNS = ["failure", "signal"]
 
 
 def silent_items(path: pathlib.Path = TELEMETRY) -> list[str]:
     """One item for each silent failure mode that the docstring of `path` lists.
 
-    Most are rows of a table whose first column names the failure. A line with text in
-    both columns starts a row, and a line with text in one column continues the row above
-    it, which is how "poisoning / a retraction that retires nothing" spans two lines. A
-    later mode can be announced in a sentence of its own instead, as the seventh is:
-    "**A seventh arrived with the redaction seam**". Those sentences are read too.
+    Most are rows of the table whose header names the columns failure and signal. A line
+    with text in both columns starts a row, and a line with text in one column continues
+    the row above it, which is how "poisoning / a retraction that retires nothing" spans
+    two lines. A later mode can be announced in a sentence of its own instead, as the
+    seventh is: "**A seventh arrived with the redaction seam**". Those sentences are read
+    too.
     """
     doc = ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"))) or ""
     lines = doc.splitlines()
-    borders = [i for i, line in enumerate(lines) if _BORDER.fullmatch(line.strip())]
-    if len(borders) < 3:
+    header = next((i for i in range(1, len(lines) - 1)
+                   if lines[i].split() == _COLUMNS
+                   and _BORDER.fullmatch(lines[i - 1].strip())
+                   and _BORDER.fullmatch(lines[i + 1].strip())), None)
+    end = None if header is None else next(
+        (i for i in range(header + 2, len(lines)) if _BORDER.fullmatch(lines[i].strip())),
+        None)
+    if header is None or end is None:
         raise ChecklistError(
-            f"the table of silent failure modes in {_shown(path)} was not found")
+            f"the table of silent failure modes in {_shown(path)} was not found. It is "
+            "the table whose header row names the columns failure and signal.")
     # The second column starts where the border's second run of "=" does. The search
     # starts after any indent, so that a table set in by a few spaces reads the same.
-    border = lines[borders[0]]
+    border = lines[header - 1]
     indent = len(border) - len(border.lstrip())
     column = border.index("=", border.index(" ", indent))
     rows: list[str] = []
-    for line in lines[borders[1] + 1:borders[2]]:
+    for line in lines[header + 2:end]:
         first, second = line[:column].strip(), line[column:].strip()
         if first and second:
             rows.append(first)
