@@ -244,6 +244,19 @@ def test_a_field_the_route_does_not_take_is_refused_as_the_cloud_refuses_it(
         ("POST /v1/recall", 422, True), ("POST /v1/recall", 200, False)]
 
 
+def test_a_question_must_be_a_non_empty_string(fake_v1: FakeV1) -> None:
+    """The cloud's `AskRequest` declares `question: str = Field(min_length=1)`, so an
+    empty question, or one that is not a string, fails validation with a 422."""
+    with httpx.Client(base_url=fake_v1.MOCK_URL, transport=fake_v1.transport(),
+                      headers={"Authorization": f"Bearer {fake_v1.api_key}"}) as client:
+        empty = client.post("/v1/ask", json={"question": ""})
+        number = client.post("/v1/ask", json={"question": 5})
+    assert [(r.status_code, r.json()["error"]["code"]) for r in (empty, number)] \
+        == [(422, "invalid_request")] * 2
+    with pytest.raises(InvalidRequest):
+        fake_v1.remote(user="alice").ask("")
+
+
 def test_a_cloud_mode_server_process_reaches_the_fake_over_a_real_url(
         fake_v1: FakeV1, mcp: Start) -> None:
     server = mcp(env={"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": fake_v1.api_key,

@@ -456,6 +456,7 @@ class FakeV1(HttpFake):
 
     def _ask(self, view: ScopedMemvara, request: Request) -> Any:
         body = _body(request, _ASK, required=("question",))
+        _non_empty_text(body, "question")
         found = view.ask(body["question"], at=_instant_in(body.get("at"), "at"),
                          k=body.get("k", 3), min_score=body.get("min_score", 0.0),
                          anchored=bool(body.get("anchored")))
@@ -858,9 +859,15 @@ def _query_body(request: Request, allowed: Collection[str]) -> dict[str, Any]:
     """The body of a read that carries a query, which the cloud requires to be a
     non-empty string."""
     body = _body(request, allowed, required=("query",))
-    if not isinstance(body["query"], str) or not body["query"]:
-        raise ApiError(422, "invalid_request", "query must be a non-empty string")
+    _non_empty_text(body, "query")
     return body
+
+
+def _non_empty_text(body: dict[str, Any], name: str) -> None:
+    """Refuse the body unless `body[name]` is a non-empty string, as the cloud's request
+    models do for a `str` field declared with `Field(min_length=1)`."""
+    if not isinstance(body[name], str) or not body[name]:
+        raise ApiError(422, "invalid_request", f"{name} must be a non-empty string")
 
 
 def _fields(value: Any, allowed: Collection[str], required: Sequence[str],
