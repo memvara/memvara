@@ -398,6 +398,8 @@ class AsyncRemoteMemvara:
         return [hydrate.path(p) for p in body["paths"]]
 
     async def standing(self, *, k: int | None = None) -> list[Claim]:
+        if k is not None:
+            _check_k(k)
         body = await self._request("GET", "/v1/standing",
                                    params=self._params(limit=k))
         return [hydrate.claim(c) for c in body["memories"]]

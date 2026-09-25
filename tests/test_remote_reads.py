@@ -347,6 +347,15 @@ def test_standing_reaches_the_standing_endpoint_and_sends_k_as_limit(recorded):
     assert isinstance(claims[0], Claim)
 
 
+def test_standing_refuses_k_below_one_before_sending_anything(recorded):
+    """The deployment would answer `limit=0` with nothing, the empty-store reply #269 is
+    about, so the client refuses first, as `profile` does."""
+    mem = recorded({"count": 0, "limit": 0, "truncated": False, "memories": []})
+    with pytest.raises(ValueError, match="at least 1"):
+        mem.standing(k=0)
+    assert recorded.calls == []
+
+
 def test_stats_returns_the_tenant_counts_and_not_the_envelope(recorded):
     """`Memvara.stats()` answers with row counts, and `tools.py` reads `claims` and
     `live_claims` straight off it. The `/v1/stats` envelope nests those under

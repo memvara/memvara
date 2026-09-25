@@ -4362,7 +4362,7 @@ def standing_server():
 
 def test_standing_refuses_k_below_one_instead_of_reporting_an_empty_store(standing_server):
     """`k=0` asked for no rows and got the reply that means "nothing is stored", in a
-    scope holding four standing preferences (#269). A caller cannot tell those apart, so
+    scope holding two standing preferences (#269). A caller cannot tell those apart, so
     the argument is refused by name, as every other tool's `k` is."""
     body, is_error = call(standing_server, "memory_standing", {"k": 0})
     assert is_error and "memory_standing.k must be >= 1" in body, body
