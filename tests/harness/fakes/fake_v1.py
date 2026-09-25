@@ -318,7 +318,12 @@ class FakeV1(HttpFake):
 
         def answer() -> Reply:
             body = handler(view, request)
-            return body if isinstance(body, Reply) else json_reply(200, body, headers)
+            if isinstance(body, Reply):
+                # A handler that sets its own status and headers still names the project.
+                # The cloud sets the header on the response every route shares
+                # (`deps._context`), so its consolidation's 202 carries it too.
+                return Reply(body.status, body.body, {**body.headers, **headers})
+            return json_reply(200, body, headers)
 
         key = request.header("idempotency-key")
         if needs in ("write", "admin") and key:

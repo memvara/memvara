@@ -185,6 +185,24 @@ def test_each_user_reads_only_its_own_memories(fake_v1: FakeV1) -> None:
     assert [c.object for c in fake_v1.remote(user="alice").get_all()] == ["Lisbon"]
 
 
+def test_every_answer_in_a_project_names_the_project_it_ran_at(fake_v1: FakeV1) -> None:
+    """The cloud sets `Memvara-Project-Applied` on the response every route shares
+    (`deps._context`), so the header is on the consolidation's 202 as well as on an
+    ordinary 200. A request that names no project gets no header."""
+    auth = {"Authorization": f"Bearer {fake_v1.api_key}"}
+    project = {**auth, "Memvara-Project": "github.com/acme/app"}
+    with httpx.Client(base_url=fake_v1.MOCK_URL, transport=fake_v1.transport()) as client:
+        read = client.get("/v1/stats", headers=project)
+        accepted = client.post("/v1/maintenance/consolidate", headers=project)
+        plain = client.post("/v1/maintenance/consolidate", headers=auth)
+    assert (read.status_code, read.headers.get("memvara-project-applied")) \
+        == (200, "github.com/acme/app")
+    assert (accepted.status_code, accepted.headers.get("memvara-project-applied")) \
+        == (202, "github.com/acme/app")
+    assert accepted.headers["location"] == f"/v1/jobs/{accepted.json()['id']}"
+    assert (plain.status_code, plain.headers.get("memvara-project-applied")) == (202, None)
+
+
 def test_an_agent_named_without_a_user_is_refused(fake_v1: FakeV1) -> None:
     with pytest.raises(ScopeError):
         fake_v1.remote(agent="a1").get_all()
