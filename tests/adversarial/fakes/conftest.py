@@ -9,6 +9,7 @@ import pytest
 
 from harness.fakes.fake_v1 import FakeV1
 from harness.fakes.hosted_mcp import FakeHostedMcp
+from harness.fakes.openai_compat import FakeOpenAI
 
 
 @pytest.fixture
@@ -20,4 +21,10 @@ def fake_v1() -> Iterator[FakeV1]:
 @pytest.fixture
 def hosted_mcp() -> Iterator[FakeHostedMcp]:
     with FakeHostedMcp() as fake:
+        yield fake
+
+
+@pytest.fixture
+def fake_openai() -> Iterator[FakeOpenAI]:
+    with FakeOpenAI() as fake:
         yield fake

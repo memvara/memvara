@@ -250,4 +250,9 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 - `expire_sessions()` forgets every session, as a restarted deployment does, so a test can watch a client shake hands again. `fake.issued` lists every session id the fake has issued.
 - A fault is keyed by JSON-RPC method, and a tool call by `tools/call <tool>`, so `fake.fail("tools/call memory_recall", 402)` refuses one tool and leaves the handshake alone.
 
+**`FakeOpenAI` is an OpenAI-compatible chat-completions endpoint.** It answers each request with the next reply a test scripted, in order, and records every request. `add_reply`, `add_json` and `add_tool_calls` script a completion; `add_raw` scripts a body the client cannot use; `add_rate_limit` scripts a 429; and `add_hang` scripts no answer at all. A request that finds no reply left gets a 500 that says so, and `fake.pending` counts the replies not used yet.
+
+- **In the test process,** `OpenAILLM(client=fake.client())` talks to it. CI does not install the `openai` package, so `client()` is a small stand-in for the SDK's transport. It sends each call over HTTP the way the SDK would, and hands back the decoded JSON, which `OpenAILLM` reads as it reads the SDK's own objects. It does not retry, whereas the SDK retries a 429 or a timeout twice by default, so a test that wants a retry scripts it.
+- **In a child process,** a server started with `MEMVARA_LLM=openai` reaches the fake through `OPENAI_BASE_URL` set to `fake.base_url`, with any `OPENAI_API_KEY`. That needs the `openai` package installed in the environment the child runs in.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
