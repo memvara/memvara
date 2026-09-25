@@ -139,8 +139,10 @@ class HookRunner:
         """Run one hook and wait for it, within this host's own timeout for that hook.
 
         capture is refused for now. It can start the real agent CLI to extract facts,
-        which would reach the network and spend money, and the stub CLIs that make it
-        safe arrive with the hook-conformance tests.
+        which would reach the network and spend money. The fake agent CLIs that make it
+        safe already exist, as `FakeClis` in `tests/harness/fakes/cli.py`. The
+        hook-conformance workstream will put them first on PATH when it lifts this
+        refusal.
         """
         if hook == "capture":
             raise NotImplementedError(
