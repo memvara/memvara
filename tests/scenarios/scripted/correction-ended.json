@@ -1,0 +1,43 @@
+{
+  "id": "correction-ended",
+  "description": "The user changes jobs. The old employer is ended with memory_end, not retired: it stops answering questions about now, still answers questions about the years it held, and memory_history keeps it with the reason. The new employer answers questions about now.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "sessions": [
+    {"turns": [
+      {"user": "I work at Northwind Traders as a data analyst. I started there in February 2023.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "works_at", "object": "Northwind Traders", "true_since": "2023-02-01"}}
+       ]}
+    ]},
+    {"turns": [
+      {"user": "Some news: my last day at Northwind was 31 May 2025, and I joined Contoso on 2 June.",
+       "script": [
+         {"tool": "memory_end", "args": {"predicate": "works_at", "at": "2025-05-31", "reason": "the user left Northwind Traders"}},
+         {"tool": "memory_remember", "args": {"predicate": "works_at", "object": "Contoso", "true_since": "2025-06-02"}}
+       ]},
+      {"id": "now", "user": "Where do I work these days?",
+       "script": [{"tool": "memory_recall", "args": {"query": "where does the user work"}}]},
+      {"id": "in-2024", "user": "And where was I working in January 2024?",
+       "script": [{"tool": "memory_search", "args": {"query": "where does the user work", "valid_at": "2024-01-15"}}]},
+      {"id": "history", "user": "Why don't you list Northwind any more?",
+       "script": [{"tool": "memory_history", "args": {"predicate": "works_at"}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "northwind-ended", "text": "user works at Northwind Traders", "state": "ended", "count": 1},
+    {"id": "northwind-not-retired", "text": "user works at Northwind Traders", "state": "retired", "count": 0},
+    {"id": "contoso-live", "text": "user works at Contoso", "state": "live", "count": 1}
+  ],
+  "answer_gold": [
+    {"id": "now-contoso", "turn": "now", "must_contain": "Contoso"},
+    {"id": "now-not-northwind", "turn": "now", "must_not_contain": "Northwind"},
+    {"id": "2024-northwind", "turn": "in-2024", "must_contain": "Northwind Traders"},
+    {"id": "2024-not-contoso", "turn": "in-2024", "must_not_contain": "Contoso"},
+    {"id": "history-keeps-the-reason", "turn": "history", "must_contain": "ended because: the user left Northwind Traders"}
+  ],
+  "forbidden": [{"tool": "memory_forget"}],
+  "requires": ["tools"],
+  "negative_control": true
+}

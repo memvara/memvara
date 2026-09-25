@@ -1,0 +1,40 @@
+{
+  "id": "correction-retired",
+  "description": "The agent stored the wrong city: the user said Porto, and Lisbon was stored. The wrong value is retired with memory_forget, which says the record was never right, so it answers no question at all. memory_history keeps it, marked retired, with the reason.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "sessions": [
+    {"turns": [
+      {"user": "I live in Porto.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "lives_in", "object": "Lisbon"}}
+       ]}
+    ]},
+    {"turns": [
+      {"user": "You have my city wrong. I never lived in Lisbon. I said Porto.",
+       "script": [
+         {"tool": "memory_search", "args": {"query": "where does the user live"}, "capture": {"lisbon_id": "id=(cl_[0-9a-f]+) [^\\]]*\\] user lives in Lisbon"}},
+         {"tool": "memory_forget", "args": {"claim_id": "{lisbon_id}", "reason": "misheard: the user said Porto"}},
+         {"tool": "memory_remember", "args": {"predicate": "lives_in", "object": "Porto"}}
+       ]},
+      {"id": "where", "user": "Which city do I live in?",
+       "script": [{"tool": "memory_recall", "args": {"query": "which city does the user live in"}}]},
+      {"id": "audit", "user": "What did you have wrong about me?",
+       "script": [{"tool": "memory_history", "args": {"predicate": "lives_in"}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "lisbon-retired", "text": "user lives in Lisbon", "state": "retired", "count": 1},
+    {"id": "lisbon-not-ended", "text": "user lives in Lisbon", "state": "ended", "count": 0},
+    {"id": "porto-live", "text": "user lives in Porto", "state": "live", "count": 1}
+  ],
+  "answer_gold": [
+    {"id": "recall-porto", "turn": "where", "must_contain": "Porto"},
+    {"id": "recall-not-lisbon", "turn": "where", "must_not_contain": "Lisbon"},
+    {"id": "history-marks-it-retired", "turn": "audit", "must_contain": "retired because: misheard: the user said Porto"}
+  ],
+  "forbidden": [{"tool": "memory_end"}],
+  "requires": ["tools"],
+  "negative_control": true
+}
