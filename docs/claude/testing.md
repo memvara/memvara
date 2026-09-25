@@ -312,4 +312,35 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 
   The tests for #311 set `PYTHONIOENCODING` rather than a locale, because it sets the stream encoding the same way on every platform, whatever locales a machine has installed.
 
+## The coverage checklist
+
+The checklist is a list of everything the suite has to test. It is read from the code, so a new tool, switch or invariant is added to it as soon as it exists. `tests/harness/checklist.py` builds it.
+
+**What is on the checklist.** Each item has an id of the form `kind:name`.
+
+| Kind | One item for each | Example |
+|---|---|---|
+| `tool` | tool in `memvara.server.tools.TOOLS` | `tool:memory_recall` |
+| `switch` | feature switch in `FEATURES` (`memvara/server/config.py`), and the read-only and anchored modes | `switch:documents`, `switch:read_only` |
+| `tool-switch` | tool whose entry in `tools/list` changes when a switch is flipped from its default | `tool-switch:memory_add_document/documents` |
+| `env` | `MEMVARA_*` variable that `memvara/server/config.py` reads | `env:MEMVARA_DB` |
+| `hook` | hook that a host in `plugin/hooks/hosts/` fires | `hook:claude/recall` |
+| `inv` | numbered invariant in `docs/INTERNALS.md`, and bullet under "Invariants and assumptions" on a `docs/claude/` page | `inv:I3`, `inv:MM5` |
+| `silent` | silent failure mode that the `memvara/telemetry.py` docstring lists | `silent:predicate-explosion` |
+| `bug` | open bug in `tests/harness/known_bugs.py` | `bug:B2` |
+
+A few sources need a word on how they are read:
+
+- **Tool-switch pairs.** The checklist compares the `tools/list` reply of a server with every setting at its default against the reply with one switch flipped. A switch is flipped rather than turned off because two features, and both modes, are off by default. The servers run inside the test process, which is enough: `python -m memvara.server` builds the same server from the same three settings.
+- **Environment variables.** Only a variable that `config.py` actually reads counts, through `.get()`, `getenv()` or a subscript, so a variable named only in an error message does not. The `MEMVARA_FEATURE_*` variables are the `switch` items.
+- **Silent failure modes.** The telemetry docstring lists six in a table and announces the seventh in a sentence of its own. The checklist reads both.
+- **A source that yields nothing stops the run.** Otherwise a renamed heading or a missing table would drop that source's items from the checklist without a word. The known bugs are the exception, because running out of open bugs is the goal.
+
+**Invariant ids.** An invariant's wording changes over time, so it needs an id that does not. `tests/harness/invariant_ids.json` records, for each document, each invariant's id and the bold sentence the invariant opens with. The sentence is how the checklist finds the invariant.
+
+- The numbered invariants in INTERNALS take their number as their id, `I1` to `I8`.
+- A bullet on a `docs/claude/` page gets its page's prefix and a number, such as `MM5` on `memory-model.md`. Give a new bullet the next unused number on its page.
+- A bullet that restates an INTERNALS invariant carries that invariant's id, so that one test covers both. When the bullet says so, as in "This is invariant 3", the fast tier checks that it carries the right id.
+- When you reword an invariant's opening sentence, change the sentence in the file and keep the id. Until you do, the fast tier fails and names the sentence.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

@@ -1,0 +1,96 @@
+{
+  "about": "Stable ids for the invariants on the coverage checklist. Each document maps an id to the bold sentence its invariant opens with, which is how the id finds the invariant. INTERNALS's numbered invariants are I1 to I8, and a bullet that restates one carries its id. When you reword an invariant, change its sentence here and keep its id. docs/claude/testing.md explains the checklist.",
+  "documents": {
+    "docs/INTERNALS.md": {
+      "I1": "Contradiction resolution is decided by the deterministic reconciler, and a model is reached only through named stages.",
+      "I2": "Unknown predicates default to `Cardinality.MANY`.",
+      "I3": "The engine hard-deletes only claims that carry an explicit `expires_at`, only after it passes, and always with a proof record; ending and superseding never delete. And end-of-life moves exactly one clock.",
+      "I4": "Every claim carries provenance.",
+      "I5": "The library must run with no API key and no network.",
+      "I6": "A multi-hop answer is evaluated at one clock pair.",
+      "I7": "A filter and a limit may not live in different layers.",
+      "I8": "No MCP client can backdate the transaction clock."
+    },
+    "docs/claude/consolidation-and-graph.md": {
+      "CG1": "Consolidation is deterministic and calls no model.",
+      "CG2": "`Sweep` reads its snapshot once and writes back in bounded transactions.",
+      "CG3": "`now` is read once for the whole pass.",
+      "CG4": "The graph leg is closed when the store provably has no joins.",
+      "CG5": "An empty connectivity result keeps the leg on.",
+      "CG6": "An unregistered predicate accumulates rather than superseding, and decays slowly."
+    },
+    "docs/claude/mcp-server.md": {
+      "MS1": "The scope is bound at startup and no tool call can change it.",
+      "I8": "No MCP client can backdate the transaction clock.",
+      "MS2": "Cloud mode refuses `MEMVARA_LLM` and `MEMVARA_EMBEDDER`.",
+      "MS3": "A configuration error is a refusal that names the fix.",
+      "MS4": "The documented example and the written entry may not drift.",
+      "MS5": "Tool text and the packaged skill do not repeat each other."
+    },
+    "docs/claude/memory-model.md": {
+      "I1": "Deterministic paths never call a model.",
+      "I2": "An unknown predicate defaults to `Cardinality.MANY`.",
+      "MM1": "`resolve_states()` is the single place either spelling of a state filter is interpreted.",
+      "MM2": "The three states do not tile the store.",
+      "I3": "The engine deletes a row only when a claim's explicit expiry has passed, and no write closes both clocks.",
+      "I7": "A filter and a limit may not live in different layers.",
+      "MM3": "A sort that sits above a limit ends in a content key, never an id.",
+      "MM4": "Scope is bound at startup and cannot be widened by a call.",
+      "MM5": "Each text index row sits at the rowid of the row it indexes.",
+      "MM6": "Every commit `SQLiteStore` makes that can change a turn goes through `_maybe_commit`.",
+      "MM7": "A claim's state changes with the clock only at one of its five time columns.",
+      "MM8": "A change to the entity fold bumps `SCHEMA_VERSION`."
+    },
+    "docs/claude/release-and-plugins.md": {
+      "RP1": "A published version is final.",
+      "RP2": "The build directory is rebuilt from scratch on every run.",
+      "RP3": "The vendored skill is not edited downstream.",
+      "RP4": "`plugin/hooks/` has no sanctioned transform at all.",
+      "RP5": "The hooks manifest under `plugin/hooks/` is generated, not vendored.",
+      "RP6": "`plugin-claude.md` opens with its exact first line and carries exactly one `@@LOCAL@@` marker.",
+      "RP7": "The seven names in `plugin-repos.txt` are pinned by a test."
+    },
+    "docs/claude/remote-and-cloud.md": {
+      "RC1": "The credential decides the tenant.",
+      "RC2": "Narrowing is one-way.",
+      "RC3": "Redaction runs client-side.",
+      "RC4": "An unmapped operation raises rather than approximating.",
+      "RC5": "This repository does not implement the server."
+    },
+    "docs/claude/retrieval.md": {
+      "RT1": "`recall()` takes `valid_at` and no other time keyword.",
+      "RT2": "Eight reads take the time keywords",
+      "RT3": "The recall header names the text as data.",
+      "RT4": "A leg abstains rather than contributing noise.",
+      "RT5": "The graph leg seeds on content, never on ids.",
+      "I7": "A filter and a limit may not live in different layers",
+      "RT6": "A document's passages are episodes.",
+      "RT7": "A store can only be opened by the embedder that wrote it.",
+      "RT8": "A cosine threshold belongs to an embedding space.",
+      "RT9": "A leg on another thread sees exactly what the calling thread would."
+    },
+    "docs/claude/telemetry-and-benchmarks.md": {
+      "TB1": "\"Verify\" means comparing an output, never that a command exited 0.",
+      "TB2": "A number goes into the results document with its caveat attached.",
+      "TB3": "The offline run repeats exactly.",
+      "TB4": "The benchmark harnesses do not exercise ingestion.",
+      "TB5": "Telemetry adds no required dependency and no background thread.",
+      "TB6": "Every read-path model call is counted, whichever stage made it.",
+      "TB7": "Benchmark reads are plain.",
+      "TB8": "A graph harness declares its corpus's relations, or it measures a store with no edges."
+    },
+    "docs/claude/write-pipeline.md": {
+      "WP1": "A document chunk passes the role check.",
+      "WP2": "The gate biases toward recall.",
+      "WP3": "A closed vocabulary refuses what nothing declared.",
+      "WP4": "Guidance adds to the extraction prompt and never replaces it.",
+      "WP5": "The fast path chooses precision over recall.",
+      "WP6": "`reject_ungrounded` defaults to `\"auto\"`.",
+      "WP7": "A truncated model response fails the write.",
+      "WP8": "`WriteReceipt` must be fully populated, including `llm_calls`.",
+      "WP9": "Extraction that cannot run is reported, and how depends on the deployment.",
+      "WP10": "A model proposes and the reconciler applies.",
+      "WP11": "A long turn is extracted whole or not at all."
+    }
+  }
+}
