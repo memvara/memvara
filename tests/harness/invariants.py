@@ -3,7 +3,7 @@
 `check_store_integrity(path)` opens the SQLite file directly, with no memvara code in
 between, and returns a list of the problems it finds, in plain sentences. An empty list
 means the file passed every check. The state machine calls it once a run is over, and
-the crash tests will call it after reopening a store that a killed process left behind.
+the crash tests call it on the store a killed process left behind.
 
 It checks:
 - SQLite's own `PRAGMA integrity_check`, and FTS5's `integrity-check` on both text indexes;
@@ -13,7 +13,9 @@ It checks:
 - that no provenance edge (`claim_sources`) names a claim or an episode that is gone;
 - that no claim with an erasure record still exists.
 
-It does not check an encrypted store, which needs its key, or the `.vecs` file's bytes.
+An encrypted store is checked when its key is given, through `sqlcipher3`. The `.vecs`
+file's bytes are not checked: the database is the authority for vectors, and a damaged
+vector file is rebuilt from it when the store opens.
 """
 
 from __future__ import annotations
@@ -22,12 +24,14 @@ import pathlib
 import sqlite3
 
 
-def check_store_integrity(path: pathlib.Path | str) -> list[str]:
-    """The problems found in the store file at `path`, or `[]` for a healthy one."""
+def check_store_integrity(path: pathlib.Path | str, *,
+                          key: bytes | None = None) -> list[str]:
+    """The problems found in the store file at `path`, or `[]` for a healthy one. `key`
+    is the 32-byte key of an encrypted store."""
     problems: list[str] = []
     # Not read-only: FTS5's integrity check is issued as an INSERT, although it writes
     # nothing. The connection is rolled back before it closes.
-    conn = sqlite3.connect(path)
+    conn, database_error = _connect(path, key)
     try:
         result = [row[0] for row in conn.execute("PRAGMA integrity_check")]
         if result != ["ok"]:
@@ -36,13 +40,25 @@ def check_store_integrity(path: pathlib.Path | str) -> list[str]:
             try:
                 # FTS5's own consistency check between its index and its content.
                 conn.execute(f"INSERT INTO {table}({table}) VALUES ('integrity-check')")
-            except sqlite3.DatabaseError as exc:
+            except database_error as exc:
                 problems.append(f"the {table} index is damaged: {exc}")
         problems.extend(_claims(conn))
     finally:
         conn.rollback()
         conn.close()
     return problems
+
+
+def _connect(path: pathlib.Path | str,
+             key: bytes | None) -> tuple[sqlite3.Connection, type[Exception]]:
+    """A connection to the store, and the error class its driver raises."""
+    if key is None:
+        return sqlite3.connect(path), sqlite3.DatabaseError
+    import sqlcipher3  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
+    conn = sqlcipher3.connect(str(path))
+    # The raw-key form memvara itself uses, so no password stretching is applied.
+    conn.execute(f"PRAGMA key = \"x'{key.hex()}'\"")
+    return conn, sqlcipher3.DatabaseError
 
 
 def _claims(conn: sqlite3.Connection) -> list[str]:
