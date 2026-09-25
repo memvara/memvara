@@ -15,6 +15,7 @@ from typing import Any, Mapping
 
 import pytest
 
+from harness import known_bugs
 from memvara.server.config import FEATURES, ServerConfig
 
 from .commandline import (CommandLine, command_lines, config_reads, console_scripts,
@@ -257,3 +258,18 @@ def test_a_feature_set_to_its_stated_default_changes_nothing(tmp_path: pathlib.P
     assert not problems, "\n".join(problems)
     assert any(default_off(help) is not None for help in _helps()), (
         "no help says which features are on by default")
+
+
+#: The drift #297 pins: both console scripts accept --version, and neither help names it.
+UNNAMED = ["--version"]
+
+
+@pytest.mark.parametrize("command", [
+    pytest.param(command, id=command.name, marks=[known_bugs.xfail("B21")])
+    for command in command_lines() if command.top])
+def test_every_word_a_console_script_accepts_is_in_its_help(command: CommandLine) -> None:
+    words = undocumented(command)
+    if words == UNNAMED:
+        raise known_bugs.Reproduced(f"{command.name} accepts {words}, and its help names "
+                                    "none of them")
+    assert not words, f"{command.name} accepts {words}, and its help names none of them"

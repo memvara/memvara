@@ -10,6 +10,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
+from harness import known_bugs
+from memvara.server.tools import TOOLS
+
 from .defaults import Stated, conflicts, same, stated, stated_in_tool, undeclared
 from .surface import configurations, served
 
@@ -141,3 +146,29 @@ def test_the_real_descriptions_state_defaults() -> None:
     assert any(not statement.literal for statement in arguments), (
         "no default worked out at call time was read")
     assert in_tools, "no default stated in a tool's description was read"
+
+
+#: The drift #296 pins: these tools state a default in words that their schema does not
+#: declare; each handler supplies the value itself.
+UNDECLARED = {"memory_recall": {"include_episodes"}, "memory_remember": {"extractor"}}
+
+
+@pytest.mark.parametrize("name", [
+    pytest.param(tool.name, marks=[known_bugs.xfail("B20")] if tool.name in UNDECLARED
+                 else []) for tool in TOOLS])
+def test_a_default_stated_in_words_is_declared_in_the_schema(name: str) -> None:
+    """The validator fills only declared defaults. A default stated in words and not
+    declared is implemented somewhere else, where the words and the code can drift apart
+    without any check."""
+    problems: dict[tuple[str, str], list[str]] = {}
+    for configuration in configurations():
+        for tool in served(configuration):
+            if tool["name"] == name:
+                for argument, words in undeclared(tool):
+                    problems.setdefault((argument, words), []).append(configuration.label)
+    report = "\n".join(
+        f"{name}.{argument} says {words!r}, and its schema declares no default "
+        f"({len(labels)} configurations)" for (argument, words), labels in problems.items())
+    if problems and {argument for argument, _ in problems} == UNDECLARED.get(name):
+        raise known_bugs.Reproduced(report)
+    assert not problems, report
