@@ -44,7 +44,11 @@ def _parts(path: pathlib.Path) -> tuple[str, ...] | None:
 def tier_of(path: pathlib.Path) -> str:
     """The tier of a test file or folder. Anything outside tests/, such as the doctests
     in memvara/, is fast."""
-    parts = _parts(path)
+    return _tier(_parts(path))
+
+
+def _tier(parts: tuple[str, ...] | None) -> str:
+    """The tier of the path whose parts under tests/ are `parts`: see tier_of."""
     if parts is None:
         return "fast"
     if parts[:1] == ("live",):
@@ -67,10 +71,11 @@ def ignored(path: pathlib.Path, option: str, *, is_dir: bool | None = None) -> b
     wanted = SELECTS[option]
     if is_dir is None:
         is_dir = pathlib.Path(path).is_dir()
-    tier = tier_of(path)
+    parts = _parts(path)
+    tier = _tier(parts)
     if is_dir:
         return tier != "fast" and tier not in wanted
-    if pathlib.Path(path).name in _ALWAYS and _parts(path) is not None:
+    if parts is not None and parts[-1] in _ALWAYS:  # under tests/ only; see _ALWAYS
         return False
     return tier not in wanted
 
