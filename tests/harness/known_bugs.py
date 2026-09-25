@@ -41,6 +41,10 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "writes"),
     KnownBug("B9", 275, "a retraction dated in the future stores a tombstone that ends "
              "before it begins"),
+    KnownBug("B13", 280, "a damaged embedder record lets a same-width embedder change go "
+             "unnoticed"),
+    KnownBug("B14", 281, "two processes opening a new store at once: one can fail at "
+             "startup"),
     KnownBug("B16", 282, "forget() leaves a scheduled value believed"),
     KnownBug("B17", 283, "a restatement with an earlier start loses the earlier start"),
     KnownBug("B18", 284, "a repeated retraction is folded into an expired tombstone"),
