@@ -157,6 +157,13 @@ JSON, under a header that names the text as data rather than instruction.
   message naming the width to use. `reembed()` is the way through. `Memvara()` with no
   embedder, and the MCP server's bare `local`, load the local model the store's fingerprint
   names, because the default model changed after 0.15 to one of the same width.
+- **A store whose record is lost says so, and records the embedder again.** When
+  `<db>.embedder.json` is missing or unreadable on a store that holds vectors, the width
+  still has to match, but nothing can tell whether the embedder in use wrote them. So
+  `_check_embedder` warns with `EmbedderChangedWarning` and writes the record naming that
+  embedder, so the next change is caught (#280). A store with no file beside it, such as an
+  in-memory one, has no record to lose, and is not warned about. `write_fingerprint` writes
+  a temporary file and renames it over the record, so a crash never leaves half a record.
 - **A cosine threshold belongs to an embedding space.** The grounding rescue, the
   duplicate merge and the write path's near-duplicate check read theirs through
   `calibration_of()`. A new default model, or any model a deployment adopts widely, needs

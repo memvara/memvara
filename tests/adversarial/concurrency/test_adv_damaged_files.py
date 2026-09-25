@@ -9,16 +9,16 @@ embedder change go unnoticed.
 
 from __future__ import annotations
 
+import json
 import pathlib
-import warnings
 from collections.abc import Callable
 
 import pytest
 
-from memvara import EmbedderMismatchError, Memvara, NullLLM
+from memvara import EmbedderChangedWarning, Memvara, NullLLM
 from memvara.embed import HashingEmbedder
 
-from harness import known_bugs, stores
+from harness import stores
 
 USER = "u1"
 PLACES = ("Berlin", "Paris", "Rome", "Lisbon", "Oslo", "Vienna")
@@ -76,20 +76,17 @@ def test_an_embedder_change_is_noticed_while_the_record_is_intact(
         Memvara(str(db), embedder=other_embedder(), llm=NullLLM()).close()
 
 
-@known_bugs.xfail("B13")
 def test_an_embedder_change_is_noticed_after_the_record_is_damaged(
         tmp_path: pathlib.Path) -> None:
+    """A torn record reads as no record, and the width alone cannot tell two embedders
+    apart. So the open warns that it cannot tell whether this embedder wrote the vectors,
+    and it writes the record again, so the next change is noticed too (#280)."""
     db = tmp_path / "s.db"
     written(db)
-    pathlib.Path(str(db) + ".embedder.json").write_text('{"embedder": "hashing:5')
-    with warnings.catch_warnings(record=True) as seen:
-        warnings.simplefilter("always")
-        try:
-            Memvara(str(db), embedder=other_embedder(), llm=NullLLM()).close()
-            refused = False
-        except EmbedderMismatchError:
-            refused = True
-    if not refused and not seen:
-        raise known_bugs.Reproduced("a store whose embedder record is damaged opened with "
-                                    "a different embedder of the same width, and nothing "
-                                    "said so")
+    record = pathlib.Path(str(db) + ".embedder.json")
+    record.write_text('{"embedder": "hashing:5')
+    with pytest.warns(EmbedderChangedWarning, match="cannot tell whether hashing:512:2-4"):
+        Memvara(str(db), embedder=other_embedder(), llm=NullLLM()).close()
+    assert json.loads(record.read_text())["embedder"] == "hashing:512:2-4"
+    with pytest.warns(Warning, match="unrelated vector spaces"):
+        stores.file(db).close()

@@ -21,15 +21,21 @@ The second is why this module records a *name* and not only a dimension.
 
 Where it is recorded: a small JSON file next to the store file. The `Store` protocol has
 no metadata surface, and inventing one belongs to whoever owns storage — so this is
-deliberately advisory. If the sidecar is missing (an older store, a database copied
-without it, an in-memory store), identity checking degrades to the dimension check,
-which is derived from the stored vectors themselves and cannot be lost.
+deliberately advisory. A store with no file beside it, such as an in-memory store, has no
+record, and identity checking degrades to the dimension check, which is derived from the
+stored vectors themselves and cannot be lost. When a store file's record is missing or
+unreadable (the database was copied without it, or a crash tore it while an older
+version wrote it), nothing can tell whether the store's vectors came from the embedder in
+use. When such a store holds vectors, `Memvara` warns as it opens it, and records the
+embedder in use so that the next change is noticed.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -133,6 +139,13 @@ def _read_sidecar(path: str) -> EmbedderFingerprint | None:
 def write_fingerprint(store: Any, fp: EmbedderFingerprint) -> bool:
     """Record who owns this store's vector space. Best-effort by construction.
 
+    The record is written to a temporary file beside it, which is then renamed over it,
+    so a crash or a full disk during the write leaves the old record or the new one and
+    never half of one. This matters most when `reembed()` rewrites the record, because
+    the store then already holds vectors, and a torn record reads as no record at all. A
+    crash in the middle of the write can leave the temporary file behind; nothing reads
+    it.
+
     Returns whether it was written, which is information for tests rather than for
     callers: a read-only directory is a fine place to keep a memory store, and losing
     the identity check there is a smaller harm than refusing to run.
@@ -140,12 +153,24 @@ def write_fingerprint(store: Any, fp: EmbedderFingerprint) -> bool:
     path = sidecar_path(store)
     if path is None:
         return False
+    # A name of its own for each write, so two processes writing at once never write
+    # into one temporary file.
+    staged = f"{path}.{uuid.uuid4().hex}.tmp"
     try:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"embedder": fp.name, "dim": fp.dim}, fh)
-        return True
+        fh = open(staged, "x", encoding="utf-8")
     except OSError:
         return False
+    try:
+        with fh:
+            json.dump({"embedder": fp.name, "dim": fp.dim}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(staged, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(staged)
+        return False
+    return True
 
 
 def stored_dim(store: Any) -> int | None:
