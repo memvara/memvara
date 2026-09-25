@@ -127,7 +127,16 @@ docs/claude/testing.md           how to run and extend the suite
 
 ### The shared foundation (`tests/harness`)
 
-The first PR fixes these interfaces before any parallel work starts.
+Each module lands in the first PR that uses it:
+
+- `env`, `stdio`, `hooks`, `stores`, `tiers` and `skips` in F1;
+- `known_bugs` in F2;
+- the fakes in F3;
+- `scenarios` in F4;
+- `clock`, `model` and `invariants` in D1;
+- `report` with the nightly run.
+
+Their interfaces are written down here before any parallel work starts.
 
 - **`env.child_env(home, extra)`** builds a subprocess environment from an allowlist.
   - HOME and USERPROFILE point at a temporary directory; the real HOME is refused.
@@ -218,7 +227,7 @@ F1 comes first; everything else waits for it.
 
 | PR | Content | Owns |
 |---|---|---|
-| F1 | The harness core, the tiers, the skip ledger, Hypothesis in `[dev]`, `.gitignore`, the tiers section of CONTRIBUTING, `docs/claude/testing.md` and its index rows, and this spec | `tests/conftest.py`, `tests/harness/{env,clock,stores,stdio,hooks,scenarios,report,tiers,skips}.py`, `tests/adversarial/{conftest,test_adv_harness}.py` |
+| F1 | The harness core, the tiers, the skip ledger, Hypothesis in `[dev]`, `.gitignore`, the tiers section of CONTRIBUTING, `docs/claude/testing.md` and its index rows, and this spec | `tests/conftest.py`, `tests/harness/{env,stores,stdio,hooks,tiers,skips}.py`, `tests/adversarial/conftest.py`, the `test_adv_*.py` self-tests beside them, and the tier guard folders |
 | F2 | The public known bugs as strict xfails, with one issue each | `tests/harness/known_bugs.py` (append-only for later PRs), `tests/adversarial/test_adv_known_bugs.py` |
 | F3 | The fakes | `tests/harness/fakes/*` |
 | F4 | The scenario schema and runner, and the first scripted scenarios | `tests/scenarios/**`, `tests/adversarial/sessions/runner.py` |

@@ -11,7 +11,8 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 
 
 def _real_home() -> pathlib.Path:
-    """The account's home directory, read from the password database on POSIX.
+    """The account's home directory, read from the password database on POSIX when
+    the account has an entry there.
 
     Not read from HOME, because every test runs with HOME pointed at a temporary
     directory (tests/conftest.py), and a check against HOME would compare that temporary
@@ -20,7 +21,12 @@ def _real_home() -> pathlib.Path:
     if os.name == "posix":
         import pwd  # noqa: PLC0415 - POSIX only
 
-        return pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+        try:
+            return pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+        except KeyError:
+            # A container can run as a numeric user with no password entry. HOME is
+            # then the best answer there is, and importing the harness must not crash.
+            pass
     return pathlib.Path(os.path.expanduser("~")).resolve()
 
 

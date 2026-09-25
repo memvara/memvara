@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from harness.env import REPO
 from harness.tiers import SELECTS, TESTS, TIER_DIRS, ignored, tier_of
@@ -57,3 +59,23 @@ def test_every_tier_folder_is_a_package() -> None:
     for directory in (TESTS / "adversarial").rglob("*"):
         if directory.is_dir() and directory.name in TIER_DIRS:
             assert (directory / "__init__.py").is_file(), directory
+
+
+def test_a_tier_folder_inside_live_is_collected_by_a_local_run() -> None:
+    """Everything under tests/live is local, whatever its own folder is called."""
+    assert not ignored(TESTS / "live" / "nightly", "local", is_dir=True)
+
+
+_PARTS = st.sampled_from(["adversarial", "live", "model", *TIER_DIRS])
+
+
+@given(folders=st.lists(_PARTS, max_size=4), option=st.sampled_from(sorted(SELECTS)))
+def test_a_collected_file_never_sits_in_a_folder_the_run_leaves_out(
+        folders: list[str], option: str) -> None:
+    """A file a run collects must be reachable: no folder above it may be left out."""
+    path = TESTS.joinpath(*folders, "test_adv_x.py")
+    if not ignored(path, option, is_dir=False):
+        for parent in path.parents:
+            if parent == TESTS:
+                break
+            assert not ignored(parent, option, is_dir=True), (parent, option)

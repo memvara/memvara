@@ -179,8 +179,10 @@ class McpProcess:
                 break
         if "error" in reply:
             raise RpcError(int(reply["error"]["code"]), str(reply["error"]["message"]))
-        result = reply["result"]
-        assert isinstance(result, dict)
+        result = reply.get("result")
+        if not isinstance(result, dict):
+            raise McpProcessError(f"the server's result for {method} is not an object: "
+                                  f"{reply!r}"[:500])
         return result
 
     def notify(self, method: str, params: Mapping[str, Any] | None = None) -> None:

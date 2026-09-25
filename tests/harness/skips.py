@@ -1,6 +1,8 @@
-"""The skip ledger: every reason a test here may skip, and why that is not hiding a failure.
+"""The skip ledger: every reason a test in this repository may skip, and why that is not
+hiding a failure.
 
-A skip whose reason no rule below explains fails the run. The ledger exists because most
+It covers every test under tests/, not only the adversarial suite: tests/conftest.py
+registers it for every run. A skip whose reason no rule below explains fails the run. The ledger exists because most
 summaries show a skip as green, so a test that stops running for a new reason looks
 exactly like a test that still passes. When you add a skip, add a rule that says why it
 is legitimate.

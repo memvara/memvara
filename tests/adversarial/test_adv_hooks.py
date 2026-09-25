@@ -61,3 +61,10 @@ def test_output_that_is_not_json_is_reported_with_its_text() -> None:
     with pytest.raises(HookOutputError, match="Traceback"):
         parse_reply("Traceback (most recent call last): boom", what="recall on claude")
     assert parse_reply("", what="recall on claude") is None
+
+
+def test_a_toml_client_config_is_refused_with_the_reason(hook_runner: Make) -> None:
+    """Codex keeps its client config in TOML, and HookRunner writes JSON only. The
+    refusal is deliberate and must say so, so nobody mistakes it for a harness bug."""
+    with pytest.raises(NotImplementedError, match="writes JSON client configs only"):
+        hook_runner("codex", server_env={"MEMVARA_DB": "unused.db"})

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 
 import pytest
@@ -49,3 +50,18 @@ def test_a_child_runs_this_checkout_offline_in_the_home_it_was_given(
     assert env["MEMVARA_FEATURE_PROJECT_SCOPE"] == "0"
     assert env["MEMVARA_DAEMON"] == "1"
     assert env["MEMVARA_USER"] == "tester"
+
+
+def test_the_real_home_falls_back_when_the_user_has_no_password_entry(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Containers often run as a numeric user with no /etc/passwd line, where getpwuid
+    raises KeyError. Importing the harness must not crash there."""
+    import pwd
+
+    import harness.env as env_module
+
+    def missing(uid: int) -> object:
+        raise KeyError(f"getpwuid(): uid not found: {uid}")
+
+    monkeypatch.setattr(pwd, "getpwuid", missing)
+    assert env_module._real_home() == pathlib.Path(os.path.expanduser("~")).resolve()

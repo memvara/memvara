@@ -77,3 +77,13 @@ def test_a_read_only_server_lists_only_read_only_tools(mcp: Start) -> None:
     specs = server.list_tools()
     assert specs
     assert all(spec["annotations"]["readOnlyHint"] for spec in specs)
+
+
+def test_a_reply_whose_result_is_not_an_object_is_reported(
+        mcp: Start, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check must not be an assert, which python -O removes."""
+    server = mcp()
+    monkeypatch.setattr(server, "recv",
+                        lambda timeout=None: {"jsonrpc": "2.0", "id": 1, "result": None})
+    with pytest.raises(McpProcessError, match="not an object"):
+        server.request("ping")

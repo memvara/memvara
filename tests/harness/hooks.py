@@ -67,7 +67,11 @@ class HookRunner:
     is given, it is written into the host's first client config file as the memvara
     server's env block, which is where the hooks look for the store
     (plugin/hooks/lib/ipc.py). Without it, the hooks find no store and report
-    "not configured".
+    "not configured". `env` is different: it is applied last to the hook process's own
+    environment, on top of `child_env`.
+
+    Client configs are written as JSON only. Codex keeps its config in TOML, so a Codex
+    run with a store is refused here until the hook-conformance tests add a TOML writer.
     """
 
     def __init__(self, host: str, *, home: pathlib.Path, cwd: pathlib.Path,
@@ -84,7 +88,8 @@ class HookRunner:
         """Write the host's first client config file, holding a memvara server block."""
         if self.host.config_format != "json":
             raise NotImplementedError(
-                f"{self.host.id} keeps a {self.host.config_format} client config")
+                f"HookRunner writes JSON client configs only, and {self.host.id} keeps a "
+                f"{self.host.config_format} one; the hook-conformance tests add that writer")
         path = pathlib.Path(str(self.host.client_configs[0]).replace("~", str(self.home), 1))
         path.parent.mkdir(parents=True, exist_ok=True)
         block = {"command": sys.executable, "args": ["-m", "memvara.server"],

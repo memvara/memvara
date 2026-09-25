@@ -10,8 +10,9 @@ TESTS = pathlib.Path(__file__).resolve().parents[1]
 #: Every value --tier accepts. fast is the default, and the only tier CI runs.
 TIERS = ("fast", "nightly", "weekly", "local", "quarantine")
 
-#: A folder with one of these names puts every test under it in that tier.
-TIER_DIRS = ("nightly", "weekly", "local", "quarantine")
+#: A folder with one of these names puts every test under it in that tier: every tier
+#: except fast, which is where a test lives when no such folder is above it.
+TIER_DIRS = tuple(tier for tier in TIERS if tier != "fast")
 
 #: The tiers each --tier value collects. The first three widen in turn. local and
 #: quarantine collect only themselves: local tests need this machine's logins, Docker or
@@ -54,26 +55,21 @@ def tier_of(path: pathlib.Path) -> str:
 def ignored(path: pathlib.Path, option: str, *, is_dir: bool | None = None) -> bool:
     """Whether a run with --tier `option` leaves `path` out of collection.
 
-    A folder is left out only when it is itself a tier folder, or tests/live, that the
-    option does not select. Any other folder is entered, because a nightly or local
-    folder can sit inside it. A file is left out when its tier is not selected, except
-    __init__.py and conftest.py, which every folder needs.
+    Folders and files get their tier from the same rule, tier_of, so the two can never
+    disagree. A folder is left out when its tier is one the option does not select. A
+    fast folder is always entered, because a nightly or local folder can sit inside it.
+    A file is left out when its tier is not selected, except __init__.py and
+    conftest.py, which every folder needs.
     """
     wanted = SELECTS[option]
     if is_dir is None:
         is_dir = pathlib.Path(path).is_dir()
+    tier = tier_of(path)
     if is_dir:
-        parts = _parts(path)
-        if not parts:
-            return False
-        if parts == ("live",):
-            own: str | None = "local"
-        else:
-            own = parts[-1] if parts[-1] in TIER_DIRS else None
-        return own is not None and own not in wanted
+        return tier != "fast" and tier not in wanted
     if pathlib.Path(path).name in _ALWAYS:
         return False
-    return tier_of(path) not in wanted
+    return tier not in wanted
 
 
 #: The Hypothesis profile each tier runs under.
