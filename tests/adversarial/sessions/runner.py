@@ -446,6 +446,14 @@ NOTHING_FOUND: Mapping[str, str] = {
     "memory_get_document": "No document with that id or custom_id is visible here",
 }
 
+#: The line the session-start hook injects first: the scope the store is bound to and how
+#: many claims are visible there, as `_binding_line` in plugin/hooks/session_start.py
+#: writes it. It says where memory is, not what it holds, so it is not memory shown.
+SCOPE_LINE = re.compile(
+    r"Memvara scope: \S+ \(tenant/user/project/agent/session; '\*' means unbound\), "
+    r".+ visible\.( Session segment is bound — memory written now will NOT carry over to "
+    r"other sessions\.)?")
+
 
 @dataclass
 class Step:
@@ -465,11 +473,15 @@ class Step:
 
         A read that found nothing shows none. Its reply repeats the query, and the query's
         words are not memory: counted, they would let must_contain pass on a turn that
-        found nothing.
+        found nothing. The session-start hook's scope line is not memory either, so that
+        hook shows only what follows it.
         """
         opening = NOTHING_FOUND.get(self.name) if self.kind == "tool" else None
         if opening is not None and self.text.startswith(opening):
             return ""
+        if self.kind == "hook" and self.name == "session_start":
+            return "\n".join(line for line in self.text.splitlines()
+                             if not SCOPE_LINE.fullmatch(line)).strip()
         return self.text
 
 
