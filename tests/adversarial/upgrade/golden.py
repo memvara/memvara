@@ -256,6 +256,10 @@ def _digest(lines: Iterable[str]) -> str:
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
 
+#: The digest `snapshot` gives a table with no rows.
+EMPTY = _digest([])
+
+
 def snapshot(db: pathlib.Path, *, key: bytes | None = None) -> dict[str, Any]:
     """Everything an open could change, to compare two opens: the schema version, the
     schema, a digest of every row of every table, and a digest of each side file."""
