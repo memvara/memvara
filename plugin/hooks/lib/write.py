@@ -198,10 +198,12 @@ def remember_kwargs(memory_type: "str | None", turn: str, hosted: bool,
     """
     kwargs: dict = {"confidence": 0.7}
     if memory_type:
-        # The hosted tool takes the type's name. The local library takes its enum, and a
-        # plain string fails there with `AttributeError: 'str' object has no attribute
-        # 'value'` when the claim is stored. Every fact this hook wrote to a local store
-        # failed that way, and capture.log recorded each one under `failed=`.
+        # The hosted tool takes the type's name. The local library takes its enum, and
+        # before #270 a plain string failed there with `AttributeError: 'str' object has
+        # no attribute 'value'` when the claim was stored, so every fact this hook wrote
+        # to a local store failed and capture.log recorded each one under `failed=`. The
+        # library converts a name itself now; converting here as well keeps the hook
+        # working with an installed library older than that fix.
         kwargs["memory_type"] = memory_type if hosted else _memory_type(memory_type)
     # The label the host writes under. It is stored on every claim and rendered back
     # by `memory_why`, so it is a fact about recorded history rather than a string to
