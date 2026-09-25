@@ -403,10 +403,11 @@ cosines a search reads by about 0.03. Over LOCOMO's questions, the median cosine
 best turn went from 0.746 to 0.713, to the twelfth from 0.664 to 0.630, and to the
 evidence turn from 0.697 to 0.665, so a `min_score` tuned under bge-small admits less.
 
-**Its cosines run higher, and two checks read cosines.** The grounding rescue keeps a
+**Its cosines run higher, and three checks read cosines.** The grounding rescue keeps a
 model-proposed claim that shares no word with its source when the two embed close enough,
-and the duplicate merge folds two claims in one slot when they embed close enough. Both
-thresholds were measured under MiniLM. `bench/embedder_calibration.py` reads them in each
+and the duplicate merge folds two claims in one slot when they embed close enough. The
+write path's near-duplicate check reads the merge's threshold. Both thresholds were
+measured under MiniLM. `bench/embedder_calibration.py` reads them in each
 space, over pairs written for it:
 
 ```bash
@@ -438,6 +439,16 @@ two numpy versions at 0.995, each higher than that model scores any restatement.
 leaves each threshold to separate values a letter or a word apart, and each sits above
 the closest such pair. Under MiniLM this leaves the merge little to fold, because 22 of
 the 24 restatements score below that pair's 0.979.
+
+The near-duplicate check reads the same threshold and the same rule. Before extracting
+from a turn, `add()` compares it with the nearest live claim and extracts nothing from a
+turn it reads as a restatement. A turn worded like a claim embeds exactly as that claim
+would, so the rows above measure the check for such turns: at a flat 0.97 it would have
+read the second value of 22 of the 69 pairs as a restatement under MiniLM and 19 under
+bge-small, and lost it, where it now reads none of them that way. A turn a person writes
+is another matter. The bench's 16 first-person turns score at most 0.921 against their
+claim under MiniLM, 0.944 under bge-small and 0.875 under `HashingEmbedder`, so the check
+never fires on them at either threshold.
 
 Two caveats. The pairs are a reconstruction: the eval behind 0.40, 33 inventions from two
 4B-class models, is not in this repository. And bge-small's 0.99 sits 0.001 above its

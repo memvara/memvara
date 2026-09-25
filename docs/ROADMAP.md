@@ -1250,7 +1250,8 @@ queued.
    The Davidson paper above proposes the same write-time edges. Storing them is not free: a
    cosine link built as a fact is stored is a vector search per write, which
    `consolidate/merge.py` names as the reason merging is not on the write path (tier 0
-   already runs a top-1 lookup at 0.97 for near-duplicates, which is a different lookup),
+   already runs a top-1 lookup for near-duplicates, at the merge's threshold for the
+   embedder's space, which is a different lookup),
    and an edge table is a new store surface behind a `SCHEMA_VERSION` bump. The cheaper
    first measurement needs neither: a read-time second hop from the fused head, the vector
    and temporal neighbours of the top-n turns, is `vector_search_episodes` and

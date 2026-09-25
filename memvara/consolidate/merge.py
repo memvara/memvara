@@ -22,14 +22,13 @@ two find exactly the same merges. See `NEIGHBOURHOOD`.
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from typing import Sequence
 
 import numpy as np
 
 from ..embed.base import Embedder
-from ..embed.calibration import calibration_of
+from ..embed.calibration import calibration_of, numbers
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..telemetry import CONSOLIDATE_MERGED, CONSOLIDATE_PROMOTED, Recorder
@@ -51,25 +50,6 @@ from .sweep import Sweep
 #: the top N claims" cap cannot say, since it would re-examine the same N forever and
 #: never touch the tail.
 NEIGHBOURHOOD = 64
-
-_NUMBER = re.compile(r"\d+")
-
-
-def _numbers(text: str) -> tuple[str, ...]:
-    """The runs of digits in `text`, in order, each without its leading zeros.
-
-    Two values holding different numbers are two values, however close they embed, so
-    `merge_pass` never folds them. Compared as digit strings rather than as integers, so
-    a pasted value thousands of digits long costs no conversion and cannot exceed Python's
-    limit on one.
-
-    >>> _numbers("2023-05-01") == _numbers("2023-05-02")
-    False
-    >>> _numbers("09:30") == _numbers("9:30")
-    True
-    """
-    return tuple(run.lstrip("0") or "0" for run in _NUMBER.findall(text))
-
 
 def survivor_rank(claim: Claim) -> tuple[int, float, str]:
     """Total order over merge candidates. Lowest sorts first and wins.
@@ -177,7 +157,7 @@ def merge_pass(sweep: Sweep, embedder: Embedder, registry: PredicateRegistry, *,
             continue
         group.sort(key=survivor_rank)
         unit = _unit_vectors(sweep.store, embedder, group)
-        digits = [_numbers(c.object) for c in group]
+        digits = [numbers(c.object) for c in group]
         # Index into `group`, i.e. into survivor_rank order, ordered by blocking key.
         # Keeping the two orders separate is what lets the blocking decide *who is
         # compared* without letting it decide *who survives*.

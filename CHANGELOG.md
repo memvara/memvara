@@ -172,6 +172,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   measured. A MiniLM store merges less from its next consolidation on, and merges already
   made stay made; `docs/UPGRADING.md` shows how to find them.
 
+### Fixed
+
+- **`add()` no longer reads a turn that states a new value in a stored claim's words as
+  a repeat of that claim.** Before extracting from a turn, the write path compares it
+  with the nearest live claim, and a turn close enough counts as a restatement: the
+  claim gains an observation and nothing is extracted. That check used 0.97 under every
+  embedder and ignored numbers, so "user has appointment on 2024-03-15" reinforced the
+  claim for 2024-03-14 under MiniLM and under bge-small, and the new date was never
+  stored. The check now reads the merge's threshold for the embedder's space (0.985 for
+  all-MiniLM-L6-v2, 0.99 for bge-small-en-v1.5, 0.97 for any other), and never counts a
+  turn whose numbers differ from the claim's text, the rule the merge already applies.
+  Over the 69 pairs of different values in `bench/embedder_calibration.py`, 0.97 read the
+  second value as a restatement 22 times under MiniLM and 19 times under bge-small; the
+  check now reads none of them that way. None of the bench's 16 first-person turns comes
+  near either threshold; the highest scores 0.944 against its claim.
+  `WritePipeline(near_dup_threshold=)` and `Memvara(write_near_dup_threshold=)` now
+  default to `None`, the calibrated value, and a number passed in is still used as given.
+  The digit reader behind the rule moves from `consolidate/merge.py` to
+  `embed/calibration.numbers`. `docs/UPGRADING.md` shows how to find values an earlier
+  version lost this way.
+
 ## [0.15.0] — 2026-09-24
 
 **Connected MCP sessions keep the old tool list until they reconnect.** This release adds
