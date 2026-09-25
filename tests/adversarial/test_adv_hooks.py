@@ -23,6 +23,7 @@ def test_every_host_gives_each_of_its_hooks_a_timeout(host: str) -> None:
         assert record.timeouts[hook] > 0, (host, hook)
 
 
+@pytest.mark.covers("hook:claude/session_start")
 def test_session_start_without_a_store_says_not_configured(hook_runner: Make) -> None:
     result = hook_runner("claude").run("session_start")
     assert result.exit_code == 0
@@ -30,6 +31,7 @@ def test_session_start_without_a_store_says_not_configured(hook_runner: Make) ->
     assert "not configured" in result.reply["systemMessage"]
 
 
+@pytest.mark.covers("hook:claude/session_start")
 def test_session_start_reads_the_store_the_client_config_names(
         hook_runner: Make, tmp_path: pathlib.Path) -> None:
     db = tmp_path / "memory.db"
@@ -45,6 +47,7 @@ def test_session_start_reads_the_store_the_client_config_names(
     assert "tabs for indentation" in result.reply["hookSpecificOutput"]["additionalContext"]
 
 
+@pytest.mark.covers("hook:claude/approve")
 def test_the_approve_hook_allows_a_read_only_memvara_tool(hook_runner: Make) -> None:
     result = hook_runner("claude").run("approve", tool_name="mcp__memvara__memory_search")
     assert result.exit_code == 0
@@ -52,6 +55,7 @@ def test_the_approve_hook_allows_a_read_only_memvara_tool(hook_runner: Make) -> 
     assert result.reply["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
+@pytest.mark.covers("hook:claude/approve")
 def test_the_approve_hook_says_nothing_about_a_write_tool(hook_runner: Make) -> None:
     result = hook_runner("claude").run("approve", tool_name="mcp__memvara__memory_forget")
     assert result.exit_code == 0
