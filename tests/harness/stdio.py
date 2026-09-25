@@ -15,6 +15,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -130,20 +131,43 @@ class McpProcess:
             code: int | None = self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             code = None
+        self._readers[1].join(timeout=2)  # let the stderr reader catch the last lines
         return McpProcessError(
             f"{what} (exit code {code}); stderr: {self.stderr_text()[-800:]!r}")
 
     def send_raw(self, data: str | bytes) -> None:
-        """Write `data` and one newline, exactly as given, with no framing checks."""
+        """Write `data` and one newline, exactly as given, with no framing checks.
+
+        The write runs on a helper thread and may take at most the timeout. A server that
+        has stopped reading would otherwise block the test forever once the pipe fills,
+        so on expiry the server is killed and McpProcessError is raised.
+        """
         payload = data.encode("utf-8") if isinstance(data, str) else data
         self.transcript.append(("->", payload.decode("utf-8", "replace")))
         stream = self.proc.stdin
         assert stream is not None
-        try:
-            stream.write(payload + b"\n")
-            stream.flush()
-        except (BrokenPipeError, OSError, ValueError) as exc:
-            raise self._dead(f"could not write to the server: {exc}") from exc
+        failure: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                stream.write(payload + b"\n")
+                stream.flush()
+            except BaseException as exc:  # noqa: BLE001 - handed back to the caller
+                failure.append(exc)
+
+        writer = threading.Thread(target=write, daemon=True)
+        writer.start()
+        writer.join(self.timeout)
+        if writer.is_alive():
+            self.kill()
+            raise McpProcessError(
+                f"the server stopped reading: writing {len(payload)} bytes did not finish "
+                f"within {self.timeout}s, so the server was killed")
+        if failure:
+            exc = failure[0]
+            if isinstance(exc, (BrokenPipeError, OSError, ValueError)):
+                raise self._dead(f"could not write to the server: {exc}") from exc
+            raise exc
 
     def recv(self, timeout: float | None = None) -> dict[str, Any]:
         """The next message the server writes. Raises McpProcessError when none arrives."""
@@ -157,9 +181,14 @@ class McpProcess:
         if raw is None:
             self._lines.put(None)  # later calls must see the end of the stream too
             raise self._dead("the server closed its output")
-        line = raw.decode("utf-8")
+        line = raw.decode("utf-8", "replace")
         self.transcript.append(("<-", line.rstrip("\r\n")))
-        message = json.loads(line)
+        try:
+            message = json.loads(line)
+        except ValueError:
+            raise McpProcessError(
+                f"the server wrote a line that is not JSON: {line[:300]!r}; "
+                f"stderr: {self.stderr_text()[-500:]!r}") from None
         if not isinstance(message, dict):
             raise McpProcessError(f"the server wrote a message that is not an object: "
                                   f"{line[:200]!r}")
@@ -175,8 +204,12 @@ class McpProcess:
         if params is not None:
             message["params"] = dict(params)
         self.send_raw(json.dumps(message))
+        deadline = time.monotonic() + self.timeout
         while True:
-            reply = self.recv()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise McpProcessError(f"no reply to {method} within {self.timeout}s")
+            reply = self.recv(timeout=remaining)
             if "method" in reply:
                 continue  # a request or notification from the server, not a reply
             if reply.get("id") == request_id:
@@ -214,6 +247,13 @@ class McpProcess:
         return ToolResult(text=text, is_error=bool(result.get("isError")), raw=result)
 
     # -- ending it -----------------------------------------------------------
+
+    def signal(self, sig: int) -> None:
+        """Send `sig` to the server, for example SIGSTOP to make it stop reading. POSIX
+        only: Windows has no such signals, and kill() is the portable way to stop it."""
+        if sys.platform == "win32":
+            raise NotImplementedError("signals other than kill() exist only on POSIX")
+        os.kill(self.proc.pid, sig)
 
     def kill(self) -> None:
         """Stop the server at once: SIGKILL on POSIX, TerminateProcess on Windows."""

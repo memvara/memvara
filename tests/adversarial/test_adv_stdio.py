@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pathlib
+import signal
+import sys
 import time
 from typing import Callable
 
@@ -105,3 +107,22 @@ def test_a_request_from_the_server_is_not_taken_for_the_reply(
 def test_each_server_gets_its_own_store_unless_a_test_shares_one(mcp: Start) -> None:
     first, second = mcp(), mcp()
     assert first.db != second.db
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGSTOP exists only on POSIX")
+def test_a_server_that_stops_reading_fails_the_write_instead_of_hanging(mcp: Start) -> None:
+    server = mcp(timeout=2.0)
+    server.initialize()
+    server.signal(signal.SIGSTOP)
+    started = time.monotonic()
+    with pytest.raises(McpProcessError, match="stopped reading"):
+        server.send_raw("x" * 1_000_000)
+    assert time.monotonic() - started < 10
+
+
+def test_a_line_that_is_not_json_is_reported_with_the_line(
+        mcp: Start, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = mcp()
+    server._lines.put(b"Traceback (most recent call last): boom\n")
+    with pytest.raises(McpProcessError, match="not JSON"):
+        server.recv(timeout=5)

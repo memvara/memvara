@@ -46,17 +46,19 @@ A test's tier comes from the folder its file lives in. You do not mark it.
 | `--tier local` | only local |
 | `--tier quarantine` | only quarantine |
 
-A tier that a run does not select is left out when pytest collects, so it is never imported and never reported as skipped. A file you name on the command line is always collected, whatever its folder.
+A tier that a run does not select is left out when pytest collects, so it is never imported and never reported as skipped. A file you name on the command line is always collected, whatever its folder. A tier folder you name is not: run `pytest tests/adversarial/nightly --tier nightly`, because without `--tier` the folder is left out and nothing runs.
 
 **The outermost tier folder decides.** Do not put one tier folder inside another, or anywhere under `tests/live`; `test_adv_tiers.py` refuses both. Every run prints its tier and the tier folders it left out, for example `tier fast; left out 3 tier folders: ...`, so a folder that happens to share a tier's name cannot drop out of the run unnoticed.
 
-**Every tier folder needs an `__init__.py`.** Without one, two test files with the same name in different folders collide. `test_adv_tiers.py` checks this.
+**Every folder of the suite needs an `__init__.py`,** not only the tier folders. Without one at every level, pytest imports the modules below that folder under names of their own: two test files with the same name collide, and a tier folder's tests fail to import. `test_adv_tiers.py` checks every folder under `tests/adversarial` and `tests/live`.
 
 The files named `test_adv_*_tier_guard.py` fail if their folder is ever collected by a tier that should have left it out. The ordinary fast run is therefore the proof that the tiers work.
 
 ## Skips
 
 **A skip needs a rule.** This applies to every test in the repository, not only the adversarial suite, because `tests/conftest.py` registers the ledger for every run. Every skip reason must match a rule in `tests/harness/skips.py`, and each rule says why that skip hides no failure. A skip with no matching rule fails the whole run, and the run lists the test and its reason.
+
+A rule can be bound to platforms (`platforms=("win32",)`) or to Python versions (`python_below=(3, 11)`, `python_from=(3, 11)`). Outside those, the reason counts as unexplained, so a test that starts skipping where it should run turns the run red.
 
 The ledger exists because most summaries show a skip as green, so a test that stops running for a new reason looks exactly like one that passes.
 
@@ -89,6 +91,8 @@ Failures are loud and quick:
 
 - A server that exits raises `McpProcessError`, with its exit code and the tail of its stderr.
 - A server that writes nothing within the timeout raises the same error, instead of hanging the suite.
+- A server that stops reading its input does too: a write that does not finish within the timeout kills the server and raises the error.
+- A line from the server that is not JSON raises the error with the line and the tail of stderr.
 
 ## Hooks
 
@@ -97,6 +101,7 @@ Failures are loud and quick:
 - **In a test,** use the `hook_runner` fixture: `hook_runner("claude").run("approve", tool_name="mcp__memvara__memory_search")`.
 - **Giving the hooks a store.** Pass `server_env={"MEMVARA_DB": ..., "MEMVARA_USER": ...}` and the runner writes the host's client config, which is where the hooks look for the store. Without it, the hooks report "not configured". The runner writes client configs as JSON only. Codex keeps its config in TOML, so a Codex run with a store is refused, with that reason, until the hook-conformance tests add a TOML writer.
 - **What a run returns:** the exit code, the parsed reply and the elapsed time. A hook that runs past its host's time limit raises `HookTimeout`, with what it had printed so far.
+- **`capture` is refused for now.** It can start the real agent CLI to extract facts, which would reach the network and spend money. The hook-conformance tests will put stub CLIs first on `PATH`, and until then `run("capture")` raises `NotImplementedError`.
 - **Non-JSON output fails the test.** A hook that prints something other than JSON raises `HookOutputError`, because on a real client that output would desynchronise the conversation.
 
 ## Stores in the test process

@@ -60,5 +60,5 @@ demo.gif
 
 # Hypothesis keeps a cache in the directory it runs from. The adversarial suite's nightly
 # runs keep their example database under ~/.cache instead, so nothing here is worth
-# keeping. Leading slash: this is the one directory at the root.
-/.hypothesis/
+# keeping. No leading slash, because pytest can be run from tests/ as well as from here.
+.hypothesis/

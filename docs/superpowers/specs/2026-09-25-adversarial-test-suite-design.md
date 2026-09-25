@@ -136,7 +136,13 @@ Each module lands in the first PR that uses it:
 - `clock`, `model` and `invariants` in D1;
 - `report` with the nightly run.
 
-Their interfaces are written down here before any parallel work starts.
+Their interfaces are written down here before any parallel work starts. A few functions described below land with the first PR that uses them, not with their module:
+
+- `stores.second_handle()`, `reopen()` and `TEST_KEY` land with D2.
+- `HookRunner`'s `daemon` option, its stub agent CLIs, and its per-run log lines land with A2. Until the stubs exist, `HookRunner` refuses to run `capture`, which could start the real agent CLI.
+- `KnownBug`'s `xfail_nodeid` and `trigger` land with D1, whose state machine needs them. F2 ships `KnownBug(id, issue, title)`, and a test raises `known_bugs.Reproduced` when it sees its bug's exact symptom.
+
+`McpProcess.signal()` lands in F1.
 
 - **`env.child_env(home, extra)`** builds a subprocess environment from an allowlist.
   - HOME and USERPROFILE point at a temporary directory; the real HOME is refused.

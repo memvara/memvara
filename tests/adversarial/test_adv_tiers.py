@@ -9,8 +9,9 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from harness.env import REPO
-from harness.tiers import (SELECTS, TESTS, TIER_DIRS, collection_report, ignored,
-                           nested_tier_folders, tier_of)
+from harness.tiers import (SELECTS, TESTS, TIER_DIRS, collection_report,
+                           folders_without_init, ignored, nested_tier_folders,
+                           tier_of)
 
 
 @pytest.mark.parametrize("relative, tier", [
@@ -106,3 +107,25 @@ def test_no_tier_folder_sits_inside_another() -> None:
     """The outermost tier folder decides a test's tier, so a tier folder inside another
     one would carry a name that means nothing."""
     assert nested_tier_folders(TESTS) == []
+
+
+def test_a_folder_without_init_is_found(tmp_path: pathlib.Path) -> None:
+    for folder in ("model/nightly", "sessions"):
+        (tmp_path / folder).mkdir(parents=True)
+    (tmp_path / "model" / "nightly" / "__init__.py").write_text("")
+    (tmp_path / "__pycache__").mkdir()
+    assert folders_without_init(tmp_path) == [tmp_path / "model", tmp_path / "sessions"]
+
+
+def test_every_folder_of_the_suite_is_a_package() -> None:
+    """A folder without __init__.py makes the modules below it top-level, and a tier
+    folder under it then cannot be imported by its package name."""
+    for root in (TESTS / "adversarial", TESTS / "live"):
+        if root.is_dir():
+            assert folders_without_init(root) == [], root
+
+
+def test_the_collection_report_ignores_bytecode_folders() -> None:
+    line = collection_report("fast", [TESTS / "adversarial" / "nightly",
+                                      TESTS / "adversarial" / "nightly" / "__pycache__"])
+    assert line == "tier fast; left out 1 tier folder: tests/adversarial/nightly"

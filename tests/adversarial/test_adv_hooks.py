@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+from types import SimpleNamespace
 from typing import Callable
 
 import pytest
@@ -73,3 +74,24 @@ def test_a_toml_client_config_is_refused_with_the_reason(hook_runner: Make) -> N
 def test_a_hook_that_runs_past_its_limit_is_reported_as_a_timeout(hook_runner: Make) -> None:
     with pytest.raises(HookTimeout, match="ran past"):
         hook_runner("claude").run("session_start", timeout=0.001)
+
+
+def test_capture_is_refused_until_the_agent_clis_are_stubbed(hook_runner: Make) -> None:
+    """capture can start the real agent CLI, which would reach the network and spend
+    money. HookRunner refuses it until the hook-conformance tests put stubs on PATH."""
+    with pytest.raises(NotImplementedError, match="stub"):
+        hook_runner("claude").run("capture")
+
+
+def test_json_that_is_not_an_object_is_reported_with_stderr() -> None:
+    with pytest.raises(HookOutputError, match="the stderr text"):
+        parse_reply("[1, 2]", what="recall on claude", stderr="the stderr text")
+
+
+def test_a_client_config_outside_the_home_directory_is_refused(
+        hook_runner: Make, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = hook_runner("claude")
+    monkeypatch.setattr(runner, "host", SimpleNamespace(
+        id="claude", config_format="json", client_configs=("/etc/memvara.json",)))
+    with pytest.raises(ValueError, match="outside the test's home"):
+        runner.write_client_config({"MEMVARA_DB": "unused.db"})

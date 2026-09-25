@@ -68,7 +68,8 @@ def parse_reply(stdout: str, *, what: str, stderr: str = "") -> dict[str, Any] |
         raise HookOutputError(f"{what} printed text that is not JSON: {text[:300]!r}; "
                               f"stderr: {stderr[-300:]!r}") from None
     if not isinstance(reply, dict):
-        raise HookOutputError(f"{what} printed JSON that is not an object: {text[:300]!r}")
+        raise HookOutputError(f"{what} printed JSON that is not an object: {text[:300]!r}; "
+                              f"stderr: {stderr[-300:]!r}")
     return reply
 
 
@@ -103,6 +104,9 @@ class HookRunner:
                 f"HookRunner writes JSON client configs only, and {self.host.id} keeps a "
                 f"{self.host.config_format} one; the hook-conformance tests add that writer")
         path = pathlib.Path(str(self.host.client_configs[0]).replace("~", str(self.home), 1))
+        if not path.resolve().is_relative_to(self.home.resolve()):
+            raise ValueError(f"refusing to write a client config outside the test's home: "
+                             f"{path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         block = {"command": sys.executable, "args": ["-m", "memvara.server"],
                  "env": dict(server_env)}
@@ -132,7 +136,16 @@ class HookRunner:
 
     def run(self, hook: str, *, stdin: str | None = None, timeout: float | None = None,
             **fields: Any) -> HookResult:
-        """Run one hook and wait for it, within this host's own timeout for that hook."""
+        """Run one hook and wait for it, within this host's own timeout for that hook.
+
+        capture is refused for now. It can start the real agent CLI to extract facts,
+        which would reach the network and spend money, and the stub CLIs that make it
+        safe arrive with the hook-conformance tests.
+        """
+        if hook == "capture":
+            raise NotImplementedError(
+                "capture can start the real agent CLI; it is refused until the "
+                "hook-conformance tests put stub CLIs first on PATH")
         text = json.dumps(self.payload(hook, **fields)) if stdin is None else stdin
         limit = float(self.host.timeouts[hook]) if timeout is None else timeout
         started = time.monotonic()

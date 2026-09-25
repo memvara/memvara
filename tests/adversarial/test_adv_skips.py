@@ -6,6 +6,8 @@ import pathlib
 import subprocess
 import sys
 
+import pytest
+
 from harness.env import REPO, child_env
 from harness.skips import RULES, explained, reason_of
 
@@ -62,3 +64,20 @@ def test_an_unexplained_skip_fails_the_run(tmp_path: pathlib.Path) -> None:
 def test_an_explained_skip_leaves_the_run_green(tmp_path: pathlib.Path) -> None:
     done = _run_one_skip(tmp_path, "git is not installed")
     assert done.returncode == 0, done.stdout + done.stderr
+
+
+def test_a_windows_only_reason_is_not_explained_elsewhere() -> None:
+    reason = "no POSIX permission bits to check"
+    assert explained(reason, platform="win32", version=(3, 13))
+    assert not explained(reason, platform="linux", version=(3, 13))
+
+
+def test_a_version_bound_reason_is_explained_only_on_that_version() -> None:
+    assert explained("tomllib arrived in 3.11", platform="linux", version=(3, 10))
+    assert not explained("tomllib arrived in 3.11", platform="linux", version=(3, 12))
+    assert explained("3.10 only", platform="linux", version=(3, 12))
+    assert not explained("3.10 only", platform="linux", version=(3, 10))
+
+
+def test_the_ledger_is_registered_for_every_run(request: pytest.FixtureRequest) -> None:
+    assert request.config.pluginmanager.get_plugin("memvara-skip-ledger") is not None

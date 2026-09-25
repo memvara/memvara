@@ -2231,7 +2231,7 @@ git commit -m "Pin five confirmed bugs as strict expected failures that cite the
 
 ## Task 11: Report B1 privately (F2)
 
-- [ ] **Step 1: Check the advisory body.** It is kept in `local/advisory-b1.json`, which git ignores, and on the internal Confluence page for the security decision (17596417). It never enters the repository, because SECURITY.md keeps a vulnerability private until its fix ships. Read it once before sending, and confirm it names the affected versions (`<= 0.15.0`).
+- [ ] **Step 1: Check the advisory body.** It is kept in `local/advisory-b1.json`, which git ignores. It never enters the repository, because SECURITY.md keeps a vulnerability private until its fix ships. Read it once before sending.
 
 - [ ] **Step 2: Create the draft advisory.**
 
@@ -2239,7 +2239,7 @@ git commit -m "Pin five confirmed bugs as strict expected failures that cite the
 gh api --method POST repos/memvara/memvara/security-advisories --input local/advisory-b1.json --jq '.ghsa_id + " " + .html_url'
 ```
 
-Expected: a GHSA id and a URL, with the advisory in draft state. Record the id on Confluence page 17596417, which is internal, and never in the repository.
+Expected: a GHSA id and a URL, with the advisory in draft state. Record the id on the internal decision page for security findings, and never in the repository.
 
 ---
 

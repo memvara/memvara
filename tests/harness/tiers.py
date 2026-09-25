@@ -79,7 +79,7 @@ def collection_report(option: str, left_out: Iterable[pathlib.Path]) -> str:
     Leaving a folder out prints nothing on its own, so a folder that happens to share a
     tier's name would drop out of every run unnoticed. This line makes it visible.
     """
-    names = sorted({_shown(path) for path in left_out})
+    names = sorted({_shown(path) for path in left_out if path.name != "__pycache__"})
     if not names:
         return f"tier {option}; no tier folder left out"
     noun = "tier folder" if len(names) == 1 else "tier folders"
@@ -109,6 +109,17 @@ def nested_tier_folders(root: pathlib.Path) -> list[pathlib.Path]:
         if above[:1] == ("live",) or any(part in TIER_DIRS for part in above):
             found.append(directory)
     return found
+
+
+def folders_without_init(root: pathlib.Path) -> list[pathlib.Path]:
+    """Folders under `root` that have no __init__.py, leaving out bytecode caches.
+
+    Without __init__.py at every level, pytest imports a tier folder's modules under a
+    name of their own, and they fail to import or collide with others of the same name.
+    """
+    return sorted(directory for directory in pathlib.Path(root).rglob("*")
+                  if directory.is_dir() and "__pycache__" not in directory.parts
+                  and not (directory / "__init__.py").is_file())
 
 
 #: The Hypothesis profile each tier runs under.
