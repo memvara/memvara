@@ -36,5 +36,6 @@ def test_a_full_disk_fails_loudly_and_the_store_recovers(tmp_path: pathlib.Path)
     assert any(word in message for word in ("full", "too large", "File too large",
                                             "disk")), message
     live = {a["ids"][0]: f"q{a['index']:06d}x" for a in child.acked if a["ids"]}
+    # `_fill` writes each object as exactly this token, so `search` finds it by itself.
     assert live, "no write succeeded before the disk filled"
     after_crash(db, USER, live).close()

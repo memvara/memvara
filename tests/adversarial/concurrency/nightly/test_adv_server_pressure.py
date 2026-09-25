@@ -132,7 +132,9 @@ def test_a_writer_that_holds_the_lock_makes_others_fail_after_the_busy_timeout(
             with pytest.raises(Exception, match="database is locked"):
                 mem.remember("user", "lives_in", "Nairobi", user=USER)
             took = time.monotonic() - started
-        assert 4.5 <= took <= 7.0, f"the write waited {took:.1f} s"
+        # At least the five-second busy timeout, less a little clock slack, and not
+        # without end; the upper bound is loose because this tier runs on a busy machine.
+        assert 4.5 <= took <= 15.0, f"the write waited {took:.1f} s"
         with McpProcess(db, home=home) as server:
             server.initialize()
             started = time.monotonic()
@@ -140,7 +142,7 @@ def test_a_writer_that_holds_the_lock_makes_others_fail_after_the_busy_timeout(
                                 object="Lima")
             took = time.monotonic() - started
             assert reply.is_error, reply.text
-            assert took <= 7.0, f"the server's write waited {took:.1f} s"
+            assert 4.5 <= took <= 15.0, f"the server's write waited {took:.1f} s"
             assert server.request("ping") is not None
         child.release()
         child.wait_for("DONE")

@@ -15,7 +15,7 @@ from collections.abc import Callable
 
 import pytest
 
-from memvara import Memvara, NullLLM
+from memvara import EmbedderMismatchError, Memvara, NullLLM
 from memvara.embed import HashingEmbedder
 
 from harness import known_bugs, stores
@@ -87,7 +87,7 @@ def test_an_embedder_change_is_noticed_after_the_record_is_damaged(
         try:
             Memvara(str(db), embedder=other_embedder(), llm=NullLLM()).close()
             refused = False
-        except Exception:  # noqa: BLE001 - a refusal is one of the two right answers
+        except EmbedderMismatchError:
             refused = True
     if not refused and not seen:
         raise known_bugs.Reproduced("a store whose embedder record is damaged opened with "

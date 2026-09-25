@@ -27,10 +27,7 @@ from memvara import Memvara
 from harness import stores
 from harness.clock import INSTANTS
 from harness.invariants import check_store_integrity
-
-USERS = ("u1", "u2")
-POOLS = {"lives_in": ("Berlin", "Paris", "Rome"), "likes": ("tea", "coffee"),
-         "collects": ("stamps", "vinyl")}
+from harness.model import POOLS, USERS
 #: Past instants and the present only. Scheduled values are the reference model's to
 #: exercise; here they would only make the single-valued check below harder to state.
 VALID_FROM = (None, None, INSTANTS[1], INSTANTS[3])
@@ -38,8 +35,8 @@ VALID_FROM = (None, None, INSTANTS[1], INSTANTS[3])
 
 @dataclass
 class Log:
-    """What the threads were told happened."""
-    added: set[str] = field(default_factory=set)
+    """What the threads were told happened: each acknowledged claim, with its user."""
+    added: dict[str, str] = field(default_factory=dict)
     errors: list[BaseException] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -52,10 +49,12 @@ def worker(mem: Memvara, seed: int, operations: int, log: Log) -> None:
             predicate = rng.choice(sorted(POOLS))
             kind = rng.choices(["remember", "retract", "forget", "delete"],
                                weights=[6, 1, 1, 1])[0]
-            with log.lock:
-                known = sorted(log.added)
-            if kind == "delete" and known:
-                mem.delete(rng.choice(known), user=user)
+            if kind == "delete":
+                with log.lock:
+                    known = sorted(log.added.items())
+                if known:
+                    claim_id, owner = rng.choice(known)
+                    mem.delete(claim_id, user=owner)
             elif kind == "forget":
                 mem.forget("user", predicate, user=user)
             else:
@@ -64,7 +63,7 @@ def worker(mem: Memvara, seed: int, operations: int, log: Log) -> None:
                     polarity=-1 if kind == "retract" else 1,
                     valid_from=rng.choice(VALID_FROM))
                 with log.lock:
-                    log.added.update(c.id for c in receipt.added)
+                    log.added.update((c.id, user) for c in receipt.added)
     except BaseException as exc:  # noqa: BLE001 - reported by the test
         log.errors.append(exc)
 
@@ -88,7 +87,8 @@ def run_threads(path: pathlib.Path, threads: int, operations: int, seed: int) ->
         for c in rows:
             assert c.valid_to is None or c.valid_to >= c.valid_from, (
                 f"{c.id} ends at {c.valid_to}, before it starts at {c.valid_from}")
-        assert log.added <= ids, f"acknowledged claims are gone: {sorted(log.added - ids)}"
+        gone = sorted(set(log.added) - ids)
+        assert not gone, f"acknowledged claims are gone: {gone}"
     assert check_store_integrity(path) == []
 
 

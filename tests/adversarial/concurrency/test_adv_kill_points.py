@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from harness import stores
-from harness.crash import Child, after_crash
+from harness.crash import Child, acked_claims, after_crash, kill_at
 from harness.invariants import check_store_integrity
 
 USER = "u1"
@@ -29,25 +29,10 @@ def program(db: pathlib.Path, **fields: Any) -> dict[str, Any]:
             "hold": False, **fields}
 
 
-@pytest.fixture()
-def home(tmp_path: pathlib.Path) -> pathlib.Path:
-    path = tmp_path / "home"
-    path.mkdir()
-    return path
-
-
-def kill_at(point: str, db: pathlib.Path, home: pathlib.Path, **fields: Any) -> Child:
-    """Run the program until the child reaches `point`, then kill it."""
-    with Child(program(db, point=point, **fields), home=home) as child:
-        child.wait_for(f"POINT {point}")
-        child.kill()
-    return child
-
 
 def acked_live(child: Child) -> dict[str, str]:
     """The setup writes the child acknowledged, by id, with the text that finds each."""
-    assert len(child.acked) == len(SETUP), f"the child acknowledged {child.acked}"
-    return {a["ids"][0]: op[1]["object"] for a, op in zip(child.acked, SETUP)}
+    return acked_claims(child, SETUP)
 
 
 def rows_per_table(raw: sqlite3.Connection) -> dict[str, int]:
@@ -69,7 +54,8 @@ def objects(mem: Any, predicate: str) -> list[str]:
 def test_a_kill_after_the_episode_leaves_no_episode(
         tmp_path: pathlib.Path, home: pathlib.Path) -> None:
     db = tmp_path / "s.db"
-    child = kill_at("after-episode", db, home, action=["add", {"text": "I live in Berlin"}])
+    child = kill_at(program(db, point="after-episode",
+                            action=["add", {"text": "I live in Berlin"}]), home)
     mem = after_crash(db, USER, acked_live(child))
     try:
         assert objects(mem, "lives_in") == []
@@ -88,8 +74,8 @@ def test_a_kill_after_the_episode_leaves_no_episode(
 def test_a_kill_inside_remember_leaves_no_part_of_the_claim(
         point: str, tmp_path: pathlib.Path, home: pathlib.Path) -> None:
     db = tmp_path / "s.db"
-    child = kill_at(point, db, home, action=[
-        "remember", {"predicate": "lives_in", "object": "Berlin"}])
+    child = kill_at(program(db, point=point, action=[
+        "remember", {"predicate": "lives_in", "object": "Berlin"}]), home)
     mem = after_crash(db, USER, acked_live(child))
     try:
         assert objects(mem, "lives_in") == []
@@ -100,7 +86,8 @@ def test_a_kill_inside_remember_leaves_no_part_of_the_claim(
 def test_a_kill_inside_erase_leaves_the_claim_whole_and_unrecorded(
         tmp_path: pathlib.Path, home: pathlib.Path) -> None:
     db = tmp_path / "s.db"
-    child = kill_at("erase-before-delete", db, home, action=["erase", {"id": {"ref": 1}}])
+    child = kill_at(program(db, point="erase-before-delete",
+                            action=["erase", {"id": {"ref": 1}}]), home)
     # Both setup claims must still be live: the erase of the second was never committed,
     # so `after_crash` also checks the second has no erasure record.
     after_crash(db, USER, acked_live(child)).close()
@@ -124,7 +111,7 @@ def test_a_kill_inside_a_batch_loses_the_whole_batch_and_nothing_before_it(
     db = tmp_path / "s.db"
     batch = [["remember", {"predicate": "collects", "object": name}]
              for name in ("stamps", "vinyl", "coins")]
-    child = kill_at("inside-batch", db, home, action=["batch", {"ops": batch}])
+    child = kill_at(program(db, point="inside-batch", action=["batch", {"ops": batch}]), home)
     mem = after_crash(db, USER, acked_live(child))
     try:
         assert objects(mem, "collects") == []
@@ -192,8 +179,8 @@ def test_after_a_kill_inside_remember_new_writes_find_only_their_own_claims(
     Whichever write takes that slot next must overwrite them, and no search may return
     a claim that does not exist."""
     db = tmp_path / "s.db"
-    child = kill_at("after-vector", db, home, action=[
-        "remember", {"predicate": "lives_in", "object": "Berlin"}])
+    child = kill_at(program(db, point="after-vector", action=[
+        "remember", {"predicate": "lives_in", "object": "Berlin"}]), home)
     mem = after_crash(db, USER, acked_live(child))
     try:
         cities = ["Paris", "Rome", "Lisbon", "Oslo", "Vienna", "Prague", "Dublin",

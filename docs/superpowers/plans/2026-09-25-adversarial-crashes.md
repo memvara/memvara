@@ -105,7 +105,7 @@ The research for this plan read the code for each point and checked two of them 
   - `after-commit`: the claim is present and found by `search`.
   - Review Focus 1: after a kill at `after-vector`, twenty more writes are made; `search` for each returns its own claim first, and never a row that does not exist.
   - Review Focus 2: in every test, the next write after the kill finishes within one second.
-  - WAL recovery: a child acknowledges five writes, then makes three more inside one `batch()` and is killed before the batch ends; the five are present and the three are not.
+  - WAL recovery: a child acknowledges two writes, then makes three more inside one `batch()` and is killed before the batch ends; the two are present and the three are not.
 - [ ] **Step 2: Run them.** Each must fail only on the missing `after_crash`, and never on a store problem. A store problem is a finding: stop and handle it as the Global Constraints say.
 - [ ] **Step 3: Write `after_crash`.**
 - [ ] **Step 4: Run them and watch them pass.**

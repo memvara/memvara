@@ -345,6 +345,8 @@ class Pair:
                 # costliest read, and the present already searches for every value.
                 self._check_search(user, values[i % len(values)], valid_at, known_at, now)
             for states in STATE_SETS:
+                if i == 0 and states == ("live",):
+                    continue        # the plain get_all() above made this read already
                 got = self._read(user, mem.get_all(user=user, valid_at=valid_at,
                                                    known_at=known_at, states=states), floor)
                 want = model.visible(user, valid_at=valid_at, known_at=known_at,

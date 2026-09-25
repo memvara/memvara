@@ -21,12 +21,6 @@ def remember(predicate: str, obj: str, **extra: Any) -> list[Any]:
     return ["remember", {"predicate": predicate, "object": obj, **extra}]
 
 
-@pytest.fixture()
-def home(tmp_path: pathlib.Path) -> pathlib.Path:
-    path = tmp_path / "home"
-    path.mkdir()
-    return path
-
 
 def test_a_child_with_no_point_acknowledges_each_setup_op_and_finishes(
         tmp_path: pathlib.Path, home: pathlib.Path) -> None:

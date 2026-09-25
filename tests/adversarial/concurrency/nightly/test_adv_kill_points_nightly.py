@@ -9,7 +9,6 @@ The recovery each must show is in the table in
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 from typing import Any
 
@@ -18,7 +17,7 @@ import pytest
 from memvara import Memvara, NullLLM
 from memvara.embed import HashingEmbedder
 
-from harness.crash import Child, after_crash
+from harness.crash import acked_claims, after_crash, kill_at
 
 USER = "u1"
 SETUP = [["remember", {"predicate": "likes", "object": "green tea"}],
@@ -26,25 +25,12 @@ SETUP = [["remember", {"predicate": "likes", "object": "green tea"}],
 KEY = bytes(range(32))
 
 
-@pytest.fixture()
-def home(tmp_path: pathlib.Path) -> pathlib.Path:
-    path = tmp_path / "home"
-    path.mkdir()
-    return path
 
-
-def kill_at(point: str, spec: dict[str, Any], home: pathlib.Path,
-            env: dict[str, str] | None = None) -> Child:
-    with Child({"user": USER, "hold": False, "point": point, **spec}, home=home, env=env,
-               timeout=120) as child:
-        child.wait_for(f"POINT {point}")
-        child.kill()
-    return child
-
-
-def acked(child: Child, setup: list[list[Any]]) -> dict[str, str]:
-    assert len(child.acked) == len(setup), f"the child acknowledged {len(child.acked)}"
-    return {a["ids"][0]: op[1]["object"] for a, op in zip(child.acked, setup)}
+def killed(point: str, spec: dict[str, Any], home: pathlib.Path,
+           env: dict[str, str] | None = None) -> Any:
+    """`crash.kill_at` with this file's user, and a timeout long enough for 256 writes."""
+    return kill_at({"user": USER, "hold": False, "point": point, **spec}, home, env=env,
+                   timeout=120)
 
 
 def test_a_kill_while_the_vector_file_grows_keeps_every_acknowledged_claim(
@@ -53,9 +39,9 @@ def test_a_kill_while_the_vector_file_grows_keeps_every_acknowledged_claim(
     db = tmp_path / "s.db"
     setup = [["remember", {"predicate": "visited", "object": f"q{i:03d}x"}]
              for i in range(256)]
-    child = kill_at("vecs-growth", {"db": str(db), "setup": setup, "action": [
+    child = killed("vecs-growth", {"db": str(db), "setup": setup, "action": [
         "remember", {"predicate": "visited", "object": "q256x"}]}, home)
-    mem = after_crash(db, USER, acked(child, setup))
+    mem = after_crash(db, USER, acked_claims(child, setup))
     try:
         assert "q256x" not in {c.object for c in mem.store.iter_claims(None, True)}
     finally:
@@ -68,7 +54,7 @@ def test_a_kill_while_the_embedder_record_is_written_heals_on_the_next_open(
     no vectors rewrites it on the next open, and the record then catches an embedder
     change again."""
     db = tmp_path / "s.db"
-    kill_at("fingerprint-write", {"db": str(db), "setup": [], "action": ["open", {}]}, home)
+    killed("fingerprint-write", {"db": str(db), "setup": [], "action": ["open", {}]}, home)
     record = pathlib.Path(str(db) + ".embedder.json")
     with pytest.raises(json.JSONDecodeError):
         json.loads(record.read_text())
@@ -80,7 +66,7 @@ def test_a_kill_while_the_embedder_record_is_written_heals_on_the_next_open(
 
 
 def test_a_kill_between_encrypt_stores_two_renames_leaves_a_store_that_opens(
-        tmp_path: pathlib.Path, home: pathlib.Path) -> None:
+        tmp_path: pathlib.Path, home: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The database is already the encrypted copy and the vector file is still the old
     one. The next open with the key rebuilds the vectors, every claim is found, and a
     second `encrypt_store` reports the store as encrypted despite the files the kill
@@ -90,14 +76,11 @@ def test_a_kill_between_encrypt_stores_two_renames_leaves_a_store_that_opens(
 
     db = tmp_path / "s.db"
     env = {"MEMVARA_DB_KEY": KEY.hex()}
-    child = kill_at("encrypt-between-renames", {"db": str(db), "setup": SETUP,
+    child = killed("encrypt-between-renames", {"db": str(db), "setup": SETUP,
                                                 "action": ["encrypt", {}]}, home, env)
-    after_crash(db, USER, acked(child, SETUP), key=KEY).close()
-    os.environ["MEMVARA_DB_KEY"] = KEY.hex()
-    try:
-        assert encrypt_store(str(db)).already is True
-    finally:
-        del os.environ["MEMVARA_DB_KEY"]
+    after_crash(db, USER, acked_claims(child, SETUP), key=KEY).close()
+    monkeypatch.setenv("MEMVARA_DB_KEY", KEY.hex())
+    assert encrypt_store(str(db)).already is True
 
 
 def test_a_kill_before_a_documents_claims_leaves_it_visibly_unfinished(
@@ -108,15 +91,19 @@ def test_a_kill_before_a_documents_claims_leaves_it_visibly_unfinished(
     db = tmp_path / "s.db"
     text = "\n\n".join(f"Section {i}. The team moved the build to Rust in year {2020 + i}."
                        for i in range(8))
-    child = kill_at("document-before-claims", {
+    child = killed("document-before-claims", {
         "db": str(db), "setup": SETUP,
         "action": ["add_document", {"content": text, "title": "notes"}]}, home)
-    mem = after_crash(db, USER, acked(child, SETUP))
+    mem = after_crash(db, USER, acked_claims(child, SETUP))
     try:
         [doc] = mem.list_documents(user=USER).items
         assert doc.status not in ("done", "stored"), (
             f"the document reads as {doc.status!r} although its claims were never "
             f"extracted")
         assert doc.chunks > 0
+        # Nothing was extracted, so the only claims are the two setup writes and the
+        # one `after_crash` made.
+        predicates = {c.predicate for c in mem.store.iter_claims(None, True)}
+        assert predicates == {"likes"}, f"a claim came from the document: {predicates}"
     finally:
         mem.close()

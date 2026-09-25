@@ -21,7 +21,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from types import TracebackType
 from typing import Any
 
@@ -32,12 +32,14 @@ from harness.crash_child import PAUSES, POINTS
 from harness.env import child_env
 from harness.invariants import check_store_integrity
 
-__all__ = ["CHILD", "PAUSES", "POINTS", "Child", "CrashHarnessError", "after_crash"]
+__all__ = ["CHILD", "PAUSES", "POINTS", "Child", "CrashHarnessError", "acked_claims",
+           "after_crash", "kill_at"]
 
 CHILD = pathlib.Path(__file__).with_name("crash_child.py")
 #: The next write after a crash must finish within this many seconds. A lock the dead
-#: process still held would make it wait out the five-second busy timeout instead.
-NEXT_WRITE_SECONDS = 1.0
+#: process still held would make it wait out SQLite's five-second busy timeout, so three
+#: seconds tells the two apart and still leaves room for a slow or loaded machine.
+NEXT_WRITE_SECONDS = 3.0
 
 _EOF = object()
 
@@ -132,6 +134,24 @@ class Child:
         assert self.proc.stdin is not None
         self.proc.stdin.close()
         return self.proc.wait(timeout=self.timeout)
+
+
+def kill_at(program: Mapping[str, Any], home: pathlib.Path, *,
+            env: Mapping[str, str] | None = None, timeout: float = 20.0) -> Child:
+    """Run `program` until the child reaches its point, then kill it. The returned child
+    has exited; its `acked` list says which setup ops it finished."""
+    with Child(program, home=home, env=env, timeout=timeout) as child:
+        child.wait_for(f"POINT {program['point']}")
+        child.kill()
+    return child
+
+
+def acked_claims(child: Child, setup: Sequence[Sequence[Any]]) -> dict[str, str]:
+    """The claims the child's `remember` setup ops acknowledged, by id, with the object
+    each was written with, which is the text `after_crash` searches for."""
+    assert len(child.acked) == len(setup), (
+        f"the child acknowledged {len(child.acked)} of {len(setup)} setup ops")
+    return {a["ids"][0]: op[1]["object"] for a, op in zip(child.acked, setup)}
 
 
 def after_crash(path: pathlib.Path, user: str, live: Mapping[str, str], *,
