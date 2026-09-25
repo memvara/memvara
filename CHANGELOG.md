@@ -31,6 +31,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     for the damage a crash or a bad write leaves.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
+### Fixed
+
+- **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
+  decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
+  interpreter's stack allows, and the server let it escape, so a single such line ended
+  the agent's memory for the rest of the session. The line is now answered with a JSON-RPC
+  parse error (`-32700`, "nested too deeply to parse"), and the server carries on. #268.
+
 ## [0.16.0] — 2026-09-25
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store moves to schema 16 on

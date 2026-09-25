@@ -636,6 +636,20 @@ def test_malformed_requests_get_the_right_error(server, line, code):
     assert json.loads(server.handle_line(line))["error"]["code"] == code
 
 
+def test_a_request_nested_too_deeply_gets_a_parse_error_and_the_server_carries_on(server):
+    """The standard library's JSON decoder raises `RecursionError`, not `ValueError`, on
+    nesting deeper than the interpreter's stack allows. One such line used to end the
+    stdio loop, and with it the agent's memory for the rest of the session (#268)."""
+    depth = 100_000
+    line = ('{"jsonrpc":"2.0","id":7,"method":"ping","params":'
+            + "[" * depth + "]" * depth + "}")
+    reply = json.loads(server.handle_line(line))
+    assert reply["id"] is None and reply["error"]["code"] == PARSE_ERROR
+    assert "nested too deeply" in reply["error"]["message"]
+    after = json.loads(server.handle_line('{"jsonrpc":"2.0","id":8,"method":"ping"}'))
+    assert after == {"jsonrpc": "2.0", "id": 8, "result": {}}
+
+
 @pytest.mark.parametrize("line", [
     '{"jsonrpc":"1.0","method":"ping"}',
     '{"jsonrpc":"2.0","method":"ping","params":[]}',
