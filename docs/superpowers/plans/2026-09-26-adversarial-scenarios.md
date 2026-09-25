@@ -34,7 +34,7 @@ Commands below use these names:
 ```bash
 PY=/Applications/workstation/agent-memory/.claude/worktrees/friendly-einstein-53c8da/local/venv-ci/bin/python
 WT=/Applications/workstation/agent-memory/.claude/worktrees/agent-af04a7e05a3bb4ec5
-TMP=/private/tmp/claude-501/-Applications-workstation-agent-memory--claude-worktrees-friendly-einstein-53c8da/84a5fc6b-bf50-44af-b5c8-9b1db5c5aa64/scratchpad/tmp-f4
+TMP=<a directory of your own under /private/tmp>
 # run from $WT:
 PYTHONPATH=$WT TMPDIR=$TMP $PY -m pytest -q -p no:cacheprovider <paths>
 ```
@@ -162,7 +162,7 @@ PYTHONPATH=$WT TMPDIR=$TMP $PY -m pytest -q -p no:cacheprovider <paths>
       "type": "object", "required": ["hook"], "additionalProperties": false,
       "properties": {
         "hook": {"enum": ["session_start", "recall", "approve"]},
-        "host": {"enum": ["claude", "codex", "copilot", "cursor", "opencode"], "description": "Which host's payload and reply shape to use. Claude Code when left out."},
+        "host": {"enum": ["claude", "codex", "copilot", "cursor", "opencode"], "description": "Which host's payload and reply shape to use: the host ids in plugin/hooks/hosts. claude when left out."},
         "fields": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Payload fields: session, cwd, prompt, transcript_path or tool_name. The session, the working directory and, for recall, the turn's words are filled in already."},
         "capture": {"$ref": "#/$defs/capture"}
       }
@@ -1411,7 +1411,7 @@ The runner writes the `seed` through the library first. The seed stands for memo
 | Step | What it does |
 |---|---|
 | `{"tool": "memory_…", "args": {…}}` | Calls a tool on the session's server. The call must succeed, unless the step says `"expect_error": true`. |
-| `{"hook": "session_start"}` | Runs one of the plugin's hooks against the same store, for Claude Code unless `host` names another host. The recall hook is given the turn's words as its prompt. |
+| `{"hook": "session_start"}` | Runs one of the plugin's hooks against the same store, with the payload and reply shape of the `claude` host unless `host` names another one. The recall hook is given the turn's words as its prompt. |
 | `{"op": "erase", "claim_id": "…"}` | Erases a claim through the library. No tool can erase a memory, so this stands for the operator doing it. |
 | `{"mark": "name", "offset_seconds": 1.5}` | Records the instant now, plus the offset, under a name. |
 | `{"wait_until": "name"}` | Sleeps until that instant has passed. |

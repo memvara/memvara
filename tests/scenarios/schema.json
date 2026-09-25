@@ -71,7 +71,7 @@
       "type": "object", "required": ["hook"], "additionalProperties": false,
       "properties": {
         "hook": {"enum": ["session_start", "recall", "approve"]},
-        "host": {"enum": ["claude", "codex", "copilot", "cursor", "opencode"], "description": "Which host's payload and reply shape to use. Claude Code when left out."},
+        "host": {"enum": ["claude", "codex", "copilot", "cursor", "opencode"], "description": "Which host's payload and reply shape to use: the host ids in plugin/hooks/hosts. claude when left out."},
         "fields": {
           "type": "object", "additionalProperties": false,
           "description": "Payload fields, written under the host's own key for each. The session, the working directory and, for recall, the turn's words are filled in already.",
