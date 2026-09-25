@@ -652,8 +652,9 @@ U+2212, which NFKD leaves alone, is read as `-`. None of the three is a colon, s
 question through the same `entity_key` (`retrieve/anchor.query_tokens`), so a question
 about "C#" matches the key `c#`. Before this, "C++", "C#" and "C" shared the key `c`, so a
 second of them in one slot was recorded as a repeat of the first. Schema version 16 exists
-only for this change: an older file re-derives every claim's keys and both hashes on its
-first open, through the UPDATEs that `_migrate_to_v12` runs on every upgrade, and
+only for two fold changes, this one and the next: an older file re-derives every claim's
+keys and both hashes on its first open, through the UPDATEs that `_migrate_to_v12` runs
+on every upgrade, and
 `test_a_store_written_with_the_old_fold_is_rekeyed_when_opened` fails if that stops. Three
 things keep what the old fold gave them. A claim's alias stamp is read before the fold, so
 a merge made at write time survives. An alias in the `entities` table stays filed under
@@ -664,6 +665,16 @@ outside the tests reads that spelling. The rule still folds some different names
 together: "C++11" folds like "C 11", and a three-letter credit rating such as "BBB-" loses
 its `-`. It also keeps one hyphen it should drop. In "in- and outbound" the suspended
 hyphen stays on the two-letter "in", so that value no longer matches "in and outbound".
+
+**Every leading article goes.** `entity_key` strips "the" from the front of a name until
+one word is left, so "the the band" folds to `band` and "The The" to `the`. It used to
+strip only the first, and "the the band" folded to "the band", which folds again to
+`band`. A key that does not fold to itself breaks what `fact_key_for` and
+`default_entity` assume, and it showed: `Claim.fact_key` folds `subject_key` again, so a
+claim about "The The Band" had the key `the band` and sat in the slot of `band`. Only a
+name that starts with "the" twice once legal forms such as "Inc" are dropped, and has a
+third word, changes key, and the same schema version 16 re-derives it. `_bounded` has no
+article rule of its own, because no leading article reaches it.
 
 `WritePipeline` copies that list onto `WriteReceipt.closed`, where `receipt.ended` and
 `receipt.retired` split it by `Claim.state`. Anything rendering the list as one word is

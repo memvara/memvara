@@ -15,12 +15,15 @@ Entries are newest first, and each one says how you find your own instances of i
 key, and so did the blood types "A+" and "A-". It now keeps a `+` at the end of any word,
 and a `#` or a single `-` at the end of a word of one or two letters. The minus sign U+2212
 counts as `-`. Inside a word the symbols still separate, so "x-ray" and "X ray" are one
-value, as before.
+value, as before. The fold also strips every leading "the" instead of only the first, so
+"The The Band" folds to `band`, where it folded to `the band`, a key that did not fold to
+itself.
 
 Every claim's `subject_key`, `object_key`, `fact_key` and `value_key` is built from that
 fold, so `SQLiteStore` moves to schema version 16. The first open of an older file
-re-derives all four for every claim from the text you wrote. Text in which no word ends in
-one of these symbols keys exactly as before.
+re-derives all four for every claim from the text you wrote. Text keys exactly as before
+unless a word ends in one of these symbols, or it starts with "the" twice once legal forms
+such as "Inc" are dropped.
 
 ### Who this changes, and in which direction
 
@@ -44,6 +47,11 @@ earlier version no longer equals the key this version computes for the same text
 registry learned aliases, through a model or `EntityRegistry.learn_alias()`, keeps each
 under the key its spelling folded to when it was learned. An alias learned for "C#" was
 filed under `c`, so it still answers for "C" and no longer answers for "C#".
+
+**If a stored name starts with "the" twice**, such as "The The Band", its key changes
+from `the band` to `band`, and it becomes one value with "The Band". Its slot does not
+move, because the slot was already computed from `band`. The query at the end of this
+entry finds such claims.
 
 **`RemoteMemvara` computes no keys.** The hosted service does, so a hosted store changes
 when the service moves to this release, not when your client does.
@@ -70,6 +78,15 @@ for c in mem.store.iter_claims(states=["live"]):
         print(f"{c.id} {c.subject} {c.predicate} {c.object!r}")
         for t in turns:
             print("    ", t[:160])
+```
+
+Claims whose subject or object starts with "the" twice, which re-key to the name without
+them. `LIKE` ignores ASCII case in SQLite. A spelling with punctuation or a legal form
+between the two, such as "The, the Band" or "The Inc The Band", is not caught:
+
+```sql
+SELECT id, subject, predicate, object FROM claims
+WHERE subject LIKE 'the the %' OR object LIKE 'the the %';
 ```
 
 ---

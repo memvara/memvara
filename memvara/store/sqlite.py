@@ -185,7 +185,8 @@ if TYPE_CHECKING:  # pragma: no cover
 #    expiry and inventing one would erase data nobody asked to erase. A partial index
 #    over the non-null expiries keeps the sweep off the rest of the table.
 # 16: the entity fold keeps a `+`, `#` or `-` that ends a name, so `C++`, `C#` and `C` key
-#    to three values and the blood types `A+` and `A-` to two. No column changes. The
+#    to three values and the blood types `A+` and `A-` to two, and it strips every leading
+#    "the", so "the the band" keys as `band` and folds to itself. No column changes. The
 #    version exists so that an older file re-derives every key once with the new fold,
 #    which `_migrate_to_v12` does on every upgrade; `_migrate` says why that is enough.
 SCHEMA_VERSION = 16
