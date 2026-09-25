@@ -47,6 +47,15 @@ def test_a_tool_description_states_the_default_of_a_quoted_argument() -> None:
     assert stated_in_tool(text) == [Stated("subject", "user", True, "'subject', default 'user'")]
 
 
+def test_a_default_that_ends_a_sentence_is_still_read() -> None:
+    """The full stop after the value must not hide the statement, and must not cut a
+    decimal short either."""
+    assert stated("Relevance is weighed at the default 0.5.", "weight") == [
+        Stated("weight", 0.5, True, "at the default 0.5")]
+    assert stated_in_tool("Give 'predicate', with 'subject', default 'user'.") == [
+        Stated("subject", "user", True, "'subject', default 'user'")]
+
+
 def test_the_word_default_alone_states_nothing() -> None:
     assert stated("The read is served in the default order, and says so.", "ranked") == []
     assert stated("The default is not a harmless approximation: it asserts a start.",

@@ -23,8 +23,11 @@ What the parse cannot see:
   argument alone in plain prose goes unnoticed.
 - Two of a tool's own one-word arguments joined by "and" count as a mention, even in a
   sentence that means the English words.
-- A word in the list after "like", "such as" or "e.g." is taken as example data, so a
-  stale argument name written there would not be reported.
+- A snake_case word that is not a tool, an argument or a predicate is taken as example
+  data when it sits inside quotes, parentheses or braces, or in the list after "like",
+  "such as" or "e.g.". So an argument renamed in the schema, whose old name the text still
+  gives in one of those places, is not reported: "(query_rewrite)" would pass under a new
+  name for the argument.
 """
 
 from __future__ import annotations

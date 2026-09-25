@@ -28,7 +28,9 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 _LITERAL = r"(?:true|false|-?\d+(?:\.\d+)?|'[^'\n]*')"
-_END_OF_LITERAL = r"(?![\w.'])"
+#: A literal ends where a word does, and may end a sentence. It may not stop at the point
+#: inside a decimal, so "1.5" is never read as 1.
+_END_OF_LITERAL = r"(?![\w'])(?!\.\d)"
 #: The start of a sentence: the start of the text, or after a sentence's punctuation.
 _START = r"(?:\A|(?<=[.;:!?]\s)|(?<=—\s)|(?<=\n))"
 #: "Default V" or "Defaults to V" opening a sentence. The phrase ends at a comma, a colon,
