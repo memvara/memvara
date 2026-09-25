@@ -291,4 +291,12 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 - **When a release changes the schema.** Add the release to `golden.RELEASES` and run `python tests/adversarial/upgrade/build_stores.py <tag>`. The nightly test `test_every_released_schema_version_has_a_committed_store` fails until you do.
 - **Two support modules.** Besides its tests, the folder holds `golden.py` and `build_stores.py`, which are not tests.
 
+## Protocol and validator fuzzing
+
+`tests/adversarial/fuzz/` sends the MCP server input that a correct client would never send. After each input it checks three things: every request that has an id gets exactly one reply with that id, a call the server refuses changes nothing in the store, and the server still answers a ping. The plan is `docs/superpowers/plans/2026-09-26-adversarial-fuzz.md`.
+
+- **How replies are counted.** `exchange(server, *lines)` sends the lines exactly as given, then a ping, and returns every message the server wrote before it answered the ping. The server handles one line at a time and in order, so a request that got no reply, or two, shows in that list. The ping's own reply is checked too, which is how every test checks that the server carries on.
+- **How "changed nothing" is checked.** `rows(db)` reads every row of every table through a second, read-only SQLite connection, and a digest of the `.vecs` vector file, while the server keeps running. A test takes one reading before a refused call and one after, and `changed` names any table that differs.
+- **Where the helpers live.** This folder may hold only test files, so the helpers are in `tests/adversarial/fuzz/__init__.py`. `test_adv_fuzz_helpers.py` shows each one catching the fault it exists to catch.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
