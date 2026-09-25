@@ -124,7 +124,10 @@ def test_a_write_retried_after_its_first_attempt_timed_out_lands_once(
     attempts = _sent(fake_v1, "POST /v1/facts")
     assert len(attempts) == 2
     assert sorted(r.replayed for r in attempts) == [False, True]
-    assert len(fake_v1.memvara.scope(user="alice").get_all()) == 1
+    # Written twice, the same value would be one claim observed twice, so the count of
+    # observations is what shows the write landed once.
+    assert [c.observation_count for c in fake_v1.memvara.scope(user="alice").get_all()] \
+        == [1]
 
 
 def test_a_wrong_key_is_refused_and_not_retried(fake_v1: FakeV1) -> None:
