@@ -8,6 +8,7 @@ import pathlib
 
 from harness import known_bugs
 from harness.crash import Child, CrashHarnessError
+from harness.stdio import kill_all
 
 ROUNDS = 60
 PROCESSES = 3
@@ -19,13 +20,13 @@ def test_processes_opening_a_new_store_at_once_all_open_it(tmp_path: pathlib.Pat
     for round_ in range(ROUNDS):
         db = tmp_path / f"r{round_}.db"
         children = []
-        for n in range(PROCESSES):
-            home = tmp_path / f"home{round_}-{n}"
-            home.mkdir()
-            children.append(Child({"db": str(db), "user": "u1", "setup": [],
-                                   "point": "before-action", "hold": True,
-                                   "action": ["open", {}]}, home=home, timeout=60))
         try:
+            for n in range(PROCESSES):
+                home = tmp_path / f"home{round_}-{n}"
+                home.mkdir()
+                children.append(Child({"db": str(db), "user": "u1", "setup": [],
+                                       "point": "before-action", "hold": True,
+                                       "action": ["open", {}]}, home=home, timeout=60))
             for child in children:
                 child.wait_for("POINT before-action")
             for child in children:
@@ -36,9 +37,7 @@ def test_processes_opening_a_new_store_at_once_all_open_it(tmp_path: pathlib.Pat
                 except CrashHarnessError as exc:
                     failures.append(f"round {round_}: {exc}".splitlines()[0])
         finally:
-            for child in children:
-                if child.proc.poll() is None:
-                    child.kill()
+            kill_all(child for child in children if child.proc.poll() is None)
     if failures and all("database is locked" in f for f in failures):
         raise known_bugs.Reproduced(f"{len(failures)} opens failed: {failures[:3]}")
     assert failures == []

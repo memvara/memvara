@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from harness import stores
+from harness import crash, stores
 from harness.crash import Child, CrashHarnessError
 
 
@@ -85,3 +85,44 @@ def test_an_unknown_point_is_refused_by_the_child(
     with Child(spec, home=home) as child:
         with pytest.raises(CrashHarnessError, match="unknown point 'nowhere'"):
             child.wait_for("DONE")
+
+
+def test_a_child_whose_program_cannot_be_sent_is_killed_before_the_error_is_raised(
+        tmp_path: pathlib.Path, home: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The child is started before its program is written to it. If that write fails, no
+    Child exists for a `with` block to clean up, so the constructor must kill it."""
+    started: list[Any] = []
+    real_popen = crash.subprocess.Popen
+
+    def popen(*args: Any, **kwargs: Any) -> Any:
+        started.append(real_popen(*args, **kwargs))
+        return started[-1]
+
+    def refuse(self: Child, line: str) -> None:
+        raise BrokenPipeError("the child closed its input")
+
+    monkeypatch.setattr(crash.subprocess, "Popen", popen)
+    monkeypatch.setattr(Child, "_send", refuse)
+    with pytest.raises(BrokenPipeError):
+        Child(program(tmp_path / "s.db"), home=home)
+    assert len(started) == 1
+    assert started[0].poll() is not None, "the child is still running"
+
+
+def test_the_send_error_survives_a_child_that_is_slow_to_die(
+        tmp_path: pathlib.Path, home: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """If killing the child times out as well, the caller still sees why the program
+    could not be sent, not the timeout."""
+    real_kill = Child.kill
+
+    def refuse(self: Child, line: str) -> None:
+        raise BrokenPipeError("the child closed its input")
+
+    def slow_kill(self: Child) -> int:
+        real_kill(self)
+        raise crash.subprocess.TimeoutExpired("child", 20)
+
+    monkeypatch.setattr(Child, "_send", refuse)
+    monkeypatch.setattr(Child, "kill", slow_kill)
+    with pytest.raises(BrokenPipeError):
+        Child(program(tmp_path / "s.db"), home=home)

@@ -14,6 +14,7 @@ lock the dead process held.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import pathlib
 import queue
@@ -63,7 +64,15 @@ class Child:
             stderr=subprocess.PIPE, env=child_env(home, env), text=True, encoding="utf-8")
         threading.Thread(target=self._pump_stdout, daemon=True).start()
         threading.Thread(target=self._pump_stderr, daemon=True).start()
-        self._send(json.dumps(dict(program)))
+        try:
+            self._send(json.dumps(dict(program)))
+        except BaseException:
+            # No Child exists yet for a `with` block to clean up, so kill it here. If the
+            # kill fails too (it waits for the child to exit), the send error is still the
+            # one to report, because it says why the child could not be driven.
+            with contextlib.suppress(Exception):
+                self.kill()
+            raise
 
     def __enter__(self) -> Child:
         return self
