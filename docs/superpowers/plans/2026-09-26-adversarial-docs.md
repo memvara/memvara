@@ -226,3 +226,12 @@ git commit -m "Plan the adversarial suite's documentation checks"
 - [ ] **Step 2: Run the full gate as two commands with a private coverage file,** and check that coverage of `memvara/` is still 100%.
 - [ ] **Step 3: Run `mypy -p memvara`, and `mypy tests/harness` with and without `--ignore-missing-imports`.** Also type-check `tests/adversarial/docs` with `MYPYPATH=tests`.
 - [ ] **Step 4: Measure the fast-tier time of `tests/adversarial/docs`** with `--durations`, against the budget of about 2 seconds.
+
+## What changed during implementation
+
+- **The checks return names, not sentences.** Each check returns the offending names, or `(tool, argument)` pairs, and the test writes the sentence with the configuration or page it came from. The planted tests can then compare against hand-written values instead of message wording.
+- **`commandline.py` has a few more public functions** than Task 6 lists: `read_script`, `read_subcommand`, `subcommands` and `reads_in`, and the checks `unread_variables`, `nonexistent_features` and `false_claims`. The planted commands and the planted configuration reader go through the same code as the real ones. `command_lines()` returns a cached tuple rather than a list.
+- **The guards against a parser that reads nothing do not count.** `test_every_command_line_is_found` requires every script in `pyproject.toml`, each with at least one subcommand, and `test_the_real_descriptions_state_defaults` requires each kind of statement at least once. A fixed number would fail when a subcommand or a sentence is removed on purpose.
+- **Three tests failed on drift and are not committed**, as Global Constraints says: `test_a_tools_own_argument_named_in_its_text_is_served`, `test_a_default_stated_in_words_is_declared_in_the_schema` and `test_every_word_a_console_script_accepts_is_in_its_help`. They went to the maintainer with a reproduction for each. The checks they call are committed and proven on planted faults.
+- **The final review found one parser bug**, and it is fixed: a default that ended a sentence, as in "at the default 0.5.", was skipped without a word. `test_a_default_that_ends_a_sentence_is_still_read` pins it.
+- **The full gate ran last,** after the review, so its result describes the final code.
