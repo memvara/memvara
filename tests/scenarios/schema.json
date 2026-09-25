@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/memvara/memvara/blob/main/tests/scenarios/schema.json",
+  "title": "A memvara agent-memory scenario",
+  "description": "A few sessions of a user talking to an agent that has memvara, and the gold that must hold afterwards. The scripted layer plays each turn's script; the real-agent layer sends only the user's words. docs/claude/testing.md explains the format.",
+  "type": "object",
+  "required": ["id", "description", "tier", "surfaces", "env", "sessions", "store_gold", "answer_gold", "requires", "negative_control"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"$ref": "#/$defs/slug", "description": "The scenario's name. Its file is <id>.json, and every test id of the scenario starts with it."},
+    "description": {"type": "string", "minLength": 1, "description": "What the scenario checks and why, in plain sentences. JSON has no comments, so this is where a reader learns what the scenario is for."},
+    "tier": {"enum": ["fast", "nightly", "weekly", "local", "quarantine"], "description": "Which runs include it. A run whose --tier does not select this tier leaves the scenario out, rather than skipping it."},
+    "surfaces": {"type": "array", "minItems": 1, "items": {"enum": ["stdio", "hooks"]}, "description": "What the scenario drives: stdio is the MCP server over its pipe, and hooks are the plugin's hook scripts. A later workstream adds a surface to this list when it can drive it."},
+    "env": {"$ref": "#/$defs/env"},
+    "workspace": {
+      "type": "object", "required": ["files"], "additionalProperties": false,
+      "description": "Files for the agent to work with. They are written into the working directory the server and the hooks start in, and a step reads one with the placeholder {file:<path>}.",
+      "properties": {"files": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Relative path to file contents."}}
+    },
+    "seed": {"type": "array", "items": {"$ref": "#/$defs/remember"}, "description": "Facts written through the library before the first session. They stand for memory from earlier conversations."},
+    "sessions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/session"}, "description": "The conversations, in order. The scripted layer starts a new server process for each one, on the same store, as a client does."},
+    "store_gold": {"type": "array", "items": {"$ref": "#/$defs/store_item"}, "description": "Claims the store must, or must not, hold after the last session, compared by text and state and never by id."},
+    "answer_gold": {"type": "array", "items": {"$ref": "#/$defs/answer_item"}, "description": "Checks on the answer to one turn: text it must contain, text it must not contain (usually a value that was replaced), a pattern it must not match, or an abstention."},
+    "judge_rubric": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Rubric items for an LLM judge. The real-agent layer uses them, and the scripted layer ignores them."},
+    "forbidden": {"type": "array", "items": {"$ref": "#/$defs/forbidden"}, "description": "Tool calls that must not happen."},
+    "requires": {"type": "array", "items": {"enum": ["tools", "hooks.session_start", "hooks.recall", "hooks.approve", "hooks.capture"]}, "description": "What the agent's host must provide. The scripted layer provides everything except hooks.capture."},
+    "negative_control": {"type": "boolean", "description": "Whether the gold must fail for an agent with no memory. Checked for every scenario that sets it."},
+    "known_bugs": {"type": "object", "additionalProperties": {"$ref": "#/$defs/known_bug"}, "description": "Gold id to the known bug that breaks that item. The item's test becomes a strict expected failure of that bug."}
+  },
+  "$defs": {
+    "slug": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "description": "Lower-case words joined by hyphens."},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "The name of a captured value or a marked instant, as a placeholder uses it: {name}."},
+    "env": {
+      "type": "object", "additionalProperties": false,
+      "description": "How the server starts. A field left out takes its default: user tester, no project, every feature at its default, writes enabled, protocol 2025-06-18. A session's own env overrides the scenario's, field by field.",
+      "properties": {
+        "user": {"type": "string", "minLength": 1, "description": "MEMVARA_USER."},
+        "project": {"type": "string", "minLength": 1, "description": "MEMVARA_PROJECT, as host/owner/repo."},
+        "features": {"type": "object", "additionalProperties": {"type": "boolean"}, "description": "Feature name to on or off, as MEMVARA_FEATURE_<NAME>."},
+        "read_only": {"type": "boolean", "description": "MEMVARA_READ_ONLY."},
+        "protocol": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "The MCP protocol version the client asks for."}
+      }
+    },
+    "session": {
+      "type": "object", "required": ["turns"], "additionalProperties": false,
+      "properties": {
+        "env": {"$ref": "#/$defs/env"},
+        "turns": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/turn"}}
+      }
+    },
+    "turn": {
+      "type": "object", "required": ["user"], "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/slug", "description": "Needed only when an answer gold item checks this turn."},
+        "user": {"type": "string", "minLength": 1, "description": "What the user says. The recall hook is given it as the prompt."},
+        "script": {"type": "array", "items": {"$ref": "#/$defs/step"}, "description": "What a careful agent does for this turn. The scripted layer plays it; the real-agent layer ignores it."}
+      }
+    },
+    "step": {"oneOf": [{"$ref": "#/$defs/tool_step"}, {"$ref": "#/$defs/hook_step"}, {"$ref": "#/$defs/erase_step"}, {"$ref": "#/$defs/mark_step"}, {"$ref": "#/$defs/wait_step"}]},
+    "capture": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}, "description": "Name to a regular expression searched in the step's output, with re.MULTILINE. The first group, or the whole match when there is no group, is kept under the name."},
+    "tool_step": {
+      "type": "object", "required": ["tool"], "additionalProperties": false,
+      "properties": {
+        "tool": {"type": "string", "pattern": "^memory_[a-z_]+$"},
+        "args": {"type": "object", "description": "The tool's arguments. A string that is exactly {name} becomes that captured value or marked instant, and one that is exactly {file:<path>} becomes that workspace file's contents."},
+        "expect_error": {"type": "boolean", "description": "The call must come back as an error. Without it, the call must succeed."},
+        "capture": {"$ref": "#/$defs/capture"}
+      }
+    },
+    "hook_step": {
+      "type": "object", "required": ["hook"], "additionalProperties": false,
+      "properties": {
+        "hook": {"enum": ["session_start", "recall", "approve"]},
+        "host": {"enum": ["claude", "codex", "copilot", "cursor", "opencode"], "description": "Which host's payload and reply shape to use. Claude Code when left out."},
+        "fields": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Payload fields: session, cwd, prompt, transcript_path or tool_name. The session, the working directory and, for recall, the turn's words are filled in already."},
+        "capture": {"$ref": "#/$defs/capture"}
+      }
+    },
+    "erase_step": {
+      "type": "object", "required": ["op", "claim_id"], "additionalProperties": false,
+      "description": "An operator erases one claim through the library, because no tool can erase a memory.",
+      "properties": {
+        "op": {"type": "string", "const": "erase"},
+        "claim_id": {"type": "string", "minLength": 1},
+        "sources": {"type": "boolean", "description": "Also erase the source turns no other claim cites."}
+      }
+    },
+    "mark_step": {
+      "type": "object", "required": ["mark"], "additionalProperties": false,
+      "description": "Record the instant now, plus offset_seconds, under a name. The steps before and after it cannot share that instant.",
+      "properties": {"mark": {"$ref": "#/$defs/name"}, "offset_seconds": {"type": "number", "minimum": 0}}
+    },
+    "wait_step": {
+      "type": "object", "required": ["wait_until"], "additionalProperties": false,
+      "description": "Sleep until a marked instant has passed.",
+      "properties": {"wait_until": {"$ref": "#/$defs/name"}}
+    },
+    "remember": {
+      "type": "object", "required": ["op", "predicate", "object"], "additionalProperties": false,
+      "properties": {
+        "op": {"type": "string", "const": "remember"},
+        "subject": {"type": "string", "minLength": 1, "description": "user when left out."},
+        "predicate": {"type": "string", "minLength": 1},
+        "object": {"type": "string", "minLength": 1},
+        "memory_type": {"enum": ["semantic", "episodic", "procedural"]}
+      }
+    },
+    "store_item": {
+      "type": "object", "required": ["id", "text", "state"], "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/slug"},
+        "text": {"type": "string", "minLength": 1, "description": "The claim's text as the store renders it, for example 'user lives in Lisbon'."},
+        "state": {"enum": ["live", "ended", "retired", "absent"], "description": "absent means no claim with this text in any state."},
+        "count": {"type": "integer", "minimum": 0, "description": "Exactly this many claims with this text in this state. Without it, at least one."},
+        "memory_type": {"enum": ["semantic", "episodic", "procedural"], "description": "Every claim with this text in this state is filed as this type."},
+        "project": {"type": ["string", "null"], "description": "Read at this project instead of the scenario's. null reads at user level."}
+      }
+    },
+    "answer_item": {"oneOf": [
+      {"type": "object", "required": ["id", "must_contain"], "additionalProperties": false,
+       "properties": {"id": {"$ref": "#/$defs/slug"}, "turn": {"$ref": "#/$defs/slug"}, "must_contain": {"type": "string", "minLength": 1}}},
+      {"type": "object", "required": ["id", "must_not_contain"], "additionalProperties": false,
+       "properties": {"id": {"$ref": "#/$defs/slug"}, "turn": {"$ref": "#/$defs/slug"}, "must_not_contain": {"type": "string", "minLength": 1}}},
+      {"type": "object", "required": ["id", "must_not_match"], "additionalProperties": false,
+       "properties": {"id": {"$ref": "#/$defs/slug"}, "turn": {"$ref": "#/$defs/slug"}, "must_not_match": {"type": "string", "minLength": 1, "description": "A regular expression, searched with re.MULTILINE in the raw answer. It is for checks about lines, such as stored text that must not start a line of its own."}}},
+      {"type": "object", "required": ["id", "abstain"], "additionalProperties": false,
+       "properties": {"id": {"$ref": "#/$defs/slug"}, "turn": {"$ref": "#/$defs/slug"}, "abstain": {"type": "boolean", "const": true}}}
+    ]},
+    "forbidden": {
+      "type": "object", "required": ["tool"], "additionalProperties": false,
+      "properties": {
+        "tool": {"type": "string", "pattern": "^memory_[a-z_]+$"},
+        "args": {"type": "object", "description": "When given, only a call with these argument values is forbidden."}
+      }
+    },
+    "known_bug": {
+      "type": "object", "required": ["bug", "symptom"], "additionalProperties": false,
+      "properties": {
+        "bug": {"type": "string", "pattern": "^B[0-9]+$", "description": "An id registered in tests/harness/known_bugs.py."},
+        "symptom": {"oneOf": [
+          {"type": "object", "required": ["states"], "additionalProperties": false,
+           "properties": {"states": {"type": "array", "items": {"enum": ["live", "ended", "retired"]}, "description": "For a store item: the states the bug leaves claims with this text in."}}},
+          {"type": "object", "required": ["answer_contains"], "additionalProperties": false,
+           "properties": {"answer_contains": {"type": "string", "minLength": 1, "description": "For an answer item: words the bug puts in the answer."}}}
+        ]}
+      }
+    }
+  }
+}

@@ -158,4 +158,14 @@ To run one point by hand, write a program and pipe it into the child. It stops a
 echo '{"db": "/tmp/s.db", "user": "u1", "setup": [], "point": "after-claim", "action": ["remember", {"predicate": "lives_in", "object": "Berlin"}]}' | PYTHONPATH=$PWD python tests/harness/crash_child.py
 ```
 
+## Scenarios and the scripted layer
+
+A scenario describes a few sessions of a user talking to an agent that has memvara, and what must be true afterwards. It is one JSON file. The same format serves two layers. The scripted layer, described here, plays a fixed script for every turn on every pull request. The real-agent layer, which comes later, sends only the user's words to a real agent and grades it against the same kind of gold.
+
+- `tests/scenarios/schema.json` defines the format. Every field has a description there.
+- `tests/scenarios/scripted/` holds the scripted scenarios, one per file, each named after its `id`.
+- `tests/adversarial/sessions/runner.py` checks, plays and grades them.
+
+The `jsonschema` package is not a dependency, so `runner.py` carries a small validator for the keywords the schema uses. It refuses a keyword it does not implement, so the schema cannot state a rule that nothing checks. A second check covers what a schema cannot express: every gold id is unique, a known bug names a gold item and a registered bug, a placeholder is set by an earlier step, and a hook or tool a step uses is declared in `surfaces` and `requires`.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
