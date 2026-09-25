@@ -23,3 +23,31 @@ A test that builds its own environment for a child process is the kind of test t
 
 - run with `PYTHONPATH` set to the checkout;
 - create a virtual environment inside the worktree (the `local/` directory is ignored by git) and install the checkout into it in editable mode.
+
+## Tiers
+
+A test's tier comes from the folder its file lives in. You do not mark it.
+
+| Folder | Tier | Who runs it |
+|---|---|---|
+| anything else | fast | every PR, in CI |
+| `nightly/` | nightly | the nightly run on the maintainer's Mac |
+| `weekly/` | weekly | the weekly run |
+| `local/`, and all of `tests/live/` | local | only on a machine with the logins, Docker and transcripts it needs |
+| `quarantine/` | quarantine | nobody by default; each test there has an issue |
+
+`--tier` chooses what a run collects:
+
+| Flag | Collects |
+|---|---|
+| none | fast |
+| `--tier nightly` | fast and nightly |
+| `--tier weekly` | fast, nightly and weekly |
+| `--tier local` | only local |
+| `--tier quarantine` | only quarantine |
+
+A tier that a run does not select is left out when pytest collects, so it is never imported and never reported as skipped. A file you name on the command line is always collected, whatever its folder.
+
+**Every tier folder needs an `__init__.py`.** Without one, two test files with the same name in different folders collide. `test_adv_tiers.py` checks this.
+
+The files named `test_adv_*_tier_guard.py` fail if their folder is ever collected by a tier that should have left it out. The ordinary fast run is therefore the proof that the tiers work.

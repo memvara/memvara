@@ -66,6 +66,11 @@ from memvara.server import config as config_module
 from memvara.server import login as login_module
 from memvara.store import encryption as encryption_module
 
+# The adversarial suite's tiers and skip ledger (docs/claude/testing.md). `harness` is
+# importable here because tests/ has no __init__.py, so pytest puts tests/ on sys.path
+# before it imports this file.
+from harness import tiers as tiers_module
+
 #: The two constants as the source defines them, read once before any fixture has
 #: redirected them. `test_credentials_path_constant_matches_logins_own` asserts the
 #: invariant that they are equal by construction, and it has to see the real values to
@@ -231,6 +236,25 @@ def pytest_configure(config: Any) -> None:
         "markers",
         "derives_project: let ServerConfig.from_env() derive the project from a git "
         "remote, which tests/conftest.py otherwise switches off")
+
+
+def pytest_addoption(parser: Any) -> None:
+    parser.addoption(
+        "--tier", choices=tiers_module.TIERS, default="fast",
+        help="which tier of tests to collect: fast (the default, and what CI runs), "
+             "nightly, weekly, local or quarantine. See docs/claude/testing.md.")
+
+
+def pytest_ignore_collect(collection_path: pathlib.Path, config: Any) -> bool | None:
+    """Leave out every test whose tier --tier does not select.
+
+    Returns True or None, never False. pytest stops at the first hook that returns a
+    value, so returning False here would overrule --ignore and every other plugin's
+    decision about the same path.
+    """
+    if tiers_module.ignored(collection_path, config.getoption("--tier")):
+        return True
+    return None
 
 
 @pytest.fixture(autouse=True)
