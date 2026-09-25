@@ -72,6 +72,10 @@ RULES: tuple[SkipRule, ...] = (
     SkipRule(r"^a RAM disk is made with hdiutil, which is macOS only$",
              "The local tier's real full-disk test mounts a RAM disk with macOS's own tools.",
              platforms=("linux", "win32")),
+    SkipRule(r"^Python before 3\.13 does not report an unclosed SQLite connection$",
+             "The leak is observable only through the ResourceWarning that Python 3.13 "
+             "added for an unclosed sqlite3 connection; earlier versions stay silent.",
+             python_below=(3, 13)),
     SkipRule(r"^RLIMIT_FSIZE exists only on POSIX$",
              "Windows has no per-process limit on file size to simulate a full disk with.",
              platforms=("win32",)),
