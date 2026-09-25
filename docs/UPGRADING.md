@@ -7,6 +7,68 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## The write path reads fewer turns as restatements
+
+### What changed
+
+Before extracting from a turn, `add()` compares it with the nearest live claim. A turn
+close enough counts as a restatement: the claim gains an observation and the turn as a
+source, and nothing is extracted from the turn. That check used a cosine of 0.97 under
+every embedder and ignored numbers. It now uses the merge's threshold for the embedder's
+space, 0.985 for all-MiniLM-L6-v2, 0.99 for bge-small-en-v1.5 and 0.97 for any other
+embedder, and it never counts a turn whose numbers differ from the claim's text.
+
+### Who this changes, and in which direction
+
+**If your turns are worded like claims**, as `subject predicate object`, more of them now
+reach extraction. That is the wording an agent or an importer produces when it sends
+"user has appointment on 2024-03-15" instead of a sentence a person wrote. A turn stating
+another value is now extracted instead of reinforcing the claim it resembles. A close
+restatement that scores between 0.97 and the new threshold is extracted too, so
+`receipt.skipped` is lower and, with a model configured, `receipt.llm_calls` can be
+higher.
+
+**Turns written by people are rarely affected.** None of the 16 first-person turns in
+`bench/embedder_calibration.py` comes near either threshold: the highest scores 0.944
+against its claim, so the check read none of them as a restatement before this release
+either.
+
+**If you pass `write_near_dup_threshold=`**, or `near_dup_threshold=` to `WritePipeline`,
+your number is still used, and the rule on numbers now applies under it as well.
+
+**Values lost before this release stay lost.** A turn the check read as a restatement was
+stored, and it became a source of the claim it was read as repeating, so its text is
+still there. This lists every source turn that the check read as a restatement at 0.97
+and would not read that way now. It embeds each claim's source turns again, one call per
+claim. To restore a value, write it again with `remember()`.
+
+### How to find your instances
+
+```python
+import numpy as np
+from memvara import Memvara
+from memvara.embed.calibration import calibration_of, numbers
+
+mem = Memvara("memory.db")
+threshold = calibration_of(mem.embedder).merge
+
+def unit(vector):
+    vector = np.asarray(vector, dtype=np.float32)
+    return vector / np.linalg.norm(vector)
+
+for c in mem.store.iter_claims(states=["live"]):
+    stored = mem.store.get_embedding(c.id)
+    if stored is None or not c.sources:
+        continue
+    turns = [ep.content for ep in mem.store.get_episodes(c.sources).values()]
+    for turn, vector in zip(turns, mem.embedder.encode(turns)):
+        cosine = float(unit(vector) @ unit(stored))
+        if cosine >= 0.97 and (cosine < threshold or numbers(turn) != numbers(c.text)):
+            print(f"{c.id} {c.text!r} <- {turn[:160]!r} ({cosine:.3f})")
+```
+
+---
+
 ## Consolidation never merges two values whose numbers differ, and merges less under MiniLM
 
 ### What changed

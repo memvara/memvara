@@ -1,10 +1,16 @@
 """The cosine thresholds that depend on which embedding space they are read in.
 
-Two places compare a cosine against a fixed number. The grounding rescue in
+Three places compare a cosine against a fixed number. The grounding rescue in
 `write/pipeline.py` keeps a model-proposed claim whose words appear nowhere in its source
 when its best chunk cosine against that source reaches `grounding_rescue`: a paraphrase
 scores high and an invention does not. The duplicate merge in `consolidate/merge.py` folds
-two live claims in one slot into one when their cosine reaches `merge`.
+two live claims in one slot into one when their cosine reaches `merge`. The near-duplicate
+check in `write/pipeline.py` reads a new turn as a restatement of the nearest claim, and
+extracts nothing from it, when their cosine reaches `merge` too.
+
+The merge and the near-duplicate check also share a rule no threshold can replace: two
+texts that hold different numbers are never one value, however close they embed.
+`numbers` is that rule's reading of a text.
 
 A cosine is not a portable quantity. Both numbers were first measured under
 `sentence-transformers/all-MiniLM-L6-v2`, the model `LocalEmbedder()` loaded through
@@ -30,11 +36,12 @@ True
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .base import _name_of
 
-__all__ = ["BASELINE", "Calibration", "calibration_of"]
+__all__ = ["BASELINE", "Calibration", "calibration_of", "numbers"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +52,10 @@ class Calibration:
     #: best chunk cosine against its source reaches this.
     grounding_rescue: float
     #: The duplicate merge in `consolidate/merge.py`: two live claims in one slot merge
-    #: when their cosine reaches this.
+    #: when their cosine reaches this. The near-duplicate check in `write/pipeline.py`
+    #: reads a turn as a restatement of the nearest claim at the same value, because a
+    #: turn worded like a claim embeds exactly as that claim would: the pairs that measure
+    #: the merge measure the check.
     merge: float
 
 
@@ -107,3 +117,23 @@ def calibration_of(embedder: object) -> Calibration:
     the embedder it wraps.
     """
     return _MEASURED.get(_name_of(embedder), BASELINE)
+
+
+#: A run of digits.
+_NUMBER = re.compile(r"\d+")
+
+
+def numbers(text: str) -> tuple[str, ...]:
+    """The runs of digits in `text`, in order, each without its leading zeros.
+
+    Two texts holding different numbers state two values, however close they embed, so
+    neither the merge nor the near-duplicate check treats them as one. Compared as digit
+    strings rather than as integers, so a pasted value thousands of digits long costs no
+    conversion and cannot exceed Python's limit on one.
+
+    >>> numbers("2023-05-01") == numbers("2023-05-02")
+    False
+    >>> numbers("09:30") == numbers("9:30")
+    True
+    """
+    return tuple(run.lstrip("0") or "0" for run in _NUMBER.findall(text))
