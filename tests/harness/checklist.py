@@ -30,6 +30,7 @@ import ast
 import json
 import pathlib
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Collection
 
@@ -361,7 +362,25 @@ def invariant_ids(repo: pathlib.Path = REPO, ids_path: pathlib.Path = INVARIANT_
     ids: set[str] = set()
     matched: set[tuple[str, str]] = set()
     problems: list[str] = []
-    for invariant in documented_invariants(repo):
+    stated = documented_invariants(repo)
+    # On a page, an id finds its invariant by the opening sentence, so one sentence must
+    # open one invariant and have one id. Each break of that is reported once, and the ids
+    # it involves are not then also reported as stale.
+    opened = Counter((invariant.document, invariant.lead) for invariant in stated
+                     if invariant.number is None and invariant.lead)
+    for (document, sentence), count in sorted(opened.items()):
+        if count > 1:
+            problems.append(f"{document} opens {count} invariants with the same sentence, "
+                            f"{sentence!r}. An id is attached to its invariant's opening "
+                            "sentence, so give each of them a sentence of its own.")
+    for document, entries in recorded.items():
+        for sentence, count in Counter(entries.values()).items():
+            if document != _INTERNALS and count > 1 and opened[(document, sentence)] < 2:
+                keys = ", ".join(key for key, text in entries.items() if text == sentence)
+                problems.append(f"{name} gives {count} ids to one sentence of {document}, "
+                                f"{sentence!r}: {keys}. An id names one invariant, so keep "
+                                "one of them.")
+    for invariant in stated:
         entries = recorded.get(invariant.document, {})
         where = f"{invariant.document}: {invariant.lead or invariant.text[:80]!r}"
         if not invariant.lead:
@@ -380,6 +399,10 @@ def invariant_ids(repo: pathlib.Path = REPO, ids_path: pathlib.Path = INVARIANT_
                                 "the new sentence.")
         else:
             found = [k for k, lead in entries.items() if lead == invariant.lead]
+            if len(found) > 1 or opened[(invariant.document, invariant.lead)] > 1:
+                ids.update(found)  # reported above
+                matched.update((invariant.document, key) for key in found)
+                continue
             if not found:
                 problems.append(f"{where} has no id in {name}. Add one, or, if the "
                                 "bullet was reworded, update the sentence of its old id.")

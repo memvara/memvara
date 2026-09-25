@@ -381,6 +381,28 @@ def test_a_bullet_that_opens_with_no_bold_sentence_is_named(tmp_path: pathlib.Pa
                  "bold sentence")
 
 
+def test_two_bullets_that_open_with_the_same_sentence_are_named(
+        tmp_path: pathlib.Path) -> None:
+    """An id is attached to its invariant's opening sentence, so two bullets on one page
+    that open alike cannot each have their own id. That is the problem to report, not
+    that the second id names a sentence the page no longer states."""
+    page = _PAGE.replace("- **A restated rule.**",
+                         "- **A page rule.** Said a second time.\n- **A restated rule.**")
+    _, problems = checklist.invariant_ids(tmp_path, _documents(
+        tmp_path, _with("docs/claude/page.md", PG2="A page rule."), page))
+    _one_problem(problems, "docs/claude/page.md", "'A page rule.'", "same sentence")
+    assert "no longer" not in problems[0]
+
+
+def test_two_ids_that_record_one_sentence_are_named(tmp_path: pathlib.Path) -> None:
+    """Two ids for one opening sentence cannot both name its invariant. The problem names
+    both, instead of calling one of them stale."""
+    _, problems = checklist.invariant_ids(tmp_path, _documents(
+        tmp_path, _with("docs/claude/page.md", PG2="A page rule.")))
+    _one_problem(problems, "docs/claude/page.md", "'A page rule.'", "PG1", "PG2")
+    assert "no longer" not in problems[0]
+
+
 def test_internals_without_its_invariants_heading_is_an_error(tmp_path: pathlib.Path) -> None:
     path = _documents(tmp_path, _IDS)
     (tmp_path / "docs" / "INTERNALS.md").write_text("# Internals\n", encoding="utf-8")
