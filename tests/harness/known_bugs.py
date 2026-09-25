@@ -38,6 +38,8 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B4", 268, "deeply nested JSON kills the stdio server"),
     KnownBug("B5", 269, "memory_standing with k=0 reports an empty store"),
     KnownBug("B6", 270, "remember() crashes on a memory_type given as a string"),
+    KnownBug("B7", 273, "a session bound inside a project cannot read the global facts it "
+             "writes"),
 )}
 
 

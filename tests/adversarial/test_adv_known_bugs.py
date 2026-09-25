@@ -168,3 +168,18 @@ def test_remember_takes_a_string_memory_type_or_refuses_it_by_name() -> None:
         return
     [claim] = user.get_all()
     assert claim.memory_type is MemoryType.PROCEDURAL
+
+
+# -- B7: a session inside a project reading its own global fact -------------------------
+
+@known_bugs.xfail("B7")
+def test_a_session_inside_a_project_reads_the_global_facts_it_writes() -> None:
+    """A global predicate clears only the project, so the claim lands at the session with
+    no project, and the session's own ancestors never include that scope (#273)."""
+    session = stores.memory().scope(user="u", project="github.com/o/a", session="s1")
+    [claim] = session.add("I live in Berlin.").added
+    seen = [c.id for c in session.get_all()]
+    if not seen and (claim.scope.project, claim.scope.session) == (None, "s1"):
+        raise known_bugs.Reproduced("B7: the claim sits where the session's reads never look")
+    assert seen == [claim.id]
+    assert session.why(claim.id) is not None
