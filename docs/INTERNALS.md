@@ -1708,7 +1708,9 @@ which costs more than the SQL path it replaces: in `bench/scale.py` the vector l
 still take the SQL path: a filtered one, because a filter can name any metadata field
 and the lists hold none; one inside `batch()`, because that thread must see its own
 uncommitted rows and a list shared with other threads must never hold them; and one before
-this process has seen any vector, because an index loaded then never learns a width.
+this process has seen any vector. The index takes its width from the first vector, so until
+some process writes one, `_ensure_index` loads the index again on every call, under the
+write lock, and the SQL path calls it only when there is a turn to rank.
 
 A write in another thread can still move a row between a search reading its lists and
 ranking them. `search_rows` therefore checks, under the index lock, that every row is
