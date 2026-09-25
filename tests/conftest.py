@@ -69,6 +69,7 @@ from memvara.store import encryption as encryption_module
 # The adversarial suite's tiers and skip ledger (docs/claude/testing.md). `harness` is
 # importable here because tests/ has no __init__.py, so pytest puts tests/ on sys.path
 # before it imports this file.
+from harness import skips as skips_module
 from harness import tiers as tiers_module
 
 #: The two constants as the source defines them, read once before any fixture has
@@ -236,6 +237,7 @@ def pytest_configure(config: Any) -> None:
         "markers",
         "derives_project: let ServerConfig.from_env() derive the project from a git "
         "remote, which tests/conftest.py otherwise switches off")
+    config.pluginmanager.register(skips_module.SkipLedger(), "memvara-skip-ledger")
 
 
 def pytest_addoption(parser: Any) -> None:

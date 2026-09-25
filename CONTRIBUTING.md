@@ -59,6 +59,8 @@ lookup and points `HOME` at a temporary directory for every test. The suite runs
 entirely offline against `HashingEmbedder` and `NullLLM`; a test that needs a model uses a
 fake that counts its own calls. **If a test you add reaches the network, it is wrong.**
 
+**Every skip needs a rule.** A test that skips for a reason with no rule in `tests/harness/skips.py` fails the run. So when you add a skip, add a rule that says why the skip is legitimate. `docs/claude/testing.md` explains the rule, and the test tiers that keep slow tests out of the default run without skipping them.
+
 The optional extras (`anthropic`, `openai`, `local-embed`, `langchain`, `llama-index`,
 `crewai`, `langgraph`) are only needed to work on those adapters, and their tests skip
 without them. Install them one at a time rather than all at once, so you notice when

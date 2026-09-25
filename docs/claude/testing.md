@@ -51,3 +51,11 @@ A tier that a run does not select is left out when pytest collects, so it is nev
 **Every tier folder needs an `__init__.py`.** Without one, two test files with the same name in different folders collide. `test_adv_tiers.py` checks this.
 
 The files named `test_adv_*_tier_guard.py` fail if their folder is ever collected by a tier that should have left it out. The ordinary fast run is therefore the proof that the tiers work.
+
+## Skips
+
+**A skip needs a rule.** Every skip reason must match a rule in `tests/harness/skips.py`, and each rule says why that skip hides no failure. A skip with no matching rule fails the whole run, and the run lists the test and its reason.
+
+The ledger exists because most summaries show a skip as green, so a test that stops running for a new reason looks exactly like one that passes.
+
+An expected failure (xfail) is not a skip, and the ledger ignores it.
