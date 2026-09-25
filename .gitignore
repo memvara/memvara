@@ -57,3 +57,8 @@ __pycache__/
 # thing to prevent is the file arriving in whichever directory somebody happened to run
 # the recorder from.
 demo.gif
+
+# Hypothesis keeps a cache in the directory it runs from. The adversarial suite's nightly
+# runs keep their example database under ~/.cache instead, so nothing here is worth
+# keeping. No leading slash, because pytest can be run from tests/ as well as from here.
+.hypothesis/

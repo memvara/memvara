@@ -50,7 +50,7 @@ document; `conftest.py` says which and why. The server tests used to be exempt t
 build a `Memvara` through `build_memvara()` and had no keyword to pass it — and are not
 any more, now that `MEMVARA_EMBEDDER` gives them one.
 
-`[dev]` is pytest, pytest-asyncio, coverage and mypy — no provider SDKs. `cloud`, `ingest`
+`[dev]` is pytest, pytest-asyncio, coverage, mypy and Hypothesis — no provider SDKs. `cloud`, `ingest`
 and `encrypt` are what CI installs beside it: the remote-store tests need `httpx` to be
 collected at all, the PDF tests read real PDFs with `pypdf`, and the server tests create
 stores the way the server does, encrypted, which needs SQLCipher. The encrypted-store tests
@@ -58,6 +58,10 @@ never read your OS keychain or `~/.memvara`: `tests/conftest.py` replaces the ke
 lookup and points `HOME` at a temporary directory for every test. The suite runs
 entirely offline against `HashingEmbedder` and `NullLLM`; a test that needs a model uses a
 fake that counts its own calls. **If a test you add reaches the network, it is wrong.**
+
+**Slow tests go in a tier folder.** A test under a folder named `nightly/`, `weekly/`, `local/` or `quarantine/` is left out of a plain `python3 -m pytest -q`, which is what CI runs. `--tier nightly`, `--tier weekly`, `--tier local` and `--tier quarantine` collect them, and every run prints which tier folders it left out. `docs/claude/testing.md` has the details.
+
+**Every skip needs a rule.** A test that skips for a reason with no rule in `tests/harness/skips.py` fails the run. So when you add a skip, add a rule that says why the skip is legitimate. `docs/claude/testing.md` explains the rule, and the test tiers that keep slow tests out of the default run without skipping them.
 
 The optional extras (`anthropic`, `openai`, `local-embed`, `langchain`, `llama-index`,
 `crewai`, `langgraph`) are only needed to work on those adapters, and their tests skip

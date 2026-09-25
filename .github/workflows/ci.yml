@@ -146,6 +146,10 @@ jobs:
       # is not an installed package and a third-party adapter's dependencies are not
       # installed here; what is being checked is this repository's own code.
       - run: python -m mypy benchmarks/agent_memory --ignore-missing-imports
+      # The adversarial suite's harness is shared by every tier, and a wrong signature there
+      # breaks tests that only the nightly run collects. Checking it here catches that on
+      # the PR that introduces it.
+      - run: python -m mypy tests/harness --ignore-missing-imports
 
   offline:
     # The headline claim is "numpy and nothing else, runs offline with no API key". That
