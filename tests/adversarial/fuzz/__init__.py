@@ -257,6 +257,13 @@ def violating(spec: Mapping[str, Any]) -> st.SearchStrategy[Any]:
     allowed = set(kinds) | ({"integer"} if "number" in kinds else set())
     options = [st.one_of([strategy for kind, strategy in _OF_TYPE.items()
                           if kind not in allowed])]
+    # The near misses a model actually sends, which validate.py's docstring lists: a
+    # boolean or a number written as a string. They get their own option so that they
+    # are drawn often, not as one wrong type among six.
+    if kinds == ["boolean"]:
+        options.append(st.sampled_from(["false", "true", "False", "0", "1", 0, 1]))
+    if kinds in (["integer"], ["number"]):
+        options.append(st.integers(-10, 100).map(str))
     if "integer" in kinds and "number" not in kinds:
         options.append(st.sampled_from([math.nan, math.inf, -math.inf]))
     if kinds == ["string"]:
@@ -334,13 +341,6 @@ def broken_arguments(tool: str, properties: Mapping[str, Mapping[str, Any]],
                   _OF_TYPE["boolean"], _OF_TYPE["null"]).map(
             lambda value: (value, f"{tool}: arguments must be a JSON object")),
     ]
-    names = sorted(name for name in properties if name not in leave_out)
-    if names:
-        def one_bad_value(name: str) -> st.SearchStrategy[tuple[Any, str]]:
-            return st.tuples(base, violating(properties[name])).map(
-                lambda drawn: ({**drawn[0], name: drawn[1]}, f"{tool}.{name}"))
-
-        ways.append(st.sampled_from(names).flatmap(one_bad_value))
     if required:
         def without(drawn: tuple[dict[str, Any], str]) -> tuple[Any, str]:
             good, gone = drawn
@@ -348,7 +348,19 @@ def broken_arguments(tool: str, properties: Mapping[str, Mapping[str, Any]],
                     f"{tool}: missing required argument(s) {gone!r}.")
 
         ways.append(st.tuples(base, st.sampled_from(list(required))).map(without))
-    return st.one_of(ways)
+    others = st.one_of(ways)
+    names = sorted(name for name in properties if name not in leave_out)
+    if not names:
+        return others
+
+    def one_bad_value(name: str) -> st.SearchStrategy[tuple[Any, str]]:
+        return st.tuples(base, violating(properties[name])).map(
+            lambda drawn: ({**drawn[0], name: drawn[1]}, f"{tool}.{name}"))
+
+    # Half of the draws break an argument's value, because checking values is most of
+    # what the validator does. The other three ways share the other half.
+    values = st.sampled_from(names).flatmap(one_bad_value)
+    return st.booleans().flatmap(lambda pick_a_value: values if pick_a_value else others)
 
 
 def json_values(*, max_leaves: int = 12) -> st.SearchStrategy[Any]:
