@@ -224,4 +224,15 @@ A read that finds nothing repeats its query in its reply. That reply adds nothin
 
 Each session starts a server, which takes about 0.2 seconds on a laptop and longer on Windows. The scripted layer's budget on the fast tier is about 25 seconds, so use as few sessions as the story allows.
 
+## Fakes for the services a client talks to
+
+`tests/harness/fakes/` holds test doubles for what a memvara client reaches over a network or starts as a program: the hosted REST API, the hosted MCP endpoint, an OpenAI-compatible model, and the agent CLIs that the capture hook runs. With them a test drives the real client code offline, with no login and no bill. Every fake listens on 127.0.0.1 only. Each one is checked in `tests/adversarial/fakes/` by driving it with the real client it stands in for, so a fake that drifts from what its client sends or reads fails its own tests first.
+
+**The three HTTP fakes share one mechanism,** in `fakes/_http.py`:
+
+- **A test reaches a fake in one of three ways.** `transport()` is an `httpx.MockTransport` for an `httpx.Client`, and `async_transport()` is the same for an `httpx.AsyncClient`. `serve()` answers on 127.0.0.1 from a background thread and returns the base URL, for a child process or for a client that does not use httpx. `close()` stops a fake, and each fake is a context manager that closes itself.
+- **Every request is recorded** in `fake.requests`, with its method, raw path, query, headers and body, the route it matched, and the status it was answered with.
+- **A test can inject a fault into one route,** for every request or for the next `times`: `fail(route, status)` answers with that status and does nothing else, `delay(route, seconds)` waits and then answers, and `hang(route)` never answers. A route name the fake does not have is refused, so a typo cannot inject a fault that never fires.
+- **A slow answer reaches the client the way a real server's would.** Over a socket, the client's own timeout fires. A mock transport has no network under it, so there a hang, or a delay at least as long as the request's read timeout, waits out that timeout and then raises `httpx.ReadTimeout`. One difference remains. Over a mock transport a request the client gave up on is never carried out, while over a socket it is carried out late, as on a real server. A test about a write that lands after its client gave up therefore uses `serve()`.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
