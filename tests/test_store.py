@@ -1937,13 +1937,35 @@ def onehot(i: int, dim: int = 64) -> np.ndarray:
 def test_a_turn_embedded_by_another_worker_becomes_visible(tmp_path):
     path = str(tmp_path / "c.db")
     a, b = SQLiteStore(path), SQLiteStore(path)
-    a.vector_search_episodes(onehot(0), [SCOPE], limit=1)  # A's index is now warm
+    a.vector_search_episodes(onehot(0), [SCOPE], limit=1)  # nothing written yet
 
     ep = Episode(content="written by b", scope=SCOPE)
     b.add_episode(ep)
     b.set_episode_embedding(ep.id, onehot(5))
 
     hits = a.vector_search_episodes(onehot(5), [SCOPE], limit=1)
+    assert [h[0] for h in hits] == [ep.id]
+    assert hits[0][1] == pytest.approx(1.0)
+    a.close()
+    b.close()
+
+
+def test_a_search_between_another_workers_turn_and_its_vector_finds_the_vector(tmp_path):
+    """`add_episode` and `set_episode_embedding` commit separately, so a search can land
+    between them: it has a candidate to rank and the store holds no vector yet. The index
+    takes its width from the first vector, and it was marked loaded without one. Every
+    refresh after that mapped the new rows with no matrix to score them in, so the vector
+    leg returned nothing until this process wrote a vector itself, while BM25 kept
+    answering and nothing said so."""
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    ep = Episode(content="written by b", scope=SCOPE)
+    b.add_episode(ep)
+    assert a.vector_search_episodes(onehot(5), [SCOPE], limit=5) == []
+
+    b.set_episode_embedding(ep.id, onehot(5))
+
+    hits = a.vector_search_episodes(onehot(5), [SCOPE], limit=5)
     assert [h[0] for h in hits] == [ep.id]
     assert hits[0][1] == pytest.approx(1.0)
     a.close()

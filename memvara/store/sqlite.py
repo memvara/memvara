@@ -2662,10 +2662,17 @@ class SQLiteStore:
         `PRAGMA data_version` moves only when a *different* connection commits, so the
         common case costs one pragma.
 
-        The first load is the only part that takes the write lock, and it has to: with
-        no vectors mapped yet, `_ensure_dim` may have to *assign* slots to rows that
-        have none, which is a write. Every refresh afterwards runs on the reading
-        thread's own connection, so a sweep in progress does not hold it up.
+        Loading is the only part that takes the write lock, and it has to: with no
+        vectors mapped yet, `_ensure_dim` may have to *assign* slots to rows that have
+        none, which is a write. Every refresh afterwards runs on the reading thread's
+        own connection, so a sweep in progress does not hold it up.
+
+        A load that finds no vector in the store does not count. The index takes its
+        width from the first vector, and a refresh maps rows without ever learning one,
+        so an index marked loaded with no width would never get a matrix, and every
+        vector search would return nothing, or raise on an encrypted store, until this
+        process wrote a vector itself. Until some process writes one, each call loads
+        again, which costs one census query under the write lock.
         """
         if not self._index_loaded:
             # No second check inside the lock. Two threads arriving together both load,
@@ -2673,6 +2680,8 @@ class SQLiteStore:
             # that only ever runs under a race and can therefore never be tested.
             with self._lock, self._index_lock:
                 self._ensure_dim()
+                if self._vec.dim is None:
+                    return
                 self._read_map(first=True)
                 self._index_loaded = True
                 self._data_version = self._version()
@@ -4752,10 +4761,10 @@ class SQLiteStore:
         must see its own uncommitted rows, which a cache shared with other threads must
         never hold.
         """
-        # `dim` is None until this process has seen a vector. The SQL path below loads
-        # the index only once there is a candidate to rank, and an index loaded before
-        # any vector exists never learns a width from the refresh that later maps
-        # another worker's first vector, so that case keeps taking the SQL path.
+        # `dim` is None until this process has seen a vector, and until some process
+        # writes one, `_ensure_index` loads again on every call, under the write lock.
+        # The SQL path below calls it only when there is a candidate to rank; the lists
+        # would call it on every search.
         if where is None and not self._batch_depth and self._vec.dim is not None:
             hits = self._cached_turn_search(qvec, scopes, limit, valid_at, known_at)
             if hits is not None:

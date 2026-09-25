@@ -796,6 +796,21 @@ def test_another_process_write_is_seen_after_a_commit(tmp_path):
 
 
 @needs_extra
+def test_a_reader_that_searched_before_any_vector_finds_the_first_one(tmp_path):
+    """The claim and its vector commit separately, so a search can land between them,
+    with a claim to rank and no vector in the store. The index was marked loaded with no
+    width, and a refresh put the new vector into a matrix that did not exist, so the first
+    search after each commit by another process raised `AssertionError`."""
+    path = str(tmp_path / "enc.db")
+    with SQLiteStore(path, key=KEY) as reader, SQLiteStore(path, key=KEY) as writer:
+        c = Claim(subject="user", predicate="p5", object="value 5", scope=SCOPE)
+        writer.put_claim(c)
+        assert hits(reader, 5) == []
+        writer.set_embedding(c.id, onehot(5))
+        assert hits(reader, 5) == [c.id]
+
+
+@needs_extra
 def test_clearing_vectors_another_encrypted_store_holds_is_refused(tmp_path):
     """An encrypted store keeps its matrix on the heap, so truncating the file cannot
     crash another store the way it crashes one that maps it. The other store went on

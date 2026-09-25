@@ -213,6 +213,33 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   name that starts with "the" twice once legal forms such as "Inc" are dropped, and has a
   third word, changes key, and the schema 16 re-derivation above re-keys it on the first
   open.
+- **A test no longer removes `SQLiteStore.episodes_near` for the rest of the test run.**
+  `test_a_store_that_cannot_rank_on_time_simply_runs_the_other_two_legs` in
+  `tests/test_temporal.py` hid the method with `del type(mem.store).episodes_near` and never
+  put it back. Every later test file saw a `SQLiteStore` without it: a direct call raised
+  `AttributeError`, and `search()` ran without the temporal leg without saying so. The full
+  suite passed only because no later file called the method directly. The test now hides it
+  through `monkeypatch`, which restores it afterwards, and searches at an instant the
+  temporal leg would rank, so it fails if the leg runs.
+- **The check that compares the hosted deployment's tools with this library's skips when
+  any of its requests fails.** `test_the_deployment_serves_the_tools_this_library_declares`
+  asks `app.memvara.dev` for its tool list in three requests, and is meant to skip when the
+  deployment cannot be asked. Only the first request turned a network error into a skip,
+  so a timeout on the second failed a CI job on a pull request that did not touch the test.
+  All three requests now do, and so does an answer that breaks off (`IncompleteRead`) or is
+  not HTTP (`BadStatusLine`). The skip message names the request. A different tool list
+  still fails the test.
+- **A process that searched before the store held any vector now finds the vectors other
+  processes write.** `add_episode` and `set_episode_embedding` commit separately, so a
+  search in another process can land between them, with a turn to rank and no vector in
+  the store. `SQLiteStore` then marked its vector index loaded with no width. When other
+  processes later wrote vectors, the refresh mapped them with no matrix to score them in,
+  so the vector leg returned nothing until the process wrote a vector itself or restarted.
+  The lexical leg kept answering, so the only sign was worse ranking. On an encrypted store
+  the refresh raised `AssertionError` instead, on the first search after each commit by
+  another process. The index now counts as loaded only once it has found a vector. Until
+  then, each search with a candidate to rank loads it again, at the cost of one census
+  query under the write lock.
 - **Re-embedding a store no longer crashes the other processes that have it open.**
   `SQLiteStore.clear_embeddings()`, which `reembed()` calls first, truncated the vector
   file, and a process that still mapped it died with SIGBUS on its next vector search: exit
