@@ -26,7 +26,7 @@
 - A test that meets documented behaviour asserts it and cites where it is documented. Here that is: batches are refused (`MemvaraMCPServer.handle_message`, and the design's list of documented behaviour), a null id is treated as a notification (`handle_message`), blank lines are skipped (`iter_messages` in `memvara/server/protocol.py`), and a deeply nested line gets a parse error (the #268 fix in `decode`).
 - A bug found here is classified against the "In scope" section of `SECURITY.md` first. A security-class bug is described only in the final report, never in a committed file, and the test that shows it is left out. Any other bug is also reported with an offline reproduction, and its failing test is left out of the commits and kept under `local/a3-fuzz-findings/`, which git ignores.
 - No skip is added, so the skip ledger needs no new rule.
-- Commits name their files. No AI attribution anywhere. Write plainly: every sentence must be understood on its first reading.
+- Commits name their files, and carry no trailer or footer naming the tool that wrote them. Write plainly: every sentence must be understood on its first reading.
 
 ## The three predictions
 
