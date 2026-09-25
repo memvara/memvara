@@ -174,7 +174,7 @@ class HttpFake:
         a `str` or `bytes`, which is how a proxy's HTML error page is sent. Left out, it is
         this fake's own error body for `status`.
         """
-        self._check(route)
+        self._check_route(route)
         if body is None:
             body = self.error_body(status, route)
         if isinstance(body, (str, bytes)):
@@ -182,32 +182,32 @@ class HttpFake:
             reply = Reply(status, raw, dict(headers or {}))
         else:
             reply = json_reply(status, body, headers)
-        self._add(route, _Fault("fail", times, reply=reply))
+        self._queue_fault(route, _Fault("fail", times, reply=reply))
 
     def delay(self, route: str, seconds: float, *, times: int | None = None) -> None:
         """Wait `seconds` before answering requests to `route`."""
-        self._check(route)
-        self._add(route, _Fault("delay", times, seconds=seconds))
+        self._check_route(route)
+        self._queue_fault(route, _Fault("delay", times, seconds=seconds))
 
     def hang(self, route: str, *, times: int | None = None) -> None:
         """Never answer requests to `route`. The fake does not act on them either: each
         one is held until the client gives up or the fake closes."""
-        self._check(route)
-        self._add(route, _Fault("hang", times))
+        self._check_route(route)
+        self._queue_fault(route, _Fault("hang", times))
 
     def clear_faults(self) -> None:
         """Remove every fault that has not been used up."""
         with self._lock:
             self._faults.clear()
 
-    def _check(self, route: str) -> None:
+    def _check_route(self, route: str) -> None:
         # A typo in a route name would inject a fault that never fires, and the test would
         # pass without testing anything.
         if route not in self.ROUTES:
             raise ValueError(f"{type(self).__name__} has no route {route!r}. Its routes "
                              f"are: {', '.join(self.ROUTES)}")
 
-    def _add(self, route: str, fault: _Fault) -> None:
+    def _queue_fault(self, route: str, fault: _Fault) -> None:
         with self._lock:
             self._faults.setdefault(route, []).append(fault)
 
