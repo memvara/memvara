@@ -695,7 +695,7 @@ so.
 ```python
 class WritePipeline:
     def __init__(self, store, embedder, registry, llm, *,
-                 near_dup_threshold: float = 0.97,
+                 near_dup_threshold: float | None = None,
                  reinforce_bump: float = 0.25,
                  reject_ungrounded: bool | str = "auto",
                  closed_vocabulary: bool = False,
@@ -728,9 +728,18 @@ warns once per instance and leaves the list empty; the claim is already durable 
 suggestion must not turn it into an exception the caller retries.
 
 - **Tier 0 (no LLM):** store the episode; skip content-hash duplicates
-  (`store.find_episode_by_hash`). For surviving episodes, embed and check near-duplicates
-  against existing claim embeddings — cosine >= `near_dup_threshold` reinforces the
-  existing claim instead of writing a new one.
+  (`store.find_episode_by_hash`). For surviving episodes, embed and find the nearest live
+  claim. A cosine at or above `near_dup_threshold` reinforces that claim instead of
+  extracting from the turn, unless the turn and the claim's text hold different numbers
+  (`embed/calibration.numbers`, the rule the merge also applies). `None`, the default,
+  reads the merge's threshold for the embedder's space from `embed/calibration.py`,
+  because a turn worded like a claim embeds exactly as that claim would. Over the 69 pairs
+  of different values in `bench/embedder_calibration.py`, a flat 0.97 would read the
+  second of a pair as a restatement of the first 22 times under MiniLM and 19 times under
+  bge-small, losing the value each time; the check now reads none of them that way. The
+  bench's 16 first-person turns score at most 0.944 against their claim in all three
+  spaces, so on them the check never fires: what it skips are turns worded like a claim,
+  such as an exact repeat of one.
 - **Tier 1 (no LLM):** `SalienceGate` drops turns carrying no durable fact
   (count them in `receipt.skipped`), then `FastExtractor` handles what it can.
 - **Tier 2 (LLM):** only the turns that survived both and produced no fast-path claim are

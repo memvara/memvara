@@ -356,6 +356,60 @@ def test_near_dup_threshold_of_one_disables_the_shortcut():
     store.close()
 
 
+def _appointment(episodes):
+    """The model's answer for any turn naming a date: an appointment on that date."""
+    return [{"subject": "user", "predicate": "has_appointment_on",
+             "object": next(w for w in e.content.split() if w[:4].isdigit()).rstrip("."),
+             "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+             "source_index": i}
+            for i, e in enumerate(episodes)]
+
+
+def test_a_turn_holding_other_numbers_than_the_nearest_claim_is_not_a_restatement():
+    """Tier 0 reads a turn as a restatement of the nearest claim and extracts nothing from
+    it. A turn worded like a claim but holding another number states another value, and
+    no threshold keeps it out: MiniLM scores two appointment dates a day apart at 0.997.
+    Here every text embeds identically, so the rule on numbers is all that sends the turn
+    on to extraction, and the same wording with the same date is still a restatement."""
+    llm = CountingLLM(responder=_appointment)
+    store = SQLiteStore(":memory:")
+    pipe = WritePipeline(store, _AngledEmbedder("hashing:512:3-5", 1.0, "\0"),
+                         PredicateRegistry(), llm)
+    stored = pipe.add([ep("My appointment is on 2023-05-01.")]).added[0]
+
+    same = pipe.add([ep("user has appointment on 2023-05-01")])
+    assert ([c.id for c in same.reinforced], llm.extract_calls) == ([stored.id], 1)
+
+    other = pipe.add([ep("user has appointment on 2023-05-02")])
+    assert (other.reinforced, [c.object for c in other.added]) == ([], ["2023-05-02"])
+    assert llm.extract_calls == 2
+    store.close()
+
+
+@pytest.mark.parametrize("name, cosine, given, restated", [
+    ("hashing:512:3-5", 0.98, None, True),
+    ("local:sentence-transformers/all-MiniLM-L6-v2", 0.98, None, False),
+    ("local:sentence-transformers/all-MiniLM-L6-v2", 0.99, None, True),
+    ("local:BAAI/bge-small-en-v1.5", 0.985, None, False),
+    ("local:BAAI/bge-small-en-v1.5", 0.995, None, True),
+    ("local:BAAI/bge-small-en-v1.5", 0.985, 0.97, True),
+])
+def test_the_near_duplicate_threshold_is_the_one_measured_in_the_embedders_space(
+        name, cosine, given, restated):
+    """A turn worded like a claim embeds exactly as that claim would, so tier 0 reads it
+    at the merge's threshold for the space: 0.985 under MiniLM and 0.99 under bge-small,
+    where 0.97 skipped 22 and 19 of the 69 claim pairs in `bench/embedder_calibration.py`
+    that hold different values. Any other embedder keeps 0.97, and a threshold passed in
+    is used as given."""
+    store = SQLiteStore(":memory:")
+    pipe = WritePipeline(store, _AngledEmbedder(name, cosine, "(again)"),
+                         PredicateRegistry(), CountingLLM(), near_dup_threshold=given)
+    first = pipe.add([ep("I live in Berlin.")])
+    receipt = pipe.add([ep("user lives in Berlin (again)")])
+    assert [c.id for c in receipt.reinforced] == ([first.added[0].id] if restated else [])
+    store.close()
+
+
 # --- tier 0: finding what a repeated turn already produced --------------------
 #
 # The repeat branch has to answer "which claims came from this turn?". It used to do that

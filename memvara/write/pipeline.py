@@ -60,7 +60,7 @@ from time import perf_counter
 from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
 from ..embed.base import Embedder
-from ..embed.calibration import calibration_of
+from ..embed.calibration import calibration_of, numbers
 from ..llm._shape import finite_amount
 from ..llm.base import (
     LLM, MalformedToolOutput, ToolChat, ToolRunError, ToolRunTimeout, Usage,
@@ -213,7 +213,7 @@ class WritePipeline:
     """Runs the tiers in order and reports what each one cost."""
 
     def __init__(self, store: Store, embedder: Embedder, registry: PredicateRegistry,
-                 llm: LLM, *, near_dup_threshold: float = 0.97,
+                 llm: LLM, *, near_dup_threshold: float | None = None,
                  reinforce_bump: float = 0.25,
                  evidence_roles: Iterable[str] | None = SalienceGate.DEFAULT_EVIDENCE_ROLES,
                  telemetry: Recorder | None = None,
@@ -229,6 +229,11 @@ class WritePipeline:
         self.embedder = embedder
         self.registry = registry
         self.llm = llm
+        #: The cosine at which tier 0 reads a turn as a restatement of the nearest claim
+        #: and extracts nothing from it. `None`, the default, takes the merge threshold
+        #: measured for the embedder's space (`embed/calibration.py`): 0.985 for
+        #: `all-MiniLM-L6-v2`, 0.99 for `bge-small-en-v1.5` and 0.97 for any other
+        #: embedder. A number passed here is used as given.
         self.near_dup_threshold = near_dup_threshold
         #: What a batch that reaches tier 2 with no model is reported as. `False`, the
         #: default, reports it on `receipt.unextracted`: the content was accepted and
@@ -767,10 +772,19 @@ class WritePipeline:
         if not hits:
             return None
         claim_id, score = hits[0]
-        if score < self.near_dup_threshold:
+        threshold = self.near_dup_threshold
+        if threshold is None:
+            threshold = calibration_of(self.embedder).merge
+        if score < threshold:
             return None
         claim = self.store.get_claim(claim_id)
         if claim is None:
+            return None
+        if numbers(ep.content) != numbers(claim.text):
+            # A turn worded like the claim but holding another number states another
+            # value, and skipping it would lose that value. No threshold keeps those
+            # apart: MiniLM scores two appointment dates a day apart at 0.997 in
+            # `bench/embedder_calibration.py`. The merge refuses the same pairs.
             return None
         # Same reasoning as `_reinforcements_from_source`: a near-duplicate restatement
         # is evidence dated to the turn that carried it, not to when we processed it.
