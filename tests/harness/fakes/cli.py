@@ -17,8 +17,9 @@ signed in to (`plugin/hooks/lib/extract.py` and `lib/agentic.py`). It finds the 
 child process's environment as `PATH`, and a hook in that process starts the fakes instead
 of the real CLIs. Each run takes the next reply from its script, prints it in the format
 its arguments ask for, and appends its arguments and its stdin to a log that `calls()`
-reads. A run that finds no reply left says so on stderr and exits with status 3, so a
-hook that starts a CLI once more than the test expected fails loudly.
+reads. Scripting again starts over from the first new reply, and the log keeps every run.
+A run that finds no reply left says so on stderr and exits with status 3, so a hook that
+starts a CLI once more than the test expected fails loudly.
 
 A run reads its stdin to the end before it answers, unless stdin is a terminal. So a
 caller that starts a fake with stdin left open, and never closes it, holds the run until
@@ -101,12 +102,15 @@ class FakeClis:
             self.script(name)
 
     def script(self, name: str, *replies: CliReply | str) -> None:
-        """Replace what `name` answers with `replies`, one per run, in order. A plain
-        string is a reply with that text. With no replies, every run fails as exhausted."""
+        """Replace what `name` answers with `replies`, one per run, in order, starting
+        with the next run. A plain string is a reply with that text. With no replies,
+        every run fails as exhausted. The call log keeps the runs made before."""
         self._check(name)
         queue = [dataclasses.asdict(r if isinstance(r, CliReply) else CliReply(text=r))
                  for r in replies]
         (self.bin / f"{name}.replies.json").write_text(json.dumps(queue), encoding="utf-8")
+        # The position of the next reply, which each run reads and advances.
+        (self.bin / f"{name}.next").write_text("0", encoding="utf-8")
 
     def calls(self, name: str) -> list[CliCall]:
         """Every run of `name` so far, in order."""
@@ -139,11 +143,16 @@ name, argv = sys.argv[1], sys.argv[2:]
 here = os.path.dirname(os.path.abspath(__file__))
 stdin = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
 
-# The log is read and appended under a lock, so two runs at once each get their own reply.
-with open(os.path.join(here, name + ".calls.jsonl"), "a+", encoding="utf-8") as log:
+# The position of the next reply is read and advanced, and the call appended to the log,
+# under one lock, so two runs at once each get their own reply. `script()` resets the
+# position when it replaces the replies.
+with open(os.path.join(here, name + ".calls.jsonl"), "a", encoding="utf-8") as log:
     fcntl.flock(log, fcntl.LOCK_EX)
-    log.seek(0)
-    number = sum(1 for line in log if line.strip())
+    position = os.path.join(here, name + ".next")
+    with open(position, encoding="utf-8") as fh:
+        number = int(fh.read())
+    with open(position, "w", encoding="utf-8") as fh:
+        fh.write(str(number + 1))
     log.write(json.dumps({"argv": argv, "stdin": stdin}) + "\n")
     log.flush()
 

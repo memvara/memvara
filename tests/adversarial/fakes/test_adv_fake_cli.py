@@ -126,6 +126,20 @@ def test_a_run_with_no_reply_left_fails_loudly(fakes: FakeClis, home: pathlib.Pa
     assert len(fakes.calls("codex")) == 2
 
 
+def test_scripting_again_starts_from_the_first_new_reply(
+        fakes: FakeClis, home: pathlib.Path) -> None:
+    """The call log keeps every run, but which reply comes next starts over with each
+    script, so a test can script, run, and script again."""
+    fakes.script("claude", "old reply")
+    assert json.loads(_run(fakes, "claude", home, "-p", "one").stdout)["result"] \
+        == "old reply"
+    fakes.script("claude", "new reply")
+    second = _run(fakes, "claude", home, "-p", "two")
+    assert second.returncode == 0, second.stderr
+    assert json.loads(second.stdout)["result"] == "new reply"
+    assert [call.argv for call in fakes.calls("claude")] == [["-p", "one"], ["-p", "two"]]
+
+
 def test_a_name_that_is_not_one_of_the_fakes_is_refused(fakes: FakeClis) -> None:
     with pytest.raises(ValueError, match="no fake 'cursor-agent'"):
         fakes.script("cursor-agent", "a reply")
