@@ -13,8 +13,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 - **An adversarial test suite that tries to break memvara the way agents use it.** It
   lives in `tests/adversarial/`, with its support code in `tests/harness/`, and
-  `docs/claude/testing.md` describes it. This entry covers the suite's foundation and its
-  first stage. None of it changes the library.
+  `docs/claude/testing.md` describes it. This entry covers the suite's foundation, its
+  reference model and its crash tests. None of it changes the library.
   - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
     and the new `--tier nightly`, `--tier weekly`, `--tier local` and `--tier quarantine`
     options select the others.
@@ -29,6 +29,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     a real store and on the model, and after every step compares every row and every read,
     including reads at past instants. `tests/harness/invariants.py` checks a store file
     for the damage a crash or a bad write leaves.
+  - **Crash and concurrency tests.** A child process stops at one of ten named points
+    inside memvara and is killed. The store it leaves behind must pass the integrity
+    checks, keep every acknowledged write, and take the next write at once. Two handles,
+    four threads and two real MCP servers share one store file. The nightly tier adds
+    random server kills, a lock held past the busy timeout, and a full disk.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed
