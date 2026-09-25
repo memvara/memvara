@@ -429,6 +429,19 @@ WAIT_MARGIN = 0.05
 _KINDS = (("tool", "tool"), ("hook", "hook"), ("op", "op"), ("mark", "mark"),
           ("wait_until", "wait"))
 
+#: How each read tool begins a reply that found nothing. Such a reply shows the agent no
+#: memory, although it repeats the query it was asked. `test_adv_runner.py` checks that each
+#: opening is still the tool's own wording.
+NOTHING_FOUND: Mapping[str, str] = {
+    "memory_recall": "No stored memory matched",
+    "memory_search": "No stored memory matched",
+    "memory_history": "Nothing has ever been recorded for",
+    "memory_standing": "No standing preferences are stored",
+    "memory_ask": "Nothing in this scope matches",
+    "memory_list_documents": "No documents are stored here",
+    "memory_get_document": "No document with that id or custom_id is visible here",
+}
+
 
 @dataclass
 class Step:
@@ -441,6 +454,19 @@ class Step:
     #: False when the step did not run, as when memvara is switched off.
     ran: bool = True
     is_error: bool = False
+
+    @property
+    def shown(self) -> str:
+        """The part of this step's output that shows the agent memory.
+
+        A read that found nothing shows none. Its reply repeats the query, and the query's
+        words are not memory: counted, they would let must_contain pass on a turn that
+        found nothing.
+        """
+        opening = NOTHING_FOUND.get(self.name) if self.kind == "tool" else None
+        if opening is not None and self.text.startswith(opening):
+            return ""
+        return self.text
 
 
 @dataclass
@@ -455,12 +481,13 @@ class Turn:
 
     @property
     def answer(self) -> str:
-        """Everything memvara showed the agent in this turn, in order.
+        """Every memory memvara showed the agent in this turn, in order.
 
         The scripted agent answers from this and from nothing else, so this is the text
-        answer gold is checked on.
+        answer gold is checked on. A read that found nothing adds nothing to it (see
+        `Step.shown`).
         """
-        return "\n\n".join(step.text for step in self.steps if step.text)
+        return "\n\n".join(step.shown for step in self.steps if step.shown)
 
 
 @dataclass(frozen=True)
@@ -783,20 +810,6 @@ class _Session:
 
 # -- gold --------------------------------------------------------------------------------
 
-#: How each read tool begins a reply that found nothing. A turn abstains when every tool
-#: step in it replied this way and no hook put anything in front of the model.
-#: `test_adv_runner.py` checks that each opening is still the tool's own wording.
-NOTHING_FOUND: Mapping[str, str] = {
-    "memory_recall": "No stored memory matched",
-    "memory_search": "No stored memory matched",
-    "memory_history": "Nothing has ever been recorded for",
-    "memory_standing": "No standing preferences are stored",
-    "memory_ask": "Nothing in this scope matches",
-    "memory_list_documents": "No documents are stored here",
-    "memory_get_document": "No document with that id or custom_id is visible here",
-}
-
-
 @dataclass(frozen=True, eq=False)
 class Gold:
     """One gold item: a claim the store must or must not hold, or a check on an answer."""
@@ -857,20 +870,14 @@ def contains_phrase(text: str, phrase: str) -> bool:
 
 
 def abstained(turn: Turn) -> bool:
-    """Whether memvara showed the agent nothing in this turn.
+    """Whether memvara showed the agent nothing in this turn: its answer is empty.
 
-    True when every tool step replied with its tool's "nothing found" opening
-    (NOTHING_FOUND) and no hook step injected anything. A turn whose steps did not run,
-    as when memvara is switched off, showed nothing too. A write receipt, or any stored
-    memory, makes it false.
+    That is true when every tool step replied with its tool's "nothing found" opening
+    (NOTHING_FOUND) and no hook step injected anything, and when the steps did not run at
+    all, as when memvara is switched off. A write receipt, or any stored memory, makes it
+    false.
     """
-    for step in turn.steps:
-        if not step.text:
-            continue
-        opening = NOTHING_FOUND.get(step.name) if step.kind == "tool" else None
-        if opening is None or not step.text.startswith(opening):
-            return False
-    return True
+    return not turn.answer
 
 
 def check(gold: Gold, outcome: Outcome) -> Verdict:

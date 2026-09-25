@@ -207,7 +207,7 @@ After the last session the store is read once more with expiry switched off, so 
 
 **Store gold** names a claim by its text, such as `user lives in Lisbon`, never by its id, and says which state it must be in: `live`, `ended`, `retired`, or `absent` for no claim with that text in any state. `count` asks for an exact number. `project` reads at another project than the scenario's own, or at user level when it is `null`.
 
-**Answer gold** checks the answer to one turn: the turn its `turn` names, or the last one. In the scripted layer, the answer is everything memvara showed the agent in that turn, which is each tool's text and each hook's injected context, in order. `must_contain` and `must_not_contain` compare whole words and ignore case and punctuation, using the normalization the real-agent layer grades with. `must_not_match` is a regular expression, for checks about lines, such as stored text that must not start a line of its own. `abstain` passes when every tool in the turn replied that it found nothing and no hook injected anything.
+**Answer gold** checks the answer to one turn: the turn its `turn` names, or the last one. In the scripted layer, the answer is every memory memvara showed the agent in that turn: each tool's text and each hook's injected context, in order, leaving out any read that found nothing. `must_contain` and `must_not_contain` compare whole words and ignore case and punctuation, using the normalization the real-agent layer grades with. `must_not_match` is a regular expression, for checks about lines, such as stored text that must not start a line of its own. `abstain` passes when every tool in the turn replied that it found nothing and no hook injected anything.
 
 **A known bug** is attached to the one gold item it breaks, with the symptom it causes: `"known_bugs": {"<gold id>": {"bug": "B2", "symptom": {"states": ["ended"]}}}`. That item's test gets the bug's strict expected-failure marker. The test raises `known_bugs.Reproduced` only when the failure shows exactly that symptom: the same states for a store item, or the given words in the answer for an answer item. Any other failure fails the run.
 
@@ -219,7 +219,7 @@ After the last session the store is read once more with expiry switched off, so 
 2. Run `pytest tests/adversarial/sessions -k <id>` and read every failure. A scenario mistake is fixed in the scenario. A failure that shows memvara doing the wrong thing is a bug, handled as "Known bugs and security findings" above describes.
 3. Keep it deterministic and offline. A scenario that needs a model, the network or the capture hook belongs to the real-agent layer.
 
-A read that finds nothing repeats its query in its reply. So keep a value that `must_not_contain` forbids out of the queries of the turn it checks, or the check fails on the echo.
+A read that finds nothing repeats its query in its reply. That reply adds nothing to the answer, so the words of a query can neither satisfy `must_contain` nor trip `must_not_contain`.
 
 Each session starts a server, which takes about 0.2 seconds on a laptop and longer on Windows. The scripted layer's budget on the fast tier is about 25 seconds, so use as few sessions as the story allows.
 

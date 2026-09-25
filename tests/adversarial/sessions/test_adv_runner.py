@@ -431,6 +431,19 @@ def store_item(bug: dict[str, Any] | None = None, **spec: Any) -> runner.Gold:
                        {"id": "item", "text": "user lives in Lisbon", **spec}, bug)
 
 
+def test_a_read_that_found_nothing_adds_nothing_to_the_answer() -> None:
+    """A reply that found nothing repeats its query. The query's words are not memory, so
+    must_contain must not find them there, and must_not_contain must not trip on them."""
+    outcome = fabricated({}, "No stored memory matched 'does the user live in Lisbon'. "
+                             "Nothing is recorded about that, so answer from the "
+                             "conversation instead of retrying with a reworded query.")
+    assert outcome.turn().answer == ""
+    found = {"id": "item", "must_contain": "Lisbon"}
+    assert not runner.check(runner.Gold(sample(), "item", "answer", found), outcome).passed
+    trap = {"id": "item", "must_not_contain": "Lisbon"}
+    assert runner.check(runner.Gold(sample(), "item", "answer", trap), outcome).passed
+
+
 @pytest.mark.parametrize(("spec", "rows", "passed"), [
     ({"state": "live"}, [LIVE], True),
     ({"state": "live"}, [ENDED], False),
