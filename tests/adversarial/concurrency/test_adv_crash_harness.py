@@ -107,3 +107,22 @@ def test_a_child_whose_program_cannot_be_sent_is_killed_before_the_error_is_rais
         Child(program(tmp_path / "s.db"), home=home)
     assert len(started) == 1
     assert started[0].poll() is not None, "the child is still running"
+
+
+def test_the_send_error_survives_a_child_that_is_slow_to_die(
+        tmp_path: pathlib.Path, home: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """If killing the child times out as well, the caller still sees why the program
+    could not be sent, not the timeout."""
+    real_kill = Child.kill
+
+    def refuse(self: Child, line: str) -> None:
+        raise BrokenPipeError("the child closed its input")
+
+    def slow_kill(self: Child) -> int:
+        real_kill(self)
+        raise crash.subprocess.TimeoutExpired("child", 20)
+
+    monkeypatch.setattr(Child, "_send", refuse)
+    monkeypatch.setattr(Child, "kill", slow_kill)
+    with pytest.raises(BrokenPipeError):
+        Child(program(tmp_path / "s.db"), home=home)

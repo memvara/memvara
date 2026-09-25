@@ -14,6 +14,7 @@ lock the dead process held.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import pathlib
 import queue
@@ -66,8 +67,11 @@ class Child:
         try:
             self._send(json.dumps(dict(program)))
         except BaseException:
-            # No Child exists yet for a `with` block to clean up, so kill it here.
-            self.kill()
+            # No Child exists yet for a `with` block to clean up, so kill it here. If the
+            # kill fails too (it waits for the child to exit), the send error is still the
+            # one to report, because it says why the child could not be driven.
+            with contextlib.suppress(Exception):
+                self.kill()
             raise
 
     def __enter__(self) -> Child:

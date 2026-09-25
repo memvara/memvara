@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Protocol
 
 from memvara.server.config import FEATURES
 
@@ -296,18 +296,28 @@ class McpProcess:
         self.kill()
 
 
-def kill_all(servers: Iterable[McpProcess]) -> None:
-    """Kill every server, then raise the first failure if there was one.
+class Killable(Protocol):
+    """Anything a test started and must stop: an `McpProcess` or a `crash.Child`."""
 
-    One server that does not stop in time must not leave the servers after it running:
+    def kill(self) -> object: ...
+
+
+def kill_all(processes: Iterable[Killable]) -> None:
+    """Kill every process, then raise the first failure if there was one.
+
+    One process that does not stop in time must not leave the processes after it running:
     they would hold their store files open, and on Windows the test's temporary directory
-    could then not be deleted.
+    could then not be deleted. That holds for an interrupt as well: a Ctrl-C that lands
+    during one kill is raised once every process has been asked to stop. Only the first
+    failure is raised; a later one is not reported, since every process has been killed
+    by then either way.
     """
-    failure: Exception | None = None
-    for server in servers:
+    failure: BaseException | None = None
+    for process in processes:
         try:
-            server.kill()
-        except Exception as exc:  # noqa: BLE001 - raised below, after the others
-            failure = failure or exc
+            process.kill()
+        except BaseException as exc:  # noqa: BLE001 - raised below, after the others
+            if failure is None:
+                failure = exc
     if failure is not None:
         raise failure

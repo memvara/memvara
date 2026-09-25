@@ -146,3 +146,22 @@ def test_killing_every_server_goes_on_past_one_that_fails_to_stop() -> None:
     with pytest.raises(subprocess.TimeoutExpired):
         kill_all([Server("first", True), Server("second", False)])
     assert killed == ["first", "second"]
+
+
+def test_an_interrupt_while_killing_one_server_still_kills_the_rest() -> None:
+    """A Ctrl-C that lands while one server is being killed must not leave the others
+    running; it is raised once every server has been asked to stop."""
+    killed: list[str] = []
+
+    class Server:
+        def __init__(self, name: str, interrupted: bool) -> None:
+            self.name, self.interrupted = name, interrupted
+
+        def kill(self) -> None:
+            killed.append(self.name)
+            if self.interrupted:
+                raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        kill_all([Server("first", True), Server("second", False)])
+    assert killed == ["first", "second"]
