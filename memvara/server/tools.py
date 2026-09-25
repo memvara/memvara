@@ -1702,7 +1702,7 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
         receipt = ctx.memory.remember(
             args["subject"], args["predicate"], args["object"],
             confidence=args["confidence"],
-            memory_type=MemoryType(memory_type) if memory_type is not None else None,
+            memory_type=memory_type,
             valid_from=since, valid_to=until,
             extractor=args.get("extractor") or "api",
             # Ids, never Episode objects. `_cite` stores anything it is handed as an

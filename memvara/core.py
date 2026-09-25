@@ -711,8 +711,8 @@ ADVISORY_CANDIDATES = 3
 
 def _as_memory_type(value: MemoryType | str | None) -> MemoryType | None:
     """A `MemoryType` from itself or from its value as a string (#270)."""
-    if value is None or isinstance(value, MemoryType):
-        return value
+    if value is None:
+        return None
     try:
         return MemoryType(value)
     except ValueError:
