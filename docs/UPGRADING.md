@@ -34,7 +34,10 @@ against its claim, so the check read none of them as a restatement before this r
 either.
 
 **If you pass `write_near_dup_threshold=`**, or `near_dup_threshold=` to `WritePipeline`,
-your number is still used, and the rule on numbers now applies under it as well.
+your number is still used, and the rule on numbers now applies under it as well. If you
+read `WritePipeline.near_dup_threshold`, it is now `None` unless a number was passed; the
+threshold in use is then `calibration_of(pipe.embedder).merge`, from
+`memvara.embed.calibration`.
 
 **Values lost before this release stay lost.** A turn the check read as a restatement was
 stored, and it became a source of the claim it was read as repeating, so its text is
