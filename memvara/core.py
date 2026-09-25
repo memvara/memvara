@@ -709,7 +709,6 @@ def _pack_predicates(pack: str) -> tuple[str, ...]:
 ADVISORY_CANDIDATES = 3
 
 
-
 def _as_memory_type(value: MemoryType | str | None) -> MemoryType | None:
     """A `MemoryType` from itself or from its value as a string (#270)."""
     if value is None or isinstance(value, MemoryType):
@@ -720,6 +719,7 @@ def _as_memory_type(value: MemoryType | str | None) -> MemoryType | None:
         raise ValueError(
             "memory_type must be one of "
             + ", ".join(t.value for t in MemoryType) + f", not {value!r}") from None
+
 
 class Memvara:
     """Bitemporal memory for agents.
