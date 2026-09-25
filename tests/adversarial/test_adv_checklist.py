@@ -1,4 +1,10 @@
-"""The coverage checklist and its ratchet (tests/harness/checklist.py)."""
+"""The coverage checklist and its ratchet (tests/harness/checklist.py).
+
+The first tests check this repository: every gap is in the baseline, every baseline line
+is still a gap, every covers mark can be read and names an item, and a new switch shows
+up as a gap. The rest check how the checklist reads the code and the tests, most of them
+on small inputs written for the test.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +15,82 @@ import textwrap
 
 import pytest
 
-from harness import checklist
+from harness import checklist, tiers
+from memvara.server import config as server_config
 from memvara.server import mcp as mcp_module
 from memvara.server.tools import BY_NAME
+
+
+@dataclasses.dataclass(frozen=True)
+class Repository:
+    """This checkout's checklist, the covers marks of its tests, and its baseline."""
+
+    items: set[str]
+    scan: checklist.Scan
+    baseline: set[str]
+
+    @property
+    def gaps(self) -> set[str]:
+        return self.items - self.scan.covered
+
+
+@pytest.fixture(scope="module")
+def repo() -> Repository:
+    return Repository(checklist.items(), checklist.scan(), checklist.read_baseline())
+
+
+def _listed(lines: list[str]) -> str:
+    return "".join(f"\n  {line}" for line in lines)
+
+
+def test_every_gap_is_listed_in_the_baseline(repo: Repository) -> None:
+    """An item with no test fails here, for example a tool added without one. The fix is
+    a test that covers it, not a new line in the baseline."""
+    new = sorted(repo.gaps - repo.baseline)
+    assert not new, (
+        f"{len(new)} checklist items have no test, and "
+        "tests/harness/checklist_baseline.txt does not list them. Write a test for each "
+        "one, and mark it with @pytest.mark.covers(...):" + _listed(new))
+
+
+def test_every_line_of_the_baseline_is_still_a_gap(repo: Repository) -> None:
+    """The baseline only shrinks. A line whose item a test now covers, or whose item no
+    longer exists, must go, or it would hide that item if its test were later lost."""
+    stale = sorted(repo.baseline - repo.gaps)
+    assert not stale, (
+        f"{len(stale)} lines of tests/harness/checklist_baseline.txt are no longer "
+        "gaps, because a test covers each one now or the item no longer exists. Delete "
+        "them:" + _listed(stale))
+
+
+def test_every_covers_mark_can_be_read(repo: Repository) -> None:
+    assert not repo.scan.problems, _listed(sorted(repo.scan.problems))
+
+
+def test_every_covers_mark_names_an_item_on_the_checklist(repo: Repository) -> None:
+    wrong = checklist.misdeclared(repo.scan, repo.items)
+    assert not wrong, _listed(wrong)
+
+
+def test_the_covers_marker_is_registered(request: pytest.FixtureRequest) -> None:
+    assert any(line.startswith("covers(") for line in request.config.getini("markers"))
+
+
+def test_a_new_feature_switch_is_a_gap_the_baseline_does_not_list(
+        repo: Repository, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The design's proof for this checklist: a switch added to FEATURES with no test
+    fails the fast tier, and the failure names the switch."""
+    monkeypatch.setattr(server_config, "FEATURES",
+                        (*server_config.FEATURES, "brand_new_switch"))
+    assert checklist.items() - repo.scan.covered - repo.baseline == {
+        "switch:brand_new_switch"}
+
+
+def test_the_baseline_leaves_out_comments_and_blank_lines(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "baseline.txt"
+    path.write_text("# a comment\n\ntool:memory_recall\n  env:MEMVARA_DB  \n",
+                    encoding="utf-8")
+    assert checklist.read_baseline(path) == {"tool:memory_recall", "env:MEMVARA_DB"}
 
 
 def test_every_tool_and_every_switch_is_an_item() -> None:
@@ -274,3 +353,198 @@ def test_no_open_known_bug_is_not_an_error(monkeypatch: pytest.MonkeyPatch) -> N
     """Every bug being fixed is the goal, not a source that changed shape."""
     monkeypatch.setattr(checklist, "bug_items", lambda: [])
     assert not any(item.startswith("bug:") for item in checklist.items())
+
+
+def _tests(tmp_path: pathlib.Path, files: dict[str, str]) -> checklist.Scan:
+    """Scan a folder of test files written for one test."""
+    for name, source in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(source), encoding="utf-8")
+    return checklist.scan(tmp_path)
+
+
+def _places(problems: set[str]) -> set[tuple[str, int]]:
+    """The file name and line number each problem starts with."""
+    places = set()
+    for problem in problems:
+        where = problem.split(": ", 1)[0]
+        path, line = where.rsplit(":", 1)
+        places.add((pathlib.PurePath(path).name, int(line)))
+    return places
+
+
+def test_a_covers_mark_on_a_test_covers_its_items(tmp_path: pathlib.Path) -> None:
+    found = _tests(tmp_path, {"test_one.py": '''
+        import pytest
+
+        @pytest.mark.covers("tool:memory_recall", "inv:I3")
+        async def test_recall():
+            pass
+        '''})
+    assert found.covered == {"tool:memory_recall", "inv:I3"}
+    assert {item for _, item in found.declared} == {"tool:memory_recall", "inv:I3"}
+    assert all(where.endswith("test_one.py:4") for where, _ in found.declared)
+    assert not found.problems
+
+
+def test_a_test_expected_to_fail_covers_nothing(tmp_path: pathlib.Path) -> None:
+    found = _tests(tmp_path, {"test_one.py": '''
+        import pytest
+
+        @pytest.mark.covers("tool:memory_recall")
+        @pytest.mark.xfail(strict=True, reason="a known bug")
+        def test_recall():
+            pass
+        '''})
+    assert found.covered == set()
+    assert {item for _, item in found.declared} == {"tool:memory_recall"}
+
+
+def test_a_known_bugs_marker_covers_its_bug_and_nothing_else(tmp_path: pathlib.Path) -> None:
+    found = _tests(tmp_path, {"test_one.py": '''
+        import pytest
+        from harness import known_bugs
+
+        @pytest.mark.covers("tool:memory_standing")
+        @known_bugs.xfail("B5")
+        def test_standing():
+            pass
+        '''})
+    assert found.covered == {"bug:B5"}
+
+
+def test_marks_on_a_class_and_in_pytestmark_reach_the_tests_they_apply_to(
+        tmp_path: pathlib.Path) -> None:
+    found = _tests(tmp_path, {"test_one.py": '''
+        import pytest
+
+        pytestmark = [pytest.mark.covers("env:MEMVARA_DB")]
+
+        @pytest.mark.covers("switch:documents")
+        class TestDocuments:
+            pytestmark = pytest.mark.covers("tool:memory_add_document")
+
+            def test_add(self):
+                pass
+
+        @pytest.mark.xfail(strict=True)
+        class TestBroken:
+            @pytest.mark.covers("tool:memory_recall")
+            def test_recall(self):
+                pass
+        '''})
+    assert found.covered == {"env:MEMVARA_DB", "switch:documents",
+                             "tool:memory_add_document"}
+    assert not found.problems
+
+
+def test_a_test_skipped_without_a_condition_covers_nothing(tmp_path: pathlib.Path) -> None:
+    found = _tests(tmp_path, {"test_one.py": '''
+        import sys
+        import pytest
+
+        @pytest.mark.covers("tool:memory_recall")
+        @pytest.mark.skip(reason="never runs")
+        def test_skipped():
+            pass
+
+        @pytest.mark.covers("tool:memory_search")
+        @pytest.mark.skipif(sys.platform == "win32", reason="POSIX only")
+        def test_sometimes_skipped():
+            pass
+        '''})
+    assert found.covered == {"tool:memory_search"}
+
+
+def test_a_quarantined_test_covers_nothing(tmp_path: pathlib.Path,
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tiers, "TESTS", tmp_path.resolve())
+    found = _tests(tmp_path, {
+        "adversarial/quarantine/test_flaky.py": '''
+            import pytest
+            from harness import known_bugs
+
+            @pytest.mark.covers("tool:memory_recall")
+            def test_flaky():
+                pass
+
+            @known_bugs.xfail("B4")
+            def test_pinned():
+                pass
+            ''',
+        "adversarial/nightly/test_slow.py": '''
+            import pytest
+
+            @pytest.mark.covers("tool:memory_search")
+            def test_slow():
+                pass
+            '''})
+    assert found.covered == {"tool:memory_search"}
+
+
+def test_a_covers_mark_the_scan_cannot_read_is_a_problem(tmp_path: pathlib.Path) -> None:
+    found = _tests(tmp_path, {"test_one.py": '''
+        import pytest
+
+        ITEMS = ("tool:memory_recall",)
+
+        @pytest.mark.covers(*ITEMS)
+        def test_from_a_variable():
+            pass
+
+        @pytest.mark.covers(item="tool:memory_recall")
+        def test_by_keyword():
+            pass
+
+        @pytest.mark.covers()
+        def test_empty():
+            pass
+
+        @pytest.mark.covers
+        def test_bare():
+            pass
+        '''})
+    assert found.covered == set()
+    assert _places(found.problems) == {("test_one.py", 6), ("test_one.py", 10),
+                                       ("test_one.py", 14), ("test_one.py", 18)}
+
+
+def test_a_covers_mark_anywhere_but_on_a_test_is_a_problem(tmp_path: pathlib.Path) -> None:
+    found = _tests(tmp_path, {
+        "test_one.py": '''
+            import pytest
+
+            @pytest.mark.covers("tool:memory_recall")
+            def helper():
+                pass
+
+            @pytest.fixture
+            @pytest.mark.covers("tool:memory_search")
+            def server():
+                pass
+
+            @pytest.mark.parametrize(
+                "n", [pytest.param(1, marks=pytest.mark.covers("tool:memory_ask"))])
+            def test_param(n):
+                pass
+            ''',
+        "support.py": '''
+            import pytest
+
+            COVERS = pytest.mark.covers("tool:memory_since")
+            '''})
+    assert found.covered == set()
+    assert _places(found.problems) == {("test_one.py", 4), ("test_one.py", 9),
+                                       ("test_one.py", 14), ("support.py", 4)}
+
+
+def test_a_covers_id_that_names_no_item_is_reported_with_its_place() -> None:
+    found = checklist.Scan(declared={("tests/x.py:3", "tool:memory_recal"),
+                                     ("tests/x.py:4", "bug:B2"),
+                                     ("tests/x.py:5", "tool:memory_recall")})
+    wrong = checklist.misdeclared(found, {"tool:memory_recall", "bug:B2"})
+    assert len(wrong) == 2, wrong
+    assert wrong[0].startswith("tests/x.py:3: ") and "tool:memory_recal" in wrong[0]
+    assert "tool:memory_recall" not in wrong[0]
+    assert wrong[1].startswith("tests/x.py:4: ") and "known_bugs.xfail('B2')" in wrong[1]

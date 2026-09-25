@@ -314,7 +314,7 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 
 ## The coverage checklist
 
-The checklist is a list of everything the suite has to test. It is read from the code, so a new tool, switch or invariant is added to it as soon as it exists. `tests/harness/checklist.py` builds it.
+The checklist is a list of everything the suite has to test, together with the tests that cover each item. It is read from the code, so a new tool, switch or invariant is added to it as soon as it exists. `tests/harness/checklist.py` builds it, and `tests/adversarial/test_adv_checklist.py` checks it in every fast run.
 
 **What is on the checklist.** Each item has an id of the form `kind:name`.
 
@@ -342,5 +342,31 @@ A few sources need a word on how they are read:
 - A bullet on a `docs/claude/` page gets its page's prefix and a number, such as `MM5` on `memory-model.md`. Give a new bullet the next unused number on its page.
 - A bullet that restates an INTERNALS invariant carries that invariant's id, so that one test covers both. When the bullet says so, as in "This is invariant 3", the fast tier checks that it carries the right id.
 - When you reword an invariant's opening sentence, change the sentence in the file and keep the id. Until you do, the fast tier fails and names the sentence.
+
+**Declaring what a test covers.** Put a `covers` mark on the test, naming the items that its assertions check:
+
+```python
+@pytest.mark.covers("tool:memory_history", "env:MEMVARA_DB")
+def test_the_store_outlives_the_server_process(mcp: Start, tmp_path: pathlib.Path) -> None:
+```
+
+Name only what the assertions check. A test that happens to start a server does not cover every variable the server reads.
+
+The checklist reads the marks from each file's source instead of importing it, because importing a nightly or local test can need Docker or a package that is not installed. So the ids must be string literals, and the mark must sit on a test function, on a test class, or in a module's `pytestmark`. A mark anywhere else, or one built from a variable, fails the run with its file and line. Without that check, the test would cover nothing and nobody would be told.
+
+Three kinds of test cover nothing, because none of them shows that anything works:
+
+- a test marked `xfail`;
+- a test marked `skip` without a condition;
+- a test in `quarantine/`.
+
+A known bug is covered differently. Its item is covered by the test that carries its strict expected failure, `known_bugs.xfail("B2")`, so registering a bug and pinning it is all the checklist needs. A `covers` mark cannot name a bug.
+
+**The baseline.** `tests/harness/checklist_baseline.txt` lists the items that no test covers today, one per line. The fast tier fails in two cases, and each failure lists the items concerned:
+
+- An item has no test and is not in the baseline, for example a tool that was added without a test. Write a test that covers it. Adding the item to the baseline instead would hide exactly what the checklist exists to catch.
+- A line of the baseline is no longer a gap, because a test now covers the item or the item no longer exists. Delete the line.
+
+So the baseline only ever shrinks, and the checklist is complete when it is empty. `test_a_new_feature_switch_is_a_gap_the_baseline_does_not_list` shows the first case working: it adds a switch to `FEATURES` and checks that the checklist reports that switch, and nothing else, as a new gap.
 
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

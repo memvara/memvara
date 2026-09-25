@@ -30,19 +30,21 @@ import ast
 import json
 import pathlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Collection
 
 from memvara.server import config as server_config
 from memvara.server.mcp import MemvaraMCPServer
 from memvara.server.tools import TOOLS
 
-from . import stores
+from . import stores, tiers
 from .env import REPO
 from .hooks import HOOKS_DIR, host_record
 from .known_bugs import KNOWN_BUGS
 
 _HERE = pathlib.Path(__file__).resolve().parent
+#: The gaps that exist today, one item per line.
+BASELINE = _HERE / "checklist_baseline.txt"
 #: The stable id of every documented invariant.
 INVARIANT_IDS = _HERE / "invariant_ids.json"
 CONFIG = REPO / "memvara" / "server" / "config.py"
@@ -412,3 +414,152 @@ def items() -> set[str]:
             f"no {' or '.join(empty)} were found, so tests/harness/checklist.py can no "
             "longer read the code they come from")
     return {item for found in sources.values() for item in found} | set(bug_items())
+
+
+@dataclass
+class Scan:
+    """What the tests under one folder declare, read from their source."""
+
+    #: The items covered by tests that are expected to pass, and `bug:<id>` for each
+    #: known bug that a test pins with its strict expected failure.
+    covered: set[str] = field(default_factory=set)
+    #: Each id that a covers mark names, with the file and line of the mark, including
+    #: the marks on tests that cover nothing.
+    declared: set[tuple[str, str]] = field(default_factory=set)
+    #: The covers marks the scan cannot read, each with its file and line.
+    problems: set[str] = field(default_factory=set)
+
+
+def scan(root: pathlib.Path = tiers.TESTS) -> Scan:
+    """Read the covers marks and known-bug markers of every test under `root`.
+
+    The files are parsed, never imported, because importing a nightly or local test can
+    need Docker or a package that this machine does not have. A test covers nothing when
+    it is not expected to pass: when it is marked xfail, marked skip with no condition,
+    or sits in the quarantine tier. A known bug is covered by the test that carries its
+    strict expected failure, `known_bugs.xfail("B2")`.
+    """
+    result = Scan()
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" not in path.parts:
+            _scan_file(path, result)
+    return result
+
+
+def _scan_file(path: pathlib.Path, result: Scan) -> None:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    read: set[int] = set()
+    if path.name.startswith("test_") or path.name.endswith("_test.py"):
+        runs = tiers.tier_of(path) != "quarantine"
+        _scan_body(path, tree.body, _pytestmark(tree.body), runs, result, read)
+    # A covers mark the walk above did not read is one that pytest applies somewhere the
+    # scan does not look, or not at all. Either way its test would cover nothing without
+    # saying so, so it is reported instead.
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    for node in ast.walk(tree):
+        if (id(node) not in read and id(node) not in called
+                and _mark_name(node) == ("covers", True)):
+            result.problems.add(
+                f"{_where(path, node)}: a covers mark is read only as a decorator of a "
+                "test function or test class, or in pytestmark")
+
+
+def _scan_body(path: pathlib.Path, body: list[ast.stmt], marks: list[ast.expr],
+               runs: bool, result: Scan, read: set[int]) -> None:
+    for node in body:
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("test")):
+            _scan_test(path, [*marks, *node.decorator_list], runs, result, read)
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            _scan_body(path, node.body,
+                       [*marks, *node.decorator_list, *_pytestmark(node.body)],
+                       runs, result, read)
+
+
+def _pytestmark(body: list[ast.stmt]) -> list[ast.expr]:
+    """The marks that a module or class applies to all its tests through `pytestmark`."""
+    for node in body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "pytestmark"
+                for target in node.targets):
+            value = node.value
+            return list(value.elts) if isinstance(value, (ast.List, ast.Tuple)) else [value]
+    return []
+
+
+def _scan_test(path: pathlib.Path, marks: list[ast.expr], runs: bool, result: Scan,
+               read: set[int]) -> None:
+    covers: list[str] = []
+    bugs: list[str] = []
+    passes = True
+    for mark in marks:
+        name, is_pytest_mark = _mark_name(mark)
+        if name == "covers" and is_pytest_mark:
+            read.add(id(mark))
+            ids = _literals(mark, path, "covers", result)
+            covers += ids
+            result.declared.update((_where(path, mark), item) for item in ids)
+        elif name == "xfail":
+            passes = False
+            if not is_pytest_mark:  # known_bugs.xfail("B2"), this suite's own marker
+                bugs += _literals(mark, path, "known_bugs.xfail", result)[:1]
+        elif name == "skip" and is_pytest_mark:
+            runs = False
+    if runs:
+        result.covered.update(f"bug:{bug}" for bug in bugs)
+        if passes:
+            result.covered.update(covers)
+
+
+def _mark_name(node: ast.AST) -> tuple[str | None, bool]:
+    """The name of the mark that `node` applies, and whether it is one of pytest's marks.
+
+    `pytest.mark.xfail(...)` and `mark.skip` are pytest's own. `known_bugs.xfail("B2")`
+    is not: it is this suite's marker for a registered bug.
+    """
+    target = node.func if isinstance(node, ast.Call) else node
+    if isinstance(target, ast.Attribute):
+        base = target.value
+        return target.attr, ((isinstance(base, ast.Attribute) and base.attr == "mark")
+                             or (isinstance(base, ast.Name) and base.id == "mark"))
+    if isinstance(target, ast.Name):
+        return target.id, False
+    return None, False
+
+
+def _literals(mark: ast.expr, path: pathlib.Path, what: str, result: Scan) -> list[str]:
+    """The string literals that `mark` is called with. Anything else is a problem,
+    because the scan cannot know its value without running the test module."""
+    args = mark.args if isinstance(mark, ast.Call) else []
+    keywords = mark.keywords if isinstance(mark, ast.Call) else []
+    values = [arg.value for arg in args
+              if isinstance(arg, ast.Constant) and isinstance(arg.value, str)]
+    if len(values) < len(args) or keywords:
+        result.problems.add(f"{_where(path, mark)}: {what} takes string literals only, "
+                            "so that the checklist can read it without importing the test")
+    elif not values:
+        result.problems.add(f"{_where(path, mark)}: {what} names nothing")
+    return values
+
+
+def _where(path: pathlib.Path, node: ast.AST) -> str:
+    return f"{_shown(path)}:{getattr(node, 'lineno', 0)}"
+
+
+def read_baseline(path: pathlib.Path = BASELINE) -> set[str]:
+    """The items the baseline lists, leaving out its comments and blank lines."""
+    lines = (line.strip() for line in path.read_text(encoding="utf-8").splitlines())
+    return {line for line in lines if line and not line.startswith("#")}
+
+
+def misdeclared(scan: Scan, items: Collection[str]) -> list[str]:
+    """Each id that a covers mark names and that no test can cover, with its place."""
+    wrong = []
+    for where, item in sorted(scan.declared):
+        if item.startswith("bug:"):
+            wrong.append(f"{where}: covers names {item}. A known bug is covered by the "
+                         "test that carries its strict expected failure, "
+                         f"known_bugs.xfail({item[4:]!r}), not by covers.")
+        elif item not in items:
+            wrong.append(f"{where}: covers names {item}, which is not on the checklist.")
+    return wrong
