@@ -12,10 +12,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 ### Added
 
 - **An adversarial test suite that tries to break memvara the way agents use it.** It
-  lives in `tests/adversarial/`, with its support code in `tests/harness/`, and
-  `docs/claude/testing.md` describes it. This entry covers the suite's foundation, its
-  reference model, its crash tests and its scripted agent sessions. None of it changes
-  the library.
+  lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
+  scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
+  covers the suite's foundation, its reference model, its crash tests and its scripted
+  agent sessions. None of it changes the library.
   - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
     which includes the doctests in `memvara/`, and the new `--tier nightly`,
     `--tier weekly`, `--tier local` and `--tier quarantine` options select the others.
@@ -43,7 +43,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     a preference, the three kinds of correction, a flip-flop, a restatement, time travel,
     expiry, project isolation, a document, a bulk forget, read-only mode, a stored
     instruction and a pasted log. Each gold item is its own test, and each scenario must
-    fail when memvara is switched off.
+    fail when memvara is switched off. Answers are compared with `phrase_in`, the
+    benchmark's whole-word rule, which `benchmarks/agent_memory/normalization.py` now
+    exports.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed

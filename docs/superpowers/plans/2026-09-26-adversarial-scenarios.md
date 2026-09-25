@@ -25,6 +25,7 @@
 - **Known bugs.** "Each gold item is its own test id", and a known bug's marker absorbs only `known_bugs.Reproduced`, raised only on that item's own symptom.
 - **Data.** Made-up people and data only, because the repository is public.
 - **Files owned.** `tests/scenarios/**`, `tests/adversarial/sessions/__init__.py`, `tests/adversarial/sessions/runner.py`, `tests/adversarial/sessions/test_adv_*.py`, this plan, and one new section in `docs/claude/testing.md`, placed just before its final line that starts with `Next:`. Do not edit `README.md`, `CONTRIBUTING.md` or `CHANGELOG.md`.
+- **Those three files do change in the pull request.** The maintainer's session edited them when it merged this work: the changelog entry, the index rows and the test counts. The review fixes that followed updated the changelog sentence and the test counts again.
 - **Prose.** Plain sentences a reader with no context understands on the first read.
 - **No AI attribution** in any commit, file or comment. Commit files by name. Never push.
 - **Security.** A bug that matches `SECURITY.md`'s "In scope" section is never written into a committed file.
