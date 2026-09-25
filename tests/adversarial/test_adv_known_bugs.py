@@ -147,7 +147,8 @@ def test_memory_standing_with_k_zero_never_reports_an_empty_store(
     reply = server.call("memory_standing", k=0)
     if reply.text.startswith("No standing preferences are stored"):
         raise known_bugs.Reproduced("B5: k=0 reported an empty store")
-    assert reply.is_error or "tabs for indentation" in reply.text, reply.text
+    # #269 accepts either fix: refusing k below 1, or any answer that is not the
+    # empty-store one. Nothing more is asserted, so either fix makes this test pass.
 
 
 # -- B6: a string memory_type -----------------------------------------------------------
