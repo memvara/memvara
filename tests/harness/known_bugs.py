@@ -40,6 +40,11 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B6", 270, "remember() crashes on a memory_type given as a string"),
     KnownBug("B7", 273, "a session bound inside a project cannot read the global facts it "
              "writes"),
+    KnownBug("B9", 275, "a retraction dated in the future stores a tombstone that ends "
+             "before it begins"),
+    KnownBug("B16", 282, "forget() leaves a scheduled value believed"),
+    KnownBug("B17", 283, "a restatement with an earlier start loses the earlier start"),
+    KnownBug("B18", 284, "a repeated retraction is folded into an expired tombstone"),
 )}
 
 
