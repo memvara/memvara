@@ -52,11 +52,11 @@
 - `tests/adversarial/test_adv_stdio.py`, `tests/adversarial/test_adv_hooks.py` (modify): add `covers` marks.
 - `docs/claude/testing.md` (modify): a section before the final `Next:` line.
 
-Every command below runs from the worktree root with the CI virtual environment:
+Every command below runs from the worktree root with the CI virtual environment, and with `TMPDIR` set to a directory of your own under `/private/tmp`:
 
 ```bash
 PY=/Applications/workstation/agent-memory/.claude/worktrees/friendly-einstein-53c8da/local/venv-ci/bin/python
-PYTHONPATH=$PWD TMPDIR=/private/tmp/claude-501/f5-checklist $PY -m pytest -q -p no:cacheprovider tests/adversarial/test_adv_checklist.py
+PYTHONPATH=$PWD TMPDIR=/private/tmp/adversarial-checklist $PY -m pytest -q -p no:cacheprovider tests/adversarial/test_adv_checklist.py
 ```
 
 ---
