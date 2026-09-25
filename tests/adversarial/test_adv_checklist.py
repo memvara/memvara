@@ -655,6 +655,23 @@ def test_a_covers_mark_anywhere_but_on_a_test_is_a_problem(tmp_path: pathlib.Pat
                                        ("test_one.py", 14), ("support.py", 4)}
 
 
+def test_a_problem_names_a_file_outside_the_checkout_by_its_resolved_path(
+        tmp_path: pathlib.Path) -> None:
+    """The checklist shows a path the way the tier report does: from the repository root,
+    or resolved and in full when the file is outside the checkout. A second copy of that
+    function showed the path exactly as it was given, so one file had two names."""
+    (tmp_path / "sub").mkdir()
+    found = _tests(tmp_path / "sub" / "..", {"test_one.py": '''
+        import pytest
+
+        @pytest.mark.covers()
+        def test_empty():
+            pass
+        '''})
+    [problem] = found.problems
+    assert problem.startswith(f"{(tmp_path / 'test_one.py').resolve()}:4: "), problem
+
+
 def test_a_covers_id_that_names_no_item_is_reported_with_its_place() -> None:
     found = checklist.Scan(declared={("tests/x.py:3", "tool:memory_recal"),
                                      ("tests/x.py:4", "bug:B2"),

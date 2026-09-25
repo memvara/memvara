@@ -248,8 +248,8 @@ def silent_items(path: pathlib.Path = TELEMETRY) -> list[str]:
         None)
     if header is None or end is None:
         raise ChecklistError(
-            f"the table of silent failure modes in {_shown(path)} was not found. It is "
-            "the table whose header row names the columns failure and signal.")
+            f"the table of silent failure modes in {tiers._shown(path)} was not found. "
+            "It is the table whose header row names the columns failure and signal.")
     # The second column starts where the border's second run of "=" does. The search
     # starts after any indent, so that a table set in by a few spaces reads the same.
     border = lines[header - 1]
@@ -264,21 +264,13 @@ def silent_items(path: pathlib.Path = TELEMETRY) -> list[str]:
             rows[-1] += f" {first}"
     if not rows:
         raise ChecklistError(
-            f"the table of silent failure modes in {_shown(path)} has no rows")
+            f"the table of silent failure modes in {tiers._shown(path)} has no rows")
     names = rows + [" ".join(name.split()) for name in _ANNOUNCED.findall(doc)]
     return [f"silent:{_slug(name)}" for name in names]
 
 
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-
-
-def _shown(path: pathlib.Path) -> str:
-    """`path` from the repository root, or in full when it is outside the checkout."""
-    try:
-        return path.resolve().relative_to(REPO).as_posix()
-    except ValueError:
-        return str(path)
 
 
 _INTERNALS = "docs/INTERNALS.md"
@@ -606,7 +598,7 @@ def _literals(mark: ast.expr, path: pathlib.Path, what: str, result: Scan) -> li
 
 
 def _where(path: pathlib.Path, node: ast.AST) -> str:
-    return f"{_shown(path)}:{getattr(node, 'lineno', 0)}"
+    return f"{tiers._shown(path)}:{getattr(node, 'lineno', 0)}"
 
 
 def read_baseline(path: pathlib.Path = BASELINE) -> set[str]:
