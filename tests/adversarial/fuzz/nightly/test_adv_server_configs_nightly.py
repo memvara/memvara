@@ -37,7 +37,7 @@ CONFIGURATIONS: dict[str, dict[str, Any]] = {
 }
 
 #: Each configuration takes a tenth of the tier's example count.
-EACH = settings(max_examples=max(30, settings.default.max_examples // 10))
+EACH = settings(max_examples=max(30, settings().max_examples // 10))
 
 
 @pytest.mark.parametrize("options", list(CONFIGURATIONS.values()), ids=list(CONFIGURATIONS))

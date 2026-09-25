@@ -182,10 +182,10 @@ SCHEMA_KEYWORDS = frozenset({
 
 #: Text that a schema's `string` allows: any character except a surrogate, which is half
 #: of a character and cannot be encoded.
-TEXT = st.text(st.characters(exclude_categories=("Cs",)), max_size=40)
+TEXT = st.text(st.characters(exclude_categories=["Cs"]), max_size=40)
 
 #: Text that may also hold lone surrogates, which a JSON string can carry as escapes.
-ANY_TEXT = st.text(st.characters(exclude_categories=("Cs",)) | st.characters(categories=("Cs",)),
+ANY_TEXT = st.text(st.characters(exclude_categories=["Cs"]) | st.characters(categories=["Cs"]),
                    max_size=40)
 
 #: A strategy for each JSON type, for drawing a value of the wrong type.
@@ -226,7 +226,7 @@ def conforming(spec: Mapping[str, Any]) -> st.SearchStrategy[Any]:
         if "pattern" in spec:
             return st.from_regex(spec["pattern"], fullmatch=True).filter(
                 lambda text: len(text) <= longest)
-        return st.text(st.characters(exclude_categories=("Cs",)), max_size=min(longest, 40))
+        return st.text(st.characters(exclude_categories=["Cs"]), max_size=min(longest, 40))
     if kind == "integer":
         return st.integers(spec.get("minimum"), spec.get("maximum"))
     if kind == "number":
@@ -267,14 +267,14 @@ def violating(spec: Mapping[str, Any]) -> st.SearchStrategy[Any]:
     if "integer" in kinds and "number" not in kinds:
         options.append(st.sampled_from([math.nan, math.inf, -math.inf]))
     if kinds == ["string"]:
-        options.append(st.tuples(TEXT, st.characters(categories=("Cs",)), TEXT).map("".join))
+        options.append(st.tuples(TEXT, st.characters(categories=["Cs"]), TEXT).map("".join))
         if "enum" in spec:
             options.append(TEXT.filter(lambda text: text not in spec["enum"]))
         if "pattern" in spec:
             options.append(TEXT.filter(lambda text: re.search(spec["pattern"], text) is None))
         if "maxLength" in spec:
             longest = spec["maxLength"]
-            options.append(st.text(st.characters(exclude_categories=("Cs",)),
+            options.append(st.text(st.characters(exclude_categories=["Cs"]),
                                    min_size=longest + 1, max_size=longest + 8))
     low, high = spec.get("minimum"), spec.get("maximum")
     if kinds == ["integer"]:

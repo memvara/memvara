@@ -29,7 +29,7 @@ Start = Callable[..., McpProcess]
 #: Examples per tool. The tier's profile sets a count for a whole test, and each property
 #: here runs once for every one of the 22 tools, so the nightly and weekly tiers take a
 #: tenth of their count per tool (300 and 2,000), and the fast tier keeps its 30.
-PER_TOOL = settings(max_examples=max(30, settings.default.max_examples // 10))
+PER_TOOL = settings(max_examples=max(30, settings().max_examples // 10))
 
 #: Arguments never sent to a real server. memory_add_document fetches a url, and this
 #: suite does not reach the network.
