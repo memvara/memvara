@@ -66,11 +66,11 @@ from memvara.server import config as config_module
 from memvara.server import login as login_module
 from memvara.store import encryption as encryption_module
 
-# The adversarial suite's tiers and skip ledger (docs/claude/testing.md). `harness` is
-# importable here because tests/ has no __init__.py, so pytest puts tests/ on sys.path
-# before it imports this file.
+# The adversarial suite's skip ledger (docs/claude/testing.md). `harness` is importable
+# here because tests/ has no __init__.py, so pytest puts tests/ on sys.path before it
+# imports this file. The suite's --tier option is registered in the conftest.py at the
+# repository root, which every run reads.
 from harness import skips as skips_module
-from harness import tiers as tiers_module
 
 #: The two constants as the source defines them, read once before any fixture has
 #: redirected them. `test_credentials_path_constant_matches_logins_own` asserts the
@@ -238,38 +238,6 @@ def pytest_configure(config: Any) -> None:
         "derives_project: let ServerConfig.from_env() derive the project from a git "
         "remote, which tests/conftest.py otherwise switches off")
     config.pluginmanager.register(skips_module.SkipLedger(), "memvara-skip-ledger")
-    tiers_module.load_hypothesis_profile(config.getoption("--tier"))
-
-
-def pytest_addoption(parser: Any) -> None:
-    parser.addoption(
-        "--tier", choices=tiers_module.TIERS, default="fast",
-        help="which tier of tests to collect: fast (the default, and what CI runs), "
-             "nightly, weekly, local or quarantine. See docs/claude/testing.md.")
-
-
-def pytest_ignore_collect(collection_path: pathlib.Path, config: Any) -> bool | None:
-    """Leave out every test whose tier --tier does not select.
-
-    Returns True or None, never False. pytest stops at the first hook that returns a
-    value, so returning False here would overrule --ignore and every other plugin's
-    decision about the same path.
-    """
-    if tiers_module.ignored(collection_path, config.getoption("--tier")):
-        if collection_path.is_dir():
-            config.stash.setdefault(_LEFT_OUT, set()).add(collection_path)
-        return True
-    return None
-
-
-#: The tier folders this run left out, for the line below.
-_LEFT_OUT = pytest.StashKey[set]()
-
-
-def pytest_report_collectionfinish(config: Any) -> str:
-    """Say which tier ran and which tier folders it left out, on every run."""
-    return tiers_module.collection_report(config.getoption("--tier"),
-                                          config.stash.get(_LEFT_OUT, set()))
 
 
 @pytest.fixture(autouse=True)

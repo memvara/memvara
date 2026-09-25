@@ -16,8 +16,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `docs/claude/testing.md` describes it. This entry covers the suite's foundation, its
   reference model and its crash tests. None of it changes the library.
   - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
-    and the new `--tier nightly`, `--tier weekly`, `--tier local` and `--tier quarantine`
-    options select the others.
+    which includes the doctests in `memvara/`, and the new `--tier nightly`,
+    `--tier weekly`, `--tier local` and `--tier quarantine` options select the others.
+    The option works whatever paths a run is given.
   - **Skips need a reason on record.** A skip anywhere in the repository must match a rule
     in `tests/harness/skips.py`, or the run fails.
   - **Real processes.** The suite drives the MCP server as a real child process and runs
