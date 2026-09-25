@@ -329,12 +329,12 @@ The checklist is a list of everything the suite has to test, together with the t
 | `silent` | silent failure mode that the `memvara/telemetry.py` docstring lists | `silent:predicate-explosion` |
 | `bug` | open bug in `tests/harness/known_bugs.py` | `bug:B2` |
 
-A few sources need a word on how they are read:
+These details explain how some of the sources are read:
 
 - **Tool-switch pairs.** The checklist compares the `tools/list` reply of a server with every setting at its default against the reply with one switch flipped. A switch is flipped rather than turned off because two features, and both modes, are off by default. The servers run inside the test process, which is enough: `python -m memvara.server` builds the same server from the same three settings.
-- **Environment variables.** Only a variable that `config.py` actually reads counts, through `.get()`, `getenv()` or a subscript, so a variable named only in an error message does not. The `MEMVARA_FEATURE_*` variables are the `switch` items.
+- **Environment variables.** A variable counts only when `config.py` reads it, through `.get()`, `getenv()` or a subscript. A variable that appears only in an error message does not count. The `MEMVARA_FEATURE_*` variables are the `switch` items.
 - **Silent failure modes.** The telemetry docstring lists six in a table and announces the seventh in a sentence of its own. The checklist reads both.
-- **A source that yields nothing stops the run.** Otherwise a renamed heading or a missing table would drop that source's items from the checklist without a word. The known bugs are the exception, because running out of open bugs is the goal.
+- **A source that yields nothing stops the run.** Otherwise a renamed heading, or a table that is missing or has no rows, would drop that source's items from the checklist, and nothing would report it. The known bugs are the exception, because running out of open bugs is the goal.
 
 **Invariant ids.** An invariant's wording changes over time, so it needs an id that does not. `tests/harness/invariant_ids.json` records, for each document, each invariant's id and the bold sentence the invariant opens with. The sentence is how the checklist finds the invariant.
 

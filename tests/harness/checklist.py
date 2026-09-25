@@ -235,8 +235,11 @@ def silent_items(path: pathlib.Path = TELEMETRY) -> list[str]:
     if len(borders) < 3:
         raise ChecklistError(
             f"the table of silent failure modes in {_shown(path)} was not found")
+    # The second column starts where the border's second run of "=" does. The search
+    # starts after any indent, so that a table set in by a few spaces reads the same.
     border = lines[borders[0]]
-    column = border.index("=", border.index(" "))
+    indent = len(border) - len(border.lstrip())
+    column = border.index("=", border.index(" ", indent))
     rows: list[str] = []
     for line in lines[borders[1] + 1:borders[2]]:
         first, second = line[:column].strip(), line[column:].strip()
@@ -244,6 +247,9 @@ def silent_items(path: pathlib.Path = TELEMETRY) -> list[str]:
             rows.append(first)
         elif first and rows:
             rows[-1] += f" {first}"
+    if not rows:
+        raise ChecklistError(
+            f"the table of silent failure modes in {_shown(path)} has no rows")
     names = rows + [" ".join(name.split()) for name in _ANNOUNCED.findall(doc)]
     return [f"silent:{_slug(name)}" for name in names]
 
@@ -396,8 +402,8 @@ def items() -> set[str]:
 
     Every source except the known bugs must yield at least one item. One that yields
     none has changed shape, a renamed heading for example, and reading nothing from it
-    would drop its items from the checklist without a word. The known bugs may run out,
-    because that is the goal.
+    would drop its items from the checklist, and nothing would report it. The known bugs
+    may run out, because that is the goal.
     """
     sources = {
         "tools": tool_items(),

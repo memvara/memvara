@@ -209,6 +209,29 @@ def test_a_telemetry_docstring_without_its_table_is_an_error(tmp_path: pathlib.P
         checklist.silent_items(path)
 
 
+def test_an_indented_telemetry_table_is_read_the_same(tmp_path: pathlib.Path) -> None:
+    """A table set in by a few spaces, as a quoted block would be, lists the same modes.
+    Reading its columns from the wrong place would lose every row in silence."""
+    lines = _TELEMETRY.splitlines(keepends=True)
+    borders = [i for i, line in enumerate(lines) if line.startswith("====")]
+    first, last = borders[0], borders[-1]
+    indented = lines[:first] + [f"    {line}" for line in lines[first:last + 1]]
+    path = tmp_path / "telemetry.py"
+    path.write_text("".join(indented + lines[last + 1:]), encoding="utf-8")
+    assert checklist.silent_items(path) == [
+        "silent:first-mode", "silent:second-mode-that-wraps", "silent:new-seam"]
+
+
+def test_a_telemetry_table_with_no_rows_is_an_error(tmp_path: pathlib.Path) -> None:
+    """The announced mode must not hide a table that lost its rows."""
+    path = tmp_path / "telemetry.py"
+    path.write_text('"""Counters.\n\n=======  ======\nfailure  signal\n=======  ======\n'
+                    '=======  ======\n\n**A third arrived with the new seam**.\n"""\n',
+                    encoding="utf-8")
+    with pytest.raises(checklist.ChecklistError, match="no rows"):
+        checklist.silent_items(path)
+
+
 _INTERNALS = """\
 # Internals
 
@@ -343,7 +366,7 @@ def test_the_checklist_holds_an_item_of_every_kind() -> None:
 def test_a_source_that_yields_nothing_stops_the_checklist(
         monkeypatch: pytest.MonkeyPatch) -> None:
     """A source that yields no items has changed shape. Reading nothing from it would
-    drop its items from the checklist without a word."""
+    drop its items from the checklist, and nothing would report it."""
     monkeypatch.setattr(checklist, "env_items", lambda: [])
     with pytest.raises(checklist.ChecklistError, match="environment variables"):
         checklist.items()
