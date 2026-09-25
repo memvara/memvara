@@ -187,6 +187,15 @@ def test_a_tool_must_exist_and_the_capabilities_must_be_declared() -> None:
                in error for error in found)
 
 
+def test_a_session_cannot_change_the_user() -> None:
+    """Store gold reads every claim at the scenario's user, so a claim that a session wrote
+    as another user would look absent."""
+    scenario = sample()
+    scenario["sessions"][1]["env"] = {"user": "someone-else"}
+    assert any("session 2 env: a session cannot change the user" in error
+               for error in errors(scenario))
+
+
 def test_a_forbidden_rule_must_name_a_tool_memvara_has() -> None:
     """A rule naming a tool that does not exist could never match, so it would pass
     without protecting anything."""

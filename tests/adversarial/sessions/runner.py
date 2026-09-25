@@ -209,6 +209,10 @@ def problems(scenario: Mapping[str, Any], *, path: pathlib.Path | None = None) -
     found += _env_problems(scenario["env"], "env")
     for number, session in enumerate(scenario["sessions"], 1):
         found += _env_problems(session.get("env", {}), f"session {number} env")
+        if "user" in session.get("env", {}):
+            found.append(f"session {number} env: a session cannot change the user, because "
+                         "store gold reads every claim at the scenario's user; set the user "
+                         "in the scenario's env")
     found += _script_problems(scenario)
     return found
 

@@ -189,7 +189,7 @@ The runner writes the `seed` through the library first. The seed stands for memo
 
 A tool or hook step can `capture` part of its output with a regular expression, and a later step can use it. An argument that is exactly `{name}` is replaced by the captured text or the marked instant, and one that is exactly `{file:path}` by that workspace file's contents. Nothing else in an argument changes, so text with braces in it is safe.
 
-`env` sets how the server starts: the user, the project, the feature switches, read-only mode and the protocol version. A session can override any of them with its own `env`, which is how a scenario moves the user from one project to another.
+`env` sets how the server starts: the user, the project, the feature switches, read-only mode and the protocol version. A session can override any of them except the user with its own `env`, which is how a scenario moves the user from one project to another. The user stays the same in every session, because store gold reads every claim at the scenario's user.
 
 After the last session the store is read once more with expiry switched off, so the read neither erases an expired claim nor hides one. The store gold therefore sees exactly what the server left on disk.
 

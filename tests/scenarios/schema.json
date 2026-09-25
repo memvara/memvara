@@ -32,7 +32,7 @@
     "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "The name of a captured value or a marked instant, as a placeholder uses it: {name}."},
     "env": {
       "type": "object", "additionalProperties": false,
-      "description": "How the server starts. A field left out takes its default: user tester, no project, every feature at its default, writes enabled, protocol 2025-06-18. A session's own env overrides the scenario's, field by field.",
+      "description": "How the server starts. A field left out takes its default: user tester, no project, every feature at its default, writes enabled, protocol 2025-06-18. A session's own env overrides the scenario's, field by field, except the user: a session cannot change it, because store gold reads every claim at the scenario's user.",
       "properties": {
         "user": {"type": "string", "minLength": 1, "description": "MEMVARA_USER."},
         "project": {"type": "string", "minLength": 1, "description": "MEMVARA_PROJECT, as host/owner/repo."},
