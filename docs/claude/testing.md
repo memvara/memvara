@@ -336,6 +336,8 @@ These details explain how some of the sources are read:
 - **Silent failure modes.** The telemetry docstring lists six in a table and announces the seventh in a sentence of its own. The checklist reads both.
 - **A source that yields nothing stops the run.** Otherwise a renamed heading, or a table that is missing or has no rows, would drop that source's items from the checklist, and nothing would report it. The known bugs are the exception, because running out of open bugs is the goal.
 
+**Each source written as text is read by a parser that recognises particular forms.** For the environment variables, it recognises a read through `.get()`, `getenv()` or a subscript. For the silent failure modes, it reads the table whose header names the columns failure and signal, and any sentence that announces a mode on its own, in the form "A seventh arrived with the ...". For the invariants, it reads the numbered list under the design invariants heading in INTERNALS, and the bullets under "Invariants and assumptions" on each page. So a new form of a source the checklist already reads, such as a new way of reading an environment variable, is missed until its parser learns it: update the parser in the same change. The check above catches only a source that yields nothing at all, not one that has lost some of its items.
+
 **Invariant ids.** An invariant's wording changes over time, so it needs an id that does not. `tests/harness/invariant_ids.json` records, for each document, each invariant's id and the bold sentence the invariant opens with. The sentence is how the checklist finds the invariant.
 
 - The numbered invariants in INTERNALS take their number as their id, `I1` to `I8`.
