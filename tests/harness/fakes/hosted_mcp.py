@@ -41,6 +41,7 @@ from typing import Any
 from memvara import Memvara
 from memvara.project import check_project
 from memvara.server.mcp import MemvaraMCPServer
+from memvara.server.protocol import INVALID_REQUEST, PARSE_ERROR, failure
 from memvara.server.tools import TOOLS
 
 from .. import stores
@@ -65,8 +66,23 @@ _CODES = {400: "bad_request", 401: "unauthorized", 402: "quota_exhausted",
           503: "unavailable"}
 
 
-def _rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+#: The JSON-RPC error code the cloud uses for a session it does not know. It is the
+#: cloud's own, from the range JSON-RPC leaves to servers, so `memvara.server.protocol`
+#: does not name it.
+UNKNOWN_SESSION = -32001
+
+#: What `_decoded` returns for a body that does not decode.
+_UNDECODABLE = object()
+
+
+def _decoded(request: Request) -> Any:
+    """The request body as JSON, or `_UNDECODABLE`. A body nested too deeply for the
+    decoder counts as one that does not decode, as it does on the cloud, which answers
+    every failure to decode a body as invalid JSON (rest/mcp.py, `_dispatch`)."""
+    try:
+        return request.json()
+    except (ValueError, RecursionError):
+        return _UNDECODABLE
 
 
 class FakeHostedMcp(HttpFake):
@@ -114,10 +130,7 @@ class FakeHostedMcp(HttpFake):
             return None
         if request.method == "GET":
             return "GET /mcp"
-        try:
-            message = request.json()
-        except ValueError:
-            return None
+        message = _decoded(request)
         if request.method != "POST" or not isinstance(message, dict):
             return None
         method = message.get("method")
@@ -174,12 +187,12 @@ class FakeHostedMcp(HttpFake):
         return None
 
     def _post(self, request: Request, project: str | None) -> Reply:
-        try:
-            message = request.json()
-        except ValueError:
-            return json_reply(400, _rpc_error(None, -32700, "invalid JSON"))
+        message = _decoded(request)
+        if message is _UNDECODABLE:
+            return json_reply(400, failure(None, PARSE_ERROR, "invalid JSON"))
         if not isinstance(message, dict):
-            return json_reply(400, _rpc_error(None, -32600, "expected a JSON-RPC object"))
+            return json_reply(400, failure(None, INVALID_REQUEST,
+                                           "expected a JSON-RPC object"))
         # A server per request, as the cloud builds one: it holds no state between
         # requests except the store, so there is nothing to keep alive. It is never
         # closed, because closing a server closes the store it was given.
@@ -193,14 +206,14 @@ class FakeHostedMcp(HttpFake):
             return self._message(server.handle_message(message), {SESSION_HEADER: session})
         presented = request.header(SESSION_HEADER)
         if presented is None:
-            return json_reply(400, _rpc_error(
-                message.get("id"), -32600,
+            return json_reply(400, failure(
+                message.get("id"), INVALID_REQUEST,
                 f"every request after 'initialize' needs a {SESSION_HEADER!r} header."))
         with self._lock:
             known = presented in self._live
         if not known:
-            return json_reply(404, _rpc_error(
-                message.get("id"), -32001,
+            return json_reply(404, failure(
+                message.get("id"), UNKNOWN_SESSION,
                 "unrecognised or expired session; call 'initialize' again."))
         return self._message(server.handle_message(message))
 

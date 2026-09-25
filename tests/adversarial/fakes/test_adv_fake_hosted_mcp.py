@@ -187,3 +187,23 @@ def test_the_npm_bridge_carries_its_key_and_session_to_the_fake(
     assert len(agents) == 1 and agents.pop().startswith("memvara-npm/")
     assert [r.header("mcp-session-id") for r in fake.requests] == [
         None, fake.issued[0], fake.issued[0]]
+
+
+def test_a_body_that_is_not_a_json_rpc_object_gets_the_json_rpc_error_envelope(
+        hosted_mcp: FakeHostedMcp) -> None:
+    """The cloud answers any body it cannot decode, including one nested too deeply for
+    the decoder, as invalid JSON, and a body that decodes to something other than an
+    object as an invalid request (rest/mcp.py, `_dispatch`)."""
+    auth = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    with httpx.Client(base_url=hosted_mcp.MOCK_URL, transport=hosted_mcp.transport(),
+                      headers=auth) as raw:
+        broken = raw.post("/mcp", content=b"{not json")
+        nested = raw.post("/mcp", content=b"[" * 100_000 + b"]" * 100_000)
+        listed = raw.post("/mcp", content=b"[1, 2]")
+    parse_error = {"jsonrpc": "2.0", "id": None,
+                   "error": {"code": -32700, "message": "invalid JSON"}}
+    assert (broken.status_code, broken.json()) == (400, parse_error)
+    assert (nested.status_code, nested.json()) == (400, parse_error)
+    assert (listed.status_code, listed.json()) == (400, {
+        "jsonrpc": "2.0", "id": None,
+        "error": {"code": -32600, "message": "expected a JSON-RPC object"}})
