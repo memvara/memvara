@@ -283,6 +283,13 @@ def test_a_file_with_a_byte_order_mark_and_non_ascii_text_loads(tmp_path: pathli
     assert runner.load(path)["description"] == "Lisbon — then a question."
 
 
+def test_the_schema_and_the_scenario_files_are_read_once() -> None:
+    """Neither changes while the tests run, and collection asks for the scenarios once for
+    each test function that plays them."""
+    assert runner.schema() is runner.schema()
+    assert runner.load_all() is runner.load_all()
+
+
 def test_a_run_includes_a_scenario_only_when_its_tier_is_selected() -> None:
     fast, nightly = sample(id="fast-one"), sample(id="nightly-one", tier="nightly")
     assert [s["id"] for s in runner.selected([fast, nightly], "fast")] == ["fast-one"]

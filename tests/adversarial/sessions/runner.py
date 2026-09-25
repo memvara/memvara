@@ -14,6 +14,7 @@ tests/ while pytest collects.
 
 from __future__ import annotations
 
+import functools
 import json
 import pathlib
 import re
@@ -78,8 +79,10 @@ class ScenarioError(ValueError):
     """A scenario file that does not follow the format. The message lists every problem."""
 
 
+@functools.cache
 def schema() -> dict[str, Any]:
-    """The scenario format, as a JSON Schema."""
+    """The scenario format, as a JSON Schema. Read once, because it does not change while
+    the tests run; do not modify what it returns."""
     loaded: dict[str, Any] = json.loads(SCHEMA.read_text(encoding="utf-8"))
     return loaded
 
@@ -401,8 +404,10 @@ def load(path: pathlib.Path) -> dict[str, Any]:
     return loaded
 
 
-def load_all(directory: pathlib.Path = SCRIPTED) -> list[dict[str, Any]]:
-    """Every scenario in `directory` that loads.
+@functools.cache
+def load_all(directory: pathlib.Path = SCRIPTED) -> tuple[dict[str, Any], ...]:
+    """Every scenario in `directory` that loads, read once per run, because the files do
+    not change while the tests run.
 
     A file that does not load is left out here and fails its own format test, so it is
     reported rather than silently dropped.
@@ -413,7 +418,7 @@ def load_all(directory: pathlib.Path = SCRIPTED) -> list[dict[str, Any]]:
             found.append(load(path))
         except ScenarioError:
             continue
-    return found
+    return tuple(found)
 
 
 def selected(scenarios: Iterable[Mapping[str, Any]], tier: str) -> list[Mapping[str, Any]]:
@@ -649,11 +654,17 @@ def _env(*layers: Mapping[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _project_of(item: Mapping[str, Any], env: Mapping[str, Any]) -> str | None:
+    """The project a store gold item reads at: the one it names, or the scenario's own.
+    An item naming null reads at user level."""
+    return item["project"] if "project" in item else env["project"]
+
+
 def _projects(scenario: Mapping[str, Any], env: Mapping[str, Any]) -> list[str | None]:
     """The projects store gold reads at: the scenario's own, and any an item names."""
     found: list[str | None] = [env["project"]]
     for item in scenario["store_gold"]:
-        project = item["project"] if "project" in item else env["project"]
+        project = _project_of(item, env)
         if project not in found:
             found.append(project)
     return found
@@ -671,15 +682,12 @@ def _seed(db: pathlib.Path, env: Mapping[str, Any], ops: Sequence[Mapping[str, A
     """Write the seed through the library: memory from conversations before this one."""
     if not ops:
         return
-    mem = stores.file(db)
-    try:
+    with stores.file(db) as mem:
         scoped = mem.scope(user=env["user"], project=env["project"])
         for op in ops:
             kind = op.get("memory_type")
             scoped.remember(op.get("subject", "user"), op["predicate"], op["object"],
                             memory_type=MemoryType(kind) if kind else None)
-    finally:
-        mem.close()
 
 
 def _snapshot(db: pathlib.Path, user: str,
@@ -689,14 +697,11 @@ def _snapshot(db: pathlib.Path, user: str,
     Opened with expiry switched off, so this read neither erases an expired claim nor
     hides it: the rows are what the server left on disk.
     """
-    mem = stores.file(db, expiry_erasure=False, sweep_expired=False)
-    try:
+    with stores.file(db, expiry_erasure=False, sweep_expired=False) as mem:
         return {project: [Row(claim.text, claim.state, claim.memory_type.value)
                           for claim in mem.scope(user=user, project=project)
                           .get_all(states=STATES)]
                 for project in projects}
-    finally:
-        mem.close()
 
 
 def _context(host: str, reply: Mapping[str, Any] | None) -> str:
@@ -756,19 +761,20 @@ class _Session:
                 f"ends: {self.server.stderr_text()[-300:]!r}")
 
     def _step(self, step: Mapping[str, Any], turn: Mapping[str, Any], where: str) -> Step:
-        if "tool" in step:
-            return self._tool(step, where)
-        if "hook" in step:
-            return self._hook(step, turn, where)
-        if "op" in step:
-            return self._erase(step, where)
-        if "mark" in step:
-            mark(self.values, step["mark"], step.get("offset_seconds", 0.0))
-            return Step("mark", step["mark"])
+        """Play one step with the handler for its kind, as `_kind` names it."""
+        handlers = {"tool": self._tool, "hook": self._hook, "op": self._erase,
+                    "mark": self._mark, "wait": self._wait}
+        return handlers[_kind(step)](step, turn, where)
+
+    def _mark(self, step: Mapping[str, Any], turn: Mapping[str, Any], where: str) -> Step:
+        mark(self.values, step["mark"], step.get("offset_seconds", 0.0))
+        return Step("mark", step["mark"])
+
+    def _wait(self, step: Mapping[str, Any], turn: Mapping[str, Any], where: str) -> Step:
         wait_until(self.values, step["wait_until"])
         return Step("wait", step["wait_until"])
 
-    def _tool(self, step: Mapping[str, Any], where: str) -> Step:
+    def _tool(self, step: Mapping[str, Any], turn: Mapping[str, Any], where: str) -> Step:
         name = step["tool"]
         args = substitute(step.get("args", {}), self.values, self.work)
         self.outcome.calls.append((name, args))
@@ -800,7 +806,7 @@ class _Session:
         self._capture(step, text, where)
         return Step("hook", step["hook"], text)
 
-    def _erase(self, step: Mapping[str, Any], where: str) -> Step:
+    def _erase(self, step: Mapping[str, Any], turn: Mapping[str, Any], where: str) -> Step:
         """The operator erases one claim and nothing else.
 
         Opened without the expiry sweep: a plain library open also erases every expired
@@ -808,12 +814,9 @@ class _Session:
         checks that work pass for the wrong reason.
         """
         claim_id = substitute(step["claim_id"], self.values, self.work)
-        mem = stores.file(self.db, sweep_expired=False)
-        try:
+        with stores.file(self.db, sweep_expired=False) as mem:
             erased = mem.scope(user=self.env["user"], project=self.env["project"]).erase(
                 claim_id, sources=bool(step.get("sources", False)))
-        finally:
-            mem.close()
         if not erased:
             self.outcome.problems.append(
                 f"{where}: the operator's erase of {claim_id} found nothing to erase")
@@ -903,7 +906,7 @@ def check(gold: Gold, outcome: Outcome) -> Verdict:
 
 
 def _check_store(item: Mapping[str, Any], outcome: Outcome) -> Verdict:
-    project = item["project"] if "project" in item else outcome.env["project"]
+    project = _project_of(item, outcome.env)
     rows = [row for row in outcome.rows[project] if row.text == item["text"]]
     if item["state"] == "absent":
         passed, wanted = not rows, "no claim in any state"
