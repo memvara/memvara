@@ -75,14 +75,17 @@ _TOOLS_LIST = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
 
 
 def listing(*, read_only: bool = False, anchored: bool = False,
-            features_off: Collection[str] = server_config.FEATURES_OFF_BY_DEFAULT,
-            ) -> dict[str, Any]:
+            features_off: Collection[str] | None = None) -> dict[str, Any]:
     """The `tools/list` reply of a server with these settings, keyed by tool name.
 
     The server runs in this process, over an in-memory store. `python -m memvara.server`
     builds the same `MemvaraMCPServer` from the same three settings
-    (memvara/server/cli.py), so this is the list the real process sends.
+    (memvara/server/cli.py), so this is the list the real process sends. `features_off`
+    defaults to the features that are off by default, read when this runs, for the reason
+    `_switches` reads FEATURES then.
     """
+    if features_off is None:
+        features_off = server_config.FEATURES_OFF_BY_DEFAULT
     server = MemvaraMCPServer(stores.memory(), user="checklist", read_only=read_only,
                               anchored=anchored, features_off=features_off)
     try:

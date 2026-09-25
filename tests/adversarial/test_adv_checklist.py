@@ -146,6 +146,22 @@ def test_a_switch_that_reveals_a_tool_makes_a_pair_too(
     assert "tool-switch:memory_probe/extraction_chunks" in checklist.tool_switch_items()
 
 
+def test_the_default_listing_follows_the_features_that_are_off_by_default(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The listing that every switch is compared against must read the features that are
+    off by default when it runs, as each flipped listing does. Read once at import, it
+    kept the document tools while the flipped listing showed them too, and the four
+    document pairs vanished."""
+    monkeypatch.setattr(server_config, "FEATURES_OFF_BY_DEFAULT",
+                        server_config.FEATURES_OFF_BY_DEFAULT | {"documents"})
+    assert {pair for pair in checklist.tool_switch_items()
+            if pair.endswith("/documents")} == {
+        "tool-switch:memory_add_document/documents",
+        "tool-switch:memory_delete_document/documents",
+        "tool-switch:memory_get_document/documents",
+        "tool-switch:memory_list_documents/documents"}
+
+
 def test_every_kind_of_environment_read_is_found(tmp_path: pathlib.Path) -> None:
     """A read by .get(), by getenv() or by subscript counts, with the name written out
     or held in a constant, including one imported from another module. A variable that
