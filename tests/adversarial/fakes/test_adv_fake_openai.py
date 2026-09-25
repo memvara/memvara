@@ -148,3 +148,10 @@ def test_a_delay_waits_and_then_answers_with_the_next_scripted_reply(
     assert answer.status_code == 200
     assert answer.json()["choices"][0]["message"]["content"] == "after the wait"
     assert fake_openai.pending == 0
+
+
+def test_a_rate_limit_writes_a_whole_wait_as_whole_seconds(fake_openai: FakeOpenAI) -> None:
+    fake_openai.add_rate_limit(retry_after=1_000_000)
+    fake_openai.add_rate_limit(retry_after=2.5)
+    assert _post(fake_openai, "1").headers["retry-after"] == "1000000"
+    assert _post(fake_openai, "2").headers["retry-after"] == "2.5"

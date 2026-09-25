@@ -127,8 +127,12 @@ class FakeOpenAI(HttpFake):
 
     def add_rate_limit(self, *, retry_after: float | None = 1.0,
                        message: str = "Rate limit reached for requests") -> None:
-        """A 429 in OpenAI's error shape, with `Retry-After` unless it is None."""
-        headers = {} if retry_after is None else {"Retry-After": f"{retry_after:g}"}
+        """A 429 in OpenAI's error shape, with `Retry-After` unless it is None. A whole
+        number of seconds is written as an integer, which is the form the header defines;
+        any other wait is written as a plain decimal."""
+        wait = float(retry_after) if retry_after is not None else None
+        headers = {} if wait is None else {
+            "Retry-After": str(int(wait)) if wait.is_integer() else repr(wait)}
         body = {"error": {"message": message, "type": "requests", "param": None,
                           "code": "rate_limit_exceeded"}}
         self._push(lambda request, number: json_reply(429, body, headers))
