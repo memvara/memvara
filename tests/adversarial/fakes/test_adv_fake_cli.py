@@ -104,7 +104,20 @@ def test_the_agentic_run_reads_the_fake_s_stream_of_events(
     fakes.script("claude", '{"proposals": []}')
     got = _child(AGENTIC, fakes=fakes, home=home, cwd=tmp_path)
     assert (got["failure"], got["result"]) == ("", '{"proposals": []}')
-    assert fakes.calls("claude") == [CliCall(argv=got["argv"], stdin="")]
+    (call,) = fakes.calls("claude")
+    assert call == CliCall(argv=got["argv"], stdin="")
+    # The flags are written out here rather than read from `agentic.argv`, so the command
+    # the fake saw is compared with what the run has to ask for, not with itself. The
+    # fake prints stream-json, which the run can read only when it asks for it, and the
+    # other flags keep the run away from the user's own settings, tools and servers.
+    argv = call.argv
+    assert argv[0] == "-p"
+    assert {("--output-format", "stream-json"), ("--mcp-config", "/no/such/config.json"),
+            ("--setting-sources", ""), ("--tools", ""), ("--permission-mode", "dontAsk"),
+            ("--system-prompt", "RULES")} <= set(zip(argv, argv[1:]))
+    assert {"--verbose", "--strict-mcp-config", "--no-session-persistence"} <= set(argv)
+    # The data comes last, straight after the one value `--system-prompt` takes.
+    assert argv[-2:] == ["RULES", "DATA"]
 
 
 def test_a_raw_reply_is_printed_byte_for_byte_with_its_stderr_and_status(
