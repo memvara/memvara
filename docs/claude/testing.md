@@ -59,3 +59,15 @@ The files named `test_adv_*_tier_guard.py` fail if their folder is ever collecte
 The ledger exists because most summaries show a skip as green, so a test that stops running for a new reason looks exactly like one that passes.
 
 An expected failure (xfail) is not a skip, and the ledger ignores it.
+
+## Property-based tests
+
+Hypothesis runs under the profile of the selected tier.
+
+| Tier | Examples | Behaviour |
+|---|---|---|
+| fast | 30 per test, 25 steps per state machine | Derandomized, with no example database, so a PR run gives the same answer every time |
+| nightly | 3,000 | Keeps the examples it finds in `~/.cache/memvara-adversarial/hypothesis`, so a failure found one night is tried first the next night |
+| weekly | 20,000 | Same database as nightly |
+
+When a property test fails, Hypothesis prints a reproduction blob. Put it in a `@reproduce_failure` decorator to replay the exact case.

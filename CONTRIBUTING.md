@@ -50,7 +50,7 @@ document; `conftest.py` says which and why. The server tests used to be exempt t
 build a `Memvara` through `build_memvara()` and had no keyword to pass it — and are not
 any more, now that `MEMVARA_EMBEDDER` gives them one.
 
-`[dev]` is pytest, pytest-asyncio, coverage and mypy — no provider SDKs. `cloud`, `ingest`
+`[dev]` is pytest, pytest-asyncio, coverage, mypy and Hypothesis — no provider SDKs. `cloud`, `ingest`
 and `encrypt` are what CI installs beside it: the remote-store tests need `httpx` to be
 collected at all, the PDF tests read real PDFs with `pypdf`, and the server tests create
 stores the way the server does, encrypted, which needs SQLCipher. The encrypted-store tests

@@ -238,6 +238,7 @@ def pytest_configure(config: Any) -> None:
         "derives_project: let ServerConfig.from_env() derive the project from a git "
         "remote, which tests/conftest.py otherwise switches off")
     config.pluginmanager.register(skips_module.SkipLedger(), "memvara-skip-ledger")
+    tiers_module.load_hypothesis_profile(config.getoption("--tier", default="fast"))
 
 
 def pytest_addoption(parser: Any) -> None:

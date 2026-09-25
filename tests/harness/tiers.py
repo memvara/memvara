@@ -74,3 +74,42 @@ def ignored(path: pathlib.Path, option: str, *, is_dir: bool | None = None) -> b
     if pathlib.Path(path).name in _ALWAYS:
         return False
     return tier_of(path) not in wanted
+
+
+#: The Hypothesis profile each tier runs under.
+HYPOTHESIS_PROFILE_FOR: dict[str, str] = {
+    "fast": "memvara-fast",
+    "nightly": "memvara-nightly",
+    "weekly": "memvara-weekly",
+    "local": "memvara-nightly",
+    "quarantine": "memvara-nightly",
+}
+
+
+def load_hypothesis_profile(option: str) -> None:
+    """Register the suite's Hypothesis profiles, and load the one for --tier `option`.
+
+    The fast profile is derandomized and keeps no example database, so a PR run is
+    repeatable. The nightly and weekly profiles run far more examples. They keep what
+    they find in ~/.cache/memvara-adversarial/hypothesis, so a failure found one night is
+    tried first the next night. Hypothesis is imported here rather than at the top of
+    the module, so this module stays importable in an environment without the dev extra.
+    """
+    try:
+        from hypothesis import HealthCheck, settings  # noqa: PLC0415
+        from hypothesis.database import DirectoryBasedExampleDatabase  # noqa: PLC0415
+    except ImportError:
+        return
+    quiet = [HealthCheck.too_slow]
+    settings.register_profile(
+        "memvara-fast", max_examples=30, stateful_step_count=25, derandomize=True,
+        database=None, deadline=None, print_blob=True, suppress_health_check=quiet)
+    database = DirectoryBasedExampleDatabase(
+        str(pathlib.Path.home() / ".cache" / "memvara-adversarial" / "hypothesis"))
+    settings.register_profile(
+        "memvara-nightly", max_examples=3000, stateful_step_count=100, database=database,
+        deadline=None, print_blob=True, suppress_health_check=quiet)
+    settings.register_profile(
+        "memvara-weekly", parent=settings.get_profile("memvara-nightly"),
+        max_examples=20000, stateful_step_count=200)
+    settings.load_profile(HYPOTHESIS_PROFILE_FOR[option])
