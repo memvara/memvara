@@ -207,7 +207,7 @@ class FakeV1(HttpFake):
         self.api_key = api_key
         self.read_only = read_only
         self._stored: dict[tuple[str, str, str], Reply] = {}
-        self._key_locks: dict[str, threading.Lock] = {}
+        self._key_locks: dict[tuple[str, str, str], threading.Lock] = {}
         self._handlers: dict[str, Callable[[ScopedMemvara, Request], Any]] = {
             "GET /v1/whoami": self._whoami,
             "GET /v1/stats": self._stats,
@@ -336,11 +336,13 @@ class FakeV1(HttpFake):
               answer: Callable[[], Reply]) -> Reply:
         """Answer a write once per idempotency key, method and path.
 
-        One lock per key, so a retry that arrives while the first attempt is still being
-        answered waits for it and then gets its reply, rather than writing a second time.
+        One lock for each key, method and path, the same triple the reply is stored under.
+        A retry that arrives while the first attempt is still being answered waits for it
+        and then gets its reply, rather than writing a second time, and a write that
+        shares only the key does not wait at all.
         """
         with self._lock:
-            lock = self._key_locks.setdefault(key[0], threading.Lock())
+            lock = self._key_locks.setdefault(key, threading.Lock())
         with lock:
             stored = self._stored.get(key)
             if stored is not None:

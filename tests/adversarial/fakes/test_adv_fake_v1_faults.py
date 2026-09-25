@@ -3,8 +3,9 @@ mock transport and over a real socket."""
 
 from __future__ import annotations
 
+import threading
 import time
-from typing import Callable
+from typing import Any, Callable
 
 import httpx
 import pytest
@@ -12,6 +13,7 @@ import pytest
 from harness.fakes._http import Request
 from harness.fakes.fake_v1 import FakeV1
 from harness.stdio import McpProcess
+from memvara.core import ScopedMemvara
 from memvara.remote.api import RemoteMemvara
 from memvara.remote.client import DEFAULT_ATTEMPTS
 from memvara.remote.errors import (AuthError, InvalidRequest, RateLimited, ReadOnly,
@@ -128,6 +130,46 @@ def test_a_write_retried_after_its_first_attempt_timed_out_lands_once(
     # observations is what shows the write landed once.
     assert [c.observation_count for c in fake_v1.memvara.scope(user="alice").get_all()] \
         == [1]
+
+
+def test_a_write_waits_only_for_an_earlier_write_with_the_same_key_method_and_path(
+        fake_v1: FakeV1) -> None:
+    """The fake stores a write's reply under its idempotency key, method and path
+    together. A write that shares only the key with one still being carried out is a
+    different write, so it must go ahead without waiting for it."""
+    entered, release = threading.Event(), threading.Event()
+    remember = fake_v1._handlers["POST /v1/facts"]
+
+    def held(view: ScopedMemvara, request: Request) -> Any:
+        entered.set()
+        release.wait(10)
+        return remember(view, request)
+
+    fake_v1._handlers["POST /v1/facts"] = held
+    statuses: dict[str, int] = {}
+
+    def post(path: str, body: dict[str, Any]) -> None:
+        with httpx.Client(base_url=fake_v1.MOCK_URL, transport=fake_v1.transport(),
+                          timeout=30, headers={"Authorization": f"Bearer {fake_v1.api_key}",
+                                               "Idempotency-Key": "the-same-key"}) as client:
+            statuses[path] = client.post(path, json=body,
+                                         params={"user": "alice"}).status_code
+
+    first = threading.Thread(target=post, daemon=True, args=(
+        "/v1/facts", {"subject": "user", "predicate": "lives_in", "object": "Lisbon"}))
+    second = threading.Thread(target=post, daemon=True, args=(
+        "/v1/memories", {"messages": [{"role": "user", "content": "I like green tea"}]}))
+    try:
+        first.start()
+        assert entered.wait(5)
+        second.start()
+        second.join(timeout=3)
+        assert not second.is_alive(), "the second write waited for the first"
+    finally:
+        release.set()
+        first.join(timeout=5)
+    assert statuses == {"/v1/facts": 200, "/v1/memories": 200}
+    assert [r.replayed for r in fake_v1.requests] == [False, False]
 
 
 def test_a_wrong_key_is_refused_and_not_retried(fake_v1: FakeV1) -> None:
