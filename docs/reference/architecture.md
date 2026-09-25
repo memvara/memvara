@@ -40,7 +40,7 @@ tier's job is to stop a turn before it reaches the one that costs money.
 ```mermaid
 flowchart TD
     E["Episode<br/><i>a turn, a document, a paste</i>"]
-    T0{"<b>Tier 0</b> — no model<br/>content-hash duplicate?<br/>near-duplicate (cosine ≥ 0.97)?"}
+    T0{"<b>Tier 0</b> — no model<br/>content-hash duplicate?<br/>near-duplicate of a claim,<br/>with the same numbers?"}
     T1{"<b>Tier 1</b> — no model<br/>SalienceGate: does this<br/>carry a durable fact?"}
     T1B{"<b>Tier 1b</b> — no model<br/>FastExtractor: a<br/>recognised sentence form?"}
     T2["<b>Tier 2</b> — the only model call<br/>llm.extract(...), batched<br/>across the surviving turns"]

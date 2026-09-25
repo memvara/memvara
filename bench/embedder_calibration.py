@@ -29,6 +29,12 @@ Two thresholds read a cosine, and a cosine is not portable between models:
   fold them and only the merge can. The 8 restatements measured before them could never
   reach the merge: 6 differ only in case, punctuation or a leading article, which
   `value_key` folds, and 2 change the predicate, which puts them in two slots.
+* **The near-duplicate check** (`write/pipeline.py`) reads a new turn as a restatement of
+  the nearest claim, and extracts nothing from it, when their cosine reaches `merge` and
+  the two hold the same numbers. A turn worded like a claim embeds exactly as that claim
+  would, so the merge's pairs measure the check for those turns. The pairs added for it
+  are turns a person writes, in the first person: 8 that repeat a claim's value and 8
+  that state another value, each against the claim.
 
 The report counts the merges at each threshold twice: all of them, and those between two
 values holding the same numbers in the same order, which are the only ones left once the
@@ -55,7 +61,7 @@ import evalkit as ek  # noqa: E402
 import longmemeval as lme  # noqa: E402
 
 # The merge's own reading of a value's numbers, so the report counts what it refuses.
-from memvara.consolidate.merge import _numbers as numbers  # noqa: E402
+from memvara.embed.calibration import numbers  # noqa: E402
 from memvara.embed import HashingEmbedder  # noqa: E402
 from memvara.types import Claim, Scope  # noqa: E402
 
@@ -206,6 +212,33 @@ RESTATED_CLAIMS = [
 ]
 
 
+# (a turn in a person's own words, the claim it repeats): the near-duplicate check's
+# restatements.
+FIRST_PERSON_SAME = [
+    ("I have an appointment on 2023-05-01.", "user has appointment on 2023-05-01"),
+    ("My booking reference is KLM7QX.", "user booking reference is KLM7QX"),
+    ("I live in Berlin.", "user lives in Berlin"),
+    ("I work at Acme.", "user works at Acme"),
+    ("My flight is LH 400.", "user's flight is LH 400"),
+    ("I pinned numpy 1.26.4", "user pinned numpy 1.26.4"),
+    ("My lease ends on 31 August 2025.", "user lease ends on 31 August 2025"),
+    ("I track ticket JIRA-4411.", "user tracks ticket JIRA-4411"),
+]
+
+# (a turn in a person's own words, a claim holding another value): must never be read as a
+# restatement of it.
+FIRST_PERSON_OTHER = [
+    ("I have an appointment on 2023-05-02.", "user has appointment on 2023-05-01"),
+    ("My appointment is on 2023-05-02", "user has appointment on 2023-05-01"),
+    ("I pinned numpy 1.26.2 in the project.", "user pinned numpy 1.26.4"),
+    ("I pinned numpy 1.26.2", "user pinned numpy 1.26.4"),
+    ("My booking reference is KLM7QZ.", "user booking reference is KLM7QX"),
+    ("My flight is LH 401.", "user's flight is LH 400"),
+    ("My lease ends on 31 August 2026.", "user lease ends on 31 August 2025"),
+    ("I track ticket JIRA-4412 now.", "user tracks ticket JIRA-4411"),
+]
+
+
 def unrelated_turns() -> list[str]:
     """Twenty real turns, over 200 characters, that none of the inventions describe."""
     episodes = json.loads((ROOT / "tests/fixtures/phi4_spike/episodes.json").read_text())
@@ -262,6 +295,8 @@ def measure(model_id: str, sources: list[str]) -> dict[str, np.ndarray]:
         "invention": np.array([best_chunk(obj, src) for obj in INVENTIONS for src in sources]),
         "different": np.array([pair(a, b) for a, b in DIFFERENT_PAIRS]),
         "restated": np.array([pair(a, b) for a, b in RESTATED_PAIRS]),
+        "first_person_same": np.array([pair(a, b) for a, b in FIRST_PERSON_SAME]),
+        "first_person_other": np.array([pair(a, b) for a, b in FIRST_PERSON_OTHER]),
     }
 
 
@@ -303,6 +338,10 @@ def main() -> int:
                   f"{int((diff[dn] >= t).sum()):>8} of {int(dn.sum()):<3} "
                   f"{int((same >= t).sum()):>10} of {len(same):<3} "
                   f"{int((same[sn] >= t).sum()):>8} of {int(sn.sum())}")
+        fs, fo = m["first_person_same"], m["first_person_other"]
+        print(f"    near-duplicate check, first-person turns: {fs.min():.3f}-{fs.max():.3f} "
+              f"against the claim they repeat, {fo.min():.3f}-{fo.max():.3f} against a "
+              f"claim holding another value")
         if args.show:
             for label, pairs, scores in (("different", DIFFERENT_PAIRS, diff),
                                          ("restated", RESTATED_PAIRS, same)):
