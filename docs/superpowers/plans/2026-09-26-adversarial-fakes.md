@@ -3925,3 +3925,15 @@ The committed files are the reference. They differ from the code above in these 
 - **`test_adv_fake_http.py`**: the async test compares the first tick with the moment the delayed answer arrived, instead of with a fixed 0.25 seconds that a loaded machine could miss.
 - **`test_adv_fake_v1_parity.py`**, from the final review: the route scan stops on a client call whose method it cannot read, instead of skipping it, and `test_a_call_the_scan_cannot_read_stops_it` shows that on a synthetic client. A route called that way would otherwise have slipped past the check.
 - **`docs/claude/testing.md`**, from the final review: the fakes section says that the hooks use a hosted endpoint only when no local store is configured, which is when a hook run reaches `FakeHostedMcp`.
+
+## Changes made after the code review
+
+The code review of the finished branch found the defects below. Each was fixed in its own commit, with a test that failed first where a failing test was possible:
+
+- **`cli.py`**: scripting a fake again starts over from the first new reply. The position of the next reply is kept in its own file, which `script()` resets and each run advances under the same lock as the call log.
+- **`openai_compat.py`**: a `delay` injected on the route waits and then answers with the next scripted reply, instead of a 404. A scripted rate limit writes a whole wait as whole seconds, so `Retry-After` is `1000000` rather than `1e+06`.
+- **`hosted_mcp.py`**: JSON-RPC errors are built with `failure`, `PARSE_ERROR` and `INVALID_REQUEST` from `memvara.server.protocol`, and a body nested too deeply for the decoder is answered as invalid JSON instead of raising out of the fake.
+- **`_http.py`**: `close()` releases requests held on the two mock transports, which used to sleep out the whole delay or read timeout.
+- **`fake_v1.py`**: a replayed write is locked on the key, method and path it is stored under, not on the key alone. The six reads that take the clocks as query parameters read them through one helper. The consolidation's 202 names the project in `Memvara-Project-Applied`, and `POST /v1/ask` refuses an empty question with a 422, both as memvara-cloud does at origin/main e8940be.
+- **`test_adv_fake_v1_faults.py`**: the field-refusal test checks that a read refused for `query_rewrite` is sent again without it, and **`test_adv_fake_cli.py`** checks the agentic run's command against flags written out in the test.
+- **Docstrings and `docs/claude/testing.md`** name the memvara-cloud commit the fakes were matched to, say that nothing checks them against it automatically, record the one known header difference, say which OpenAI endpoints `FakeOpenAI` serves, and say that the hook-conformance workstream will lift `HookRunner`'s refusal of `capture`.

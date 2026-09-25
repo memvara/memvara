@@ -11,6 +11,11 @@ reaches a self-hosted model.
 
 `FakeOpenAI` is such an endpoint: `POST /v1/chat/completions` on 127.0.0.1. It answers
 each request with the next reply a test scripted, in order, and records every request.
+It serves chat completions and nothing else. `OpenAILLM.describe_image` is a chat
+completion with the image attached, so it is answered from the script like any other
+call. `OpenAILLM.transcribe` calls the transcription endpoint instead,
+`POST /v1/audio/transcriptions`, which this fake does not serve: over a socket it answers
+404, and the stand-in client that `client()` returns has no `audio` attribute at all.
 A scripted reply can be a completion, tool calls, a raw body the client cannot parse, a
 429 or a hang. A request that finds no scripted reply left gets a 500 that says so, so a
 test that made one call more than it expected fails loudly.

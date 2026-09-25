@@ -8,6 +8,12 @@ memvara-cloud's `rest/render.py` does, because `hydrate.py` is written as the in
 that module, and it refuses a request the way the cloud's routes refuse it. A test can
 therefore point the real client at it and compare the answers with a local store's.
 
+**How current it is.** The renderers and the refusals were written to match memvara-cloud
+at origin/main e8940be (2026-09-25). Nothing checks that automatically, because this suite
+never reads memvara-cloud: when the cloud changes, this fake keeps the old behaviour until
+somebody compares the two again by hand. Only the list of routes is checked, against the
+clients, as the next paragraph says.
+
 **The routes** are the 34 that the two clients call, read from `memvara/remote/api.py` and
 `memvara/remote/aio.py`. A self-test reads those two files and fails when a client calls a
 route this fake does not serve, or when this fake serves one that no client calls.
@@ -30,6 +36,13 @@ calls (`GET /v1/jobs/{id}` and `POST /v1/erasures/shred`); and a document added 
 which the cloud fetches and this fake refuses, because the suite runs offline. One route
 behaves differently: `POST /v1/maintenance/consolidate` runs the pass before it answers,
 so the job it returns has already finished, where the cloud answers first.
+
+One header differs as well, and not on purpose. An answer in a project carries
+`Memvara-Project-Applied`, but a refusal never does. The cloud also puts the header on a
+refusal raised after it has resolved the request's project (`rest/errors.py`,
+`_stamped`), such as a 404 for a missing memory, though not on a request that fails
+schema validation. No client in this repository reads the header, so nothing depends on
+the difference yet.
 """
 
 from __future__ import annotations

@@ -23,6 +23,11 @@ or as server-sent events.
 * A `memvara-project` header binds the project, and the reply names it in
   `Memvara-Project-Applied`.
 
+It was written to match `rest/mcp.py` at memvara-cloud origin/main e8940be (2026-09-25).
+Nothing checks that automatically, because this suite never reads memvara-cloud: when the
+cloud changes, this fake keeps the old behaviour until somebody compares the two again by
+hand.
+
 With `sse=True` each reply is sent as one server-sent event instead of plain JSON.
 `expire_sessions()` forgets every issued session, as a restarted deployment does, so a
 test can check that a client shakes hands again.
