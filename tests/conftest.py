@@ -67,8 +67,9 @@ from memvara.server import login as login_module
 from memvara.store import encryption as encryption_module
 
 # The adversarial suite's skip ledger (docs/claude/testing.md). `harness` is importable
-# here because pyproject.toml puts tests/ on the import path. The suite's --tier option
-# is registered in the conftest.py at the repository root, which every run reads.
+# here because tests/ has no __init__.py, so pytest puts tests/ on sys.path before it
+# imports this file. The suite's --tier option is registered in the conftest.py at the
+# repository root, which every run reads.
 from harness import skips as skips_module
 
 #: The two constants as the source defines them, read once before any fixture has

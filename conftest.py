@@ -10,18 +10,35 @@ at first, and two things went wrong:
   file's `pytest_ignore_collect` only about paths inside that file's own folder.
 
 tests/harness/tiers.py decides which tier a test is in and what each `--tier` value
-collects, and docs/claude/testing.md describes the tiers. `harness` can be imported here
-because pyproject.toml puts tests/ on the import path (`pythonpath`).
+collects, and docs/claude/testing.md describes the tiers. That module is loaded here from
+its file, under a name of its own, rather than imported as `harness.tiers`: this file is
+read before pytest puts tests/ on the import path, and a setting that put it there would
+be lost in a run given another config file (`-c`), and would let a module under tests/
+hide an installed package of the same name in every run.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import pathlib
+import sys
+from types import ModuleType
 from typing import Any
 
 import pytest
 
-from harness import tiers
+
+def _load_tiers() -> ModuleType:
+    path = pathlib.Path(__file__).resolve().parent / "tests" / "harness" / "tiers.py"
+    spec = importlib.util.spec_from_file_location("_memvara_test_tiers", path)
+    assert spec is not None and spec.loader is not None, path
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+tiers = _load_tiers()
 
 
 def pytest_addoption(parser: Any) -> None:

@@ -171,3 +171,13 @@ def test_a_local_run_leaves_out_the_doctests_in_the_package(tmp_path: pathlib.Pa
     collected = [line for line in run.stdout.splitlines() if "::" in line]
     assert collected, "the local tier has tests, so the run must collect some"
     assert [line for line in collected if not line.startswith("tests/")] == []
+
+
+def test_a_run_with_another_config_file_still_loads_the_root_conftest(
+        tmp_path: pathlib.Path) -> None:
+    """`-c` replaces pyproject.toml's settings, so the root conftest cannot rely on any of
+    them to find the tier rules."""
+    config = tmp_path / "other.ini"
+    config.write_text("[pytest]\n", encoding="utf-8")
+    run = _collect(tmp_path, "-c", str(config), "tests/adversarial/test_adv_tiers.py")
+    assert run.returncode == pytest.ExitCode.OK, run.stdout + run.stderr

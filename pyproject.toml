@@ -164,8 +164,5 @@ exclude_also = [
 # coverage measures a file no library code calls, which put it in the report at 17% and
 # the total at 97% against a gate of 100.
 testpaths = ["tests", "memvara"]
-# tests/ goes on the import path before any conftest file is read, so the conftest.py at
-# the repository root can import the suite's `harness` package.
-pythonpath = ["tests"]
 addopts = "--doctest-modules --ignore=memvara/skills"
 filterwarnings = ["error::DeprecationWarning"]
