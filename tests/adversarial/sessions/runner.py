@@ -26,7 +26,7 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 import pytest
 
 from harness import known_bugs, stores, tiers
-from harness.env import REPO
+from harness.env import REPO, feature_env
 from harness.hooks import HookRunner, host_record
 from harness.stdio import PROTOCOL, McpProcess
 from memvara import MemoryType
@@ -834,8 +834,7 @@ class _Session:
             env["MEMVARA_PROJECT"] = self.env["project"]
         if self.env["read_only"]:
             env["MEMVARA_READ_ONLY"] = "1"
-        for name, on in self.env["features"].items():
-            env[f"MEMVARA_FEATURE_{name.upper()}"] = "1" if on else "0"
+        env.update(feature_env(self.env["features"]))
         return env
 
 
