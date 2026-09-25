@@ -3810,8 +3810,9 @@ class Memvara:
 
         The order is `standing_order`: what the user stated before what a machine
         inferred, then by confidence, then newest first. `k` caps the list, and `None`
-        returns all of it. `RemoteMemvara.standing` returns the same order from
-        `GET /v1/standing`.
+        returns all of it; a `k` below 1 is a `ValueError`, because an empty list would
+        read as an empty store (#269). `RemoteMemvara.standing` returns the same order
+        from `GET /v1/standing`.
 
         >>> mem = Memvara(llm=NullLLM(), user="alice")
         >>> _ = mem.remember("user", "prefers", "pytest", memory_type=MemoryType.PROCEDURAL)
@@ -3822,6 +3823,8 @@ class Memvara:
         To read another project's standing preferences, bind it first:
         `mem.scope(project=...).standing()`.
         """
+        if k is not None:
+            _check_k(k)
         live = self.get_all(states=["live"], tenant=tenant, user=user, agent=agent,
                             session=session)
         return self._standing_from(live, k)

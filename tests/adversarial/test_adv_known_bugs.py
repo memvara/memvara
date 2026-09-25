@@ -129,21 +129,18 @@ def test_one_deeply_nested_request_does_not_kill_the_server(
     assert server.request("ping") == {}
 
 
-# -- B5: memory_standing with k=0 --------------------------------------------------------
+# -- B5, fixed: memory_standing refuses k below 1 --------------------------------------
 
-@known_bugs.xfail("B5")
 def test_memory_standing_with_k_zero_never_reports_an_empty_store(
         mcp: Callable[..., McpProcess]) -> None:
+    """Over the real pipe: `k=0` is refused by name, never answered as an empty store."""
     server = mcp()
     server.initialize()
     stored = server.call("memory_remember", subject="user", predicate="prefers",
                          object="tabs for indentation", memory_type="procedural")
     assert not stored.is_error, stored.text
     reply = server.call("memory_standing", k=0)
-    if reply.text.startswith("No standing preferences are stored"):
-        raise known_bugs.Reproduced("B5: k=0 reported an empty store")
-    # #269 accepts either fix: refusing k below 1, or any answer that is not the
-    # empty-store one. Nothing more is asserted, so either fix makes this test pass.
+    assert reply.is_error and "memory_standing.k must be >= 1" in reply.text, reply.text
 
 
 # -- B6: a string memory_type -----------------------------------------------------------

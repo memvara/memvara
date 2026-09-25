@@ -43,6 +43,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   interpreter's stack allows, and the server let it escape, so a single such line ended
   the agent's memory for the rest of the session. The line is now answered with a JSON-RPC
   parse error (`-32700`, "nested too deeply to parse"), and the server carries on. #268.
+- **`memory_standing` and `standing()` refuse a `k` below 1.** With `k=0` the tool replied
+  that no standing preferences were stored, in a scope that held some, and
+  `Memvara.standing(k=0)` returned an empty list; a caller could not tell either from a
+  really empty store. The tool's `k` now has a minimum of 1, like every other tool's `k`,
+  and refuses a smaller value with `memory_standing.k must be >= 1`. `standing()` on
+  `Memvara`, `RemoteMemvara` and their async twins raises `ValueError` for it, as
+  `profile()` already did, and the hosted clients refuse before sending anything. #269.
 
 ## [0.16.0] — 2026-09-25
 

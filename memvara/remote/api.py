@@ -791,6 +791,8 @@ class RemoteMemvara:
         confidence 1.00 scored zero against it and never reached a session. This is
         `Memvara.standing` served by the deployment, which filters server-side.
         """
+        if k is not None:
+            _check_k(k)
         body = self._request("GET", "/v1/standing", params=self._params(limit=k))
         return [hydrate.claim(c) for c in body["memories"]]
 

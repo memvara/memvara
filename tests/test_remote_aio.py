@@ -908,3 +908,21 @@ def test_the_async_client_refuses_a_purge_with_a_project_bound_and_sends_nothing
 
     asyncio.run(run())
     assert sent == []
+
+
+def test_standing_refuses_k_below_one_before_sending_anything():
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={"memories": []})
+
+    mem = _client(handler)
+
+    async def main():
+        with pytest.raises(ValueError, match="at least 1"):
+            await mem.standing(k=0)
+        await mem.aclose()
+
+    run(main())
+    assert sent == []
