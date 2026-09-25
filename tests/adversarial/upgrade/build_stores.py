@@ -52,14 +52,15 @@ import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-try:
-    from . import golden
-except ImportError:  # run as a script: this file's folder is the first entry of sys.path
-    import golden  # type: ignore[no-redef]
-
 #: The repository root, and tests/, which holds the harness package.
 REPO = pathlib.Path(__file__).resolve().parents[3]
 TESTS = REPO / "tests"
+
+if __package__:
+    from . import golden
+else:  # run as a script, so the package is imported through tests/
+    sys.path.insert(0, str(TESTS))
+    from adversarial.upgrade import golden
 #: Seeds the generator that stands in for `uuid.uuid4`, so a rebuild mints the same ids.
 SEED = 20240101
 #: How long one release may take to write its store, in seconds.
@@ -291,8 +292,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if unknown:
         print(f"unknown tags {unknown}; choose from {list(golden.TAGS)}", file=sys.stderr)
         return 2
-    sys.path.insert(0, str(TESTS))
-    from harness.env import child_env  # noqa: PLC0415 - tests/ is on sys.path only now
+    from harness.env import child_env  # noqa: PLC0415 - not needed by the writer child
 
     with tempfile.TemporaryDirectory(prefix="memvara-build-home-") as home:
         env = child_env(pathlib.Path(home))
