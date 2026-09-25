@@ -13,6 +13,9 @@ from typing import Any, Iterator
 
 import pytest
 
+from harness import known_bugs
+from harness.env import REPO
+
 from . import runner
 
 
@@ -311,3 +314,140 @@ def test_the_env_reaches_the_server_on_a_real_server(tmp_path: pathlib.Path) -> 
     outcome = runner.run(scenario, tmp_path)
     assert outcome.problems == []
     assert "the documents feature is switched off" in outcome.turn("ask").answer
+
+
+# -- gold -------------------------------------------------------------------------------
+
+@pytest.mark.parametrize(("text", "phrase", "found"), [
+    ("- user lives in Lisbon.", "lisbon", True),
+    ("She moved to Yorkshire.", "York", False),
+    ("user locker combination 31-07-42", "31-07-42", True),
+    ("   retired because: misheard: the user said Porto",
+     "retired because: misheard: the user said Porto", True),
+])
+def test_answer_phrases_match_whole_words_ignoring_case_and_punctuation(
+        text: str, phrase: str, found: bool) -> None:
+    assert runner.contains_phrase(text, phrase) is found
+
+
+def turn_of(*steps: runner.Step) -> runner.Turn:
+    return runner.Turn(session=1, index=1, id=None, user="Where do I live?", steps=list(steps))
+
+
+def test_a_turn_abstains_when_every_read_found_nothing_and_no_hook_spoke() -> None:
+    assert runner.abstained(turn_of(
+        runner.Step("tool", "memory_recall", "No stored memory matched 'where'. Nothing ..."),
+        runner.Step("tool", "memory_history", "Nothing has ever been recorded for user/x."),
+        runner.Step("hook", "recall", "")))
+    assert runner.abstained(turn_of(runner.Step("tool", "memory_recall", ran=False)))
+
+
+def test_a_turn_that_showed_a_memory_or_a_write_does_not_abstain() -> None:
+    assert not runner.abstained(turn_of(runner.Step(
+        "tool", "memory_recall", "Known about the user:\n- user lives in Lisbon")))
+    assert not runner.abstained(turn_of(runner.Step(
+        "tool", "memory_remember", "added 1, ended 0, retired 0")))
+    assert not runner.abstained(turn_of(runner.Step("hook", "recall", "Recalled from Memvara")))
+
+
+def test_every_nothing_found_opening_is_still_the_tools_own_wording() -> None:
+    source = (REPO / "memvara" / "server" / "tools.py").read_text(encoding="utf-8")
+    assert {tool: opening for tool, opening in runner.NOTHING_FOUND.items()
+            if opening not in source} == {}
+
+
+LIVE = runner.Row("user lives in Lisbon", "live", "semantic")
+ENDED = runner.Row("user lives in Lisbon", "ended", "semantic")
+
+
+def fabricated(rows: dict[str | None, list[runner.Row]], answer: str = "") -> runner.Outcome:
+    """An outcome built by hand, for checking gold without playing anything."""
+    outcome = runner.Outcome("sample", True, dict(runner.DEFAULT_ENV), rows=rows)
+    outcome.turns.append(runner.Turn(1, 1, None, "Where do I live?",
+                                     [runner.Step("tool", "memory_recall", answer)]))
+    return outcome
+
+
+def store_item(bug: dict[str, Any] | None = None, **spec: Any) -> runner.Gold:
+    return runner.Gold(sample(), "item", "store",
+                       {"id": "item", "text": "user lives in Lisbon", **spec}, bug)
+
+
+@pytest.mark.parametrize(("spec", "rows", "passed"), [
+    ({"state": "live"}, [LIVE], True),
+    ({"state": "live"}, [ENDED], False),
+    ({"state": "live", "count": 1}, [LIVE, LIVE], False),
+    ({"state": "live", "count": 0}, [ENDED], True),
+    ({"state": "ended", "memory_type": "procedural"}, [ENDED], False),
+    ({"state": "absent"}, [], True),
+    ({"state": "absent"}, [ENDED], False),
+])
+def test_a_store_item_compares_text_and_state(spec: dict[str, Any], rows: list[runner.Row],
+                                              passed: bool) -> None:
+    assert runner.check(store_item(**spec), fabricated({None: rows})).passed is passed
+
+
+def test_a_store_item_reads_at_the_project_it_names() -> None:
+    gold = store_item(state="live", project="github.com/acme/app")
+    assert runner.check(gold, fabricated({None: [], "github.com/acme/app": [LIVE]})).passed
+
+
+def test_a_failure_with_the_known_bugs_own_symptom_is_reported_as_that_bug() -> None:
+    gold = store_item({"bug": "B2", "symptom": {"states": ["ended"]}}, state="live")
+    with pytest.raises(known_bugs.Reproduced, match="B2"):
+        runner.judge(gold, fabricated({None: [ENDED]}))
+
+
+def test_a_failure_with_any_other_symptom_is_a_plain_failure() -> None:
+    gold = store_item({"bug": "B2", "symptom": {"states": ["ended"]}}, state="live")
+    with pytest.raises(AssertionError, match="wanted at least one live, found nothing"):
+        runner.judge(gold, fabricated({None: []}))
+
+
+def test_an_answer_symptom_is_matched_on_the_bugs_own_words() -> None:
+    gold = runner.Gold(sample(), "item", "answer", {"id": "item", "must_contain": "tabs"},
+                       {"bug": "B5", "symptom": {"answer_contains": "No standing preferences"}})
+    with pytest.raises(known_bugs.Reproduced):
+        runner.judge(gold, fabricated({}, "No standing preferences are stored in this scope."))
+    with pytest.raises(AssertionError):
+        runner.judge(gold, fabricated({}, "1 standing preference(s)."))
+
+
+def test_a_passing_item_passes_even_when_a_known_bug_is_attached() -> None:
+    gold = store_item({"bug": "B2", "symptom": {"states": ["ended"]}}, state="live")
+    runner.judge(gold, fabricated({None: [LIVE]}))
+
+
+def test_only_the_item_a_known_bug_breaks_carries_its_marker() -> None:
+    scenario = sample(known_bugs={"says-lisbon": {"bug": "B2",
+                                                  "symptom": {"answer_contains": "Paris"}}})
+    marks = {param.id: list(param.marks) for param in runner.gold_params([scenario])}
+    assert marks["sample/lisbon-live"] == []
+    [mark] = marks["sample/says-lisbon"]
+    assert mark.name == "xfail"
+    assert mark.kwargs["strict"] is True and mark.kwargs["raises"] is known_bugs.Reproduced
+
+
+def test_gold_that_fails_without_memvara_is_listed() -> None:
+    assert runner.fails_without_memvara(sample()) == ["lisbon-live", "says-lisbon"]
+
+
+def test_gold_that_passes_without_memvara_is_caught() -> None:
+    scenario = sample(store_gold=[], answer_gold=[{"id": "no-porto",
+                                                   "must_not_contain": "Porto"}])
+    assert runner.fails_without_memvara(scenario) == []
+
+
+def test_a_forbidden_rule_matches_its_tool_and_the_arguments_it_names() -> None:
+    calls = [("memory_forget", {"predicate": "prefers"}),
+             ("memory_forget", {"predicate": "lives_in"})]
+    rule = {"tool": "memory_forget", "args": {"predicate": "prefers"}}
+    assert runner.forbidden_calls([rule], calls) == [
+        "memory_forget with {'predicate': 'prefers'}"]
+    assert runner.forbidden_calls([{"tool": "memory_end"}], calls) == []
+
+
+def test_the_sample_scenarios_gold_holds_on_a_real_server(tmp_path: pathlib.Path) -> None:
+    outcome = runner.run(sample(), tmp_path)
+    for gold in runner.gold_items(sample()):
+        runner.judge(gold, outcome)

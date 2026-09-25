@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
+import pytest
+
 from harness import known_bugs, stores, tiers
 from harness.env import REPO
 from harness.hooks import HookRunner, host_record
@@ -59,6 +61,8 @@ _ANNOTATIONS = frozenset({"title", "description"})
 _VALUE = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 _FILE = re.compile(r"\{file:([^{}]+)\}")
 
+
+# -- the format --------------------------------------------------------------------------
 
 class ScenarioError(ValueError):
     """A scenario file that does not follow the format. The message lists every problem."""
@@ -745,3 +749,181 @@ class _Session:
         for name, on in self.env["features"].items():
             env[f"MEMVARA_FEATURE_{name.upper()}"] = "1" if on else "0"
         return env
+
+
+# -- gold --------------------------------------------------------------------------------
+
+#: How each read tool begins a reply that found nothing. A turn abstains when every tool
+#: step in it replied this way and no hook put anything in front of the model.
+#: `test_adv_runner.py` checks that each opening is still the tool's own wording.
+NOTHING_FOUND: Mapping[str, str] = {
+    "memory_recall": "No stored memory matched",
+    "memory_search": "No stored memory matched",
+    "memory_history": "Nothing has ever been recorded for",
+    "memory_standing": "No standing preferences are stored",
+    "memory_ask": "Nothing in this scope matches",
+    "memory_list_documents": "No documents are stored here",
+    "memory_get_document": "No document with that id or custom_id is visible here",
+}
+
+
+@dataclass(frozen=True, eq=False)
+class Gold:
+    """One gold item: a claim the store must or must not hold, or a check on an answer."""
+
+    scenario: Mapping[str, Any]
+    id: str
+    #: "store" or "answer".
+    kind: str
+    spec: Mapping[str, Any]
+    #: The scenario's known_bugs entry for this item, when a known bug breaks it.
+    known_bug: Mapping[str, Any] | None = None
+
+    @property
+    def test_id(self) -> str:
+        return f"{self.scenario['id']}/{self.id}"
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """Whether one gold item held, what was expected and found, and the observation a known
+    bug's symptom is compared with."""
+
+    passed: bool
+    detail: str
+    observed: Mapping[str, Any]
+
+
+def gold_items(scenario: Mapping[str, Any]) -> list[Gold]:
+    """The scenario's gold items, store gold first, each with its known bug if it has one."""
+    bugs = scenario.get("known_bugs", {})
+    return [Gold(scenario, item["id"], kind, item, bugs.get(item["id"]))
+            for kind, key in (("store", "store_gold"), ("answer", "answer_gold"))
+            for item in scenario[key]]
+
+
+def gold_params(scenarios: Iterable[Mapping[str, Any]]) -> list[Any]:
+    """One pytest parameter per gold item. An item that a known bug breaks carries that
+    bug's strict expected-failure marker, and no other item does."""
+    return [pytest.param(gold, id=gold.test_id,
+                         marks=[known_bugs.xfail(gold.known_bug["bug"])] if gold.known_bug
+                         else [])
+            for scenario in scenarios for gold in gold_items(scenario)]
+
+
+def contains_phrase(text: str, phrase: str) -> bool:
+    """Whether `phrase` appears in `text` as whole words, ignoring case and punctuation.
+
+    The normalization is the one the real-agent layer grades answers with
+    (benchmarks/agent_memory/normalization.py), so both layers agree on what a match is.
+
+    >>> contains_phrase("- user lives in Lisbon.", "lisbon")
+    True
+    >>> contains_phrase("She moved to Yorkshire.", "York")
+    False
+    """
+    wanted = normalize(phrase)
+    return bool(wanted) and f" {wanted} " in f" {normalize(text)} "
+
+
+def abstained(turn: Turn) -> bool:
+    """Whether memvara showed the agent nothing in this turn.
+
+    True when every tool step replied with its tool's "nothing found" opening
+    (NOTHING_FOUND) and no hook step injected anything. A turn whose steps did not run,
+    as when memvara is switched off, showed nothing too. A write receipt, or any stored
+    memory, makes it false.
+    """
+    for step in turn.steps:
+        if not step.text:
+            continue
+        opening = NOTHING_FOUND.get(step.name) if step.kind == "tool" else None
+        if opening is None or not step.text.startswith(opening):
+            return False
+    return True
+
+
+def check(gold: Gold, outcome: Outcome) -> Verdict:
+    """Whether one gold item holds for one play of its scenario."""
+    if gold.kind == "store":
+        return _check_store(gold.spec, outcome)
+    return _check_answer(gold.spec, outcome)
+
+
+def _check_store(item: Mapping[str, Any], outcome: Outcome) -> Verdict:
+    project = item["project"] if "project" in item else outcome.env["project"]
+    rows = [row for row in outcome.rows[project] if row.text == item["text"]]
+    if item["state"] == "absent":
+        passed, wanted = not rows, "no claim in any state"
+    else:
+        matching = [row for row in rows if row.state == item["state"]]
+        if "count" in item:
+            passed = len(matching) == item["count"]
+            wanted = f"exactly {item['count']} {item['state']}"
+        else:
+            passed, wanted = bool(matching), f"at least one {item['state']}"
+        if "memory_type" in item:
+            passed = passed and {row.memory_type for row in matching} == {item["memory_type"]}
+            wanted += f", filed as {item['memory_type']}"
+    where = f"project {project}" if project else "user level"
+    found = ", ".join(f"{row.state} {row.memory_type}" for row in rows) or "nothing"
+    return Verdict(passed, f"{item['text']!r} read at {where}: wanted {wanted}, found {found}",
+                   {"states": sorted(row.state for row in rows)})
+
+
+def _check_answer(item: Mapping[str, Any], outcome: Outcome) -> Verdict:
+    turn = outcome.turn(item.get("turn"))
+    text = turn.answer
+    if "must_contain" in item:
+        passed, wanted = contains_phrase(text, item["must_contain"]), \
+            f"contain {item['must_contain']!r}"
+    elif "must_not_contain" in item:
+        passed, wanted = not contains_phrase(text, item["must_not_contain"]), \
+            f"not contain {item['must_not_contain']!r}"
+    elif "must_not_match" in item:
+        passed = re.search(item["must_not_match"], text, re.MULTILINE) is None
+        wanted = f"have no match for {item['must_not_match']!r}"
+    else:
+        passed, wanted = abstained(turn), "show that nothing is stored"
+    return Verdict(passed, f"the answer to session {turn.session}, turn {turn.index} should "
+                           f"{wanted}, and it was: {text!r}", {"answer": text})
+
+
+def symptom_seen(symptom: Mapping[str, Any], verdict: Verdict) -> bool:
+    """Whether a failed check shows exactly the symptom a known bug is recorded with."""
+    if "states" in symptom:
+        return verdict.observed.get("states") == sorted(symptom["states"])
+    return str(symptom["answer_contains"]) in str(verdict.observed.get("answer", ""))
+
+
+def judge(gold: Gold, outcome: Outcome) -> None:
+    """Return when one gold item holds, and raise when it does not.
+
+    The failure is known_bugs.Reproduced only when the item names a known bug and the
+    failure shows that bug's own symptom. Any other failure is an AssertionError, which a
+    known bug's strict marker does not absorb, so a new bug cannot hide behind a known one.
+    """
+    verdict = check(gold, outcome)
+    if verdict.passed:
+        return
+    if gold.known_bug is not None and symptom_seen(gold.known_bug["symptom"], verdict):
+        raise known_bugs.Reproduced(f"{gold.known_bug['bug']}: {verdict.detail}")
+    raise AssertionError(verdict.detail)
+
+
+def forbidden_calls(rules: Sequence[Mapping[str, Any]],
+                    calls: Sequence[tuple[str, Mapping[str, Any]]]) -> list[str]:
+    """The calls that match a forbidden rule: the same tool, with every argument the rule
+    names set to the rule's value."""
+    return [f"{tool} with {dict(args)}" for rule in rules for tool, args in calls
+            if tool == rule["tool"]
+            and all(args.get(key) == value for key, value in rule.get("args", {}).items())]
+
+
+def fails_without_memvara(scenario: Mapping[str, Any]) -> list[str]:
+    """The gold ids that fail for an agent with no memory at all.
+
+    An empty list means the gold cannot tell memvara working from memvara absent.
+    """
+    outcome = without_memvara(scenario)
+    return [gold.id for gold in gold_items(scenario) if not check(gold, outcome).passed]

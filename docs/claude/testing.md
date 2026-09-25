@@ -186,4 +186,32 @@ A tool or hook step can `capture` part of its output with a regular expression, 
 
 After the last session the store is read once more with expiry switched off, so the read neither erases an expired claim nor hides one. The store gold therefore sees exactly what the server left on disk.
 
+### What gets checked
+
+`tests/adversarial/sessions/test_adv_scenarios.py` plays each scenario once, and every test below reads that one play. When a scenario stops early, for example because a capture found nothing, each of its tests fails with the same message.
+
+| Test | Passes when |
+|---|---|
+| `test_the_file_follows_the_format[<id>]` | The file matches the schema and passes the checks the schema cannot express. |
+| `test_gold[<id>/<gold id>]` | That one gold item holds. |
+| `test_the_script_ran_as_written[<id>]` | Every step succeeded, or failed where it said `expect_error`. |
+| `test_no_forbidden_tool_was_called[<id>]` | No step called a tool the scenario forbids. |
+| `test_the_gold_fails_without_memvara[<id>]` | At least one gold item fails for an agent with no memory. |
+
+**Store gold** names a claim by its text, such as `user lives in Lisbon`, never by its id, and says which state it must be in: `live`, `ended`, `retired`, or `absent` for no claim with that text in any state. `count` asks for an exact number. `project` reads at another project than the scenario's own, or at user level when it is `null`.
+
+**Answer gold** checks the answer to one turn: the turn its `turn` names, or the last one. In the scripted layer, the answer is everything memvara showed the agent in that turn, which is each tool's text and each hook's injected context, in order. `must_contain` and `must_not_contain` compare whole words and ignore case and punctuation, using the normalization the real-agent layer grades with. `must_not_match` is a regular expression, for checks about lines, such as stored text that must not start a line of its own. `abstain` passes when every tool in the turn replied that it found nothing and no hook injected anything.
+
+**A known bug** is attached to the one gold item it breaks, with the symptom it causes: `"known_bugs": {"<gold id>": {"bug": "B2", "symptom": {"states": ["ended"]}}}`. That item's test gets the bug's strict expected-failure marker. The test raises `known_bugs.Reproduced` only when the failure shows exactly that symptom: the same states for a store item, or the given words in the answer for an answer item. Any other failure fails the run.
+
+**The negative control** plays the scenario for an agent with no memory: no seed, no server and no hook, so every answer is empty and the store holds nothing. At least one gold item must fail then. If none does, the gold cannot tell memvara working from memvara absent.
+
+### Adding a scenario
+
+1. Write `tests/scenarios/scripted/<id>.json`. Use made-up people and data, because this repository is public.
+2. Run `pytest tests/adversarial/sessions -k <id>` and read every failure. A scenario mistake is fixed in the scenario. A failure that shows memvara doing the wrong thing is a bug, handled as "Known bugs and security findings" above describes.
+3. Keep it deterministic and offline. A scenario that needs a model, the network or the capture hook belongs to the real-agent layer.
+
+Each session starts a server, which takes about 0.2 seconds on a laptop and longer on Windows. The scripted layer's budget on the fast tier is about 25 seconds, so use as few sessions as the story allows.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

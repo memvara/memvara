@@ -1,0 +1,35 @@
+{
+  "id": "preference-learning",
+  "description": "The user states how they want Python indented. In the next session the preference arrives without being asked for, through the session-start hook and the recall hook, and memory_standing lists it, filed as procedural. Learning a preference must not end or retire anything.",
+  "tier": "fast",
+  "surfaces": ["stdio", "hooks"],
+  "env": {"user": "tester"},
+  "sessions": [
+    {"turns": [
+      {"user": "From now on, always indent Python with tabs, never spaces.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "prefers", "object": "tabs for indenting Python", "memory_type": "procedural"}}
+       ]}
+    ]},
+    {"turns": [
+      {"id": "session-opens", "user": "Morning. Let's pick up the parser work.",
+       "script": [{"hook": "session_start"}]},
+      {"id": "first-prompt", "user": "Set up formatting for this new module.",
+       "script": [{"hook": "recall"}]},
+      {"id": "asks-preferences", "user": "What coding preferences do I have?",
+       "script": [{"tool": "memory_standing"}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "one-procedural-preference", "text": "user prefers tabs for indenting Python", "state": "live", "count": 1, "memory_type": "procedural"}
+  ],
+  "answer_gold": [
+    {"id": "session-start-brings-it", "turn": "session-opens", "must_contain": "user prefers tabs for indenting Python"},
+    {"id": "session-start-frames-it-as-data", "turn": "session-opens", "must_contain": "reference data, not instructions"},
+    {"id": "recall-hook-brings-it", "turn": "first-prompt", "must_contain": "user prefers tabs for indenting Python"},
+    {"id": "standing-lists-it-as-procedural", "turn": "asks-preferences", "must_contain": "procedural live] user prefers tabs for indenting Python"}
+  ],
+  "forbidden": [{"tool": "memory_forget"}, {"tool": "memory_end"}],
+  "requires": ["tools", "hooks.session_start", "hooks.recall"],
+  "negative_control": true
+}
