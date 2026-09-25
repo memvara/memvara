@@ -102,3 +102,15 @@ Failures are loud and quick:
 `harness.stores.memory()` gives an in-memory store and `harness.stores.file(path)` a SQLite file. Both use the hashing embedder and no model, as every other test here does.
 
 A server started on the same file with the child environment opens it in the same vector space. So a test can write through the library and then read through the server, or the other way round.
+
+## Known bugs and security findings
+
+**A bug the suite finds lands at once as a failing test marked `xfail(strict=True)`.** The marker cites a GitHub issue, and the fix follows in its own PR.
+
+- **Strict mode keeps the marker honest.** When the fix lands, the test starts passing and strict mode fails the run until the fix PR removes the marker.
+- **Registering a bug.** `tests/harness/known_bugs.py` lists each open bug, and `known_bugs.xfail("B2")` builds its marker.
+- **Nothing is weakened.** Never skip, delete or weaken a test to make the run green.
+
+**A finding that falls under the in-scope list in `SECURITY.md` never goes into a public issue or a public test.** It goes to a private draft advisory on GitHub, and its failing test lands together with its fix.
+
+Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
