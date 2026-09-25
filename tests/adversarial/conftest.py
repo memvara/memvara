@@ -7,6 +7,7 @@ from typing import Any, Callable, Iterator
 
 import pytest
 
+from harness.hooks import HookRunner
 from harness.stdio import McpProcess
 
 
@@ -30,3 +31,17 @@ def mcp(tmp_path: pathlib.Path,
     yield start
     for server in started:
         server.kill()
+
+
+@pytest.fixture
+def hook_runner(tmp_path: pathlib.Path,
+                tmp_path_factory: pytest.TempPathFactory) -> Callable[..., HookRunner]:
+    """Build HookRunners that share one scratch home and one working directory."""
+    home = tmp_path_factory.mktemp("hook-home")
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def make(host: str, **options: Any) -> HookRunner:
+        return HookRunner(host, home=home, cwd=work, **options)
+
+    return make

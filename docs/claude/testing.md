@@ -87,3 +87,18 @@ Failures are loud and quick:
 
 - A server that exits raises `McpProcessError`, with its exit code and the tail of its stderr.
 - A server that writes nothing within the timeout raises the same error, instead of hanging the suite.
+
+## Hooks
+
+`harness.hooks.HookRunner` runs `plugin/hooks/run.py <hook> --host <host>` in a child process, with the stdin payload that host sends.
+
+- **In a test,** use the `hook_runner` fixture: `hook_runner("claude").run("approve", tool_name="mcp__memvara__memory_search")`.
+- **Giving the hooks a store.** Pass `server_env={"MEMVARA_DB": ..., "MEMVARA_USER": ...}` and the runner writes the host's client config, which is where the hooks look for the store. Without it, the hooks report "not configured".
+- **What a run returns:** the exit code, the parsed reply and the elapsed time.
+- **Non-JSON output fails the test.** A hook that prints something other than JSON raises `HookOutputError`, because on a real client that output would desynchronise the conversation.
+
+## Stores in the test process
+
+`harness.stores.memory()` gives an in-memory store and `harness.stores.file(path)` a SQLite file. Both use the hashing embedder and no model, as every other test here does.
+
+A server started on the same file with the child environment opens it in the same vector space. So a test can write through the library and then read through the server, or the other way round.
