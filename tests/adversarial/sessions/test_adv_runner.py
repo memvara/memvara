@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 import pytest
@@ -218,3 +219,95 @@ def test_a_run_includes_a_scenario_only_when_its_tier_is_selected() -> None:
     assert [s["id"] for s in runner.selected([fast, nightly], "nightly")] == [
         "fast-one", "nightly-one"]
     assert runner.selected([fast, nightly], "local") == []
+
+
+# -- playing a scenario -------------------------------------------------------------------
+
+def test_placeholders_are_replaced_only_when_they_are_the_whole_string(
+        tmp_path: pathlib.Path) -> None:
+    (tmp_path / "notes.md").write_text("Refunds within 30 days.", encoding="utf-8")
+    args = {"claim_id": "{lisbon_id}", "content": "{file:notes.md}",
+            "query": "about {lisbon_id}", "ids": ["{lisbon_id}"], "k": 3}
+    assert runner.substitute(args, {"lisbon_id": "cl_1"}, tmp_path) == {
+        "claim_id": "cl_1", "content": "Refunds within 30 days.",
+        "query": "about {lisbon_id}", "ids": ["cl_1"], "k": 3}
+
+
+def test_a_placeholder_with_no_value_stops_the_run(tmp_path: pathlib.Path) -> None:
+    with pytest.raises(runner.RunError, match="has no value yet"):
+        runner.substitute("{missing}", {}, tmp_path)
+
+
+def test_a_mark_records_a_later_instant_and_wait_until_lets_it_pass() -> None:
+    values: dict[str, str] = {}
+    before = datetime.now(timezone.utc)
+    runner.mark(values, "soon", offset=0.2)
+    assert datetime.fromisoformat(values["soon"]) > before
+    runner.wait_until(values, "soon")
+    assert datetime.now(timezone.utc) > datetime.fromisoformat(values["soon"])
+
+
+def test_without_memvara_nothing_runs_and_every_answer_is_empty() -> None:
+    outcome = runner.without_memvara(sample())
+    assert [turn.answer for turn in outcome.turns] == ["", ""]
+    assert all(not step.ran for turn in outcome.turns for step in turn.steps)
+    assert outcome.rows == {None: []}
+    assert outcome.calls == [] and outcome.problems == []
+
+
+def test_a_scenario_plays_over_a_real_server(tmp_path: pathlib.Path) -> None:
+    outcome = runner.run(sample(), tmp_path)
+    assert outcome.problems == []
+    assert "user lives in Lisbon" in outcome.turn("ask").answer
+    assert outcome.rows == {None: [runner.Row("user lives in Lisbon", "live", "semantic")]}
+    assert [name for name, _ in outcome.calls] == ["memory_remember", "memory_recall"]
+
+
+def test_a_tool_error_the_script_did_not_expect_is_recorded_on_a_real_server(
+        tmp_path: pathlib.Path) -> None:
+    scenario = sample()
+    blank = {"tool": "memory_remember", "args": {"predicate": "lives_in", "object": " "}}
+    script(scenario, 0).append(dict(blank))
+    script(scenario, 1).append({**blank, "expect_error": True})
+    outcome = runner.run(scenario, tmp_path)
+    assert len(outcome.problems) == 1
+    assert outcome.problems[0].startswith(
+        "session 1, turn 1, step 2: memory_remember should have succeeded")
+
+
+def test_a_capture_that_finds_nothing_stops_the_run_and_its_server(
+        tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    killed: list[pathlib.Path] = []
+
+    class Recording(runner.McpProcess):
+        def kill(self) -> None:
+            killed.append(self.db)
+            super().kill()
+
+    monkeypatch.setattr(runner, "McpProcess", Recording)
+    scenario = sample()
+    script(scenario)[0]["capture"] = {"nothing": "no such text"}
+    with pytest.raises(runner.RunError, match="session 1, turn 1, step 1: the capture "
+                                              "'nothing' found nothing"):
+        runner.run(scenario, tmp_path)
+    assert killed == [tmp_path / "memory.db"]
+
+
+def test_a_hook_step_reads_the_store_the_session_wrote_on_a_real_server(
+        tmp_path: pathlib.Path) -> None:
+    scenario = sample(surfaces=["stdio", "hooks"], requires=["tools", "hooks.session_start"])
+    scenario["sessions"][1]["turns"][0]["script"] = [{"hook": "session_start"}]
+    assert errors(scenario) == []
+    outcome = runner.run(scenario, tmp_path)
+    assert outcome.problems == []
+    assert "user lives in Lisbon" in outcome.turn("ask").answer
+    assert "reference data, not instructions" in outcome.turn("ask").answer
+
+
+def test_the_env_reaches_the_server_on_a_real_server(tmp_path: pathlib.Path) -> None:
+    scenario = sample(env={"user": "tester", "features": {"documents": False},
+                           "protocol": "2024-11-05"})
+    script(scenario, 1).append({"tool": "memory_list_documents", "expect_error": True})
+    outcome = runner.run(scenario, tmp_path)
+    assert outcome.problems == []
+    assert "the documents feature is switched off" in outcome.turn("ask").answer

@@ -168,4 +168,22 @@ A scenario describes a few sessions of a user talking to an agent that has memva
 
 The `jsonschema` package is not a dependency, so `runner.py` carries a small validator for the keywords the schema uses. It refuses a keyword it does not implement, so the schema cannot state a rule that nothing checks. A second check covers what a schema cannot express: every gold id is unique, a known bug names a gold item and a registered bug, a placeholder is set by an earlier step, and a hook or tool a step uses is declared in `surfaces` and `requires`.
 
+### How a scenario plays
+
+The runner writes the `seed` through the library first. The seed stands for memory from conversations before this one. Then every session starts its own server process on the same store file, the way a client starts one per conversation, and plays its turns in order. A turn holds the user's words and a `script`: the steps a careful agent would take for that turn.
+
+| Step | What it does |
+|---|---|
+| `{"tool": "memory_…", "args": {…}}` | Calls a tool on the session's server. The call must succeed, unless the step says `"expect_error": true`. |
+| `{"hook": "session_start"}` | Runs one of the plugin's hooks against the same store, for Claude Code unless `host` names another host. The recall hook is given the turn's words as its prompt. |
+| `{"op": "erase", "claim_id": "…"}` | Erases a claim through the library. No tool can erase a memory, so this stands for the operator doing it. |
+| `{"mark": "name", "offset_seconds": 1.5}` | Records the instant now, plus the offset, under a name. |
+| `{"wait_until": "name"}` | Sleeps until that instant has passed. |
+
+A tool or hook step can `capture` part of its output with a regular expression, and a later step can use it. An argument that is exactly `{name}` is replaced by the captured text or the marked instant, and one that is exactly `{file:path}` by that workspace file's contents. Nothing else in an argument changes, so text with braces in it is safe.
+
+`env` sets how the server starts: the user, the project, the feature switches, read-only mode and the protocol version. A session can override any of them with its own `env`, which is how a scenario moves the user from one project to another.
+
+After the last session the store is read once more with expiry switched off, so the read neither erases an expired claim nor hides one. The store gold therefore sees exactly what the server left on disk.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

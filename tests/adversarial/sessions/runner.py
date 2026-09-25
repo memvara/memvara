@@ -18,10 +18,16 @@ import json
 import pathlib
 import re
 import sys
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-from harness import known_bugs, tiers
+from harness import known_bugs, stores, tiers
 from harness.env import REPO
+from harness.hooks import HookRunner, host_record
+from harness.stdio import PROTOCOL, McpProcess
+from memvara import MemoryType
 from memvara.server.config import FEATURES
 from memvara.server.mcp import SUPPORTED_PROTOCOLS
 from memvara.server.tools import BY_NAME
@@ -367,3 +373,375 @@ def selected(scenarios: Iterable[Mapping[str, Any]], tier: str) -> list[Mapping[
     """The scenarios a run with `--tier tier` includes, by each scenario's own tier."""
     wanted = tiers.SELECTS[tier]
     return [scenario for scenario in scenarios if scenario["tier"] in wanted]
+
+
+# -- running -----------------------------------------------------------------------------
+
+class RunError(RuntimeError):
+    """A script that cannot go on: a placeholder with no value, or a capture that found
+    nothing. The scenario stops there, and every test of it reports this error."""
+
+
+#: The server settings a scenario gets for anything its `env` leaves out.
+DEFAULT_ENV: Mapping[str, Any] = {
+    "user": "tester", "project": None, "features": {}, "read_only": False,
+    "protocol": PROTOCOL}
+
+#: The three states a stored claim can be in. A snapshot reads all of them.
+STATES = ("live", "ended", "retired")
+
+#: A `mark` step sleeps this long on each side of the instant it records, so the steps
+#: before and after it cannot share that instant, even on a clock with coarse resolution.
+MARK_GAP = 0.03
+
+#: `wait_until` sleeps this long past the marked instant.
+WAIT_MARGIN = 0.05
+
+#: The step kinds, keyed by the field that names each one.
+_KINDS = (("tool", "tool"), ("hook", "hook"), ("op", "op"), ("mark", "mark"),
+          ("wait_until", "wait"))
+
+
+@dataclass
+class Step:
+    """What one script step did, as the agent saw it."""
+
+    kind: str
+    name: str
+    #: The tool's text, or the context a hook put in front of the model. Empty otherwise.
+    text: str = ""
+    #: False when the step did not run, as when memvara is switched off.
+    ran: bool = True
+    is_error: bool = False
+
+
+@dataclass
+class Turn:
+    """One user turn and the steps the scripted agent took for it."""
+
+    session: int
+    index: int
+    id: str | None
+    user: str
+    steps: list[Step] = field(default_factory=list)
+
+    @property
+    def answer(self) -> str:
+        """Everything memvara showed the agent in this turn, in order.
+
+        The scripted agent answers from this and from nothing else, so this is the text
+        answer gold is checked on.
+        """
+        return "\n\n".join(step.text for step in self.steps if step.text)
+
+
+@dataclass(frozen=True)
+class Row:
+    """One stored claim in a snapshot. Gold compares its text and state, never its id."""
+
+    text: str
+    state: str
+    memory_type: str
+
+
+@dataclass
+class Outcome:
+    """Everything one play of a scenario did, for its gold to be checked against."""
+
+    scenario: str
+    memvara: bool
+    env: Mapping[str, Any]
+    turns: list[Turn] = field(default_factory=list)
+    #: What a reader at each project sees after the last session, in every state, keyed by
+    #: project. None is user level.
+    rows: dict[str | None, list[Row]] = field(default_factory=dict)
+    #: Every tool call the script made, with its arguments after substitution.
+    calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    #: Steps that did not behave the way the script said they would.
+    problems: list[str] = field(default_factory=list)
+
+    def turn(self, turn_id: str | None = None) -> Turn:
+        """The turn with this id, or the last turn when no id is given."""
+        if turn_id is None:
+            return self.turns[-1]
+        return next(turn for turn in self.turns if turn.id == turn_id)
+
+
+def substitute(value: Any, values: Mapping[str, str], workspace: pathlib.Path) -> Any:
+    """`value` with every placeholder replaced: `{name}` by a captured value or a marked
+    instant, and `{file:<path>}` by that workspace file's contents.
+
+    Only a string that is a placeholder and nothing else is replaced, so text that happens
+    to contain braces is passed on unchanged.
+    """
+    if isinstance(value, str):
+        found = _VALUE.fullmatch(value)
+        if found:
+            if found.group(1) not in values:
+                raise RunError(f"{value} has no value yet; a capture or a mark earlier in "
+                               "the script must set it")
+            return values[found.group(1)]
+        found = _FILE.fullmatch(value)
+        if found:
+            return (workspace / found.group(1)).read_text(encoding="utf-8")
+        return value
+    if isinstance(value, Mapping):
+        return {key: substitute(item, values, workspace) for key, item in value.items()}
+    if isinstance(value, list):
+        return [substitute(item, values, workspace) for item in value]
+    return value
+
+
+def mark(values: dict[str, str], name: str, offset: float = 0.0) -> None:
+    """Record now plus `offset` seconds under `name`, as ISO-8601 in UTC."""
+    time.sleep(MARK_GAP)
+    values[name] = (datetime.now(timezone.utc) + timedelta(seconds=offset)).isoformat()
+    time.sleep(MARK_GAP)
+
+
+def wait_until(values: Mapping[str, str], name: str) -> None:
+    """Sleep until the instant recorded under `name` has passed, by WAIT_MARGIN."""
+    remaining = (datetime.fromisoformat(values[name])
+                 - datetime.now(timezone.utc)).total_seconds() + WAIT_MARGIN
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+def run(scenario: Mapping[str, Any], workdir: pathlib.Path) -> Outcome:
+    """Play `scenario` in `workdir` against a real server, and record what happened.
+
+    The seed is written through the library first. Then each session starts its own
+    server process on the same store file, the way a client starts one per conversation,
+    and plays its turns in order. After the last session the store is read once more, with
+    expiry switched off so the read neither erases nor hides an expired claim: the rows are
+    what the server left on disk.
+    """
+    env = _env(scenario["env"])
+    outcome = Outcome(scenario["id"], True, env)
+    home, work, db = workdir / "home", workdir / "work", workdir / "memory.db"
+    home.mkdir(parents=True)
+    work.mkdir()
+    for name, text in scenario.get("workspace", {}).get("files", {}).items():
+        target = work / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    _seed(db, env, scenario.get("seed", []))
+    values: dict[str, str] = {}
+    for number, session in enumerate(scenario["sessions"], 1):
+        _Session(f"{scenario['id']}-{number}", number,
+                 _env(scenario["env"], session.get("env", {})),
+                 db, home, work, values, outcome).play(session["turns"])
+    outcome.rows = _snapshot(db, env["user"], _projects(scenario, env))
+    return outcome
+
+
+def without_memvara(scenario: Mapping[str, Any]) -> Outcome:
+    """The same scenario for an agent with no memory at all: no seed, no server, no hook.
+
+    Every step is recorded as not run, so every answer is empty and the store holds
+    nothing. This is the negative control.
+    """
+    env = _env(scenario["env"])
+    outcome = Outcome(scenario["id"], False, env)
+    for number, session in enumerate(scenario["sessions"], 1):
+        for index, turn in enumerate(session["turns"], 1):
+            steps = [Step(_kind(step), _label(step), ran=False)
+                     for step in turn.get("script", [])]
+            outcome.turns.append(Turn(number, index, turn.get("id"), turn["user"], steps))
+    outcome.rows = {project: [] for project in _projects(scenario, env)}
+    return outcome
+
+
+def _env(*layers: Mapping[str, Any]) -> dict[str, Any]:
+    """DEFAULT_ENV with each layer on top. Feature switches merge one by one."""
+    merged = dict(DEFAULT_ENV)
+    features: dict[str, bool] = {}
+    for layer in layers:
+        features.update(layer.get("features", {}))
+        merged.update((key, value) for key, value in layer.items() if key != "features")
+    merged["features"] = features
+    return merged
+
+
+def _projects(scenario: Mapping[str, Any], env: Mapping[str, Any]) -> list[str | None]:
+    """The projects store gold reads at: the scenario's own, and any an item names."""
+    found: list[str | None] = [env["project"]]
+    for item in scenario["store_gold"]:
+        project = item["project"] if "project" in item else env["project"]
+        if project not in found:
+            found.append(project)
+    return found
+
+
+def _kind(step: Mapping[str, Any]) -> str:
+    return next(kind for key, kind in _KINDS if key in step)
+
+
+def _label(step: Mapping[str, Any]) -> str:
+    return str(next(step[key] for key, _ in _KINDS if key in step))
+
+
+def _seed(db: pathlib.Path, env: Mapping[str, Any], ops: Sequence[Mapping[str, Any]]) -> None:
+    """Write the seed through the library: memory from conversations before this one."""
+    if not ops:
+        return
+    mem = stores.file(db)
+    try:
+        scoped = mem.scope(user=env["user"], project=env["project"])
+        for op in ops:
+            kind = op.get("memory_type")
+            scoped.remember(op.get("subject", "user"), op["predicate"], op["object"],
+                            memory_type=MemoryType(kind) if kind else None)
+    finally:
+        mem.close()
+
+
+def _snapshot(db: pathlib.Path, user: str,
+              projects: Sequence[str | None]) -> dict[str | None, list[Row]]:
+    """Every claim a reader at each project sees, in every state.
+
+    Opened with expiry switched off, so this read neither erases an expired claim nor
+    hides it: the rows are what the server left on disk.
+    """
+    mem = stores.file(db, expiry_erasure=False, sweep_expired=False)
+    try:
+        return {project: [Row(claim.text, claim.state, claim.memory_type.value)
+                          for claim in mem.scope(user=user, project=project)
+                          .get_all(states=STATES)]
+                for project in projects}
+    finally:
+        mem.close()
+
+
+def _context(host: str, reply: Mapping[str, Any] | None) -> str:
+    """The text a hook's reply puts in front of the model, in either envelope shape."""
+    key = host_record(host).context_key
+    if not reply or not key:
+        return ""
+    nested = reply.get("hookSpecificOutput")
+    if isinstance(nested, Mapping) and key in nested:
+        return str(nested[key])
+    return str(reply.get(key, ""))
+
+
+class _Session:
+    """One conversation: its own server process, the hook runners it needs, and its turns."""
+
+    def __init__(self, session_id: str, number: int, env: Mapping[str, Any],
+                 db: pathlib.Path, home: pathlib.Path, work: pathlib.Path,
+                 values: dict[str, str], outcome: Outcome) -> None:
+        self.id = session_id
+        self.number = number
+        self.env = env
+        self.db, self.home, self.work = db, home, work
+        self.values = values
+        self.outcome = outcome
+        self.hooks: dict[str, HookRunner] = {}
+        self.server = McpProcess(
+            db, home=home, user=env["user"], features=env["features"],
+            read_only=env["read_only"], cwd=work,
+            scope={"project": env["project"]} if env["project"] else None)
+
+    def play(self, turns: Sequence[Mapping[str, Any]]) -> None:
+        """Play every turn, then close the server as a client does when the session ends.
+
+        When a step raises, the server is killed before the error goes on, so no process
+        outlives a failed run.
+        """
+        try:
+            agreed = self.server.initialize(self.env["protocol"]).get("protocolVersion")
+            if agreed != self.env["protocol"]:
+                self.outcome.problems.append(
+                    f"session {self.number}: asked for protocol {self.env['protocol']} and "
+                    f"the server answered {agreed}")
+            for index, turn in enumerate(turns, 1):
+                record = Turn(self.number, index, turn.get("id"), turn["user"])
+                for n, step in enumerate(turn.get("script", []), 1):
+                    where = f"session {self.number}, turn {index}, step {n}"
+                    record.steps.append(self._step(step, turn, where))
+                self.outcome.turns.append(record)
+        except BaseException:
+            self.server.kill()
+            raise
+        code = self.server.close()
+        if code != 0:
+            self.outcome.problems.append(
+                f"session {self.number}: the server exited with code {code}; its stderr "
+                f"ends: {self.server.stderr_text()[-300:]!r}")
+
+    def _step(self, step: Mapping[str, Any], turn: Mapping[str, Any], where: str) -> Step:
+        if "tool" in step:
+            return self._tool(step, where)
+        if "hook" in step:
+            return self._hook(step, turn, where)
+        if "op" in step:
+            return self._erase(step, where)
+        if "mark" in step:
+            mark(self.values, step["mark"], step.get("offset_seconds", 0.0))
+            return Step("mark", step["mark"])
+        wait_until(self.values, step["wait_until"])
+        return Step("wait", step["wait_until"])
+
+    def _tool(self, step: Mapping[str, Any], where: str) -> Step:
+        name = step["tool"]
+        args = substitute(step.get("args", {}), self.values, self.work)
+        self.outcome.calls.append((name, args))
+        result = self.server.call(name, **args)
+        expected = bool(step.get("expect_error", False))
+        if result.is_error != expected:
+            wanted = "failed" if expected else "succeeded"
+            self.outcome.problems.append(
+                f"{where}: {name} should have {wanted}, and it returned: {result.text[:300]!r}")
+        self._capture(step, result.text, where)
+        return Step("tool", name, result.text, is_error=result.is_error)
+
+    def _hook(self, step: Mapping[str, Any], turn: Mapping[str, Any], where: str) -> Step:
+        host = step.get("host", "claude")
+        runner = self.hooks.get(host)
+        if runner is None:
+            runner = self.hooks[host] = HookRunner(host, home=self.home, cwd=self.work,
+                                                   server_env=self._server_env())
+        fields = {"session": self.id}
+        if step["hook"] == "recall":
+            fields["prompt"] = turn["user"]
+        fields.update(substitute(step.get("fields", {}), self.values, self.work))
+        result = runner.run(step["hook"], **fields)
+        if result.exit_code != 0:
+            self.outcome.problems.append(
+                f"{where}: the {step['hook']} hook exited with code {result.exit_code}; its "
+                f"stderr ends: {result.stderr[-300:]!r}")
+        text = _context(host, result.reply)
+        self._capture(step, text, where)
+        return Step("hook", step["hook"], text)
+
+    def _erase(self, step: Mapping[str, Any], where: str) -> Step:
+        claim_id = substitute(step["claim_id"], self.values, self.work)
+        mem = stores.file(self.db)
+        try:
+            erased = mem.scope(user=self.env["user"], project=self.env["project"]).erase(
+                claim_id, sources=bool(step.get("sources", False)))
+        finally:
+            mem.close()
+        if not erased:
+            self.outcome.problems.append(
+                f"{where}: the operator's erase of {claim_id} found nothing to erase")
+        return Step("op", "erase")
+
+    def _capture(self, step: Mapping[str, Any], text: str, where: str) -> None:
+        for name, pattern in step.get("capture", {}).items():
+            found = re.search(pattern, text, re.MULTILINE)
+            if found is None:
+                raise RunError(f"{where}: the capture {name!r} found nothing for "
+                               f"{pattern!r} in: {text[:300]!r}")
+            self.values[name] = found.group(1) if found.re.groups else found.group(0)
+
+    def _server_env(self) -> dict[str, str]:
+        """The client config's env block the hooks read to find this session's store."""
+        env = {"MEMVARA_DB": str(self.db), "MEMVARA_USER": self.env["user"]}
+        if self.env["project"]:
+            env["MEMVARA_PROJECT"] = self.env["project"]
+        if self.env["read_only"]:
+            env["MEMVARA_READ_ONLY"] = "1"
+        for name, on in self.env["features"].items():
+            env[f"MEMVARA_FEATURE_{name.upper()}"] = "1" if on else "0"
+        return env
