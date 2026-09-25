@@ -1,0 +1,44 @@
+"""Bugs the adversarial suite has found and not yet fixed, one entry per GitHub issue.
+
+A test that reproduces one of these carries `xfail("B2")`, a strict expected failure
+that cites the issue. When the fix lands, the test passes, and strict mode fails the run
+until the fix PR removes the marker. So a fixed bug cannot keep its marker, and the marker
+cannot hide a different failure: `raises` names the exception the bug produces, and any
+other exception fails the test.
+
+Security-class findings are not listed here. They follow SECURITY.md, and their tests
+land together with their fixes.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+
+@dataclass(frozen=True)
+class KnownBug:
+    id: str
+    #: The issue number in memvara/memvara.
+    issue: int
+    title: str
+
+
+KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
+    KnownBug("B2", 266, "a session-bound or agent-bound write ends the user-wide value"),
+    KnownBug("B3", 267, "auto-approve misses two read-only document tools"),
+    KnownBug("B4", 268, "deeply nested JSON kills the stdio server"),
+    KnownBug("B5", 269, "memory_standing with k=0 reports an empty store"),
+    KnownBug("B6", 270, "remember() crashes on a memory_type given as a string"),
+)}
+
+
+def xfail(bug_id: str, *,
+          raises: type[BaseException] | tuple[type[BaseException], ...] = AssertionError,
+          ) -> pytest.MarkDecorator:
+    """The strict expected-failure marker for a registered bug."""
+    bug = KNOWN_BUGS[bug_id]
+    return pytest.mark.xfail(
+        strict=True, raises=raises,
+        reason=f"{bug.id}, memvara/memvara#{bug.issue}: {bug.title}")
