@@ -27,7 +27,9 @@ SELECTS: dict[str, frozenset[str]] = {
     "quarantine": frozenset({"quarantine"}),
 }
 
-#: Files that every folder needs whatever the tier. They are never left out.
+#: Files that every folder of the suite needs whatever the tier. Under tests/ they are
+#: never left out. In memvara/ an __init__.py is an ordinary module whose doctests are
+#: fast tests.
 _ALWAYS = ("__init__.py", "conftest.py")
 
 
@@ -60,7 +62,7 @@ def ignored(path: pathlib.Path, option: str, *, is_dir: bool | None = None) -> b
     disagree. A folder is left out when its tier is one the option does not select. A
     fast folder is always entered, because a nightly or local folder can sit inside it.
     A file is left out when its tier is not selected, except __init__.py and
-    conftest.py, which every folder needs.
+    conftest.py under tests/, which every folder of the suite needs.
     """
     wanted = SELECTS[option]
     if is_dir is None:
@@ -68,7 +70,7 @@ def ignored(path: pathlib.Path, option: str, *, is_dir: bool | None = None) -> b
     tier = tier_of(path)
     if is_dir:
         return tier != "fast" and tier not in wanted
-    if pathlib.Path(path).name in _ALWAYS:
+    if pathlib.Path(path).name in _ALWAYS and _parts(path) is not None:
         return False
     return tier not in wanted
 

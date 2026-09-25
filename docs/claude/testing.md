@@ -48,6 +48,8 @@ A test's tier comes from the folder its file lives in. You do not mark it.
 
 A tier that a run does not select is left out when pytest collects, so it is never imported and never reported as skipped. A file you name on the command line is always collected, whatever its folder. A tier folder you name is not: run `pytest tests/adversarial/nightly --tier nightly`, because without `--tier` the folder is left out and nothing runs.
 
+The `--tier` option, and the filter that leaves the other tiers out, are in the `conftest.py` at the repository root. pytest reads that file on every run, so `--tier` works whatever paths a run is given, `pytest memvara --tier nightly` included. The doctests in `memvara/` are fast tests, so a local or quarantine run leaves them out. `pyproject.toml` puts `tests/` on the import path, so that the root file can import `harness`.
+
 **The outermost tier folder decides.** Do not put one tier folder inside another, or anywhere under `tests/live`; `test_adv_tiers.py` refuses both. Every run prints its tier and the tier folders it left out, for example `tier fast; left out 3 tier folders: ...`, so a folder that happens to share a tier's name cannot drop out of the run unnoticed.
 
 **Every folder of the suite needs an `__init__.py`,** not only the tier folders. Without one at every level, pytest imports the modules below that folder under names of their own: two test files with the same name collide, and a tier folder's tests fail to import. `test_adv_tiers.py` checks every folder under `tests/adversarial` and `tests/live`.

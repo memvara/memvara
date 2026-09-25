@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import pathlib
+import subprocess
+import sys
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from harness.env import REPO
+from harness.env import REPO, child_env
 from harness.tiers import (SELECTS, TESTS, TIER_DIRS, collection_report,
                            folders_without_init, ignored, nested_tier_folders,
                            tier_of)
@@ -55,6 +57,13 @@ def test_a_local_run_leaves_out_fast_files_but_keeps_package_files() -> None:
     assert ignored(REPO / "memvara" / "core.py", "local", is_dir=False)
     assert not ignored(TESTS / "adversarial" / "__init__.py", "local", is_dir=False)
     assert not ignored(TESTS / "adversarial" / "conftest.py", "local", is_dir=False)
+
+
+def test_a_package_file_outside_the_tests_folder_is_an_ordinary_fast_module() -> None:
+    """Only the suite's own folders need their __init__.py in every tier. The one in a
+    package of memvara/ holds doctests, which are fast tests."""
+    assert ignored(REPO / "memvara" / "ingest" / "__init__.py", "local", is_dir=False)
+    assert not ignored(REPO / "memvara" / "ingest" / "__init__.py", "fast", is_dir=False)
 
 
 def test_every_tier_folder_is_a_package() -> None:
@@ -129,3 +138,36 @@ def test_the_collection_report_ignores_bytecode_folders() -> None:
     line = collection_report("fast", [TESTS / "adversarial" / "nightly",
                                       TESTS / "adversarial" / "nightly" / "__pycache__"])
     assert line == "tier fast; left out 1 tier folder: tests/adversarial/nightly"
+
+
+def _collect(tmp_path: pathlib.Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """`pytest --collect-only` with `args`, in a child process started at the repository
+    root, as a developer would run it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
+         *args],
+        cwd=REPO, env=child_env(home), capture_output=True, text=True, timeout=120)
+
+
+def test_a_run_given_only_the_package_accepts_tier_and_leaves_out_its_doctests(
+        tmp_path: pathlib.Path) -> None:
+    """pytest learns an option only from a conftest file it has loaded, and before a run
+    it loads only the conftest files above the paths it was given. With the option
+    registered in tests/conftest.py, `pytest memvara --tier local` stopped with
+    "unrecognized arguments: --tier". The doctests in memvara/ are fast tests, so a
+    local run given that folder collects nothing."""
+    run = _collect(tmp_path, "memvara", "--tier", "local")
+    assert "unrecognized arguments" not in run.stderr, run.stderr
+    assert run.returncode == pytest.ExitCode.NO_TESTS_COLLECTED, run.stdout + run.stderr
+
+
+def test_a_local_run_leaves_out_the_doctests_in_the_package(tmp_path: pathlib.Path) -> None:
+    """A hook in tests/conftest.py is asked only about paths under tests/, so the doctests
+    in memvara/ used to be collected by every tier, local included."""
+    run = _collect(tmp_path, "--tier", "local")
+    assert run.returncode == pytest.ExitCode.OK, run.stdout + run.stderr
+    collected = [line for line in run.stdout.splitlines() if "::" in line]
+    assert collected, "the local tier has tests, so the run must collect some"
+    assert [line for line in collected if not line.startswith("tests/")] == []
