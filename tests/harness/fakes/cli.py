@@ -20,6 +20,10 @@ its arguments ask for, and appends its arguments and its stdin to a log that `ca
 reads. A run that finds no reply left says so on stderr and exits with status 3, so a
 hook that starts a CLI once more than the test expected fails loudly.
 
+A run reads its stdin to the end before it answers, unless stdin is a terminal. So a
+caller that starts a fake with stdin left open, and never closes it, holds the run until
+its own timeout.
+
 POSIX only. The executables are shell scripts, and on Windows a program that another
 starts without a shell is found on `PATH` only as an `.exe`.
 """

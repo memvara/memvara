@@ -3910,3 +3910,18 @@ Expected: `Success: no issues found` three times.
 - `FakeOpenAI` with ordered scripted replies, a request log, malformed output, a 429 and a hang, and memvara's LLM client talking to it: Task 4.
 - Fake `claude` and `codex` that a test puts first on `PATH`, recording argv and stdin, printing a scripted reply in the format the hook parses: Task 5. `HookRunner`'s refusal of `capture` is left as it is.
 - The self-tests: parity for `remember`, `get`, `get_all`, `search`, `forget`, `delete` and `erase` (Task 2); each fault reaching the client as the client handles it (Tasks 1 and 2); `FakeOpenAI` in order, recorded, and reachable by `OpenAILLM` (Task 4); a fake CLI found on `PATH`, recording argv, printing its reply exactly (Task 5); everything offline and in the fast tier (every task).
+
+## Changes made while executing this plan
+
+The committed files are the reference. They differ from the code above in these places, each for the reason given:
+
+- **`_http.py`, `serve()`** runs `serve_forever` with a poll interval of 0.05 seconds instead of the default half second. `close()` waits for the loop to notice the shutdown, so the default cost every test that serves a fake up to half a second.
+- **`_http.py`, the fault helpers** are named `_queue_fault` and `_check_route` instead of `_add` and `_check`. `FakeV1`'s handler for `POST /v1/memories` is also named `_add`, and it overrode the helper, so `fail()` and `delay()` called the route handler. The first run of Task 2's tests showed it.
+- **`fake_v1.py`, `_end`** tests its two addressing modes as two explicit branches, so the type checker can see which variable each one uses. The answer it gives is unchanged.
+- **`hosted_mcp.py`, `_post`** calls the presented session header `presented`, because reusing the name `session` gave one variable two types.
+- **`openai_compat.py`**: the class docstring no longer says the fake is reached over a socket only, because the inherited mock transports reach it too.
+- **`cli.py`**: the module docstring says that a run reads its stdin to the end, so a caller that leaves stdin open holds the run.
+- **`test_adv_fake_v1_faults.py`**: the retried-write test also checks that the claim was observed once. A write that lands twice leaves one claim observed twice, so counting claims alone could not catch it.
+- **`test_adv_fake_http.py`**: the async test compares the first tick with the moment the delayed answer arrived, instead of with a fixed 0.25 seconds that a loaded machine could miss.
+- **`test_adv_fake_v1_parity.py`**, from the final review: the route scan stops on a client call whose method it cannot read, instead of skipping it, and `test_a_call_the_scan_cannot_read_stops_it` shows that on a synthetic client. A route called that way would otherwise have slipped past the check.
+- **`docs/claude/testing.md`**, from the final review: the fakes section says that the hooks use a hosted endpoint only when no local store is configured, which is when a hook run reaches `FakeHostedMcp`.
