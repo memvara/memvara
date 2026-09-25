@@ -79,7 +79,8 @@ def test_fold_is_the_expected_string(surface, expected):
 
 def test_fold_is_idempotent():
     for surface in ("Acme, Inc.", "The Acme Corporation", "Inc", "Co", "Zoë", "",
-                    "C++", "C#", "A-", "A\u2212", "Disney+", "C++/CLI", "A- grade"):
+                    "C++", "C#", "A-", "A\u2212", "Disney+", "C++/CLI", "A- grade",
+                    "the the band", "The The", "The the Acme Inc"):
         assert entity_key(entity_key(surface)) == entity_key(surface)
 
 
@@ -1235,9 +1236,20 @@ def test_an_all_legal_form_name_bounds_to_a_bare_digest():
     assert _is_bare_digest(key) and entity_key(key) == key
 
 
-def test_an_all_article_name_bounds_to_a_bare_digest():
-    key = entity_key("the " * 400)
-    assert _is_bare_digest(key) and entity_key(key) == key
+def test_an_all_article_name_folds_to_one_article():
+    # Every leading "the" goes until one word is left, so a name made only of articles
+    # folds to one, as "The" does, however long it is, and never reaches the bound.
+    assert entity_key("the " * 400) == entity_key("The") == "the"
+
+
+def test_a_claim_about_a_name_with_two_articles_keys_it_as_its_slot_does():
+    """`Claim.fact_key` folds `subject_key` again. When the fold stripped one article, a
+    claim about "The The Band" had the key `the band` and sat in the slot of `band`, so
+    it was one value and "The Band" another in the same slot."""
+    doubled = Claim(subject="The The Band", predicate="plays", object="jazz")
+    single = Claim(subject="The Band", predicate="plays", object="jazz")
+    assert doubled.subject_key == entity_key(doubled.subject_key) == "band"
+    assert (doubled.fact_key, doubled.value_key) == (single.fact_key, single.value_key)
 
 
 def test_a_single_word_too_long_to_fit_bounds_to_a_bare_digest():

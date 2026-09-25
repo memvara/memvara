@@ -171,7 +171,7 @@ either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/sto
   them only when it is upgraded, through the UPDATEs that `_migrate_to_v12` runs on every
   upgrade. A fold change without a bump leaves every file written before it on the old
   keys, so the next write of a stored value no longer matches it. Version 16 is the bump
-  for keeping a `+`, `#` or `-` that ends a name.
+  for keeping a `+`, `#` or `-` that ends a name and for stripping every leading "the".
 
 ## Read next
 

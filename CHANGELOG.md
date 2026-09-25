@@ -183,10 +183,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   (`C++`, `Disney+`, `18+`), a trailing `#` on a word of one or two letters (`C#`, `F#`),
   and one trailing `-` on a word of one or two letters (`A-`, `AB-`). The minus sign U+2212
   counts as `-`. Inside a word the symbols still separate, so "x-ray" and "X ray" are still
-  one value, and nothing else about the fold changes. `SQLiteStore` moves to schema version
-  16, and the first open of an older file re-derives every claim's keys with the new fold.
-  A value that an earlier version recorded as a repeat of another stays recorded that way;
-  `docs/UPGRADING.md` shows how to find those.
+  one value. `SQLiteStore` moves to schema version 16, and the first open of an older file
+  re-derives every claim's keys with the new fold. A value that an earlier version
+  recorded as a repeat of another stays recorded that way; `docs/UPGRADING.md` shows how
+  to find those.
+- **`entity_key()` strips every leading "the", so a key folds to itself.** It stripped
+  only the first, so "the the band" folded to "the band", which folds again to "band".
+  `Claim.fact_key` folds the subject's key again, so a claim about "The The Band" had the
+  key `the band` while it sat in the slot of `band`. Every leading "the" now goes until one
+  word is left: "The The Band" folds to `band`, and "The The" still folds to `the`. Only a
+  name that starts with "the" twice and has a third word changes key, and the schema 16
+  re-derivation above re-keys it on the first open.
 
 ## [0.15.0] — 2026-09-24
 

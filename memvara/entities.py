@@ -231,6 +231,12 @@ def entity_key(surface: str) -> str:
     >>> entity_key("x-ray") == entity_key("X ray")
     True
 
+    Every leading "the" goes, however many there are, until one word is left. Stripping
+    only the first made "the the band" fold to "the band", which folds again to "band":
+
+    >>> entity_key("the the band"), entity_key("the band"), entity_key("The The")
+    ('band', 'band', 'the')
+
     Returns "" for a surface form with no content at all, which callers read as "no
     entity here" — an empty object is meaningful for retraction, where it means "clear
     the whole slot".
@@ -257,7 +263,7 @@ def entity_key(surface: str) -> str:
     kept = [t for t in tokens if t not in _LEGAL_FORMS]
     if kept:
         tokens = kept
-    if len(tokens) > 1 and tokens[0] in _ARTICLES:
+    while len(tokens) > 1 and tokens[0] in _ARTICLES:
         tokens = tokens[1:]
     key = " ".join(tokens)
     if len(key) <= ENTITY_KEY_MAX:
@@ -332,12 +338,12 @@ def _bounded(key: str, tokens: list[str]) -> str:
     """Cut a key past `ENTITY_KEY_MAX` to the words that fit, plus a digest of all of it.
 
     Folding the result must return it unchanged, because `fact_key_for` and
-    `default_entity` both rely on that. So the prefix never keeps a legal-form word or a
-    leading article: `entity_key` would strip either of them on the second pass, once the
-    digest is there as another word to keep. A legal-form word only reaches this function
-    when every word of the surface was one, and the same goes for a leading article, so
-    both cases leave no words at all, and the key is the bare digest. A surface whose
-    first word alone is longer than the room ends the same way.
+    `default_entity` both rely on that. So the prefix never keeps a legal-form word:
+    `entity_key` would strip it on the second pass, once the digest is there as another
+    word to keep. A legal-form word only reaches this function when every word of the
+    surface was one, so that case leaves no words at all, and the key is the bare digest.
+    A surface whose first word alone is longer than the room ends the same way. A leading
+    article never reaches this function, because `entity_key` strips every one first.
 
     >>> len(_bounded(" ".join(["inc"] * 200), ["inc"] * 200)) == _DIGEST_CHARS
     True
@@ -347,7 +353,7 @@ def _bounded(key: str, tokens: list[str]) -> str:
     prefix: list[str] = []
     used = 0
     for tok in tokens:
-        if tok in _LEGAL_FORMS or (not prefix and tok in _ARTICLES):
+        if tok in _LEGAL_FORMS:
             continue
         cost = len(tok) + (1 if prefix else 0)
         if used + cost > room:
