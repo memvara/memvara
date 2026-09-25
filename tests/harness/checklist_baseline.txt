@@ -78,8 +78,6 @@ inv:RC1
 inv:RC2
 inv:RC3
 inv:RC4
-inv:RC5
-inv:RP1
 inv:RP2
 inv:RP3
 inv:RP4
@@ -95,8 +93,6 @@ inv:RT6
 inv:RT7
 inv:RT8
 inv:RT9
-inv:TB1
-inv:TB2
 inv:TB3
 inv:TB4
 inv:TB5

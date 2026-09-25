@@ -422,6 +422,26 @@ def items() -> set[str]:
     return {item for found in sources.values() for item in found} | set(bug_items())
 
 
+#: Items that no test can check, each with the reason. They are rules for people, listed
+#: among a page's invariants, rather than behaviour of memvara. They stay on the
+#: checklist, so that a reworded rule is still noticed, but they are never gaps.
+EXEMPT: dict[str, str] = {
+    "inv:TB1": "A rule for how a person checks work: an output is compared, not an exit "
+               "status. It describes a method, not anything memvara does.",
+    "inv:TB2": "A rule for how a person reports a benchmark number, with its caveat. It "
+               "governs a document, not code.",
+    "inv:RC5": "A commercial boundary: the hosted server lives in another repository, so "
+               "there is no code here for a test to run.",
+    "inv:RP1": "A rule of the release process, which the suite leaves out of scope: the "
+               "package index refuses to replace a published version.",
+}
+
+
+def gaps(items: Collection[str], covered: Collection[str]) -> set[str]:
+    """The items that no test covers and that are not exempt."""
+    return set(items) - set(covered) - set(EXEMPT)
+
+
 @dataclass
 class Scan:
     """What the tests under one folder declare, read from their source."""

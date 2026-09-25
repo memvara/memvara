@@ -31,7 +31,7 @@ class Repository:
 
     @property
     def gaps(self) -> set[str]:
-        return self.items - self.scan.covered
+        return checklist.gaps(self.items, self.scan.covered)
 
 
 @pytest.fixture(scope="module")
@@ -82,8 +82,31 @@ def test_a_new_feature_switch_is_a_gap_the_baseline_does_not_list(
     fails the fast tier, and the failure names the switch."""
     monkeypatch.setattr(server_config, "FEATURES",
                         (*server_config.FEATURES, "brand_new_switch"))
-    assert checklist.items() - repo.scan.covered - repo.baseline == {
+    assert checklist.gaps(checklist.items(), repo.scan.covered) - repo.baseline == {
         "switch:brand_new_switch"}
+
+
+def test_an_exempt_item_is_neither_a_gap_nor_in_the_baseline(repo: Repository) -> None:
+    """A rule that no test can check stays on the checklist but is never a gap, so the
+    baseline can reach empty."""
+    for item in checklist.EXEMPT:
+        assert item not in repo.gaps, item
+        assert item not in repo.baseline, item
+
+
+def test_every_exemption_names_an_item_on_the_checklist(repo: Repository) -> None:
+    """An exemption whose rule was removed or renamed would outlive it unnoticed."""
+    assert set(checklist.EXEMPT) <= repo.items, sorted(set(checklist.EXEMPT) - repo.items)
+
+
+def test_no_test_covers_an_exempt_item(repo: Repository) -> None:
+    """An item a test can cover is not exempt: its exemption must go."""
+    assert not set(checklist.EXEMPT) & repo.scan.covered
+
+
+def test_every_exemption_gives_its_reason() -> None:
+    for item, reason in checklist.EXEMPT.items():
+        assert item.startswith("inv:") and len(reason.split()) >= 8, (item, reason)
 
 
 def test_the_baseline_leaves_out_comments_and_blank_lines(tmp_path: pathlib.Path) -> None:
