@@ -229,6 +229,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   All three requests now do, and so does an answer that breaks off (`IncompleteRead`) or is
   not HTTP (`BadStatusLine`). The skip message names the request. A different tool list
   still fails the test.
+- **A process that searched before the store held any vector now finds the vectors other
+  processes write.** `add_episode` and `set_episode_embedding` commit separately, so a
+  search in another process can land between them, with a turn to rank and no vector in
+  the store. `SQLiteStore` then marked its vector index loaded with no width. When other
+  processes later wrote vectors, the refresh mapped them with no matrix to score them in,
+  so the vector leg returned nothing until the process wrote a vector itself or restarted.
+  The lexical leg kept answering, so the only sign was worse ranking. On an encrypted store
+  the refresh raised `AssertionError` instead, on the first search after each commit by
+  another process. The index now counts as loaded only once it has found a vector. Until
+  then, each search with a candidate to rank loads it again, at the cost of one census
+  query under the write lock.
 
 ## [0.15.0] — 2026-09-24
 
