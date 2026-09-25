@@ -15,8 +15,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
   scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
   covers the suite's foundation, its reference model, its crash tests, its scripted
-  agent sessions, its fakes, its documentation checks, its stores from old releases
-  and its protocol fuzzing. None of it changes the library.
+  agent sessions, its fakes, its documentation checks, its stores from old releases,
+  its protocol fuzzing and its coverage checklist. None of it changes the library.
   - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
     which includes the doctests in `memvara/`, and the new `--tier nightly`,
     `--tier weekly`, `--tier local` and `--tier quarantine` options select the others.
@@ -72,6 +72,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     tool's own input schema. Every request must get exactly one reply, a refused call must
     change nothing in the store, and the server must still answer a ping afterwards. The
     nightly tier adds lines of 20 MB and servers configured other ways.
+  - **A coverage checklist.** `tests/harness/checklist.py` reads from the code everything
+    the suite must test: every tool, feature switch, pair of a tool and a switch that
+    changes it, `MEMVARA_*` variable, hook on each host, documented invariant, silent
+    failure mode and open bug. A test declares what it covers with
+    `@pytest.mark.covers(...)`. `tests/harness/checklist_baseline.txt` lists today's gaps,
+    and the fast tier fails when a new gap appears, for example a new tool with no test.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed
