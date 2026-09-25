@@ -143,21 +143,12 @@ def test_memory_standing_with_k_zero_never_reports_an_empty_store(
     assert reply.is_error and "memory_standing.k must be >= 1" in reply.text, reply.text
 
 
-# -- B6: a string memory_type -----------------------------------------------------------
+# -- B6, fixed: a string memory_type ----------------------------------------------------
 
-@known_bugs.xfail("B6")
 def test_remember_takes_a_string_memory_type_or_refuses_it_by_name() -> None:
     user = stores.memory().scope(user="u")
-    try:
-        # A string on purpose: it is the spelling the MCP tool accepts.
-        user.remember("user", "prefers", "tabs", memory_type="procedural")  # type: ignore[arg-type]
-    except AttributeError as exc:
-        if "'str' object has no attribute 'value'" in str(exc):
-            raise known_bugs.Reproduced("B6: remember() used the string as an enum") from exc
-        raise
-    except (TypeError, ValueError) as exc:
-        assert "memory_type" in str(exc), exc
-        return
+    # A string on purpose: it is the spelling the MCP tool accepts.
+    user.remember("user", "prefers", "tabs", memory_type="procedural")
     [claim] = user.get_all()
     assert claim.memory_type is MemoryType.PROCEDURAL
 

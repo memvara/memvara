@@ -1305,3 +1305,20 @@ def test_a_store_predating_bulk_fetch_can_also_list_its_memories():
             assert [c.id for c in mem.produced(stored.sources[0])]
     finally:
         mem.close()
+
+
+def test_remember_takes_a_memory_type_spelled_as_the_mcp_tool_spells_it():
+    """`memory_remember` passes the type as a string, and so does anyone who copies its
+    arguments; `remember()` used to fail on it with an AttributeError (#270)."""
+    with Memvara(embedder=HashingEmbedder(dim=64), user="u") as mem:
+        claim = mem.remember("user", "prefers", "tabs", memory_type="procedural").added[0]
+        assert claim.memory_type is MemoryType.PROCEDURAL
+        assert mem.get(claim.id).memory_type is MemoryType.PROCEDURAL
+
+
+def test_remember_refuses_an_unknown_memory_type_by_name_and_writes_nothing():
+    with Memvara(embedder=HashingEmbedder(dim=64), user="u") as mem:
+        with pytest.raises(ValueError, match="memory_type must be one of episodic, "
+                                             "semantic, procedural, not 'durable'"):
+            mem.remember("user", "prefers", "tabs", memory_type="durable")
+        assert mem.get_all() == []

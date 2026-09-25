@@ -709,6 +709,18 @@ def _pack_predicates(pack: str) -> tuple[str, ...]:
 ADVISORY_CANDIDATES = 3
 
 
+
+def _as_memory_type(value: MemoryType | str | None) -> MemoryType | None:
+    """A `MemoryType` from itself or from its value as a string (#270)."""
+    if value is None or isinstance(value, MemoryType):
+        return value
+    try:
+        return MemoryType(value)
+    except ValueError:
+        raise ValueError(
+            "memory_type must be one of "
+            + ", ".join(t.value for t in MemoryType) + f", not {value!r}") from None
+
 class Memvara:
     """Bitemporal memory for agents.
 
@@ -1534,7 +1546,7 @@ class Memvara:
 
     def remember(self, subject: str, predicate: str, obj: str, *, tenant=None, user=None,
                  agent=None, session=None, confidence: float = 1.0,
-                 memory_type: MemoryType | None = None, polarity: int = 1,
+                 memory_type: MemoryType | str | None = None, polarity: int = 1,
                  valid_from: datetime | None = None, valid_to: datetime | None = None,
                  recorded_at: datetime | None = None,
                  sources: Sequence[str | Episode] | None = None,
@@ -1649,7 +1661,13 @@ class Memvara:
           `json.dumps` refuses gets no further than `put_claim`, which raises with the
           key nowhere in the message and the traceback pointing at the storage layer
           rather than at this call.
+
+        `memory_type` is a `MemoryType` or its value as a string, `"episodic"`,
+        `"semantic"` or `"procedural"`, which is how `memory_remember` spells it. Any other
+        string is a `ValueError` that names the argument, raised before anything is
+        written.
         """
+        memory_type = _as_memory_type(memory_type)
         if PROJECT_META in meta:
             raise TypeError(PROJECT_META_REFUSAL.format(method="remember()"))
         if reserved := RESERVED_META & set(meta):
