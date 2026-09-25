@@ -591,6 +591,26 @@ def test_an_expired_claim_is_not_reinforced_so_a_new_statement_survives_the_swee
     assert m.get(receipt.added[0].id) is not None
 
 
+def test_a_retraction_repeated_after_the_first_expired_keeps_a_tombstone_of_its_own(m):
+    """The retraction side of the test above. A repeated retraction is normally folded
+    into the tombstone the first one left. Folded into a tombstone whose expiry has
+    passed, it was erased with that tombstone by the next sweep, and a retraction written
+    with no expiry left no record at all (#284)."""
+    m.remember("user", "likes", "tea")
+    m.remember("user", "likes", "tea", polarity=-1, expires_at=utcnow() + DAY)
+    [first] = [c for c in m.store.iter_claims(None, True) if c.polarity < 0]
+    first.expires_at = utcnow() - timedelta(seconds=1)
+    m.store.put_claim(first)
+
+    m.remember("user", "likes", "tea", polarity=-1)
+    tombstones = [c for c in m.store.iter_claims(None, True) if c.polarity < 0]
+    assert len(tombstones) == 2, "the repeat was folded into the expired tombstone"
+    [second] = [c for c in tombstones if c.id != first.id]
+    assert second.expires_at is None and second.state == "retired"
+    assert [e.claim_id for e in m.erase_expired()] == [first.id]
+    assert [c.id for c in m.store.iter_claims(None, True) if c.polarity < 0] == [second.id]
+
+
 def test_erase_by_name_still_erases_a_claim_whose_expiry_has_passed(m):
     code = _overdue(m)
     assert m.erase(code.id) is True

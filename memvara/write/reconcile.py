@@ -963,6 +963,12 @@ class Reconciler:
         if not matches:
             prior = [c for c in self.store.find_by_value(tenant, claim.value_key)
                      if owner_key(c.scope) == owner]
+            if getattr(self.store, "hide_expired", True):
+                # A tombstone whose expiry has passed is gone to every read, and the sweep
+                # will erase it. Folding this retraction into it would have the sweep erase
+                # this one too, so it does not count as the retraction on record. The
+                # positive path in `apply` leaves an expired claim out for the same reason.
+                prior = [c for c in prior if not expired(c, t)]
             if prior:
                 # We have already processed this exact retraction; re-running it must not
                 # accumulate tombstones. Provenance still merges.

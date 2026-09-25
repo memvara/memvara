@@ -294,9 +294,8 @@ def test_a_turn_restating_a_fact_with_an_earlier_date_keeps_the_earlier_period(
     assert seen == ["tea"], seen
 
 
-# -- B18: a repeated retraction is folded into an expired tombstone ----------------------
+# -- B18, fixed: a repeated retraction keeps its own record after the first expired ------
 
-@known_bugs.xfail("B18")
 def test_a_retraction_repeated_after_the_first_expired_keeps_its_own_record() -> None:
     """The positive path leaves expired claims out of its duplicate lookup. A retraction
     must too, or the sweep erases the repeat with the tombstone it was folded into
@@ -315,8 +314,6 @@ def test_a_retraction_repeated_after_the_first_expired_keeps_its_own_record() ->
     mem.remember("user", "likes", "tea", polarity=-1, user="u")
     mem.erase_expired()
     left = [c for c in mem.store.iter_claims(None, True) if c.polarity < 0]
-    if left == []:
-        raise known_bugs.Reproduced("B18: the repeat was erased with the expired tombstone")
     assert len(left) == 1 and left[0].expires_at is None
 
 

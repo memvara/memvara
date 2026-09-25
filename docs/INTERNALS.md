@@ -469,8 +469,10 @@ of the write path all leave it out and `k` still counts visible rows (invariant 
 `Memvara._gone` does the same for the reads addressed by id: `get`, `why`, `history`,
 `produced`, and the claims `forget_matching` and `links` hydrate. The reconciler does not
 reinforce such a claim, so writing the fact again stores a new claim rather than one the
-sweep is about to erase. `erase()` by name still finds and erases it. With
-`expiry_erasure=False` the store's `hide_expired` is false and an expiry does nothing.
+sweep is about to erase. A retraction is treated the same way: a repeat is not folded into
+an earlier tombstone whose expiry has passed, so the sweep does not erase the repeat
+together with that tombstone. `erase()` by name still finds and erases an expired claim.
+With `expiry_erasure=False` the store's `hide_expired` is false and an expiry does nothing.
 
 **A repeat with an expiry stays in its own scope.** Writing a fact the store already
 holds normally reinforces the claim on record, which `value_key` finds by owner (tenant

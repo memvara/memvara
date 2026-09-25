@@ -150,6 +150,16 @@ def test_a_repeated_retraction_reinforces_its_tombstone_and_reports_nothing(
     assert e.reinforced == ["r2"] and not e.reinforced_reported
 
 
+def test_a_retraction_repeated_after_its_tombstone_expired_writes_a_new_one(
+        pair: Pair) -> None:
+    pair.apply(Remember("u1", "likes", "tea"))
+    pair.apply(Remember("u1", "likes", "tea", polarity=-1, expires_at=FAR_FUTURE))
+    pair.apply(Lapse("r2", pair.lapsed_instant()))
+    e = pair.apply(Remember("u1", "likes", "tea", polarity=-1))
+    assert e.new == "r3" and e.reinforced == []
+    assert pair.apply(EraseExpired()).returned == ["r2"]
+
+
 def test_a_retraction_of_a_value_that_is_not_there_writes_nothing(pair: Pair) -> None:
     pair.apply(Remember("u1", "likes", "tea"))
     e = pair.apply(Remember("u1", "likes", "coffee", polarity=-1))
