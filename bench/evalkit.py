@@ -1027,16 +1027,21 @@ class AnthropicReader:
         effort: str = "low",
         max_tokens: int = 4096,
         thinking: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> None:
         self.model = model
         self.effort = effort
         self.max_tokens = max_tokens
         self.thinking = dict(thinking) if thinking is not None else None
+        #: Seconds the client waits for one request, or `None` for the SDK's default.
+        #: Printed in the header by `reader_settings_lines` and deliberately not in
+        #: `settings()`; see `OpenAIReader` for why.
+        self.timeout = timeout
         self.name = f"anthropic/{model}"
-        self._client = client if client is not None else self._default_client()
+        self._client = client if client is not None else self._default_client(timeout)
 
     @staticmethod
-    def _default_client() -> Any:
+    def _default_client(timeout: float | None = None) -> Any:
         try:
             import anthropic
         except ImportError as exc:
@@ -1046,7 +1051,7 @@ class AnthropicReader:
                 "with --reader stub to exercise the harness offline."
             ) from exc
         require_key("ANTHROPIC_API_KEY", "--reader anthropic")
-        return anthropic.Anthropic()
+        return anthropic.Anthropic(**({"timeout": timeout} if timeout is not None else {}))
 
     def settings(self) -> dict[str, Any]:
         """Every request parameter this reader pins, as the report header prints it and
@@ -1063,7 +1068,7 @@ class AnthropicReader:
         """
         return AnthropicReader(model=model or self.model, client=self._client,
                                effort=self.effort, max_tokens=self.max_tokens,
-                               thinking=self.thinking)
+                               thinking=self.thinking, timeout=self.timeout)
 
     def answer(self, system: str, prompt: str) -> Answer:
         extra = {"thinking": self.thinking} if self.thinking is not None else {}
@@ -1107,6 +1112,14 @@ class OpenAIReader:
     Both settings appear in `settings()` only when they are set, so an ordinary OpenAI
     run keeps the checkpoint ids it had before either existed.
 
+    `timeout` is how many seconds the client waits for one request, passed to the SDK's
+    client; `None` leaves the SDK's own default. A full-transcript prompt at corpus scale
+    10 is about 25,000 tokens, and a quantized model on one machine can take longer than
+    that default to answer it. The value is printed in the report header but is not in
+    `settings()`, because `settings()` is the checkpoint key and how long the client
+    waits does not change what was asked: a rerun with a longer timeout replays the
+    answers it already has.
+
     A self-hosted model has no list price, so a run against one prints its tokens and an
     UNPRICED line under the cost table rather than a dollar figure it could not know.
     """
@@ -1124,6 +1137,7 @@ class OpenAIReader:
         base_url: str | None = None,
         api_key_file: str | None = None,
         extra_body: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
@@ -1131,9 +1145,10 @@ class OpenAIReader:
         self.seed = seed
         self.base_url = base_url
         self.extra_body = dict(extra_body) if extra_body is not None else None
+        self.timeout = timeout
         self.name = f"openai/{model}"
         self._client = (client if client is not None
-                        else self._default_client(base_url, api_key_file))
+                        else self._default_client(base_url, api_key_file, timeout))
 
     def settings(self) -> dict[str, Any]:
         """See `AnthropicReader.settings`. `seed` is `None` when none was sent; the
@@ -1153,11 +1168,12 @@ class OpenAIReader:
         return OpenAIReader(model=model or self.model, client=self._client,
                             max_tokens=self.max_tokens, temperature=self.temperature,
                             seed=self.seed, base_url=self.base_url,
-                            extra_body=self.extra_body)
+                            extra_body=self.extra_body, timeout=self.timeout)
 
     @staticmethod
     def _default_client(base_url: str | None = None,
-                        api_key_file: str | None = None) -> Any:
+                        api_key_file: str | None = None,
+                        timeout: float | None = None) -> Any:
         try:
             import openai
         except ImportError as exc:
@@ -1169,6 +1185,8 @@ class OpenAIReader:
         options: dict[str, Any] = {}
         if base_url is not None:
             options["base_url"] = base_url
+        if timeout is not None:
+            options["timeout"] = timeout
         if api_key_file is not None:
             options["api_key"] = read_api_key_file(api_key_file)
         else:
@@ -1539,6 +1557,11 @@ def reader_settings_lines(reader: Reader, *, sampling_note: bool = True) -> list
             parts.append(f"{key}={json.dumps(value, sort_keys=True)}")
         else:
             parts.append(f"{key}={value}")
+    # Printed beside the settings but kept out of them: `settings()` is the checkpoint
+    # key, and how long the client waits does not change what was asked.
+    if isinstance(inner, (AnthropicReader, OpenAIReader)):
+        parts.append("timeout=not set (the client library's default)"
+                     if inner.timeout is None else f"timeout={inner.timeout:g}s")
     lines = ["    " + "  ".join(parts)]
     if sampling_note and isinstance(inner, AnthropicReader):
         lines.append("    temperature, top_p, top_k: not accepted by this model family, "
@@ -2937,6 +2960,12 @@ def add_reader_arguments(parser: Any) -> None:
                         help="OpenAI reader: a JSON object merged into every request "
                              "body, e.g. '{\"chat_template_kwargs\": "
                              "{\"enable_thinking\": false}}'. Printed in the header")
+    parser.add_argument("--timeout", type=float, default=None, metavar="SECONDS",
+                        help="how long the reader's client waits for one request, for "
+                             "either provider. Omitted, the client library's own default "
+                             "applies. Printed in the header; not part of the checkpoint "
+                             "key, so a rerun with a longer timeout replays the answers "
+                             "it already has")
     parser.add_argument("--concurrency", type=int, default=1, metavar="N",
                         help="model calls in flight at once, reader and judge alike. "
                              "1, the default, issues them one at a time on the calling "
@@ -2987,7 +3016,11 @@ def hosted_reader(provider: str, args: Any, *,
     """
     pinned = {name: value for name, value in (
         ("max_tokens", getattr(args, "max_tokens", None)),
+        ("timeout", getattr(args, "timeout", None)),
     ) if value is not None}
+    if pinned.get("timeout", 1) <= 0:
+        raise SystemExit(f"--timeout must be a number of seconds above zero; got "
+                         f"{pinned['timeout']:g}.")
     base_url = getattr(args, "base_url", None)
     api_key_file = getattr(args, "api_key_file", None)
     extra_body = getattr(args, "extra_body", None)

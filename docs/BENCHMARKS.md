@@ -1622,6 +1622,14 @@ under its alias `goal`. And `POST /v1/recall` has no time axis, so the four date
 are read with `search(valid_at=)` and rendered by the library's own recall renderer.
 Extraction and the episode cap are the deployment's, so each context records how many
 claims its scope held when it was read.
+
+The service extracts claims in a background worker and gives a client no way to ask
+whether it has finished with a scope. So a hosted run is two steps: `--write-only` writes
+every scope and exits, and a later run with the same `--hosted-run-id` reads them. The read
+refuses any scope younger than `--min-scope-age` hours, 24 by default, by the time the
+manifest recorded for its write. The report prints each scope's age and claim count at
+read time, and says that the wait is a fixed delay, not a confirmation that extraction
+finished.
 [`demo/README.md`](../demo/README.md#the-memvara-arms-against-the-hosted-service) has the
 whole of it.
 

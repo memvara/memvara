@@ -539,6 +539,10 @@ def hosted_reads(items: Sequence[Item], arms: Mapping[str, Arm]) -> list[str]:
     through `recall()`, because the hosted recall has no time axis. And how many claims
     its scopes held when they were read, because the deployment extracts on its own
     schedule and the `memvara` row was measured on whatever claim tier existed by then.
+
+    Then one line per scope: how long after its write finished it was read, how many
+    turns it holds, and its claim count at read time. A range means the count moved
+    between two questions reading the same scope, which is extraction still landing.
     """
     lines: list[str] = []
     for name in arms:
@@ -547,12 +551,31 @@ def hosted_reads(items: Sequence[Item], arms: Mapping[str, Arm]) -> list[str]:
         if not counts:
             continue
         searched = sum(1 for c in mine if c.read == "search")
-        spread = (str(counts[0]) if min(counts) == max(counts)
-                  else f"{min(counts)}–{max(counts)}")
-        lines.append(f"  {name}: claims in the hosted scope at read time {spread}; "
+        lines.append(f"  {name}: claims in the hosted scope at read time {_spread(counts)}; "
                      f"{searched} of {len(mine)} contexts read through search(valid_at=) "
                      "and rendered by the library's recall renderer")
+    scopes: dict[str, list[Context]] = {}
+    for item in items:
+        if item.context.scope is not None:
+            scopes.setdefault(item.context.scope, []).append(item.context)
+    if scopes:
+        lines += ["", "  each hosted scope, as it was read:"]
+    for scope, read in sorted(scopes.items()):
+        ages = [c.scope_age_hours for c in read if c.scope_age_hours is not None]
+        age = (f"read {min(ages):.1f} h after it was written" if ages
+               else "age unknown")
+        claims = [c.claims_in_scope for c in read if c.claims_in_scope is not None]
+        lines.append(f"    {scope}: {age}, turns {read[0].turns_visible}, "
+                     f"claims at read {_spread(claims)}")
     return ["", *lines] if lines else []
+
+
+def _spread(counts: Sequence[int]) -> str:
+    """One number, or the range a set of counts covered."""
+    if not counts:
+        return "unknown"
+    return (str(counts[0]) if min(counts) == max(counts)
+            else f"{min(counts)}–{max(counts)}")
 
 
 #: Arm counts as words, for the report's title. The default run is five arms and its
@@ -855,6 +878,30 @@ def ordered_arms(extra: Mapping[str, Arm]) -> dict[str, Arm]:
     return out
 
 
+#: Hours a hosted scope must have stood before a run reads it. See `demo/hosted.py`.
+DEFAULT_MIN_SCOPE_AGE = 24.0
+
+
+def hosted_backend(args: Any) -> tuple[Any, Any]:
+    """`demo/hosted.py`'s two arms for this run, and the credential they write with.
+
+    The credential is refused here if it could reach this machine's own store, before
+    anything is written. `--min-scope-age` becomes the arms' `min_age`.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from demo import hosted as ho
+
+    credential = ho.load_demo_credential(args.hosted_credentials)
+    run_id = args.hosted_run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    manifest = ho.Manifest(args.hosted_manifest
+                           or _ROOT / "demo" / "runs" / f"{run_id}.hosted.jsonl")
+    min_age = timedelta(hours=getattr(args, "min_scope_age", DEFAULT_MIN_SCOPE_AGE))
+    return (ho.HostedMemvara(ho.connect(credential), run_id=run_id,
+                             scale=args.corpus_scale, manifest=manifest, min_age=min_age),
+            credential)
+
+
 def build_arms(args: Any) -> tuple[dict[str, Arm], str]:
     """The arms this run compares, and the backend note the report carries.
 
@@ -874,17 +921,7 @@ def build_arms(args: Any) -> tuple[dict[str, Arm], str]:
     extra, notes = cp.build_competitors(args)
     arms = ordered_arms(extra)
     if args.memory == "hosted":
-        from datetime import datetime, timezone
-
-        from demo import hosted as ho
-
-        credential = ho.load_demo_credential(args.hosted_credentials)
-        run_id = args.hosted_run_id or datetime.now(timezone.utc).strftime(
-            "%Y%m%dT%H%M%SZ")
-        manifest = ho.Manifest(args.hosted_manifest
-                               or _ROOT / "demo" / "runs" / f"{run_id}.hosted.jsonl")
-        hosted_arms = ho.HostedMemvara(ho.connect(credential), run_id=run_id,
-                                       scale=args.corpus_scale, manifest=manifest)
+        hosted_arms, credential = hosted_backend(args)
         arms.update(hosted_arms.arms())
         notes.insert(0, hosted_arms.backend_note(credential))
     return arms, "\n".join(notes)
@@ -937,6 +974,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--hosted-manifest", metavar="PATH", default=None,
                         help="--memory hosted: the JSON-lines record of which scopes this "
                              "run has written. Default demo/runs/<run id>.hosted.jsonl")
+    parser.add_argument("--write-only", action="store_true",
+                        help="--memory hosted: write every scope the two memvara arms "
+                             "read, record each in the manifest, print when the read may "
+                             "start, and exit. No reader is built. Read later with the "
+                             "same --hosted-run-id")
+    parser.add_argument("--min-scope-age", type=float, default=DEFAULT_MIN_SCOPE_AGE,
+                        metavar="HOURS",
+                        help="--memory hosted: refuse to read a scope written less than "
+                             "this many hours ago, by its manifest row, or one the write "
+                             "step never finished. Default 24. It is a fixed delay, not a "
+                             "sign that the service finished extracting. 0 writes and "
+                             "reads in one run")
     # The two competitor arms. Off unless asked for, because each needs something a clean
     # checkout does not have, and the offline run CI depends on must keep working without
     # either. See demo/competitors.py.
@@ -975,6 +1024,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.corpus_scale < 1:
         parser.error("--corpus-scale must be at least 1")
+    if args.min_scope_age < 0:
+        parser.error("--min-scope-age must be 0 or more hours")
+    if args.write_only and args.memory != "hosted":
+        parser.error("--write-only writes the hosted scopes and needs --memory hosted; a "
+                     "local run has nothing to write ahead of time.")
     if args.memory == "hosted" and not args.hosted_credentials:
         parser.error("--memory hosted needs --hosted-credentials PATH: the credentials "
                      "file for a project made for the demo. Create the project in the "
@@ -984,6 +1038,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     authored = len(turns)
     turns = scale_conversation(turns, args.corpus_scale)
     corpus = corpus_note(args.corpus_scale, authored, len(turns))
+    if args.write_only:
+        hosted_arms, _ = hosted_backend(args)
+        print(hosted_arms.write_summary(hosted_arms.write_all(questions, turns)))
+        return 0
     arms, backend = build_arms(args)
 
     if args.reader != "file":

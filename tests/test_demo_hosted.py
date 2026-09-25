@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -591,6 +591,7 @@ def test_the_harness_runs_the_hosted_arms_and_says_where_they_read_from(tmp_path
                     "--hosted-credentials", str(tmp_path / "demo.json"),
                     "--hosted-run-id", "run7",
                     "--hosted-manifest", str(tmp_path / "m.jsonl"),
+                    "--min-scope-age", "0",
                     "--out", str(out)]) == 0
     printed = capsys.readouterr().out
     assert "memory arms: hosted, project memvara-demo on https://app.memvara.dev" in printed
@@ -598,6 +599,182 @@ def test_the_harness_runs_the_hosted_arms_and_says_where_they_read_from(tmp_path
     assert "mv_demo" not in printed
     assert {c[1] for c in client.calls if c[0] == "add"}, "the hosted arms wrote nothing"
     assert "naive_rag" in printed, "the local arms still run beside the hosted ones"
+
+
+# --- writing now, reading a day later -------------------------------------------
+#
+# The hosted service extracts claims from stored turns in a background worker, and it
+# offers a client no way to ask whether that worker has finished with a scope. A scope
+# read straight after it was written was measured on whatever claims existed by then: on
+# 2026-09-23 the `memvara` arm's scopes held 0 claims at read time and 3 to 4 once the
+# worker had been through them. So a run writes its scopes in one step and reads them
+# in a later one, and the read refuses a scope younger than a minimum age.
+
+T0 = datetime(2026, 9, 25, 16, 0, tzinfo=UTC)
+
+
+def _patch_demo_credential(monkeypatch, client: FakeHosted) -> None:
+    monkeypatch.setattr(ho, "connect", lambda credential: client)
+    monkeypatch.setattr(ho, "load_demo_credential",
+                        lambda path, **kw: ho.HostedCredential(
+                            api_key="mv_demo", base_url="https://app.memvara.dev",
+                            project="memvara-demo", path=Path(path)))
+
+
+def _written(tmp_path: Path, client: FakeHosted, questions=QUESTIONS) -> Path:
+    """A manifest whose scopes were all written at `T0`."""
+    path = tmp_path / "manifest.jsonl"
+    writer = ho.HostedMemvara(client, run_id="r1", scale=1,
+                              manifest=ho.Manifest(path, clock=lambda: T0))
+    writer.write_all(questions, TURNS)
+    return path
+
+
+def test_the_write_step_fills_every_scope_and_the_manifest_without_asking_a_reader(
+        tmp_path, monkeypatch, capsys):
+    """`--write-only` writes both memvara arms' scopes for every question instant, records
+    each in the manifest with the time it finished, and exits. No reader is built, so the
+    write step can run while the reader's server is down."""
+    client = FakeHosted()
+    _patch_demo_credential(monkeypatch, client)
+    monkeypatch.setattr(ho, "_utcnow", lambda: T0)
+
+    def no_reader(*args: Any, **kw: Any) -> Any:
+        raise AssertionError("the write step must not build a reader")
+
+    monkeypatch.setattr(hz, "build_reader", no_reader)
+    monkeypatch.setattr(ek, "hosted_reader", no_reader)
+    manifest = tmp_path / "m.jsonl"
+
+    assert hz.main(["--reader", "openai", "--memory", "hosted", "--write-only",
+                    "--hosted-credentials", str(tmp_path / "demo.json"),
+                    "--hosted-run-id", "w1", "--hosted-manifest", str(manifest)]) == 0
+
+    instants = {q.asked_at for q in QUESTIONS}
+    written = {user for kind, user, _ in client.calls if kind == "add"}
+    assert len(written) == 2 * len(instants)
+    rows = [json.loads(line) for line in manifest.read_text().splitlines()]
+    complete = {r["scope"]: r for r in rows if r["status"] == "complete"}
+    assert set(complete) == written
+    printed = capsys.readouterr().out
+    for scope, row in complete.items():
+        assert scope in printed and f"turns {row['turns']}" in printed
+    assert "2026-09-25 16:00 UTC" in printed
+    assert "--hosted-run-id w1" in printed and "2026-09-26 16:00 UTC" in printed, (
+        "the write step must say when the read may start")
+    assert "mv_demo" not in printed
+
+
+def test_the_write_step_needs_the_hosted_backend(monkeypatch, capsys):
+    monkeypatch.setattr(hz, "load_scenario", lambda: (QUESTIONS[:1], TURNS))
+    with pytest.raises(SystemExit):
+        hz.main(["--reader", "stub", "--write-only"])
+    assert "--memory hosted" in capsys.readouterr().err
+
+
+def test_a_read_refuses_a_scope_younger_than_the_minimum_age_and_names_its_age(tmp_path):
+    """The default wait is a day. A read an hour short of it is refused, naming the scope,
+    its age and the flag, and nothing is read from the scope."""
+    client = FakeHosted()
+    path = _written(tmp_path, client)
+    early = ho.HostedMemvara(client, run_id="r1", scale=1, manifest=ho.Manifest(path),
+                             min_age=timedelta(hours=24),
+                             clock=lambda: T0 + timedelta(hours=23))
+    with pytest.raises(SystemExit, match=r"23\.0 h.*--min-scope-age") as refused:
+        early.memvara(QUESTIONS[0], TURNS)
+    assert early.scope_name("memvara", QUESTIONS[0]) in str(refused.value)
+    assert not [c for c in client.calls if c[0] in ("recall", "search")]
+
+
+def test_a_read_after_the_minimum_age_records_each_scopes_age_and_claim_count(tmp_path):
+    client = FakeHosted()
+    path = _written(tmp_path, client)
+    later = ho.HostedMemvara(client, run_id="r1", scale=1, manifest=ho.Manifest(path),
+                             min_age=timedelta(hours=24),
+                             clock=lambda: T0 + timedelta(hours=26, minutes=30))
+    writes = len([c for c in client.calls if c[0] in ("add", "remember")])
+    context = later.memvara_structured(QUESTIONS[0], TURNS)
+    assert len([c for c in client.calls if c[0] in ("add", "remember")]) == writes, (
+        "a read of a completed scope must not write it again")
+    assert context.scope == later.scope_name("memvara_structured", QUESTIONS[0])
+    assert context.scope_age_hours == pytest.approx(26.5)
+    assert context.claims_in_scope == client.scope(user=context.scope).count()
+
+
+def test_a_read_refuses_a_scope_that_was_never_written_rather_than_writing_it(tmp_path):
+    """With a minimum age set, a scope the write step never finished cannot be old enough,
+    and writing it now would only make the read refuse a moment later. The refusal names
+    the write step, and nothing is written."""
+    client = FakeHosted()
+    reader = ho.HostedMemvara(client, run_id="r1", scale=1,
+                              manifest=ho.Manifest(tmp_path / "empty.jsonl"),
+                              min_age=timedelta(hours=24), clock=lambda: T0)
+    with pytest.raises(SystemExit, match="--write-only"):
+        reader.memvara(QUESTIONS[0], TURNS)
+    assert not client.calls
+
+
+def test_a_scope_the_manifest_records_no_finish_time_for_is_refused(tmp_path):
+    """The manifest is the only record of when a scope was written. A `complete` row with
+    no readable time cannot show the scope is old enough, so it is refused."""
+    client = FakeHosted()
+    probe = ho.HostedMemvara(client, run_id="r1", scale=1,
+                             manifest=ho.Manifest(tmp_path / "m.jsonl"))
+    path = tmp_path / "m.jsonl"
+    path.write_text(json.dumps({"scope": probe.scope_name("memvara", QUESTIONS[0]),
+                                "status": "complete", "at": "not a time"}) + "\n")
+    reader = ho.HostedMemvara(client, run_id="r1", scale=1, manifest=ho.Manifest(path),
+                              min_age=timedelta(hours=24), clock=lambda: T0)
+    with pytest.raises(SystemExit, match="no time"):
+        reader.memvara(QUESTIONS[0], TURNS)
+
+
+def test_the_report_prints_each_scopes_age_and_claims_and_says_the_wait_is_only_a_delay(
+        tmp_path, monkeypatch, capsys):
+    """End to end: the write step, then the read a day and two hours later with the same
+    run id. The report names every scope with its age and its claim count at read time,
+    and says plainly that the wait is a fixed delay and not a sign that extraction has
+    finished, because the service offers no such sign."""
+    client = FakeHosted()
+    _patch_demo_credential(monkeypatch, client)
+    monkeypatch.setattr(hz, "load_scenario", lambda: (QUESTIONS[:3], TURNS))
+    common = ["--memory", "hosted", "--hosted-credentials", str(tmp_path / "demo.json"),
+              "--hosted-run-id", "w2", "--hosted-manifest", str(tmp_path / "m.jsonl")]
+    monkeypatch.setattr(ho, "_utcnow", lambda: T0)
+    assert hz.main(["--write-only", *common]) == 0
+    capsys.readouterr()
+
+    monkeypatch.setattr(ho, "_utcnow", lambda: T0 + timedelta(hours=26))
+    assert hz.main(["--reader", "stub", *common]) == 0
+    printed = capsys.readouterr().out
+    scopes = {user for kind, user, _ in client.calls if kind == "add"}
+    for scope in scopes:
+        line = next(li for li in printed.splitlines() if scope in li)
+        assert "read 26.0 h after it was written" in line
+        assert f"claims at read {client.scope(user=scope).count()}" in line
+    assert "at least 24.0 h" in printed
+    assert "fixed delay" in printed and "not a confirmation" in printed
+
+
+def test_a_minimum_age_of_zero_writes_and_reads_in_one_run_and_says_so(tmp_path):
+    """`--min-scope-age 0` keeps the one-step run, for a local rehearsal. The report must
+    then say the scopes may have been read before extraction finished."""
+    hosted = ho.HostedMemvara(FakeHosted(), run_id="r1", scale=1,
+                              manifest=ho.Manifest(tmp_path / "m.jsonl",
+                                                   clock=lambda: T0),
+                              min_age=timedelta(0), clock=lambda: T0)
+    context = hosted.memvara(QUESTIONS[0], TURNS)
+    assert context.scope_age_hours == 0.0
+    note = hosted.backend_note(ho.HostedCredential(api_key="k", base_url="u",
+                                                   project="p", path=tmp_path))
+    assert "before" in note and "extraction" in note
+
+
+def test_the_minimum_age_flag_must_not_be_negative(monkeypatch, capsys):
+    monkeypatch.setattr(hz, "load_scenario", lambda: (QUESTIONS[:1], TURNS))
+    with pytest.raises(SystemExit):
+        hz.main(["--reader", "stub", "--min-scope-age", "-1"])
+    assert "--min-scope-age" in capsys.readouterr().err
 
 
 def test_the_hosted_backend_needs_a_credential_named_for_it(monkeypatch, capsys):

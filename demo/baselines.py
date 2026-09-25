@@ -213,6 +213,12 @@ class Context:
     #: tier a hosted `memvara` row was measured on is not known in advance; this is the
     #: record of what it was.
     claims_in_scope: int | None = None
+    #: The hosted scope this context was read from, or `None` for a local arm.
+    scope: str | None = None
+    #: Hours between the scope's write finishing and this read, from the run's manifest,
+    #: or `None` for a local arm. The service extracts in the background and cannot say
+    #: when it has finished, so the report prints this beside `claims_in_scope`.
+    scope_age_hours: float | None = None
 
     @property
     def chars(self) -> int:

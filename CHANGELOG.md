@@ -9,6 +9,28 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **The benchmark readers take `--timeout SECONDS`.** It sets how long the Anthropic or
+  OpenAI client waits for one request; without it the client library's default applies.
+  The report header prints it. It is not part of the checkpoint key, so a rerun with a
+  longer timeout replays the answers it already has. It is shared by `demo/harness.py` and
+  the `bench/` runners.
+- **A hosted demo run can write its scopes now and read them a day later.**
+  `demo/harness.py --memory hosted --write-only` writes every scope the two memvara arms
+  read, records each in the run's manifest, and exits without building a reader. A later
+  run with the same `--hosted-run-id` reads them. The hosted service extracts claims in the
+  background and does not say when it has finished, and a run that read its scopes
+  straight away on 2026-09-23 found no claims in them.
+
+### Changed
+
+- **A hosted demo read refuses scopes younger than `--min-scope-age` hours, 24 by
+  default.** It also refuses a scope the write step never finished, instead of writing it
+  and reading it at once. The report prints each scope's age and claim count at read time,
+  and says the wait is a fixed delay, not a confirmation that extraction finished. Pass
+  `--min-scope-age 0` for the old one-step run.
+
 ## [0.16.0] — 2026-09-25
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store moves to schema 16 on

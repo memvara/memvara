@@ -72,6 +72,12 @@ number quotable and the run repeatable:
   keyed in the checkpoint, because a different server or `{"chat_template_kwargs":
   {"enable_thinking": false}}` changes the answers. The key is read from the file at run
   time and appears nowhere; the file is refused if other users can read it.
+* `--timeout SECONDS` sets how long the reader's client waits for one request, on either
+  provider. Without it the client library's own default applies. A full-transcript prompt
+  at `--corpus-scale 10` is about 25,000 tokens, and a quantized model on one machine can
+  take a long time to read it. The header prints the value, or says none was set. It is
+  not part of the checkpoint key, because how long the client waits does not change what
+  was asked, so a rerun with a longer timeout replays the answers it already has.
 * `--judge llm` grades with the reader's twin: the same provider and the same parameters,
   with `--judge-model` swapped in when given. `--judge containment`, the default, is free
   and wrong in the known directions the report lists under its tables.
@@ -522,9 +528,37 @@ Every other arm is unchanged: `none`, `full_transcript` and `naive_rag` use no s
 
 ```bash
 memvara login --credentials ~/.memvara/demo-credentials.json   # choose the demo's project
+# Step 1: write every scope, then exit. No reader is involved.
+PYTHONPATH=. python3 demo/harness.py --memory hosted --write-only \
+    --hosted-credentials ~/.memvara/demo-credentials.json --hosted-run-id 2026-09-16a
+# Step 2, at least a day later: read the same scopes.
 PYTHONPATH=. python3 demo/harness.py --reader stub --memory hosted \
     --hosted-credentials ~/.memvara/demo-credentials.json --hosted-run-id 2026-09-16a
 ```
+
+**A hosted run is two steps, a day apart.** The service extracts claims from stored turns
+in a background worker after the write has returned, and nothing a client can reach says
+when that worker has finished with a scope. `/v1/stats` returns counts. A turn the worker
+read and found nothing in looks the same as a turn it has not read yet. A claim count that
+stops changing proves nothing either, because the worker reads one turn at a time across
+every project on the service and pauses between passes. On 2026-09-23 the `memvara` arm
+read its scopes straight after writing them and found 0 claims in them. The same scopes
+held 3 to 4 claims once the worker had been through them, so that run measured the arm
+before the service had done its work.
+
+So `--write-only` writes every scope both memvara arms will read, records each one in the
+manifest, prints each scope's turn count and the time its write finished, and exits. It
+builds no reader, so it runs while the reader's server is down. The read is a later run
+with the same `--hosted-run-id`. It refuses any scope whose manifest row is younger than
+`--min-scope-age` hours (24 by default), and any scope the write step never finished,
+before a single reader call is made. The manifest is the only record of when a scope was
+written.
+
+The report prints, for every scope, how many hours after its write it was read, how many
+turns it holds, and how many claims it held at read time. It also says plainly that the
+wait is a fixed delay chosen for the run, not a confirmation that extraction had finished.
+`--min-scope-age 0` keeps the one-step run for a rehearsal, and its report says the scopes
+may have been read before extraction finished with them.
 
 **It writes to a project of its own, and refuses to do otherwise.** A run writes a few
 thousand turns, which no code here can take back, so `--hosted-credentials` refuses the
@@ -562,9 +596,10 @@ rather than leaving them to be noticed:
   store, which a test pins. The report counts how many contexts were read that way.
 
 Extraction and the episode cap are the deployment's: it runs its own extractor over the
-turns the `memvara` arm writes, on its own schedule, and its own limit on how many turns a
-read returns, where the local arm sets `read_max_episodes=k`. So each context records how
-many claims its scope held when it was read, and the report prints the range.
+turns both arms write, on its own schedule, and its own limit on how many turns a read
+returns, where the local arm sets `read_max_episodes=k`. So each context records how many
+claims its scope held when it was read, and the report prints the range per arm and the
+count per scope.
 
 **Scopes, and repeating a run.** One scope per run, arm, corpus size and question instant —
 eighteen of the twenty questions share an `asked_at`, so a run writes three scopes per arm
