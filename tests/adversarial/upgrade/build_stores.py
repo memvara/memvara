@@ -12,10 +12,10 @@ For each tag in `golden.RELEASES` it does four things:
    so that `write` runs with the release's own code, the hashing embedder and no model.
    The child reports which memvara it imported, and the build stops if that is not the
    release.
-3. It compresses the closed store into `tests/fixtures/stores/<tag>/`.
-4. It dumps that committed copy with `golden.dump`, which reads with `sqlite3` alone,
-   because opening it with memvara would migrate it, and writes the dump to
-   `golden.json` beside it.
+3. It compresses the closed store and dumps the compressed copy with `golden.dump`,
+   which reads with `sqlite3` alone, because opening it with memvara would migrate it.
+4. Only when every file is made and checked does it copy the store, its embedder
+   record and the dump, as `golden.json`, into `tests/fixtures/stores/<tag>/`.
 
 Two things make a rebuild reproducible, so that the nightly tier can compare it with the
 committed store. Claim, episode and document ids come from `uuid.uuid4`, which the child
@@ -61,6 +61,7 @@ if __package__:
 else:  # run as a script, so the package is imported through tests/
     sys.path.insert(0, str(TESTS))
     from adversarial.upgrade import golden
+
 #: Seeds the generator that stands in for `uuid.uuid4`, so a rebuild mints the same ids.
 SEED = 20240101
 #: How long one release may take to write its store, in seconds.
@@ -148,29 +149,40 @@ def _check_closed(store: pathlib.Path) -> None:
 
 def build(tag: str, root: pathlib.Path, *, env: Mapping[str, str]) -> dict[str, Any]:
     """Write release `tag`'s store and its golden record into `root/<tag>/`, replacing
-    any that are there, and return the record."""
+    any that are there, and return the record.
+
+    Every file is made in a temporary directory first and copied into `root/<tag>/`
+    only when all of them are made and checked, so a build that fails leaves the
+    committed store and its golden record as they were, and still matching each other.
+    """
     if tag not in golden.RELEASES:
         raise BuildError(f"{tag} is not in golden.RELEASES")
-    out = root / tag
     with tempfile.TemporaryDirectory(prefix="memvara-store-") as scratch:
-        store = pathlib.Path(scratch) / "store"
+        work = pathlib.Path(scratch)
+        store = work / "store"
         store.mkdir()
         info = write_with_release(tag, store / golden.DB, env=env)
         _check_closed(store)
-        out.mkdir(parents=True, exist_ok=True)
+        staged = work / "staged" / tag
+        staged.mkdir(parents=True)
         for name in golden.COMPRESSED:
-            (out / f"{name}.gz").write_bytes(
+            (staged / f"{name}.gz").write_bytes(
                 gzip.compress((store / name).read_bytes(), compresslevel=9, mtime=0))
-        shutil.copyfile(store / golden.RECORD, out / golden.RECORD)
-        # Dumped from the committed files, the way every test reads them.
-        db = golden.unpack(tag, pathlib.Path(scratch) / "committed", root=root)
+        shutil.copyfile(store / golden.RECORD, staged / golden.RECORD)
+        # Dumped from the files as they will be committed, the way every test reads them.
+        db = golden.unpack(tag, work / "unpacked", root=staged.parent)
         record = {"tag": tag, "commit": commit_of(tag, env=env),
                   "schema_version": golden.schema_version(db), "data": golden.dump(db)}
-    if {info["schema"], record["schema_version"]} != {golden.RELEASES[tag]}:
-        raise BuildError(f"{tag} wrote schema version {record['schema_version']}, and "
-                         f"golden.RELEASES says {golden.RELEASES[tag]}")
-    (out / "golden.json").write_text(json.dumps(record, indent=1, sort_keys=True) + "\n",
-                                     encoding="utf-8", newline="\n")
+        if {info["schema"], record["schema_version"]} != {golden.RELEASES[tag]}:
+            raise BuildError(f"{tag} wrote schema version {record['schema_version']}, "
+                             f"and golden.RELEASES says {golden.RELEASES[tag]}")
+        (staged / "golden.json").write_text(
+            json.dumps(record, indent=1, sort_keys=True) + "\n", encoding="utf-8",
+            newline="\n")
+        out = root / tag
+        out.mkdir(parents=True, exist_ok=True)
+        for item in staged.iterdir():
+            shutil.copyfile(item, out / item.name)
     return record
 
 

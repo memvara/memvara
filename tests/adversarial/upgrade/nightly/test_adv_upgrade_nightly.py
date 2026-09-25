@@ -76,6 +76,25 @@ def test_a_store_rebuilt_from_its_tag_matches_the_committed_one(
     assert (ours.parent / record).read_bytes() == (theirs.parent / record).read_bytes()
 
 
+def test_a_build_that_fails_leaves_the_committed_store_as_it_was(
+        tmp_path: pathlib.Path, home: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The builder checks the schema version the release wrote only after the release
+    has run. A failed check must not have replaced the committed files already, or the
+    store and its golden record would no longer match."""
+    tag = golden.TAGS[-1]
+    root = tmp_path / "root"
+    committed = golden.FIXTURES / tag
+    (root / tag).mkdir(parents=True)
+    for item in committed.iterdir():
+        (root / tag / item.name).write_bytes(item.read_bytes())
+    monkeypatch.setitem(golden.RELEASES, tag, golden.RELEASES[tag] + 1)
+    with pytest.raises(build_stores.BuildError, match="golden.RELEASES says"):
+        build_stores.build(tag, root, env=child_env(home))
+    assert {item.name: item.read_bytes() for item in (root / tag).iterdir()} == {
+        item.name: item.read_bytes() for item in committed.iterdir()}
+
+
 @pytest.mark.parametrize("tag", OLD)
 def test_a_kill_during_the_upgrade_of_an_old_store_leaves_it_whole(
         tag: str, tmp_path: pathlib.Path, home: pathlib.Path) -> None:
