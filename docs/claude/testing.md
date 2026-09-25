@@ -276,4 +276,11 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 - **The command lines and their help.** `test_adv_docs_help.py` finds every command line from the code: the console scripts in `pyproject.toml`, `python -m memvara.server`, and each subcommand their dispatch reaches. `commandline.py` reads with `ast` which words and options each one accepts, and which help text it prints; the words that print the help, such as `-h`, are found the same way, so the help need not list them. Every option a subcommand accepts must be named in its help. Every `MEMVARA_*` variable a help names must be one `memvara/server/config.py` reads, and every feature it names must exist. A claim such as "PROFILE=0 hides memory_profile" must hold on the servers `surface.py` starts. A variable set to the value its help calls the default, and each feature set to its stated default, must leave the configuration unchanged.
 - **Each rule is first shown catching its fault** on planted text, and the real-data tests also assert that the parse read something. A parser that stopped reading would therefore fail instead of passing on nothing.
 
+## Stores from old releases
+
+`tests/adversarial/upgrade/` checks that a store written by any release opens with this code, migrates, and keeps everything it held. The plan is `docs/superpowers/plans/2026-09-26-adversarial-upgrade.md`.
+
+- **The golden dump.** `tests/adversarial/upgrade/golden.py` reads a store with `sqlite3` alone, never through memvara, which would migrate it. `golden.dump` returns every claim with its scope, text, both clocks and sources, every turn, and the provenance edges, erasure records, links, documents, entities and predicates. It leaves out what a migration recomputes on purpose: the entity keys, the two hashes and the two type columns. A table or column that a store's version lacks reads as empty, so a store dumps the same before and after its migration. `test_adv_upgrade_golden.py` shows each comparison the upgrade tests rely on catching a change.
+- **A support module.** Besides its tests, the folder holds `golden.py`, which is not a test.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
