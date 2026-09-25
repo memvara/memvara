@@ -175,6 +175,15 @@ def test_forget_retires_every_live_row_in_the_slot(pair: Pair) -> None:
     assert e.returned == ["r1", "r2"]
 
 
+def test_forget_retires_a_row_scheduled_to_begin_later_and_leaves_an_ended_one(
+        pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I0, valid_to=I1))
+    pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I2))
+    pair.apply(Remember("u1", "lives_in", "Paris", valid_from=FAR_FUTURE))
+    e = pair.apply(Forget("u1", "lives_in"))
+    assert e.returned == ["r2", "r3"] and pair.model.rows["r1"].state == "ended"
+
+
 def test_delete_can_end_a_row_instead_of_retiring_it(pair: Pair) -> None:
     pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I0))
     pair.apply(Delete("u1", "r1", close="ended"))

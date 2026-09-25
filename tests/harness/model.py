@@ -337,10 +337,15 @@ class ReferenceStore:
         return e
 
     def forget(self, op: Forget, t: datetime) -> Expect:
-        """`Memvara.forget`: retire every live row in the slot, at the clock."""
+        """`Memvara.forget`: retire, at the clock, every row in the slot that the store
+        believes and that has not ended. That is the live rows and the rows written to
+        begin later; an ended row is left as it is."""
         e = Expect()
         slot = (op.user, SUBJECT, op.predicate)
-        closed = [r for r in self.rows.values() if r.slot == slot and self.live_at(r, t)]
+        closed = [r for r in self.rows.values()
+                  if r.slot == slot and not r.expired(t) and r.recorded_at <= t
+                  and (r.invalidated_at is None or r.invalidated_at > t)
+                  and (r.valid_to is None or r.valid_to > t)]
         for r in closed:
             e.stamps.append(Stamp(r.id, "invalidated_at"))
         e.closed = [r.id for r in closed]
@@ -437,7 +442,8 @@ class Remember:
 
 @dataclass(frozen=True)
 class Forget:
-    """`forget(subject, predicate)`: retire every live row in the slot."""
+    """`forget(subject, predicate)`: retire every row in the slot that is believed and has
+    not ended, including a row written to begin later."""
 
     user: str
     predicate: str

@@ -224,9 +224,8 @@ def test_a_future_dated_retraction_sent_again_is_a_repeat() -> None:
     assert len(tombstones) == 1 and reported == [1, 0, 0], (len(tombstones), reported)
 
 
-# -- B16: forget leaves a scheduled value believed ---------------------------------------
+# -- B16, fixed: forget retires a scheduled value too ------------------------------------
 
-@known_bugs.xfail("B16")
 def test_forget_retires_a_scheduled_value_too() -> None:
     """`forget` retires everything the store currently believes in the slot, and a value
     scheduled to start later is believed (#282)."""
@@ -239,8 +238,6 @@ def test_forget_retires_a_scheduled_value_too() -> None:
     user.remember("user", "lives_in", "Paris", valid_from=FAR_FUTURE)
     user.forget("user", "lives_in")
     later = [c.object for c in user.get_all(valid_at=FAR_FUTURE + timedelta(days=1))]
-    if later == ["Paris"]:
-        raise known_bugs.Reproduced("B16: the scheduled value survived forget")
     assert later == []
 
 

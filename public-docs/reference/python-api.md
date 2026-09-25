@@ -52,7 +52,7 @@ pasted transcripts) is stored and citable, but never scanned. See
 
 | Method | Returns | What it means |
 |---|---|---|
-| `forget(subject, predicate, *, at=None, close="retired")` | `list[Claim]` | Close every current value in this slot. `close="retired"` (default) means the record was wrong; `close="ended"` means the world changed. |
+| `forget(subject, predicate, *, at=None, close="retired")` | `list[Claim]` | Close every current value in this slot, and any value written to begin later. A value that has already ended is left as it is. `close="retired"` (default) means the record was wrong; `close="ended"` means the world changed. |
 | `delete(claim_id, *, at=None, close="retired")` | `bool` | The same choice, for a single claim by ID. |
 
 ## Deleting (irreversible — text is actually removed)

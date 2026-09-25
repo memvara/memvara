@@ -1886,8 +1886,8 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
     if (claim_id is None) == (predicate is None):
         raise ToolError(
             "memory_forget needs exactly one of: 'predicate' (with optional 'subject'), "
-            "to retire every current value of that fact, or 'claim_id', to retire one "
-            "specific claim from memory_search.")
+            "to retire every current value of that fact and any value stored to begin "
+            "later, or 'claim_id', to retire one specific claim from memory_search.")
     reason = _reason(args, "reason", "memory_forget")
 
     if claim_id is not None:
@@ -1905,8 +1905,9 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
     retired = ctx.memory.forget(args["subject"], predicate,  # type: ignore[arg-type]
                                 reason=reason)
     if not retired:
-        return (f"Nothing to forget: no live value for {args['subject']}/{predicate}. "
-                "Check the predicate spelling with memory_search.")
+        return (f"Nothing to forget: no current or scheduled value for "
+                f"{args['subject']}/{predicate}. Check the predicate spelling with "
+                "memory_search.")
     lines = [f"Retired {len(retired)} value(s) of {args['subject']}/{predicate}. They no "
              "longer answer questions; memory_history still shows them."]
     return "\n".join(filter(None, lines + _claim_lines("-", retired)
@@ -1947,9 +1948,10 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
     if (claim_id is None) == (predicate is None):
         raise ToolError(
             "memory_end needs exactly one of: 'predicate' (with optional 'subject'), to "
-            "end every current value of that fact, or 'claim_id', to end one specific "
-            "claim from memory_search. Use the id when a newer value is already stored — "
-            "ending the slot ends everything in it, the current value included.")
+            "end every current value of that fact and any value stored to begin later, or "
+            "'claim_id', to end one specific claim from memory_search. Use the id when a "
+            "newer value is already stored — ending the slot ends everything in it, the "
+            "current value included.")
 
     at_raw = args.get("at")
     # Parsed before anything is written, so a malformed instant costs a retry rather than
@@ -1996,9 +1998,10 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
     ended = ctx.memory.forget(args["subject"], predicate,  # type: ignore[arg-type]
                               at=at, close="ended", reason=reason)
     if not ended:
-        return (f"Nothing to end: no live value for {args['subject']}/{predicate}. Check "
-                "the predicate spelling with memory_search; if the value you meant is "
-                "already closed, memory_history says whether it ended or was retired.")
+        return (f"Nothing to end: no current or scheduled value for "
+                f"{args['subject']}/{predicate}. Check the predicate spelling with "
+                "memory_search; if the value you meant is already closed, memory_history "
+                "says whether it ended or was retired.")
     lines = [f"Ended {len(ended)} value(s) of {args['subject']}/{predicate}, each at the "
              "instant shown. They answer nothing after it and still answer about the "
              "period before it; memory_history keeps them, marked ended rather than "
@@ -3234,8 +3237,9 @@ TOOLS: tuple[Tool, ...] = (
             "past readable. Retiring asserts the value was always an error, so using it "
             "for a change that really happened writes a false reason into an audit trail "
             "nothing downstream can correct. Give 'predicate' (with 'subject', default "
-            "'user') to retire every current value of that fact, or 'claim_id' from "
-            "memory_search to retire one specific claim. Retired values stop answering "
+            "'user') to retire every current value of that fact and any value stored to "
+            "begin later, or 'claim_id' from memory_search to retire one specific claim. "
+            "Retired values stop answering "
             "questions immediately and remain visible to memory_history, so this is "
             "auditable — it is not erasure. It is not reversible, though, and that is the "
             "asymmetry to weigh when the choice is close: a mistaken memory_end can be "
@@ -3273,10 +3277,12 @@ TOOLS: tuple[Tool, ...] = (
             "No, it was never right — retire it with memory_forget. Getting that "
             "backwards records a false reason for the change, and nothing downstream can "
             "tell, because both leave a closed claim. Give 'predicate' (with 'subject', "
-            "default 'user') to end every current value of that fact, or 'claim_id' from "
-            "memory_search to end exactly one — use the id when a newer value is already "
-            "stored, since ending the slot ends everything in it, including the value "
-            "that is still true. Ended claims stay visible to memory_history and to "
+            "default 'user') to end every current value of that fact and any value stored "
+            "to begin later, or 'claim_id' from memory_search to end exactly one — use "
+            "the id when a newer value is already stored, since ending the slot ends "
+            "everything in it, including the value that is still true. A value that has "
+            "not begun by 'at' is ended at its own start, so it never answers. Ended "
+            "claims stay visible to memory_history and to "
             "memory_search with as_of, so this is auditable and reversible by an "
             "operator; it is not erasure. You often do not need it after storing a "
             "replacement, which already ends the old value when the fact is "

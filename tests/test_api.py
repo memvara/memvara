@@ -2694,6 +2694,42 @@ def test_forget_can_close_out_a_slot_that_genuinely_finished(mem):
     assert mem.get_all(user="alice") == []
 
 
+def test_forget_retires_a_value_scheduled_to_begin_later_as_well_as_the_live_one(mem):
+    """`forget` retires everything the store believes in the slot, and a value written to
+    begin later is believed from the moment it is recorded. Retiring only the live values
+    left it believed, so the forgotten slot answered again when it began (#282). A value
+    that has already ended is history and is left as it is."""
+    now = utcnow()
+    mem.remember("user", "lives_in", "Rome", valid_from=now - timedelta(days=60),
+                 valid_to=now - timedelta(days=30))
+    mem.remember("user", "lives_in", "Berlin", valid_from=now - timedelta(days=10))
+    mem.remember("user", "lives_in", "Paris", valid_from=now + timedelta(days=30))
+
+    forgotten = mem.forget("user", "lives_in")
+
+    assert sorted(c.object for c in forgotten) == ["Berlin", "Paris"]
+    assert {c.state for c in forgotten} == {"retired"}
+    assert mem.get_all(valid_at=now + timedelta(days=60)) == []
+    assert [c.object for c in mem.get_all(valid_at=now - timedelta(days=45))] == ["Rome"]
+
+
+def test_ending_a_slot_ends_a_scheduled_value_at_its_own_start(mem):
+    """The world-change reading closes the same values. One that has not begun is ended
+    where it would have begun, the clamp every ending gets, so it is true at no instant
+    instead of becoming true later."""
+    now = utcnow()
+    later = now + timedelta(days=30)
+    mem.remember("user", "works_at", "Acme", valid_from=now - timedelta(days=30))
+    mem.remember("user", "works_at", "Globex", valid_from=later)
+
+    ended = {c.object: c for c in mem.forget("user", "works_at", close="ended")}
+
+    assert sorted(ended) == ["Acme", "Globex"]
+    assert ended["Globex"].valid_from == ended["Globex"].valid_to == later
+    assert ended["Globex"].invalidated_at is None
+    assert mem.get_all(valid_at=later + timedelta(days=1)) == []
+
+
 @pytest.mark.parametrize("key, value", [
     ("salience_base", 5.0),
     ("last_observed_at", 4102444800.0),

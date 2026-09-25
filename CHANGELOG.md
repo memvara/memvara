@@ -150,6 +150,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     extraction and so before the reconciler. A turn that embeds as a near-duplicate of a
     stored claim, or whose text is exactly that of the turn a claim came from, still
     reinforces that claim, and its earlier date is lost. #318 tracks this.
+- **`forget()` retires a value written to begin later, as well as the values in force.**
+  It retired only the values in force at the time of the call, so a value written with a
+  future `valid_from` stayed believed, and the forgotten slot answered again when that
+  value began. `forget()` now retires every value in the slot that the store believes and
+  that has not ended, scheduled values included, and returns them with the others. A
+  value that has already ended is left as it is. `forget(close="ended")` closes the same
+  values, and a value that has not begun by `at` is ended at its own start, so it is true
+  at no instant. `memory_forget` and `memory_end` given a `predicate` call `forget()`, so
+  they do the same, and their descriptions now say so. #282.
 
 ## [0.16.0] — 2026-09-25
 

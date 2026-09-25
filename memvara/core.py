@@ -2164,6 +2164,14 @@ class Memvara:
         queries but remain visible to `as_of` and `history`. For true erasure (a GDPR
         deletion, say), use `purge`.
 
+        "Everything currently believed" is every value in the slot that the store
+        believes and that has not ended. That is the values in force now and any value
+        written to begin later, which is believed from the moment it is recorded; leaving
+        that one out would let the forgotten slot answer again when it began. A value that
+        has already ended is history and is left as it is. Under `close="ended"` the
+        ending is clamped to each value's own start, as every ending is, so a value that
+        has not begun by `at` is ended where it would have begun and is true at no instant.
+
         **This is the one write that defaults to `close="retired"`, and the name is the
         argument.** Forgetting is something the holder of a memory does, not something
         the world does. The call names no successor value and no end date for the fact,
@@ -2195,7 +2203,8 @@ class Memvara:
         and `why()` show it. At most 500 characters; see `types.closure_reason`.
         """
         scope = self._scope(tenant, user, agent, session)
-        now = at or utcnow()
+        clock = utcnow()
+        now = at or clock
         how = closure(close)
         why = closure_reason(reason)
         pred = self.registry.normalize(predicate)
@@ -2214,8 +2223,18 @@ class Memvara:
         # Checked against `slot`, not `scope`, because `contains` compares the project:
         # a globally-declared predicate is stored with no project, and a caller inside a
         # repository still has to reach it.
-        retired = [c for c in self.store.competing_claims(scope.tenant, probe.fact_key)
-                   if slot.contains(c.scope)]
+        #
+        # Every value the store believes at the clock and that has not ended by then, which
+        # is more than the live ones: a value written to begin later is believed from the
+        # moment it is recorded. A lookup of live values left it believed, so the
+        # forgotten slot answered again when that value began. A value that has already
+        # ended is history and is left as it is. `slot_history` returns every row of the
+        # slot, and one slot holds few rows, so the test runs here.
+        retired = [c for c in self.store.slot_history(scope.tenant, probe.fact_key)
+                   if slot.contains(c.scope) and not self._gone(c)
+                   and c.recorded_at <= clock
+                   and (c.invalidated_at is None or c.invalidated_at > clock)
+                   and (c.valid_to is None or c.valid_to > clock)]
         self._close_all(retired, now, how, why)
         return retired
 
