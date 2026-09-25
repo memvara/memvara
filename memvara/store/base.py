@@ -731,6 +731,10 @@ class Store(Protocol):
         index fixes its width on the first vector it sees, so migrating to a new model
         must empty the store of vectors before writing the first new one. Claims and
         episodes are untouched — this drops derived data, not memory.
+
+        A store that other processes share may refuse while they have it open, as
+        `SQLiteStore` does with `StoreInUseError`: emptying a matrix another process
+        still reads is how that process crashes.
         """
         ...
 

@@ -53,6 +53,7 @@ connection. See `_read`.
 
 from __future__ import annotations
 
+import gc
 import json
 import math
 import os
@@ -1050,6 +1051,24 @@ def _vec_path(db_path: str) -> str | None:
     return None if db_path in (":memory:", "") else db_path + ".vecs"
 
 
+def _lock_path(db_path: str) -> str | None:
+    """The file every open store holds a lock on, or None when no other store can open it.
+
+    An in-memory database belongs to its one connection, and `""` is a private
+    temporary file, so neither can be shared.
+    """
+    return None if db_path in (":memory:", "") else db_path + ".lock"
+
+
+# How long a store that is opening waits for another store's `clear_embeddings` to finish
+# before it gives up.
+_PRESENCE_WAIT = 60.0
+
+
+class StoreInUseError(RuntimeError):
+    """The operation needs the store to itself, and another store has it open."""
+
+
 def _fts_query(raw: str) -> str:
     """Turn arbitrary user text into a safe FTS5 MATCH expression.
 
@@ -1746,18 +1765,29 @@ class SQLiteStore:
         # the read is pinned to an instant, after it could not prove an answer for them.
         # Only keys still skipping are kept.
         self._text_first_skips: dict[tuple[tuple[Scope, ...], bool], int] = {}
-        with self._lock:
-            self._db.executescript(SCHEMA)
-            self._migrate()
-            self._db.executescript(_LATE_INDEXES)
-            self._db.commit()
-            if sealer is not None:
-                # Read after the first commit: a new database has no salt on disk until
-                # its first page is written, and this is the value every other process
-                # reads from the file.
-                sealer.salt = bytes.fromhex(
-                    self._db.execute("PRAGMA cipher_salt").fetchone()[0])
-            self._attach_vectors()
+        # Before this store writes to the database or opens the vector file; see
+        # `_hold_presence`.
+        self._alone = False
+        self._presence = self._hold_presence()
+        try:
+            with self._lock:
+                self._db.executescript(SCHEMA)
+                self._migrate()
+                self._db.executescript(_LATE_INDEXES)
+                self._db.commit()
+                if sealer is not None:
+                    # Read after the first commit: a new database has no salt on disk
+                    # until its first page is written, and this is the value every other
+                    # process reads from the file.
+                    sealer.salt = bytes.fromhex(
+                        self._db.execute("PRAGMA cipher_salt").fetchone()[0])
+                self._attach_vectors()
+        except BaseException:
+            # A store that failed to open would otherwise hold the lock until it was
+            # garbage collected, and an interactive session keeps the traceback, and with
+            # it the store, until the next error.
+            self._drop_presence()
+            raise
 
     # -- connections ---------------------------------------------------------
 
@@ -1797,6 +1827,112 @@ class SQLiteStore:
                 "is not a memvara store. memvara looks for the key in the OS keychain, "
                 "then in MEMVARA_DB_KEY, then in ~/.memvara/db.key, and uses the first "
                 "it finds. A store whose key is lost cannot be read.") from None
+
+    # -- presence ------------------------------------------------------------
+
+    def _hold_presence(self) -> sqlite3.Connection | None:
+        """Hold a shared lock on `<db>.lock` until `close()`, so others can see this store.
+
+        `clear_embeddings` truncates the vector file, and another process that still maps
+        it dies with SIGBUS on its next vector search, with no exception to catch. So
+        every store that opens the database holds this lock shared, and a clear first
+        takes it exclusively (`_claim_alone`). The lock is SQLite's own, on a file that
+        holds nothing, so it needs no locking the database does not already need, and it
+        works between two stores in one process too. It is taken before this store writes
+        to the database or opens the vector file, so a store that opens during a clear
+        waits here, not after it has mapped the file.
+        """
+        path = _lock_path(self.path)
+        if path is None:
+            return None
+        conn = sqlite3.connect(path, timeout=_PRESENCE_WAIT, isolation_level=None,
+                               check_same_thread=False)
+        try:
+            self._share(conn)
+        except sqlite3.DatabaseError as exc:
+            conn.close()
+            if "locked" not in str(exc):
+                raise RuntimeError(
+                    f"{path} cannot be used as this store's lock file ({exc}). It holds "
+                    "no data: delete it while nothing has the store open, and open the "
+                    "store again.") from exc
+            raise StoreInUseError(
+                f"{self.path} is having its vectors cleared by another store, and it "
+                f"has not finished in {_PRESENCE_WAIT:.0f} seconds. Open it again when "
+                "that re-embedding has finished.") from None
+        return conn
+
+    @staticmethod
+    def _share(conn: sqlite3.Connection) -> None:
+        """Start a read on `conn` and leave it open, which holds SQLite's shared lock."""
+        conn.execute("BEGIN")
+        conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+
+    def _claim_alone(self) -> None:
+        """Take `<db>.lock` exclusively, or raise `StoreInUseError` with nothing changed.
+
+        Only possible when no other store, in any process, has the database open, because
+        each holds the lock shared. Held until `_share_again`, so a store that opens in the
+        meantime waits in `_hold_presence`.
+        """
+        conn = self._presence
+        if conn is None or self._alone:
+            return
+        if not self._try_alone(conn):
+            # A store that nothing refers to any more holds its lock until Python frees
+            # it, and a store sits in a reference cycle, so that waits for the cycle
+            # collector. Collecting once keeps a store somebody forgot to close from
+            # counting as open.
+            gc.collect()
+            if not self._try_alone(conn):
+                raise StoreInUseError(
+                    f"{self.path} is open in another process, or in another SQLiteStore "
+                    "in this one, so its vectors were not cleared. Clearing truncates the "
+                    "vector file they share, and a process that still maps it would crash "
+                    "on its next vector search. Stop every other process using this store "
+                    "(the MCP server, a worker, a notebook) and close any other "
+                    "SQLiteStore on it, then run this again. Nothing was changed.")
+
+    def _try_alone(self, conn: sqlite3.Connection) -> bool:
+        """Ask once for `<db>.lock` exclusively, and hold it shared again if refused.
+
+        This store has to let go of its own shared lock to ask, and while it has let go,
+        a clear elsewhere cannot see it. So it holds the database's write lock throughout,
+        which one connection holds at a time in any process: no two stores are ever
+        between the two locks at once. Without that, two clears at once could each find
+        the other gone, and the one refused would go on mapping a file the other had
+        truncated.
+        """
+        began = not self._db.in_transaction
+        if began:
+            self._db.execute("BEGIN IMMEDIATE")
+        conn.execute("COMMIT")  # this store's own shared lock would block it
+        conn.execute("PRAGMA busy_timeout = 0")
+        try:
+            conn.execute("BEGIN EXCLUSIVE")
+        except sqlite3.OperationalError:
+            conn.execute(f"PRAGMA busy_timeout = {int(_PRESENCE_WAIT * 1000)}")
+            self._share(conn)
+            if began:
+                self._db.rollback()
+            return False
+        conn.execute(f"PRAGMA busy_timeout = {int(_PRESENCE_WAIT * 1000)}")
+        self._alone = True
+        return True
+
+    def _share_again(self) -> None:
+        """Give up the exclusive lock `_claim_alone` took and hold it shared again."""
+        if self._presence is not None and self._alone:
+            # Nothing was written, so ROLLBACK and COMMIT are the same here.
+            self._presence.execute("ROLLBACK")
+            self._share(self._presence)
+            self._alone = False
+
+    def _drop_presence(self) -> None:
+        if self._presence is not None:
+            self._presence.close()
+            self._presence = None
+            self._alone = False
 
     @property
     def _batch_depth(self) -> int:
@@ -2681,7 +2817,12 @@ class SQLiteStore:
                 if self._batch_depth == 0:
                     self._touched.clear()
                     self._cleared = False
-                    self._maybe_commit()
+                    try:
+                        self._maybe_commit()
+                    finally:
+                        # A `clear_embeddings` in this batch kept the store to itself
+                        # until now.
+                        self._share_again()
 
     def _mark(self, t: _VecTable, item_id: str) -> None:
         if self._batch_depth:
@@ -4284,19 +4425,32 @@ class SQLiteStore:
         Both tables, unconditionally. Leaving episode vectors behind would keep the old
         model's width alive in the shared matrix, and the first re-embedded claim would
         be rejected by the very dimension check this call exists to release.
+
+        Needs the store to itself, and raises `StoreInUseError`, having changed nothing,
+        while another store in any process has it open. Emptying the matrix truncates
+        the vector file, and a process that still maps it dies with SIGBUS on its next
+        vector search. Inside `batch()` the store stays its own until the batch ends,
+        because a store that opened before the commit would map vectors the batch is
+        about to delete. A store that nothing refers to any more does not count: the
+        clear collects garbage once before it refuses.
         """
         with self._lock:
-            dropped = self._count_vectors()
-            for t in _VEC_TABLES:
-                self._db.execute(f"DELETE FROM {t.name}")
-            self._db.execute("DELETE FROM vec_free")
-            self._vec.reset()
-            self._index_loaded = False
-            self._seq = {t.name: -1 for t in _VEC_TABLES}
-            self._data_version = -1
-            # Row-by-row repair cannot undo this, so a rollback has to rebuild instead.
-            self._cleared = bool(self._batch_depth)
-            self._maybe_commit()
+            self._claim_alone()
+            try:
+                dropped = self._count_vectors()
+                for t in _VEC_TABLES:
+                    self._db.execute(f"DELETE FROM {t.name}")
+                self._db.execute("DELETE FROM vec_free")
+                self._vec.reset()
+                self._index_loaded = False
+                self._seq = {t.name: -1 for t in _VEC_TABLES}
+                self._data_version = -1
+                # Row-by-row repair cannot undo this, so a rollback has to rebuild instead.
+                self._cleared = bool(self._batch_depth)
+                self._maybe_commit()
+            finally:
+                if not self._batch_depth:
+                    self._share_again()
         return dropped
 
     def _get_vector(self, t: _VecTable, item_id: str) -> np.ndarray | None:
@@ -5008,6 +5162,9 @@ class SQLiteStore:
                 conn.close()
             self._db.close()
             self._vec.close()
+            # Last, once the vector file is unmapped: until then a clear elsewhere must
+            # still see this store.
+            self._drop_presence()
 
     def __enter__(self) -> "SQLiteStore":
         return self

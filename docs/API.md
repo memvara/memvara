@@ -212,6 +212,8 @@ mem.merge_predicate(surface, canonical, *, dry_run=True) -> MergeReport
 # maintenance
 mem.consolidate()                                 -> dict[str, int]
 mem.reembed(embedder=None)                        -> int            # after a model change
+#   needs the store to itself: raises StoreInUseError, changing nothing, while another
+#   process or another SQLiteStore has it open
 mem.stats()                                       -> dict[str, int]
 #   episodes, claims, live_claims, ended_claims, invalidated, embeddings
 #   these do not sum — see "Counting claims" above; `claims` is the only total

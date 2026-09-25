@@ -1,8 +1,12 @@
 """SQLite store: persistence, the indexed conflict lookup, hybrid search primitives,
 and the bitemporal SQL that makes time travel work."""
 
+import gc
+import pathlib
 import re
 import sqlite3
+import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -12,8 +16,8 @@ import pytest
 
 from memvara.embed import HashingEmbedder
 from memvara.filters import SearchFilter
-from memvara.store import (STATES, SQLStore, SQLiteStore, live_predicate,
-                           state_predicate, stored_state_predicate,
+from memvara.store import (STATES, SQLStore, SQLiteStore, StoreInUseError,
+                           live_predicate, state_predicate, stored_state_predicate,
                            unexpired_predicate)
 from memvara.store import sqlite as sqlite_store
 from memvara.store.base import Store
@@ -2050,6 +2054,192 @@ def test_a_turn_indexed_by_another_worker_is_findable_by_text_immediately(tmp_pa
     assert len(a.lexical_search_episodes("kafka", [SCOPE], limit=5)) == 1
     a.close()
     b.close()
+
+
+# `clear_embeddings()` truncates the vector file, so it needs the store to itself.
+
+_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+# Another process: open the store, search, wait for a line, search again.
+_MAPPER = """
+import sys
+import numpy as np
+from memvara.store import SQLiteStore
+from memvara.types import Scope
+q = np.zeros(16, dtype=np.float32)
+q[3] = 1.0
+store = SQLiteStore(sys.argv[1])
+print(len(store.vector_search_episodes(q, [Scope("acme", "alice")], 5)), flush=True)
+sys.stdin.readline()
+print(len(store.vector_search_episodes(q, [Scope("acme", "alice")], 5)), flush=True)
+store.close()
+"""
+
+
+def test_clearing_vectors_another_process_maps_is_refused_rather_than_fatal_to_it(
+        tmp_path):
+    """A process that still mapped the vector file died with SIGBUS on its next vector
+    search after another process cleared the vectors: exit code -7, no exception, and
+    nothing any caller could catch. It runs in a subprocess, because a SIGBUS in this
+    one would end the whole suite."""
+    path = str(tmp_path / "shared.db")
+    with SQLiteStore(path) as writer:
+        for i in range(300):
+            writer.set_episode_embedding(turn(writer, content=f"turn {i}").id,
+                                         onehot(i, 16))
+    mapper = subprocess.Popen([sys.executable, "-c", _MAPPER, path], cwd=_ROOT,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    refused = ""
+    try:
+        assert mapper.stdout is not None and mapper.stdout.readline().strip() == "5"
+        with SQLiteStore(path) as other:
+            try:
+                other.clear_embeddings()
+            except StoreInUseError as exc:
+                refused = str(exc)
+                assert len(other.vector_search_episodes(onehot(3, 16), [SCOPE], 5)) == 5
+        out, err = mapper.communicate("go\n", timeout=120)
+    finally:
+        mapper.kill()
+    assert mapper.returncode == 0, f"the other process died ({mapper.returncode}): {err}"
+    assert out.strip() == "5"
+    assert "open in another process" in refused and "Nothing was changed" in refused
+    with SQLiteStore(path) as alone:
+        assert alone.clear_embeddings() == 300
+
+
+def test_clearing_vectors_another_store_in_this_process_maps_is_refused(tmp_path,
+                                                                        monkeypatch):
+    """Two stores in one process map the file separately, so each counts as another.
+    Nothing changes, the refusal leaves no lock behind that would keep a third store
+    from opening, and once the other store closes, the clear goes through."""
+    monkeypatch.setattr(sqlite_store, "_PRESENCE_WAIT", 0.05)
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    ep = turn(a)
+    a.set_episode_embedding(ep.id, onehot(1))
+    assert a.vector_search_episodes(onehot(1), [SCOPE], 1)[0][0] == ep.id
+    with pytest.raises(StoreInUseError, match="another SQLiteStore in this one"):
+        b.clear_embeddings()
+    SQLiteStore(path).close()
+    assert a.vector_search_episodes(onehot(1), [SCOPE], 1)[0][0] == ep.id
+    assert b.vector_search_episodes(onehot(1), [SCOPE], 1)[0][0] == ep.id
+    a.close()
+    assert b.clear_embeddings() == 1
+    assert b.vector_search_episodes(onehot(1), [SCOPE], 1) == []
+    b.close()
+
+
+def test_two_clears_at_once_are_both_refused_and_leave_the_file_alone(tmp_path):
+    """A clear lets go of its own shared lock to ask for the exclusive one. Two clears
+    that let go at once each found the other gone, and the one that got the lock
+    truncated the file under the one refused, whose next search died with SIGBUS. So a
+    clear asks while holding the database's write lock, and the second waits for that
+    with its shared lock still held. `b` is stopped just after it lets go, where a
+    scheduler could stop it."""
+    path = str(tmp_path / "c.db")
+    a, b = SQLiteStore(path), SQLiteStore(path)
+    b.set_episode_embedding(turn(b).id, onehot(1))
+    assert b.vector_search_episodes(onehot(1), [SCOPE], 1)
+    vecs = pathlib.Path(path + ".vecs")
+    size = vecs.stat().st_size
+    let_go, go_on = threading.Event(), threading.Event()
+    presence = b._presence
+
+    class Stopped:
+        def execute(self, sql, *args):
+            cursor = presence.execute(sql, *args)
+            if sql == "COMMIT":
+                let_go.set()
+                go_on.wait(10)
+            return cursor
+
+    outcome = {}
+
+    def clear(name, store):
+        try:
+            outcome[name] = store.clear_embeddings()
+        except StoreInUseError:
+            outcome[name] = "refused"
+
+    first = threading.Thread(target=clear, args=("b", b))
+    second = threading.Thread(target=clear, args=("a", a))
+    b._presence = Stopped()
+    try:
+        first.start()
+        assert let_go.wait(10)
+        second.start()
+        second.join(0.5)
+        assert "a" not in outcome and vecs.stat().st_size == size
+    finally:
+        go_on.set()
+        first.join(10)
+        second.join(10)
+        b._presence = presence
+    assert outcome == {"a": "refused", "b": "refused"}
+    assert vecs.stat().st_size == size
+    assert b.vector_search_episodes(onehot(1), [SCOPE], 1)
+    a.close()
+    b.close()
+
+
+def test_a_store_nothing_refers_to_does_not_stop_a_clear(tmp_path):
+    """A store that was never closed holds its lock until Python frees it, and a store
+    sits in a reference cycle, so that waits for the cycle collector. A refused clear
+    collects once and asks again. Automatic collection is off here, so the clear's own
+    collection is the only one that can free the store."""
+    path = str(tmp_path / "c.db")
+    gc.disable()
+    try:
+        forgotten = SQLiteStore(path)
+        forgotten.set_episode_embedding(turn(forgotten).id, onehot(1))
+        del forgotten
+        with SQLiteStore(path) as store:
+            assert store.clear_embeddings() == 1
+    finally:
+        gc.enable()
+
+
+def test_a_store_that_failed_to_open_does_not_count_as_open(tmp_path, monkeypatch):
+    """`failed` keeps the traceback, and with it the store that failed to open, the way
+    an interactive session keeps the last one, so no collection can free its lock."""
+    path = str(tmp_path / "c.db")
+    with SQLiteStore(path) as store:
+        store.set_episode_embedding(turn(store).id, onehot(1))
+
+    def fail(self):
+        raise OSError("the vector file cannot be read")
+
+    monkeypatch.setattr(SQLiteStore, "_attach_vectors", fail)
+    with pytest.raises(OSError, match="cannot be read") as failed:
+        SQLiteStore(path)
+    monkeypatch.undo()
+    with SQLiteStore(path) as store:
+        assert store.clear_embeddings() == 1
+    del failed  # alive until here
+
+
+def test_a_clear_inside_a_batch_keeps_the_store_to_itself_until_the_batch_ends(
+        tmp_path, monkeypatch):
+    """A store that opened between the clear and the commit would map vectors the batch
+    is about to delete, so it waits, and gives up after `_PRESENCE_WAIT` seconds."""
+    monkeypatch.setattr(sqlite_store, "_PRESENCE_WAIT", 0.05)
+    path = str(tmp_path / "c.db")
+    with SQLiteStore(path) as store:
+        store.set_episode_embedding(turn(store).id, onehot(1))
+        with store.batch():
+            assert store.clear_embeddings() == 1
+            assert store.clear_embeddings() == 0  # already its own
+            with pytest.raises(StoreInUseError, match="having its vectors cleared"):
+                SQLiteStore(path)
+        SQLiteStore(path).close()
+
+
+def test_a_lock_file_that_is_not_a_database_is_named(tmp_path):
+    (tmp_path / "c.db.lock").write_bytes(b"not a database " * 100)
+    with pytest.raises(RuntimeError, match=r"c\.db\.lock cannot be used"):
+        SQLiteStore(str(tmp_path / "c.db"))
 
 
 def write_v2(path: str) -> str:
