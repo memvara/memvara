@@ -71,3 +71,19 @@ Hypothesis runs under the profile of the selected tier.
 | weekly | 20,000 | Same database as nightly |
 
 When a property test fails, Hypothesis prints a reproduction blob. Put it in a `@reproduce_failure` decorator to replay the exact case.
+
+## The MCP server, in its own process
+
+`harness.stdio.McpProcess` starts `python -m memvara.server` as a child process and speaks newline-delimited JSON-RPC to it, the way an agent's client does. Nothing about the server is faked: it imports this checkout, opens a real SQLite store, and reads its configuration from the environment.
+
+To use it:
+
+- **In a test,** use the `mcp` fixture. `mcp()` opens `memory.db` in the test's temporary directory, and `mcp(path)` opens a store you name.
+- **Scope and switches.** Pass `features={"documents": False}` to switch a feature off, `read_only=True` for a read-only server, and `scope={"session": "s1"}` to bind a scope field.
+- **Calling tools.** `call(name, **arguments)` returns the tool's text and its error flag.
+- **Raw input.** `send_raw` and `recv` send and read arbitrary lines, for protocol tests.
+
+Failures are loud and quick:
+
+- A server that exits raises `McpProcessError`, with its exit code and the tail of its stderr.
+- A server that writes nothing within the timeout raises the same error, instead of hanging the suite.
