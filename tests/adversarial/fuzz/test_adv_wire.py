@@ -226,10 +226,11 @@ def test_a_line_nested_too_deeply_gets_one_parse_error_and_nothing_runs(
 
     The same line nested three deep parses, which shows that the parse error comes from
     the depth and not from a line this test built wrongly."""
-    shallow = exchange(shared_server, PLACES[place](3))
+    build = PLACES[place]
+    shallow = exchange(shared_server, build(3))
     assert len(shallow) == 1 and shallow[0].get("error", {}).get("code") != -32700, shallow
     before = rows(shared_server.db)
-    _one_error(exchange(shared_server, PLACES[place](DEEP)), -32700)
+    _one_error(exchange(shared_server, build(DEEP)), -32700)
     assert changed(before, rows(shared_server.db)) == []
 
 

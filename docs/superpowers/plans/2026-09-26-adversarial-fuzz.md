@@ -926,8 +926,9 @@ def test_a_line_nested_too_deeply_gets_one_parse_error_and_nothing_runs(
     `memvara/server/protocol.py` turns it into a parse error. Its id is null, because no
     id can be read from a line that did not parse. Wherever the nesting sits, the server
     answers once, runs nothing and carries on."""
+    build = PLACES[place]
     before = rows(shared_server.db)
-    replies = exchange(shared_server, PLACES[place](DEEP))
+    replies = exchange(shared_server, build(DEEP))
     assert len(replies) == 1, replies
     assert replies[0]["id"] is None
     assert replies[0]["error"]["code"] == -32700
