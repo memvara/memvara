@@ -234,6 +234,14 @@ def test_a_hook_step_takes_only_the_payload_fields_a_host_sends() -> None:
     assert any("unknown field 'timeout'" in error for error in errors(scenario))
 
 
+def test_store_gold_refuses_an_empty_project() -> None:
+    """An empty project would be read as no project, and its failure message would say
+    user level. null is how an item reads at user level."""
+    scenario = sample(store_gold=[{"id": "lisbon-live", "text": "user lives in Lisbon",
+                                   "state": "live", "project": ""}])
+    assert "$.store_gold[0].project: must be at least 1 character(s) long" in errors(scenario)
+
+
 def test_an_absent_claim_takes_no_count() -> None:
     scenario = sample(store_gold=[{"id": "gone", "text": "user lives in Lisbon",
                                    "state": "absent", "count": 0}])

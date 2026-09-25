@@ -120,7 +120,7 @@
         "state": {"enum": ["live", "ended", "retired", "absent"], "description": "absent means no claim with this text in any state."},
         "count": {"type": "integer", "minimum": 0, "description": "Exactly this many claims with this text in this state. Without it, at least one."},
         "memory_type": {"enum": ["semantic", "episodic", "procedural"], "description": "Every claim with this text in this state is filed as this type."},
-        "project": {"type": ["string", "null"], "description": "Read at this project instead of the scenario's. null reads at user level."}
+        "project": {"type": ["string", "null"], "minLength": 1, "description": "Read at this project instead of the scenario's. null reads at user level; an empty string is refused."}
       }
     },
     "answer_item": {"oneOf": [
