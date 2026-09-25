@@ -369,6 +369,8 @@ A known bug is covered differently. Its item is covered by the test that carries
 
 So the baseline only ever shrinks, and the checklist is complete when it is empty. `test_a_new_feature_switch_is_a_gap_the_baseline_does_not_list` shows the first case working: it adds a switch to `FEATURES` and checks that the checklist reports that switch, and nothing else, as a new gap.
 
+**Adding a line to the baseline excuses a gap instead of closing it.** The tests check only that the baseline and today's gaps hold the same items. So a pull request could add a tool with no test and, in the same diff, a baseline line for it, and the fast tier would pass. A pull request that adds a line to the baseline must therefore give the reason in its body, and the code review checks the baseline's diff for added lines.
+
 **Exempt items.** Four invariant bullets are rules for people rather than behaviour of memvara, so no test can check them: `TB1` ("verify" means comparing an output), `TB2` (a number is reported with its caveat), `RC5` (this repository does not implement the hosted server) and `RP1` (a published version is final; the release process is outside the suite's scope). `EXEMPT` in `tests/harness/checklist.py` lists each with its reason. An exempt item stays on the checklist, so a reworded rule is still noticed, but it is never a gap. The fast tier fails if an exemption names an item that no longer exists, or an item that a test covers. Add an exemption only for a rule that no test could ever check, and give the reason.
 
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
