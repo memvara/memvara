@@ -4,6 +4,7 @@ to reach a fake."""
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Iterator
 
@@ -44,6 +45,15 @@ def _wait_for_answer(request: Request) -> None:
     deadline = time.monotonic() + 5
     while request.status is None and time.monotonic() < deadline:
         time.sleep(0.02)
+
+
+def _hold_three_requests(fake: HttpFake) -> None:
+    """Make the next three requests to `GET /echo` wait on the fake, for a client whose
+    read timeout is 30 seconds: one hangs, one is delayed past the timeout, and one is
+    delayed for less than the timeout."""
+    fake.hang("GET /echo", times=1)
+    fake.delay("GET /echo", 30, times=1)
+    fake.delay("GET /echo", 10, times=1)
 
 
 def test_every_request_is_recorded_with_what_it_carried(echo: Echo) -> None:
@@ -141,6 +151,61 @@ def test_the_async_transport_waits_without_blocking_the_event_loop(echo: Echo) -
     assert status == 200 and len(ticks) == 3
     # A wait that blocked the event loop would hold every tick back until the answer.
     assert ticks[0] < answered, "the delay blocked the event loop"
+
+
+def test_closing_the_fake_releases_every_request_waiting_on_the_mock_transport(
+        echo: Echo) -> None:
+    """A test that closes its fake while a request is still held must not wait out the
+    client's timeout or the delay. Each held request ends at once without being carried
+    out."""
+    _hold_three_requests(echo)
+    ended: list[type[BaseException]] = []
+
+    def get() -> None:
+        with _client(echo, timeout=30) as client:
+            try:
+                client.get("/echo")
+            except httpx.HTTPError as exc:
+                ended.append(type(exc))
+
+    threads = [threading.Thread(target=get, daemon=True) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + 5
+    while len(echo.requests) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    started = time.monotonic()
+    echo.close()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert not any(thread.is_alive() for thread in threads), "close did not release them"
+    assert time.monotonic() - started < 2
+    assert ended == [httpx.ReadTimeout] * 3
+    assert [r.status for r in echo.requests] == [None, None, None]
+
+
+def test_closing_the_fake_releases_every_request_waiting_on_the_async_transport(
+        echo: Echo) -> None:
+    _hold_three_requests(echo)
+
+    async def main() -> tuple[list[object], float]:
+        async with httpx.AsyncClient(base_url=echo.MOCK_URL, timeout=30,
+                                     transport=echo.async_transport()) as client:
+            calls = [asyncio.ensure_future(client.get("/echo")) for _ in range(3)]
+            for _ in range(500):
+                if len(echo.requests) == 3:
+                    break
+                await asyncio.sleep(0.01)
+            started = time.monotonic()
+            echo.close()
+            ended = await asyncio.wait_for(asyncio.gather(*calls, return_exceptions=True),
+                                           timeout=5)
+            return ended, time.monotonic() - started
+
+    ended, elapsed = asyncio.run(main())
+    assert elapsed < 2
+    assert [type(outcome) for outcome in ended] == [httpx.ReadTimeout] * 3
+    assert [r.status for r in echo.requests] == [None, None, None]
 
 
 def test_over_a_socket_a_hang_ends_at_the_client_s_timeout_and_close_releases_it(

@@ -23,6 +23,11 @@ raises `httpx.ReadTimeout`, which is what the client would have seen. One differ
 remains, and a test has to choose for it: over a mock transport a request the client gave
 up on is never carried out, while over a socket it is carried out late, after the client
 has stopped waiting, as on a real server.
+
+`close()` releases every request that is still hanging or waiting, however it arrived, so
+a test that ends with a request held never waits out the delay or the client's timeout. A
+released request is not carried out. Over a socket its connection is closed without an
+answer; over a mock transport it raises `httpx.ReadTimeout`.
 """
 
 from __future__ import annotations
@@ -59,7 +64,7 @@ class Request:
     #: The matched route's path parameters, percent-decoded.
     params: dict[str, str] = field(default_factory=dict)
     #: The status the fake answered with. None until it answers, and for good when the
-    #: request hung or the client gave up before the answer.
+    #: request hung, the client gave up, or the fake closed before the answer.
     status: int | None = None
     #: True when the fake answered with the reply it stored for an earlier request, as a
     #: retried write that carries the same idempotency key is answered.
@@ -252,13 +257,12 @@ class HttpFake:
             step = self._receive(request)
             limit = _read_timeout(outgoing)
             if step.hang or (limit is not None and step.wait >= limit):
-                if limit is None:
-                    self._closed.wait()
-                else:
-                    time.sleep(limit)
+                # Waiting on the event rather than sleeping lets `close()` end the wait.
+                self._closed.wait(limit)
                 raise httpx.ReadTimeout("the fake did not answer in time", request=outgoing)
-            if step.wait:
-                time.sleep(step.wait)
+            if step.wait and self._closed.wait(step.wait):
+                raise httpx.ReadTimeout("the fake closed before it answered",
+                                        request=outgoing)
             return _to_httpx(self._answer(request, step))
 
         return httpx.MockTransport(handle)
@@ -272,17 +276,27 @@ class HttpFake:
             step = self._receive(request)
             limit = _read_timeout(outgoing)
             if step.hang or (limit is not None and step.wait >= limit):
-                if limit is None:
-                    while not self._closed.is_set():
-                        await asyncio.sleep(0.05)
-                else:
-                    await asyncio.sleep(limit)
+                await self._wait_for_close(limit)
                 raise httpx.ReadTimeout("the fake did not answer in time", request=outgoing)
-            if step.wait:
-                await asyncio.sleep(step.wait)
+            if step.wait and await self._wait_for_close(step.wait):
+                raise httpx.ReadTimeout("the fake closed before it answered",
+                                        request=outgoing)
             return _to_httpx(self._answer(request, step))
 
         return httpx.MockTransport(handle)
+
+    async def _wait_for_close(self, seconds: float | None) -> bool:
+        """Wait `seconds`, or until the fake closes, without blocking the event loop.
+        None waits only for the close. True when the fake closed first."""
+        deadline = None if seconds is None else time.monotonic() + seconds
+        while not self._closed.is_set():
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
+                return False
+            # The event is a thread's event, so the loop cannot await it; it checks it
+            # every twentieth of a second instead.
+            await asyncio.sleep(0.05 if left is None else min(0.05, left))
+        return True
 
     def serve(self) -> str:
         """Answer on 127.0.0.1 from a background thread, and return the base URL.
