@@ -9,9 +9,103 @@ server can be started in.
 from __future__ import annotations
 
 from memvara.server.config import FEATURE_DEFAULTS
+from memvara.server.mcp import INSTRUCTIONS
 from memvara.server.tools import FEATURE_ARGUMENTS, TOOLS
 
+from .mentions import (mentions, predicates, ties, tool_names, unknown_tools,
+                       unresolved_identifiers, unserved_arguments, wrong_ties)
 from .surface import configurations, served, table, texts
+
+#: A small tool table for the planted cases, so each expected answer can be read off by
+#: hand rather than computed by the code under test.
+PLANTED = {
+    "memory_recall": frozenset({"query", "include_episodes", "ranked", "synthesize",
+                                "query_rewrite", "valid_at", "budget"}),
+    "memory_search": frozenset({"query", "k", "as_of", "valid_at"}),
+    "memory_end": frozenset({"claim_id", "at", "reason"}),
+    "memory_remember": frozenset({"subject", "predicate", "object", "true_since",
+                                  "true_until", "memory_type"}),
+}
+
+
+# -- the parse, on planted text ----------------------------------------------------------
+
+def test_a_misspelled_tool_name_is_reported() -> None:
+    assert unknown_tools("Call memory_serch first, then memory_recall.", PLANTED) == [
+        "memory_serch"]
+
+
+def test_wildcards_paths_and_arguments_are_not_reported_as_tools() -> None:
+    text = ("The memory_* tools. See memvara/server/memory_api.py and "
+            "memvara.server.memory_api. Pass memory_type, then call memory_recall.")
+    assert tool_names(text) == ["memory_type", "memory_recall"]
+    assert unknown_tools(text, PLANTED) == []
+
+
+def test_a_renamed_argument_is_reported() -> None:
+    """The fault this check exists for: an argument renamed in the schema and not in the
+    words, so the description sends the model to the old name."""
+    text = "For a fact that will stop being true, send valid_from instead, at kk=5."
+    assert unresolved_identifiers(text, PLANTED) == ["valid_from", "kk"]
+
+
+def test_predicates_examples_and_labels_are_not_arguments() -> None:
+    text = (
+        "The relation, in snake_case: lives_in, works_at, uses_tool. "
+        "A memory filed under a paraphrase ('the coverage threshold' for coverage_gate). "
+        "A claim id, e.g. 'cl_1a2b3c...'. Buckets such as {\"stack\": [\"depends_on\"]}. "
+        "A predicate like attended or met_with is filed as semantic. "
+        "An operator sets it from memvara.calibrate_min_score. "
+        "Later as_of and valid_at questions read it, with true_until=2 at k=5."
+    )
+    assert unresolved_identifiers(text, PLANTED) == []
+
+
+def test_the_builtin_predicates_and_their_aliases_are_known() -> None:
+    assert {"lives_in", "works_at", "prefers_tool", "uses_tool"} <= predicates()
+
+
+def test_a_tie_to_the_wrong_tool_is_reported() -> None:
+    text = "memory_search with include_episodes true returns passages from it."
+    assert wrong_ties(text, PLANTED) == [("memory_search", "include_episodes")]
+
+
+def test_a_tie_to_the_right_tool_is_not() -> None:
+    text = ("memory_recall with include_episodes true; memory_end and claim_id; "
+            "memory_remember's true_since; call memory_end again with the same claim_id; "
+            "memory_end with a query; memory_recall and memory_search; "
+            "memory_end and to memory_search.")
+    assert ties(text)[:3] == [("memory_recall", "include_episodes"),
+                              ("memory_end", "claim_id"), ("memory_remember", "true_since")]
+    assert wrong_ties(text, PLANTED) == []
+
+
+def test_each_way_of_naming_an_argument_is_read() -> None:
+    text = ("Give 'predicate' (with 'subject', default 'user'); at k=5; ranked and "
+            "synthesize each add a call; send true_since / true_until.")
+    own = {"predicate", "subject", "k", "ranked", "synthesize", "true_since", "true_until"}
+    found = [(m.word, m.kind) for m in mentions(text, own)]
+    assert found == [("predicate", "quoted"), ("subject", "quoted"), ("k", "assigned"),
+                     ("ranked", "listed"), ("synthesize", "listed"),
+                     ("true_since", "snake"), ("true_until", "snake")]
+
+
+def test_an_argument_a_switch_removed_is_reported() -> None:
+    text = ("It rewrites the query into other phrasings (query_rewrite), and ranked and "
+            "synthesize each add one more call; reach for 'budget' to save space.")
+    own = PLANTED["memory_recall"]
+    served_here = own - {"query_rewrite", "synthesize", "budget"}
+    assert unserved_arguments(text, own, served_here) == ["query_rewrite", "synthesize",
+                                                          "budget"]
+
+
+def test_an_english_word_that_is_also_an_argument_is_not_a_mention() -> None:
+    """With `end_reason` off, `reason` is gone from every tool, and the descriptions still
+    say "a false reason" in plain English. That must not count as naming the argument."""
+    text = ("Getting that backwards writes a false reason into an audit trail. The reason "
+            "is that the query and the text are records.")
+    own = PLANTED["memory_end"] | {"query", "text"}
+    assert unserved_arguments(text, own, own - {"reason", "query", "text"}) == []
 
 
 def test_every_switch_has_a_configuration() -> None:
@@ -70,3 +164,47 @@ def test_texts_labels_each_description_with_where_it_came_from() -> None:
             "inputSchema": {"properties": {"a": {"description": "x"}, "b": {}}}}
 
     assert texts(tool) == [("t", "d"), ("t.a", "x"), ("t.b", "")]
+
+
+# -- the real descriptions ---------------------------------------------------------------
+
+def _every_text() -> list[tuple[str, str, str]]:
+    """`(configurations, where, text)` for each distinct description any configuration
+    serves, and for the instructions the server sends when a client connects.
+
+    Most descriptions are the same on every server, so each distinct text is checked once
+    and the message names the configurations that serve it.
+    """
+    serving: dict[tuple[str, str], list[str]] = {("INSTRUCTIONS", INSTRUCTIONS): []}
+    everywhere = [configuration.label for configuration in configurations()]
+    for configuration in configurations():
+        for tool in served(configuration):
+            for where, text in texts(tool):
+                serving.setdefault((where, text), []).append(configuration.label)
+    return [("every configuration" if labels in ([], everywhere) else ", ".join(labels),
+             where, text) for (where, text), labels in serving.items()]
+
+
+def test_every_tool_the_descriptions_name_exists() -> None:
+    problems = [f"{label}: {where} names {name}, which is not a tool"
+                for label, where, text in _every_text()
+                for name in unknown_tools(text, table())]
+    assert not problems, "\n".join(problems)
+    assert any(tool_names(text) for _, _, text in _every_text()), "no tool name was read"
+
+
+def test_every_identifier_in_the_descriptions_resolves() -> None:
+    """A snake_case word that is not a tool, an argument or a predicate is most likely an
+    argument renamed in the schema while the words kept its old name."""
+    problems = [f"{label}: {where} names {word!r}, which is no tool, argument or predicate"
+                for label, where, text in _every_text()
+                for word in unresolved_identifiers(text, table())]
+    assert not problems, "\n".join(problems)
+
+
+def test_a_tool_named_with_an_argument_takes_it() -> None:
+    problems = [f"{label}: {where} ties {argument!r} to {tool}, which does not take it"
+                for label, where, text in _every_text()
+                for tool, argument in wrong_ties(text, table())]
+    assert not problems, "\n".join(problems)
+    assert any(ties(text) for _, _, text in _every_text()), "no tie was read"

@@ -264,4 +264,13 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 - `HookRunner` still refuses `run("capture")`. The fakes' own tests call the capture hook's extraction code directly instead. The hook-conformance workstream, A2 in [the test-suite design](../superpowers/specs/2026-09-25-adversarial-test-suite-design.md), will lift the refusal and run the whole hook against these fakes.
 - The fakes are POSIX shell scripts. On Windows a program that another starts without a shell is found on `PATH` only as an `.exe`, so their tests skip there.
 
+## Documentation that must match the code
+
+`tests/adversarial/docs/` checks that the text a person or a model reads about memvara names only what the code has. Each check parses the text and reads the truth from the code, so no test keeps a list of what the text mentions, and a new tool, argument or switch is checked without anyone adding it. The plan is `docs/superpowers/plans/2026-09-26-adversarial-docs.md`.
+
+- **Every server configuration.** A switch can hide a tool, remove an argument or rewrite a description, so a description that is right on the default server can be wrong on another. `surface.py` therefore starts a server in the test process for each configuration: the default, each feature switched away from its default, read-only, and anchored by default. It reads each server's `tools/list`. The configurations are built from `FEATURE_DEFAULTS`, so a new switch is covered without being added by hand.
+- **Tool descriptions.** `test_adv_docs_tools.py` checks every description any configuration serves, and the instructions the server sends when a client connects. Every tool name in them must be a tool. Every snake_case word must be a tool, an argument of some tool, or a built-in predicate or alias, unless the text marks it as example data. A phrase that ties an argument to a tool, such as "memory_recall with include_episodes", must name an argument that tool takes.
+- **How a mention is recognised.** `mentions.py` holds the rules, and its docstring lists them together with what they cannot see. The main limit is that a one-word argument such as `reason` or `query`, written alone as a plain word, is not read as a mention, because it is usually English: "a false reason" is about a stored reason, not about the argument.
+- **Each rule is first shown catching its fault** on planted text, and the real-data tests also assert that the parse read something. A parser that stopped reading would therefore fail instead of passing on nothing.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
