@@ -50,6 +50,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   and refuses a smaller value with `memory_standing.k must be >= 1`. `standing()` on
   `Memvara`, `RemoteMemvara` and their async twins raises `ValueError` for it, as
   `profile()` already did, and the hosted clients refuse before sending anything. #269.
+- **`remember()` takes `memory_type` as a string.** `memory_type="procedural"`, the
+  spelling `memory_remember` uses, used to fail with `AttributeError: 'str' object has no
+  attribute 'value'` when the claim was stored. `remember()` now accepts a `MemoryType` or
+  its value as a string, and refuses any other string with a `ValueError` that names the
+  argument, before anything is written. #270.
 
 ## [0.16.0] — 2026-09-25
 
