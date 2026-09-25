@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from harness.env import REPO
-from harness.tiers import SELECTS, TESTS, TIER_DIRS, ignored, tier_of
+from harness.tiers import (SELECTS, TESTS, TIER_DIRS, collection_report, ignored,
+                           nested_tier_folders, tier_of)
 
 
 @pytest.mark.parametrize("relative, tier", [
@@ -79,3 +82,27 @@ def test_a_collected_file_never_sits_in_a_folder_the_run_leaves_out(
             if parent == TESTS:
                 break
             assert not ignored(parent, option, is_dir=True), (parent, option)
+
+
+def test_the_collection_report_names_every_folder_a_run_left_out() -> None:
+    line = collection_report(
+        "fast", [TESTS / "adversarial" / "weekly", TESTS / "adversarial" / "nightly"])
+    assert line == ("tier fast; left out 2 tier folders: "
+                    "tests/adversarial/nightly, tests/adversarial/weekly")
+
+
+def test_the_collection_report_says_when_nothing_was_left_out() -> None:
+    assert collection_report("weekly", []) == "tier weekly; no tier folder left out"
+
+
+def test_a_tier_folder_inside_another_is_found(tmp_path: pathlib.Path) -> None:
+    for folder in ("a/nightly/weekly", "live/local", "b/nightly"):
+        (tmp_path / folder).mkdir(parents=True)
+    assert nested_tier_folders(tmp_path) == [tmp_path / "a" / "nightly" / "weekly",
+                                             tmp_path / "live" / "local"]
+
+
+def test_no_tier_folder_sits_inside_another() -> None:
+    """The outermost tier folder decides a test's tier, so a tier folder inside another
+    one would carry a name that means nothing."""
+    assert nested_tier_folders(TESTS) == []

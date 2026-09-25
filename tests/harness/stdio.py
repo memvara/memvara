@@ -81,6 +81,8 @@ class McpProcess:
             extra["MEMVARA_READ_ONLY"] = "1"
         extra.update(env or {})
 
+        #: The store this server opened.
+        self.db = pathlib.Path(db)
         self.timeout = timeout
         #: Every line written ("->") and read ("<-"), in order.
         self.transcript: list[tuple[str, str]] = []
@@ -175,6 +177,8 @@ class McpProcess:
         self.send_raw(json.dumps(message))
         while True:
             reply = self.recv()
+            if "method" in reply:
+                continue  # a request or notification from the server, not a reply
             if reply.get("id") == request_id:
                 break
         if "error" in reply:

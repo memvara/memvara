@@ -87,3 +87,21 @@ def test_a_reply_whose_result_is_not_an_object_is_reported(
                         lambda timeout=None: {"jsonrpc": "2.0", "id": 1, "result": None})
     with pytest.raises(McpProcessError, match="not an object"):
         server.request("ping")
+
+
+def test_a_request_from_the_server_is_not_taken_for_the_reply(
+        mcp: Start, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A message with a method is a request or notification from the server, even when
+    its id matches the one the client is waiting on."""
+    server = mcp()
+    messages = iter([
+        {"jsonrpc": "2.0", "id": 1, "method": "sampling/createMessage", "params": {}},
+        {"jsonrpc": "2.0", "id": 1, "result": {}},
+    ])
+    monkeypatch.setattr(server, "recv", lambda timeout=None: next(messages))
+    assert server.request("ping") == {}
+
+
+def test_each_server_gets_its_own_store_unless_a_test_shares_one(mcp: Start) -> None:
+    first, second = mcp(), mcp()
+    assert first.db != second.db

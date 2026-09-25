@@ -256,8 +256,20 @@ def pytest_ignore_collect(collection_path: pathlib.Path, config: Any) -> bool | 
     decision about the same path.
     """
     if tiers_module.ignored(collection_path, config.getoption("--tier")):
+        if collection_path.is_dir():
+            config.stash.setdefault(_LEFT_OUT, set()).add(collection_path)
         return True
     return None
+
+
+#: The tier folders this run left out, for the line below.
+_LEFT_OUT = pytest.StashKey[set]()
+
+
+def pytest_report_collectionfinish(config: Any) -> str:
+    """Say which tier ran and which tier folders it left out, on every run."""
+    return tiers_module.collection_report(config.getoption("--tier"),
+                                          config.stash.get(_LEFT_OUT, set()))
 
 
 @pytest.fixture(autouse=True)

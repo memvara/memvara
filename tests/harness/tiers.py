@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+from typing import Iterable
 
 #: tests/, the folder this package sits in.
 TESTS = pathlib.Path(__file__).resolve().parents[1]
@@ -70,6 +71,44 @@ def ignored(path: pathlib.Path, option: str, *, is_dir: bool | None = None) -> b
     if pathlib.Path(path).name in _ALWAYS:
         return False
     return tier not in wanted
+
+
+def collection_report(option: str, left_out: Iterable[pathlib.Path]) -> str:
+    """The line a run prints after collecting: its tier, and the tier folders it left out.
+
+    Leaving a folder out prints nothing on its own, so a folder that happens to share a
+    tier's name would drop out of every run unnoticed. This line makes it visible.
+    """
+    names = sorted({_shown(path) for path in left_out})
+    if not names:
+        return f"tier {option}; no tier folder left out"
+    noun = "tier folder" if len(names) == 1 else "tier folders"
+    return f"tier {option}; left out {len(names)} {noun}: {', '.join(names)}"
+
+
+def _shown(path: pathlib.Path) -> str:
+    resolved = pathlib.Path(path).resolve()
+    try:
+        return resolved.relative_to(TESTS.parent).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def nested_tier_folders(root: pathlib.Path) -> list[pathlib.Path]:
+    """Tier folders that sit inside another tier folder, or anywhere under `root`/live.
+
+    The outermost tier folder decides a test's tier, so an inner one would carry a name
+    that means nothing. The suite keeps this list empty.
+    """
+    root = pathlib.Path(root)
+    found = []
+    for directory in sorted(root.rglob("*")):
+        if not directory.is_dir() or directory.name not in TIER_DIRS:
+            continue
+        above = directory.relative_to(root).parts[:-1]
+        if above[:1] == ("live",) or any(part in TIER_DIRS for part in above):
+            found.append(directory)
+    return found
 
 
 #: The Hypothesis profile each tier runs under.

@@ -22,6 +22,11 @@ class HookOutputError(AssertionError):
     the conversation, so it is a failure in its own right."""
 
 
+class HookTimeout(AssertionError):
+    """A hook ran past its host's time limit. A real client would kill it there and carry
+    on without its answer, so it is a failure in its own right."""
+
+
 @dataclass(frozen=True)
 class HookResult:
     """What one hook run did."""
@@ -33,6 +38,13 @@ class HookResult:
     reply: dict[str, Any] | None
     #: Wall-clock seconds, including Python start-up.
     elapsed: float
+
+
+def _text(output: str | bytes | None) -> str:
+    """Partial output from a timed-out run, which Python can hand back as bytes."""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", "replace")
+    return output or ""
 
 
 def host_record(host: str) -> Any:
@@ -124,10 +136,16 @@ class HookRunner:
         text = json.dumps(self.payload(hook, **fields)) if stdin is None else stdin
         limit = float(self.host.timeouts[hook]) if timeout is None else timeout
         started = time.monotonic()
-        done = subprocess.run(
-            [sys.executable, str(RUN), hook, "--host", self.host.id], input=text,
-            capture_output=True, text=True, encoding="utf-8", env=self._env,
-            cwd=str(self.cwd), timeout=limit)
+        try:
+            done = subprocess.run(
+                [sys.executable, str(RUN), hook, "--host", self.host.id], input=text,
+                capture_output=True, text=True, encoding="utf-8", env=self._env,
+                cwd=str(self.cwd), timeout=limit)
+        except subprocess.TimeoutExpired as exc:
+            raise HookTimeout(
+                f"{hook} on {self.host.id} ran past its limit of {limit}s; "
+                f"stdout so far: {_text(exc.stdout)[:300]!r}; "
+                f"stderr: {_text(exc.stderr)[-300:]!r}") from None
         elapsed = time.monotonic() - started
         reply = parse_reply(done.stdout, what=f"{hook} on {self.host.id}", stderr=done.stderr)
         return HookResult(exit_code=done.returncode, stdout=done.stdout, stderr=done.stderr,

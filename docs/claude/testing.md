@@ -48,6 +48,8 @@ A test's tier comes from the folder its file lives in. You do not mark it.
 
 A tier that a run does not select is left out when pytest collects, so it is never imported and never reported as skipped. A file you name on the command line is always collected, whatever its folder.
 
+**The outermost tier folder decides.** Do not put one tier folder inside another, or anywhere under `tests/live`; `test_adv_tiers.py` refuses both. Every run prints its tier and the tier folders it left out, for example `tier fast; left out 3 tier folders: ...`, so a folder that happens to share a tier's name cannot drop out of the run unnoticed.
+
 **Every tier folder needs an `__init__.py`.** Without one, two test files with the same name in different folders collide. `test_adv_tiers.py` checks this.
 
 The files named `test_adv_*_tier_guard.py` fail if their folder is ever collected by a tier that should have left it out. The ordinary fast run is therefore the proof that the tiers work.
@@ -78,7 +80,7 @@ When a property test fails, Hypothesis prints a reproduction blob. Put it in a `
 
 To use it:
 
-- **In a test,** use the `mcp` fixture. `mcp()` opens `memory.db` in the test's temporary directory, and `mcp(path)` opens a store you name.
+- **In a test,** use the `mcp` fixture. Each `mcp()` call opens a new store file in the test's temporary directory. `mcp(path)` opens a store you name, so passing the same path twice makes two servers share one store.
 - **Scope and switches.** Pass `features={"documents": False}` to switch a feature off, `read_only=True` for a read-only server, and `scope={"session": "s1"}` to bind a scope field.
 - **Calling tools.** `call(name, **arguments)` returns the tool's text and its error flag.
 - **Raw input.** `send_raw` and `recv` send and read arbitrary lines, for protocol tests.
@@ -94,7 +96,7 @@ Failures are loud and quick:
 
 - **In a test,** use the `hook_runner` fixture: `hook_runner("claude").run("approve", tool_name="mcp__memvara__memory_search")`.
 - **Giving the hooks a store.** Pass `server_env={"MEMVARA_DB": ..., "MEMVARA_USER": ...}` and the runner writes the host's client config, which is where the hooks look for the store. Without it, the hooks report "not configured". The runner writes client configs as JSON only. Codex keeps its config in TOML, so a Codex run with a store is refused, with that reason, until the hook-conformance tests add a TOML writer.
-- **What a run returns:** the exit code, the parsed reply and the elapsed time.
+- **What a run returns:** the exit code, the parsed reply and the elapsed time. A hook that runs past its host's time limit raises `HookTimeout`, with what it had printed so far.
 - **Non-JSON output fails the test.** A hook that prints something other than JSON raises `HookOutputError`, because on a real client that output would desynchronise the conversation.
 
 ## Stores in the test process

@@ -8,7 +8,7 @@ from typing import Callable
 import pytest
 
 from harness import stores
-from harness.hooks import HookOutputError, HookRunner, host_record, parse_reply
+from harness.hooks import HookOutputError, HookRunner, HookTimeout, host_record, parse_reply
 from memvara import MemoryType
 
 Make = Callable[..., HookRunner]
@@ -68,3 +68,8 @@ def test_a_toml_client_config_is_refused_with_the_reason(hook_runner: Make) -> N
     refusal is deliberate and must say so, so nobody mistakes it for a harness bug."""
     with pytest.raises(NotImplementedError, match="writes JSON client configs only"):
         hook_runner("codex", server_env={"MEMVARA_DB": "unused.db"})
+
+
+def test_a_hook_that_runs_past_its_limit_is_reported_as_a_timeout(hook_runner: Make) -> None:
+    with pytest.raises(HookTimeout, match="ran past"):
+        hook_runner("claude").run("session_start", timeout=0.001)
