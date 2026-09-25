@@ -48,9 +48,9 @@ def test_every_gap_is_listed_in_the_baseline(repo: Repository) -> None:
     a test that covers it, not a new line in the baseline."""
     new = sorted(repo.gaps - repo.baseline)
     assert not new, (
-        f"{len(new)} checklist items have no test, and "
-        "tests/harness/checklist_baseline.txt does not list them. Write a test for each "
-        "one, and mark it with @pytest.mark.covers(...):" + _listed(new))
+        "No test covers the items below, and tests/harness/checklist_baseline.txt does "
+        "not list them. Write a test for each one and mark it with "
+        "@pytest.mark.covers(...), instead of adding it to the baseline:" + _listed(new))
 
 
 def test_every_line_of_the_baseline_is_still_a_gap(repo: Repository) -> None:
@@ -58,9 +58,9 @@ def test_every_line_of_the_baseline_is_still_a_gap(repo: Repository) -> None:
     longer exists, must go, or it would hide that item if its test were later lost."""
     stale = sorted(repo.baseline - repo.gaps)
     assert not stale, (
-        f"{len(stale)} lines of tests/harness/checklist_baseline.txt are no longer "
-        "gaps, because a test covers each one now or the item no longer exists. Delete "
-        "them:" + _listed(stale))
+        "The lines below are in tests/harness/checklist_baseline.txt, but they are no "
+        "longer gaps: a test covers each one now, or its item no longer exists. Delete "
+        "them from the baseline:" + _listed(stale))
 
 
 def test_every_covers_mark_can_be_read(repo: Repository) -> None:
