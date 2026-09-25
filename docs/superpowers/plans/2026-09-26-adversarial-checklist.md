@@ -4,7 +4,7 @@
 
 **Goal:** Build workstream F5 of the adversarial suite: a checklist of everything the suite must test, read from the code, plus a fast-tier test that fails when a new gap appears and when a recorded gap closes.
 
-**Architecture:** `tests/harness/checklist.py` reads eight sources and turns each into item ids of the form `kind:name`. It reads the `@pytest.mark.covers(...)` marks from the source of every file under `tests/`, by walking the syntax tree rather than importing. `tests/harness/checklist_baseline.txt` records today's gaps, and `tests/adversarial/test_adv_checklist.py` compares the gaps with the baseline in both directions, so the baseline can only shrink. `tests/harness/invariant_ids.json` gives each documented invariant an id that survives rewording.
+**Architecture:** `tests/harness/checklist.py` reads eight sources and turns each into item ids of the form `kind:name`. It reads the `@pytest.mark.covers(...)` marks from the source of every file under `tests/`, by walking the syntax tree rather than importing. `tests/harness/checklist_baseline.txt` records today's gaps, and `tests/adversarial/test_adv_checklist.py` compares the gaps with the baseline in both directions, so the two stay equal. That the baseline only shrinks is kept by review, because a change can add a line to it. `tests/harness/invariant_ids.json` gives each documented invariant an id that survives rewording.
 
 **Tech Stack:** Python 3.10 to 3.13, pytest, the standard library's `ast`, `json` and `re`, and memvara's own `MemvaraMCPServer`, run in the test process.
 

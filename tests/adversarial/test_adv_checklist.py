@@ -54,8 +54,8 @@ def test_every_gap_is_listed_in_the_baseline(repo: Repository) -> None:
 
 
 def test_every_line_of_the_baseline_is_still_a_gap(repo: Repository) -> None:
-    """The baseline only shrinks. A line whose item a test now covers, or whose item no
-    longer exists, must go, or it would hide that item if its test were later lost."""
+    """A line whose item a test now covers, or whose item no longer exists, must go.
+    Otherwise it would hide that item if its test were later lost."""
     stale = sorted(repo.baseline - repo.gaps)
     assert not stale, (
         "The lines below are in tests/harness/checklist_baseline.txt, but they are no "

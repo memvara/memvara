@@ -77,7 +77,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     changes it, `MEMVARA_*` variable, hook on each host, documented invariant, silent
     failure mode and open bug. A test declares what it covers with
     `@pytest.mark.covers(...)`. `tests/harness/checklist_baseline.txt` lists today's gaps,
-    and the fast tier fails when a new gap appears, for example a new tool with no test.
+    and the fast tier fails whenever the baseline and today's gaps differ, for example
+    when a tool is added with no test. A change can still add a line to the baseline, so
+    review, not a test, keeps the baseline from growing.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed

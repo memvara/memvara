@@ -367,7 +367,7 @@ A known bug is covered differently. Its item is covered by the test that carries
 - An item has no test and is not in the baseline, for example a tool that was added without a test. Write a test that covers it. Adding the item to the baseline instead would hide exactly what the checklist exists to catch.
 - A line of the baseline is no longer a gap, because a test now covers the item or the item no longer exists. Delete the line.
 
-So the baseline only ever shrinks, and the checklist is complete when it is empty. `test_a_new_feature_switch_is_a_gap_the_baseline_does_not_list` shows the first case working: it adds a switch to `FEATURES` and checks that the checklist reports that switch, and nothing else, as a new gap.
+These two checks keep the baseline equal to today's gaps, in both directions. They do not make it shrink: review does that, as the next paragraph explains. The checklist is complete when the baseline is empty. `test_a_new_feature_switch_is_a_gap_the_baseline_does_not_list` shows the first check working: it adds a switch to `FEATURES` and checks that the checklist reports that switch, and nothing else, as a new gap.
 
 **Adding a line to the baseline excuses a gap instead of closing it.** The tests check only that the baseline and today's gaps hold the same items. So a pull request could add a tool with no test and, in the same diff, a baseline line for it, and the fast tier would pass. A pull request that adds a line to the baseline must therefore give the reason in its body, and the code review checks the baseline's diff for added lines.
 
