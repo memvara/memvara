@@ -17,6 +17,7 @@ from harness import stores
 from harness.env import REPO
 from harness.fakes.fake_v1 import FakeV1
 from memvara import MemoryType
+from memvara.remote.errors import InvalidRequest
 from memvara.schema import BUILTIN_PREDICATES, PredicateRegistry, PredicateSpec
 from memvara.types import (ENTITY_REKEY, LAST_OBSERVED, OBJECT_ENTITY, SALIENCE_BASE,
                            SUBJECT_ENTITY, Claim, utcnow)
@@ -276,3 +277,41 @@ def test_every_route_answers_the_client_that_calls_it() -> None:
 
     answered = {r.route for r in fake.requests if r.status is not None and r.status < 300}
     assert sorted(set(FakeV1.ROUTES) - answered) == []
+
+
+def test_every_read_that_takes_the_clocks_in_its_query_applies_them() -> None:
+    """Six reads take `as_of`, `valid_at` and `known_at` as query parameters. Each one
+    must read the past through them, and must refuse `as_of` beside another clock with a
+    400, which is what `memvara.types.time_axes` makes the cloud do."""
+    with FakeV1(stores.memory(registry=_walkable())) as fake:
+        remote = fake.remote(user="alice")
+        before = utcnow() - timedelta(seconds=1)
+        added = remote.add("I moved to Lisbon last year.")
+        lisbon, episode = added.added[0], added.episode_ids[0]
+        remote.remember("alice", "reports_to", "bob")
+        remote.remember("bob", "reports_to", "carol")
+
+        def sources(**clocks: Any) -> list[Any]:
+            # `why` still explains the claim on a past clock. What the clocks change is
+            # which source turns it cites: only those heard, and had, by then.
+            found = remote.why(lisbon.id, **clocks)
+            return [] if found is None else list(found.episodes)
+
+        reads: dict[str, Callable[..., Any]] = {
+            "GET /v1/memories": remote.get_all,
+            "GET /v1/history": lambda **clocks: remote.history("user", "lives_in", **clocks),
+            "GET /v1/memories/{id}/why": sources,
+            "GET /v1/episodes/{id}/produced":
+                lambda **clocks: remote.produced(episode, **clocks),
+            "GET /v1/neighborhood": lambda **clocks: remote.neighborhood("alice", **clocks),
+            "GET /v1/paths":
+                lambda **clocks: remote.paths_between("alice", "carol", **clocks),
+        }
+        for route, read in reads.items():
+            assert read(), f"{route} found nothing now"
+            assert not read(known_at=before), f"{route} ignored known_at"
+            assert not read(as_of=before), f"{route} ignored as_of"
+            with pytest.raises(InvalidRequest) as refused:
+                read(as_of=before, valid_at=before)
+            assert refused.value.status_code == 400, route
+    assert {r.route for r in fake.requests if r.status == 400} == set(reads)

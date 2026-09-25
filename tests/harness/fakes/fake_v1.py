@@ -415,8 +415,7 @@ class FakeV1(HttpFake):
     def _list(self, view: ScopedMemvara, request: Request) -> Any:
         limit = _int(request, "limit", 100, low=1, high=500)
         offset = _int(request, "offset", 0, low=0)
-        valid_at, known_at = _axes(request.param("as_of"), request.param("valid_at"),
-                                   request.param("known_at"))
+        valid_at, known_at = _query_axes(request)
         states = _states(request.query.get("states"),
                          _flag(request, "include_invalidated"))
         claims = view.get_all(states=states, valid_at=valid_at, known_at=known_at)
@@ -433,8 +432,7 @@ class FakeV1(HttpFake):
         return _memory(claim)
 
     def _why(self, view: ScopedMemvara, request: Request) -> Any:
-        valid_at, known_at = _axes(request.param("as_of"), request.param("valid_at"),
-                                   request.param("known_at"))
+        valid_at, known_at = _query_axes(request)
         found = view.why(request.params["id"], valid_at=valid_at, known_at=known_at)
         if found is None:
             raise _no_memory(request.params["id"])
@@ -443,8 +441,7 @@ class FakeV1(HttpFake):
     def _history(self, view: ScopedMemvara, request: Request) -> Any:
         predicate = _required(request, "predicate")
         subject = request.param("subject") or "user"
-        valid_at, known_at = _axes(request.param("as_of"), request.param("valid_at"),
-                                   request.param("known_at"))
+        valid_at, known_at = _query_axes(request)
         claims = view.history(subject, predicate, valid_at=valid_at, known_at=known_at)
         return {"subject": subject,
                 "predicate": self.memvara.registry.normalize(predicate),
@@ -467,16 +464,14 @@ class FakeV1(HttpFake):
                 "gone": [_memory(c) for c in delta.gone]}
 
     def _produced(self, view: ScopedMemvara, request: Request) -> Any:
-        valid_at, known_at = _axes(request.param("as_of"), request.param("valid_at"),
-                                   request.param("known_at"))
+        valid_at, known_at = _query_axes(request)
         claims = view.produced(request.params["id"], valid_at=valid_at, known_at=known_at)
         return {"episode_id": request.params["id"], "as_of": request.param("as_of"),
                 "valid_at": _instant(valid_at), "known_at": _instant(known_at),
                 "count": len(claims), "memories": [_memory(c) for c in claims]}
 
     def _neighborhood(self, view: ScopedMemvara, request: Request) -> Any:
-        valid_at, known_at = _axes(request.param("as_of"), request.param("valid_at"),
-                                   request.param("known_at"))
+        valid_at, known_at = _query_axes(request)
         found = view.neighborhood(
             _required(request, "entity"), depth=_int(request, "depth", 2, low=1, high=4),
             k=_int(request, "k", 10, low=1, high=50),
@@ -487,8 +482,7 @@ class FakeV1(HttpFake):
         return _paths_body(request, valid_at, known_at, found)
 
     def _paths(self, view: ScopedMemvara, request: Request) -> Any:
-        valid_at, known_at = _axes(request.param("as_of"), request.param("valid_at"),
-                                   request.param("known_at"))
+        valid_at, known_at = _query_axes(request)
         found = view.paths_between(
             _required(request, "source"), _required(request, "target"),
             depth=_int(request, "depth", 3, low=1, high=4),
@@ -903,6 +897,12 @@ def _axes(as_of: Any, valid_at: Any,
                          _instant_in(known_at, "known_at"))
     except ValueError as exc:
         raise ApiError(400, "bad_request", str(exc)) from None
+
+
+def _query_axes(request: Request) -> tuple[datetime | None, datetime | None]:
+    """`_axes` for a read that takes the clocks as query parameters."""
+    return _axes(request.param("as_of"), request.param("valid_at"),
+                 request.param("known_at"))
 
 
 def _states(states: Any, include_invalidated: bool | None) -> tuple[str, ...]:
