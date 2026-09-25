@@ -217,6 +217,14 @@ def test_a_scripted_scenario_must_be_in_a_tier_the_scripted_layer_runs(tier: str
                for error in errors(sample(tier=tier)))
 
 
+def test_a_hook_step_takes_only_the_payload_fields_a_host_sends() -> None:
+    """HookRunner.run takes stdin and timeout as keywords of its own, so a field with
+    either name would change how the hook runs instead of what it is sent."""
+    scenario = sample(surfaces=["stdio", "hooks"], requires=["tools", "hooks.session_start"])
+    script(scenario, 1).append({"hook": "session_start", "fields": {"timeout": "5"}})
+    assert any("unknown field 'timeout'" in error for error in errors(scenario))
+
+
 def test_an_absent_claim_takes_no_count() -> None:
     scenario = sample(store_gold=[{"id": "gone", "text": "user lives in Lisbon",
                                    "state": "absent", "count": 0}])

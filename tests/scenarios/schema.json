@@ -72,7 +72,14 @@
       "properties": {
         "hook": {"enum": ["session_start", "recall", "approve"]},
         "host": {"enum": ["claude", "codex", "copilot", "cursor", "opencode"], "description": "Which host's payload and reply shape to use. Claude Code when left out."},
-        "fields": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Payload fields: session, cwd, prompt, transcript_path or tool_name. The session, the working directory and, for recall, the turn's words are filled in already."},
+        "fields": {
+          "type": "object", "additionalProperties": false,
+          "description": "Payload fields, written under the host's own key for each. The session, the working directory and, for recall, the turn's words are filled in already.",
+          "properties": {
+            "session": {"type": "string"}, "cwd": {"type": "string"}, "prompt": {"type": "string"},
+            "transcript_path": {"type": "string"}, "tool_name": {"type": "string"}
+          }
+        },
         "capture": {"$ref": "#/$defs/capture"}
       }
     },

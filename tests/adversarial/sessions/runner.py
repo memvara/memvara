@@ -729,7 +729,7 @@ class _Session:
         if runner is None:
             runner = self.hooks[host] = HookRunner(host, home=self.home, cwd=self.work,
                                                    server_env=self._server_env())
-        fields = {"session": self.id}
+        fields: dict[str, Any] = {"session": self.id}
         if step["hook"] == "recall":
             fields["prompt"] = turn["user"]
         fields.update(substitute(step.get("fields", {}), self.values, self.work))
