@@ -56,8 +56,8 @@ RECORDED_AT = st.sampled_from([None, None, None, *INSTANTS])
 CONFIDENCE = st.sampled_from([1.0, 1.0, 0.5, 0.4])
 EXPIRES_AT = st.sampled_from([None, None, None, FAR_FUTURE])
 
-#: The open bugs this machine steers around: B9 (#275), a retraction dated in the future.
-STEERED = ("B9",)
+#: The open bugs this machine steers around, by their ids in `known_bugs`. None today.
+STEERED: tuple[str, ...] = ()
 #: Steps and skips over every run of this process, for the check after a test's runs.
 TOTALS: Counter[str] = Counter()
 
@@ -97,9 +97,6 @@ class MemoryMachine(RuleBasedStateMachine):
                  confidence: float, close: str, expires_at: datetime | None,
                  valid_to: datetime | None) -> None:
         obj = data.draw(st.sampled_from(POOLS[predicate]))
-        if polarity < 0 and valid_from == FAR_FUTURE:
-            self.avoid("B9")
-            return
         self._apply(Remember(user, predicate, obj, polarity, valid_from, recorded_at,
                              confidence, close, expires_at, valid_to))
 

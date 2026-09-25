@@ -282,9 +282,8 @@ class ReferenceStore:
         matching live rows ended at the retraction's own start.
 
         The world clock closes at the clock or at the row's own start, whichever is later,
-        which is the rule the fix for #275 gives a retraction dated in the future. Until
-        that fix lands, the state machine writes no such retraction, so the two rules
-        never differ in a run."""
+        the clamp `close_out` gives every closure. So a retraction dated in the future
+        leaves a row whose interval is empty rather than inverted (#275)."""
         e = Expect()
         row = self._new_row(op, valid_from, clock_start, t, e)
         row.valid_to = None

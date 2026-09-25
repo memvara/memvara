@@ -913,7 +913,10 @@ class Reconciler:
         # interval to preserve and nothing an audit loses by it being unreachable from
         # either clock. Everything the retraction *says* lives on the claims below.
         claim.invalidated_at = t
-        claim.valid_to = t
+        # The world clock never closes before the row's own start, the clamp `close_out`
+        # gives every other closure. Without it a retraction dated in the future stored
+        # a row that ended before it began; with it, that row's interval is empty.
+        claim.valid_to = max(t, as_utc(claim.valid_from))
         self.store.put_claim(claim)
 
         collapsed: list[Collapse] = []

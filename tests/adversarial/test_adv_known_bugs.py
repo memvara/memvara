@@ -168,13 +168,12 @@ def test_a_session_inside_a_project_reads_the_global_facts_it_writes() -> None:
     assert session.why(claim.id) is not None
 
 
-# -- B9: a future-dated retraction's tombstone ends before it begins ---------------------
+# -- B9, fixed: a future-dated retraction's tombstone no longer ends before it begins ---
 
-@known_bugs.xfail("B9")
 def test_a_future_retraction_leaves_a_tombstone_that_does_not_end_before_it_begins(
         ) -> None:
-    """Every closure goes through `close_out`, which never ends a row before its own
-    start, except the tombstone a retraction writes (#275)."""
+    """The tombstone's world clock gets the clamp `close_out` gives every other closure,
+    so it never ends before its own start (#275)."""
     from harness.clock import FAR_FUTURE
 
     m = stores.memory()
@@ -183,8 +182,6 @@ def test_a_future_retraction_leaves_a_tombstone_that_does_not_end_before_it_begi
     user.remember("user", "likes", "tea", polarity=-1, valid_from=FAR_FUTURE)
     [tombstone] = [c for c in m.store.iter_claims(None, True) if c.polarity < 0]
     assert tombstone.valid_from == FAR_FUTURE and tombstone.valid_to is not None
-    if tombstone.valid_to < tombstone.valid_from:
-        raise known_bugs.Reproduced("B9: the tombstone ends before it begins")
     assert tombstone.valid_to == tombstone.valid_from
 
 

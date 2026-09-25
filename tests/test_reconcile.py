@@ -717,6 +717,25 @@ def test_the_retraction_tombstone_is_unreachable_from_either_clock(rec, store):
         assert not res.claim.is_live(**kw), kw
 
 
+def test_a_retraction_dated_in_the_future_leaves_a_tombstone_that_does_not_end_first(
+        rec, store):
+    """The tombstone's world clock gets the clamp every other closure gets: it never
+    ends before the row's own start. Closed at the write instead, a retraction dated next
+    year stored a row that ended before it began, and `history()` and `why()` showed that
+    inverted interval (#275). The belief clock still closes at the write."""
+    now = utcnow()
+    later = now + timedelta(days=365)
+    tea = rec.apply(claim("likes", "tea", valid_from=now), now=now).claim
+    res = rec.apply(claim("likes", "tea", polarity=-1, valid_from=later,
+                          sources=["ep_2"]), now=now)
+
+    tombstone = store.get_claim(res.claim.id)
+    assert tombstone.valid_from == later
+    assert tombstone.valid_to == later, "an empty interval, not an inverted one"
+    assert tombstone.invalidated_at == now
+    assert store.get_claim(tea.id).valid_to == later, "tea stays true until then"
+
+
 def test_retraction_only_retires_the_value_it_names(rec, store):
     globex = rec.apply(claim("works_at", "Globex")).claim
     res = rec.apply(claim("works_at", "Acme", polarity=-1))
