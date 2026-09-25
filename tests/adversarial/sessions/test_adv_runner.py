@@ -187,6 +187,36 @@ def test_a_tool_must_exist_and_the_capabilities_must_be_declared() -> None:
                in error for error in found)
 
 
+def test_a_forbidden_rule_must_name_a_tool_memvara_has() -> None:
+    """A rule naming a tool that does not exist could never match, so it would pass
+    without protecting anything."""
+    scenario = sample(forbidden=[{"tool": "memory_forgett"}])
+    assert any("forbidden names memory_forgett, and memvara has no tool with that name"
+               in error for error in errors(scenario))
+
+
+def test_answer_gold_must_check_a_turn_that_reads_something() -> None:
+    """A turn with no tool or hook step always has an empty answer, and an empty answer
+    passes must_not_contain, must_not_match and abstain without checking anything."""
+    scenario = sample()
+    scenario["sessions"][1]["turns"].append({"id": "chat", "user": "Thanks!"})
+    scenario["answer_gold"] = [{"id": "no-porto", "turn": "chat", "must_not_contain": "Porto"},
+                               {"id": "says-nothing", "abstain": True}]
+    found = errors(scenario)
+    assert any("'no-porto' checks turn 'chat', which has no tool or hook step" in error
+               for error in found)
+    assert any("'says-nothing' checks the last turn, which has no tool or hook step" in error
+               for error in found)
+
+
+@pytest.mark.parametrize("tier", ["local", "quarantine"])
+def test_a_scripted_scenario_must_be_in_a_tier_the_scripted_layer_runs(tier: str) -> None:
+    """The scenario tests live in a fast-tier folder, so a run that selects only the local or
+    quarantine tier never collects them, and a scenario in one of those tiers never runs."""
+    assert any(f"a {tier} scenario would never run" in error
+               for error in errors(sample(tier=tier)))
+
+
 def test_an_absent_claim_takes_no_count() -> None:
     scenario = sample(store_gold=[{"id": "gone", "text": "user lives in Lisbon",
                                    "state": "absent", "count": 0}])
@@ -314,6 +344,26 @@ def test_the_env_reaches_the_server_on_a_real_server(tmp_path: pathlib.Path) -> 
     outcome = runner.run(scenario, tmp_path)
     assert outcome.problems == []
     assert "the documents feature is switched off" in outcome.turn("ask").answer
+
+
+def test_the_operators_erase_touches_only_its_claim_on_a_real_server(
+        tmp_path: pathlib.Path) -> None:
+    """Opening a store through the library also erases every expired claim, unless told not
+    to. If the operator's erase did that, it would do the server's expiry work for it, and
+    a scenario checking that the server erased an expired claim could pass for the wrong
+    reason. One session only, because a second server would erase the claim at startup."""
+    scenario = sample()
+    del scenario["sessions"][1]
+    script(scenario)[0]["capture"] = {"lisbon_id": r"\[(cl_[0-9a-f]+)\]"}
+    script(scenario)[:0] = [
+        {"mark": "soon", "offset_seconds": 0.5},
+        {"tool": "memory_remember", "args": {"predicate": "door_code", "object": "4417",
+                                             "expires_at": "{soon}"}}]
+    script(scenario).extend([{"wait_until": "soon"},
+                             {"op": "erase", "claim_id": "{lisbon_id}"}])
+    outcome = runner.run(scenario, tmp_path)
+    assert outcome.problems == []
+    assert outcome.rows == {None: [runner.Row("user door code 4417", "live", "semantic")]}
 
 
 # -- gold -------------------------------------------------------------------------------

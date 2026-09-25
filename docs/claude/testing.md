@@ -166,7 +166,14 @@ A scenario describes a few sessions of a user talking to an agent that has memva
 - `tests/scenarios/scripted/` holds the scripted scenarios, one per file, each named after its `id`.
 - `tests/adversarial/sessions/runner.py` checks, plays and grades them.
 
-The `jsonschema` package is not a dependency, so `runner.py` carries a small validator for the keywords the schema uses. It refuses a keyword it does not implement, so the schema cannot state a rule that nothing checks. A second check covers what a schema cannot express: every gold id is unique, a known bug names a gold item and a registered bug, a placeholder is set by an earlier step, and a hook or tool a step uses is declared in `surfaces` and `requires`.
+The `jsonschema` package is not a dependency, so `runner.py` carries a small validator for the keywords the schema uses. It refuses a keyword it does not implement, so the schema cannot state a rule that nothing checks. A second check covers what a schema cannot express:
+
+- every gold id is unique;
+- a known bug names a gold item and a registered bug;
+- a placeholder is set by an earlier step;
+- a hook or tool a step uses is declared in `surfaces` and `requires`;
+- a `forbidden` rule names a tool memvara has, and an answer gold item checks a turn that has a tool or hook step, because otherwise the check could never fail;
+- the tier is fast, nightly or weekly, because a run that selects only the local or quarantine tier never collects the scenario tests, so a scenario in either would never run.
 
 ### How a scenario plays
 
@@ -176,7 +183,7 @@ The runner writes the `seed` through the library first. The seed stands for memo
 |---|---|
 | `{"tool": "memory_…", "args": {…}}` | Calls a tool on the session's server. The call must succeed, unless the step says `"expect_error": true`. |
 | `{"hook": "session_start"}` | Runs one of the plugin's hooks against the same store, for Claude Code unless `host` names another host. The recall hook is given the turn's words as its prompt. |
-| `{"op": "erase", "claim_id": "…"}` | Erases a claim through the library. No tool can erase a memory, so this stands for the operator doing it. |
+| `{"op": "erase", "claim_id": "…"}` | Erases a claim through the library. No tool can erase a memory, so this stands for the operator doing it. It erases that claim and nothing else: the store is opened without the expiry sweep, so it never does the server's expiry work for it. |
 | `{"mark": "name", "offset_seconds": 1.5}` | Records the instant now, plus the offset, under a name. |
 | `{"wait_until": "name"}` | Sleeps until that instant has passed. |
 

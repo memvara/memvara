@@ -48,6 +48,11 @@ SCRIPTED = SCENARIOS / "scripted"
 #: real agent CLI. A scenario that needs it belongs to the real-agent layer.
 PROVIDES = frozenset({"tools", "hooks.session_start", "hooks.recall", "hooks.approve"})
 
+#: The tiers a scripted scenario can belong to. The scenario tests live in a fast-tier
+#: folder, so only a run that selects the fast tier collects them, and these are the tiers
+#: such runs select. A run with --tier local or --tier quarantine never collects them.
+RUN_TIERS = frozenset().union(*(wanted for wanted in tiers.SELECTS.values() if "fast" in wanted))
+
 #: The JSON Schema keywords `schema_errors` implements, annotations included.
 KEYWORDS = frozenset({
     "$schema", "$id", "$defs", "$ref", "title", "description", "type", "properties",
@@ -192,6 +197,14 @@ def problems(scenario: Mapping[str, Any], *, path: pathlib.Path | None = None) -
     if path is not None and path.stem != scenario["id"]:
         found.append(f"the file is {path.name}, and it must be named after the scenario's "
                      f"id: {scenario['id']}.json")
+    if scenario["tier"] not in RUN_TIERS:
+        *first, last = sorted(RUN_TIERS)
+        found.append(f"tier {scenario['tier']!r}: the scripted layer runs only in the "
+                     f"{', '.join(first)} and {last} tiers, so a {scenario['tier']} scenario "
+                     "would never run")
+    found += [f"forbidden names {rule['tool']}, and memvara has no tool with that name, so "
+              "the rule could never match" for rule in scenario.get("forbidden", [])
+              if rule["tool"] not in BY_NAME]
     found += _gold_problems(scenario)
     found += _env_problems(scenario["env"], "env")
     for number, session in enumerate(scenario["sessions"], 1):
@@ -204,6 +217,11 @@ def _repeated(values: Sequence[str]) -> list[str]:
     return sorted({value for value in values if values.count(value) > 1})
 
 
+def _reads(turn: Mapping[str, Any]) -> bool:
+    """Whether a turn has a step that can show the agent something: a tool call or a hook."""
+    return any("tool" in step or "hook" in step for step in turn.get("script", []))
+
+
 def _gold_problems(scenario: Mapping[str, Any]) -> list[str]:
     found: list[str] = []
     store, answers = scenario["store_gold"], scenario["answer_gold"]
@@ -211,9 +229,10 @@ def _gold_problems(scenario: Mapping[str, Any]) -> list[str]:
     if not ids:
         found.append("the scenario has no gold, so it checks nothing")
     found += [f"gold id {gold_id!r} is used more than once" for gold_id in _repeated(ids)]
-    turn_ids = [turn["id"] for session in scenario["sessions"]
-                for turn in session["turns"] if "id" in turn]
+    turns = [turn for session in scenario["sessions"] for turn in session["turns"]]
+    turn_ids = [turn["id"] for turn in turns if "id" in turn]
     found += [f"turn id {turn_id!r} is used more than once" for turn_id in _repeated(turn_ids)]
+    reads = {turn["id"]: _reads(turn) for turn in turns if "id" in turn}
     for item in store:
         if item["state"] == "absent" and {"count", "memory_type"} & set(item):
             found.append(f"store gold {item['id']!r}: a claim that is absent has no count "
@@ -224,6 +243,11 @@ def _gold_problems(scenario: Mapping[str, Any]) -> list[str]:
         if "turn" in item and item["turn"] not in turn_ids:
             found.append(f"answer gold {item['id']!r} names turn {item['turn']!r}, and no "
                          "turn has that id")
+        elif not (reads[item["turn"]] if "turn" in item else _reads(turns[-1])):
+            where = f"turn {item['turn']!r}" if "turn" in item else "the last turn"
+            found.append(f"answer gold {item['id']!r} checks {where}, which has no tool or "
+                         "hook step, so its answer is always empty and the check proves "
+                         "nothing")
         for key in ("must_contain", "must_not_contain"):
             if key in item and not normalize(item[key]):
                 found.append(f"answer gold {item['id']!r}: {key} has no words left once "
@@ -719,8 +743,14 @@ class _Session:
         return Step("hook", step["hook"], text)
 
     def _erase(self, step: Mapping[str, Any], where: str) -> Step:
+        """The operator erases one claim and nothing else.
+
+        Opened without the expiry sweep: a plain library open also erases every expired
+        claim, which would do the server's expiry work for it and let a scenario that
+        checks that work pass for the wrong reason.
+        """
         claim_id = substitute(step["claim_id"], self.values, self.work)
-        mem = stores.file(self.db)
+        mem = stores.file(self.db, sweep_expired=False)
         try:
             erased = mem.scope(user=self.env["user"], project=self.env["project"]).erase(
                 claim_id, sources=bool(step.get("sources", False)))
