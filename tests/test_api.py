@@ -638,6 +638,46 @@ def test_reembed_at_construction_migrates_a_store_to_a_new_embedder(tmp_path):
     assert json.loads((tmp_path / "m.db.embedder.json").read_text())["dim"] == 384
 
 
+def test_reembed_at_construction_works_right_after_the_mismatch_error(tmp_path):
+    """The mismatch error says to open the store again with `reembed=True`. The
+    construction that raised it had opened the store and left it open, so the re-embed
+    was refused as if another store had the database. `refused` keeps the traceback, and
+    with it that construction, the way an interactive session keeps the last one."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=512), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    with pytest.raises(EmbedderMismatchError) as refused:
+        Memvara(path, embedder=HashingEmbedder(dim=384), llm=NullLLM())
+    with Memvara(path, embedder=HashingEmbedder(dim=384), llm=NullLLM(),
+                 reembed=True) as migrated:
+        assert migrated.search("lives in Lisbon")[0].claim.object == "Lisbon"
+    del refused  # alive until here
+
+
+def test_a_failed_construction_raises_its_own_error_when_closing_fails_too(
+        tmp_path, monkeypatch):
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=512), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+
+    def broken(self):
+        raise OSError("the disk went away")
+
+    monkeypatch.setattr(SQLiteStore, "close", broken)
+    with pytest.raises(EmbedderMismatchError):
+        Memvara(path, embedder=HashingEmbedder(dim=384), llm=NullLLM())
+
+
+def test_a_failed_construction_leaves_a_store_it_was_given_open(tmp_path):
+    """The caller opened it, so the caller closes it, and may still want it."""
+    store = SQLiteStore(str(tmp_path / "m.db"))
+    with pytest.raises(TypeError, match="advise_replacements"):
+        Memvara(store=store, embedder=HashingEmbedder(dim=32), llm=NullLLM(),
+                advise_replacements=True)
+    assert store.stats()["episodes"] == 0
+    store.close()
+
+
 def test_reembed_reports_how_many_claims_it_re_encoded(mem):
     mem.remember("user", "lives_in", "Lisbon")
     mem.remember("user", "works_at", "Acme")

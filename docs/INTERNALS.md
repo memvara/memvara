@@ -2115,12 +2115,31 @@ So `clear_embeddings()` raises `StoreInUseError`, having changed nothing, while 
 store has the database open, in another process or in the same one. Every file-backed
 `SQLiteStore` holds a shared lock on `<db>.lock` from before it opens the vector file until
 `close()` has unmapped it, and a clear first takes that lock exclusively (`_claim_alone`).
-The lock is SQLite's own, on a file that holds no data, so it behaves the same on every
-platform and between two stores in one process. While a clear holds it, a store that is
-opening waits in `_hold_presence`, for up to `_PRESENCE_WAIT` (60 seconds), instead of
-mapping a file that is about to shrink. Inside `batch()` the clear keeps the lock until the
-batch ends, because a store that opened before the commit would map vectors the batch is
-about to delete.
+The lock is SQLite's own, on a file that holds no data, so it needs no file locking the
+database does not already need, and it works between two stores in one process too. While
+a clear holds it, a store that is opening waits in `_hold_presence`, for up to
+`_PRESENCE_WAIT` (60 seconds), instead of mapping a file that is about to shrink. Inside
+`batch()` the clear keeps the lock until the batch ends, because a store that opened before
+the commit would map vectors the batch is about to delete.
+
+To ask for the exclusive lock, a store first lets go of its own shared one, and while it
+has let go, a clear elsewhere cannot see it. Two clears that let go at the same moment
+would each find the other gone, and the one that got the lock would truncate the file under
+the one refused, which still maps it. So a store asks only while it holds the database's
+write lock (`_try_alone`). One connection holds that at a time, in any process, so a second
+clear waits for it with its shared lock still held, and both are refused.
+
+A store that nothing can use any more does not count. A store whose constructor fails lets
+go of the lock before raising, and a `Memvara` whose construction fails closes the store it
+opened. Both matter because an interactive session keeps the last traceback, and with it
+whatever the failed call had opened: without them, the `reembed=True` that the
+embedder-mismatch error recommends would be refused whenever it followed that error in the
+same session. The one construction failure that leaves the store open is the expired-claims
+sweep at open, because closing commits, and an erasure that fails partway can leave some of
+its deletes uncommitted. A store that was never closed, and that nothing refers to any
+more, holds the lock until Python frees it, and a store sits in a reference cycle, so that
+waits for the cycle collector. A refused clear therefore collects garbage once and asks
+again.
 
 An encrypted store keeps its matrix on the heap, so a truncated file cannot crash it. It is
 refused all the same: another encrypted store went on returning every cleared vector at

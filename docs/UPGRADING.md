@@ -34,6 +34,12 @@ anyway: each process embeds new writes with the model it started with.
 **If a test or a script opens a second `SQLiteStore` on the same file and clears the
 vectors through one of them,** close the other first.
 
+**If the refusal names a store you thought was closed,** look for one that was opened and
+never closed and that something still refers to, such as a variable in a notebook. A store
+that nothing refers to any more does not count, because a refused clear collects garbage
+once and asks again. Neither does a store whose construction failed, or the store that a
+failed `Memvara(...)` had opened, unless what failed was its expired-claims sweep.
+
 **If you back up or copy a store's directory,** `memory.db.lock` can be copied or left
 out; the next open recreates it. Do not delete it while anything has the store open,
 because a clear would then stop seeing that store.

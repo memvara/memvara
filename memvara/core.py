@@ -930,141 +930,159 @@ class Memvara:
         # environment; the MCP server passes the environment its configuration came from.
         self.store = store if store is not None else SQLiteStore(
             path or ":memory:", encryption=encryption, key_env=key_env)
-        self.embedder = embedder if embedder is not None else self._default_embedder()
-        # Default to no LLM on purpose: the deterministic path is the product, and the
-        # library must be fully usable with no API key. What is *not* on purpose is
-        # doing that silently — see `_warn_if_degraded`.
-        self.llm = llm if llm is not None else NullLLM()
-        #: Ask the model, on each `remember()` that closed nothing, whether the new fact
-        #: is a newer version of one of its nearest live neighbours, and report the
-        #: matches on the receipt as `may_replace`. Off by default because it is up to
-        #: three model calls per write. It needs a backend that implements
-        #: `ReplacementJudge`; with any other backend the flag does nothing.
-        self.advise_replacements = advise_replacements
-        self._warned_advice = False
-        #: Issues and checks the token `forget_matching` hands out with a preview. Keyed
-        #: by `confirm_secret` when one is given, so every process that shares the key
-        #: accepts every other's tokens; otherwise by a key generated once per process.
-        #: See `memvara.confirm`.
-        self._confirmer = Confirmer(confirm_secret)
-        if advise_replacements and (
-                not isinstance(self.llm, ReplacementJudge) or self.llm.is_noop):
-            # Refused here rather than skipped at write time: a flag that is read and
-            # never used tells the caller something false in silence, and every write
-            # would look like a write the model found nothing to say about.
-            raise TypeError(
-                "advise_replacements=True needs a backend that can judge, and "
-                f"{self.llm.name!r} cannot. Pass llm=OpenAILLM(...) or "
-                "llm=AnthropicLLM(...), or leave advise_replacements off.")
-        self.registry = registry if registry is not None else PredicateRegistry()
-        # Rehydrate anything a previous process paid a model to classify. Without this
-        # the schema is process-local, so every restart re-pays classification and, worse,
-        # treats learned predicates as multi-valued until it does — silently disabling
-        # contradiction detection for those writes.
-        for spec in self._persisted_specs(tenant):
-            # A *declared* spec outranks a persisted *learned* one, and this is the line
-            # that makes a declared vocabulary able to correct a store rather than merely
-            # describe a fresh one. Rehydration runs after construction, so without the
-            # guard the guess a previous process wrote — often the MANY default fossilised
-            # by an offline extractor — would overwrite the caller's declaration and the
-            # correction would silently do nothing on exactly the stores that needed it.
-            # Forward-only: it changes what supersedes on the *next* write and retires
-            # nothing already stored.
-            if not (spec.learned and self.registry.spec_is_declared(spec.name)):
-                self.registry.register(spec)
-        # Keyword for `project`, positional for the rest: `project` is declared last on
-        # `Scope` so that existing positional callers keep binding, and it is bound here
-        # rather than accepted per call because scope is bound once, at construction.
-        self.default_scope = Scope(tenant, scope_kw["user"], scope_kw["agent"],
-                                   scope_kw["session"], project=scope_kw["project"])
+        try:
+            self.embedder = embedder if embedder is not None else self._default_embedder()
+            # Default to no LLM on purpose: the deterministic path is the product, and the
+            # library must be fully usable with no API key. What is *not* on purpose is
+            # doing that silently — see `_warn_if_degraded`.
+            self.llm = llm if llm is not None else NullLLM()
+            #: Ask the model, on each `remember()` that closed nothing, whether the new fact
+            #: is a newer version of one of its nearest live neighbours, and report the
+            #: matches on the receipt as `may_replace`. Off by default because it is up to
+            #: three model calls per write. It needs a backend that implements
+            #: `ReplacementJudge`; with any other backend the flag does nothing.
+            self.advise_replacements = advise_replacements
+            self._warned_advice = False
+            #: Issues and checks the token `forget_matching` hands out with a preview. Keyed
+            #: by `confirm_secret` when one is given, so every process that shares the key
+            #: accepts every other's tokens; otherwise by a key generated once per process.
+            #: See `memvara.confirm`.
+            self._confirmer = Confirmer(confirm_secret)
+            if advise_replacements and (
+                    not isinstance(self.llm, ReplacementJudge) or self.llm.is_noop):
+                # Refused here rather than skipped at write time: a flag that is read and
+                # never used tells the caller something false in silence, and every write
+                # would look like a write the model found nothing to say about.
+                raise TypeError(
+                    "advise_replacements=True needs a backend that can judge, and "
+                    f"{self.llm.name!r} cannot. Pass llm=OpenAILLM(...) or "
+                    "llm=AnthropicLLM(...), or leave advise_replacements off.")
+            self.registry = registry if registry is not None else PredicateRegistry()
+            # Rehydrate anything a previous process paid a model to classify. Without this
+            # the schema is process-local, so every restart re-pays classification and, worse,
+            # treats learned predicates as multi-valued until it does — silently disabling
+            # contradiction detection for those writes.
+            for spec in self._persisted_specs(tenant):
+                # A *declared* spec outranks a persisted *learned* one, and this is the line
+                # that makes a declared vocabulary able to correct a store rather than merely
+                # describe a fresh one. Rehydration runs after construction, so without the
+                # guard the guess a previous process wrote — often the MANY default fossilised
+                # by an offline extractor — would overwrite the caller's declaration and the
+                # correction would silently do nothing on exactly the stores that needed it.
+                # Forward-only: it changes what supersedes on the *next* write and retires
+                # nothing already stored.
+                if not (spec.learned and self.registry.spec_is_declared(spec.name)):
+                    self.registry.register(spec)
+            # Keyword for `project`, positional for the rest: `project` is declared last on
+            # `Scope` so that existing positional callers keep binding, and it is bound here
+            # rather than accepted per call because scope is bound once, at construction.
+            self.default_scope = Scope(tenant, scope_kw["user"], scope_kw["agent"],
+                                       scope_kw["session"], project=scope_kw["project"])
 
-        self.writer = WritePipeline(
-            self.store, self.embedder, self.registry, self.llm, **write_kw
-        )
-        #: Multi-hop traversal. No embedder: a walk follows stored entity identity, not
-        #: similarity — which is the point, since a chain of "close enough" hops
-        #: compounds into an assertion nobody made. No telemetry either, for now: the
-        #: series worth publishing here (frontier truncation, paths pruned by the beam)
-        #: are not in `telemetry.series_names()` yet.
-        #:
-        #: Built before the reader because the reader takes it: the graph leg of
-        #: `search()` walks this same object, at the same scope and the same clock pair,
-        #: so `neighborhood()` and a graph-weighted search cannot disagree about what the
-        #: graph is. `read_traverser=` still wins, for a caller wiring a differently-bounded
-        #: walk into retrieval than the one `neighborhood()` exposes.
-        self.traverser = GraphTraverser(self.store, self.registry, **graph_kw)
-        read_kw.setdefault("traverser", self.traverser)
-        # The writer's live entity registry, so a question spelled with a learned alias
-        # anchors the claims filed under the canonical key (`retrieve/anchor.py`). The
-        # same object `_probe_entities` reads, for the same reason: an alias learned this
-        # process applies to the next read without a round trip through the store.
-        read_kw.setdefault("entities", self.writer.reconciler.entities)
-        # The read path's two model stages beside `ranked` (`memvara.select.stages`) use
-        # the caller's own chat backend: whatever `llm=` is, when it can chat. `NullLLM`,
-        # the default, cannot, so a default install has no backend here and makes no
-        # model call on any read. `read_rewriter=` and `synthesizer=` replace the built
-        # ones; `query_rewrite=False` and `synthesis=False` are the switches, and leave
-        # a backend in place so that a read asking for the stage reports `disabled`
-        # rather than `unconfigured`.
-        chat = self.llm if isinstance(self.llm, Chat) else None
-        if chat is not None:
-            read_kw.setdefault("rewriter", QueryRewriter(chat))
-        read_kw.setdefault("rewrite_enabled", query_rewrite)
-        #: Writes the summary `recall(synthesize=True)` puts above the notes, or `None`
-        #: when there is no chat backend. See `memvara.select.stages`.
-        self.synthesizer = (synthesizer if synthesizer is not None
-                            else Synthesizer(chat) if chat is not None else None)
-        #: The `synthesis` switch. Off, `recall(synthesize=True)` reports `disabled`.
-        self.synthesis_enabled = synthesis
-        self.reader = HybridRetriever(
-            self.store, self.embedder, self.registry, **read_kw
-        )
-        self.consolidator = Consolidator(self.store, self.embedder, self.registry,
-                                         telemetry=telemetry)
-        # See `_index_episodes`: warned once per instance, not once per rejected turn.
-        self._warned_episode_vectors = False
-        #: Whether `add_document` splits a document into retrieval chunks of about 1,000
-        #: characters (see `memvara.documents.chunk`). With it off, a document is stored
-        #: as one chunk: still searchable, but a question about one paragraph is matched
-        #: against the whole text. The MCP server turns it off with
-        #: `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0`.
-        self.retrieval_chunks = retrieval_chunks
-        #: What `add_document(url=...)` fetches with, or `None` for ingestion's own
-        #: `SafeFetcher`. The MCP server passes `ServerConfig.url_fetcher()`, which adds
-        #: the operator's NAT64 prefixes.
-        self.url_fetcher = url_fetcher
-        #: The `ingest_urls` and `ingest_media` switches: whether `add_document` may fetch
-        #: a URL, and whether it may read images, audio and video. Refused with the code
-        #: `feature_off` when off.
-        self.ingest_urls = ingest_urls
-        self.ingest_media = ingest_media
-        #: Whether `search()` and `recall()` accept `filters` and `filepath_prefix`. With
-        #: it off, a call that passes either is refused with `ValueError` rather than run
-        #: without the filter. The MCP server turns it off with
-        #: `MEMVARA_FEATURE_METADATA_FILTERS=0`.
-        self.metadata_filters = metadata_filters
-        self._documents = DocumentService(self)
-        #: Whether opening this store erases the claims whose `expires_at` has passed.
-        #: The MCP server reads the same switch (`MEMVARA_FEATURE_EXPIRY_ERASURE`) for its
-        #: hourly sweep. Off, `expires_at` is still stored and nothing erases on its own;
-        #: `erase_expired()` called directly still erases, because then the caller asked.
-        self.expiry_erasure = expiry_erasure
-        # The store leaves an expired claim out of its own queries (`hide_expired`), and
-        # an expiry that erases nothing should hide nothing either, so the switch reaches
-        # it. A store without the attribute is left as it is.
-        if hasattr(self.store, "hide_expired"):
-            self.store.hide_expired = expiry_erasure
+            self.writer = WritePipeline(
+                self.store, self.embedder, self.registry, self.llm, **write_kw
+            )
+            #: Multi-hop traversal. No embedder: a walk follows stored entity identity, not
+            #: similarity — which is the point, since a chain of "close enough" hops
+            #: compounds into an assertion nobody made. No telemetry either, for now: the
+            #: series worth publishing here (frontier truncation, paths pruned by the beam)
+            #: are not in `telemetry.series_names()` yet.
+            #:
+            #: Built before the reader because the reader takes it: the graph leg of
+            #: `search()` walks this same object, at the same scope and the same clock pair,
+            #: so `neighborhood()` and a graph-weighted search cannot disagree about what the
+            #: graph is. `read_traverser=` still wins, for a caller wiring a differently-bounded
+            #: walk into retrieval than the one `neighborhood()` exposes.
+            self.traverser = GraphTraverser(self.store, self.registry, **graph_kw)
+            read_kw.setdefault("traverser", self.traverser)
+            # The writer's live entity registry, so a question spelled with a learned alias
+            # anchors the claims filed under the canonical key (`retrieve/anchor.py`). The
+            # same object `_probe_entities` reads, for the same reason: an alias learned this
+            # process applies to the next read without a round trip through the store.
+            read_kw.setdefault("entities", self.writer.reconciler.entities)
+            # The read path's two model stages beside `ranked` (`memvara.select.stages`) use
+            # the caller's own chat backend: whatever `llm=` is, when it can chat. `NullLLM`,
+            # the default, cannot, so a default install has no backend here and makes no
+            # model call on any read. `read_rewriter=` and `synthesizer=` replace the built
+            # ones; `query_rewrite=False` and `synthesis=False` are the switches, and leave
+            # a backend in place so that a read asking for the stage reports `disabled`
+            # rather than `unconfigured`.
+            chat = self.llm if isinstance(self.llm, Chat) else None
+            if chat is not None:
+                read_kw.setdefault("rewriter", QueryRewriter(chat))
+            read_kw.setdefault("rewrite_enabled", query_rewrite)
+            #: Writes the summary `recall(synthesize=True)` puts above the notes, or `None`
+            #: when there is no chat backend. See `memvara.select.stages`.
+            self.synthesizer = (synthesizer if synthesizer is not None
+                                else Synthesizer(chat) if chat is not None else None)
+            #: The `synthesis` switch. Off, `recall(synthesize=True)` reports `disabled`.
+            self.synthesis_enabled = synthesis
+            self.reader = HybridRetriever(
+                self.store, self.embedder, self.registry, **read_kw
+            )
+            self.consolidator = Consolidator(self.store, self.embedder, self.registry,
+                                             telemetry=telemetry)
+            # See `_index_episodes`: warned once per instance, not once per rejected turn.
+            self._warned_episode_vectors = False
+            #: Whether `add_document` splits a document into retrieval chunks of about 1,000
+            #: characters (see `memvara.documents.chunk`). With it off, a document is stored
+            #: as one chunk: still searchable, but a question about one paragraph is matched
+            #: against the whole text. The MCP server turns it off with
+            #: `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0`.
+            self.retrieval_chunks = retrieval_chunks
+            #: What `add_document(url=...)` fetches with, or `None` for ingestion's own
+            #: `SafeFetcher`. The MCP server passes `ServerConfig.url_fetcher()`, which adds
+            #: the operator's NAT64 prefixes.
+            self.url_fetcher = url_fetcher
+            #: The `ingest_urls` and `ingest_media` switches: whether `add_document` may fetch
+            #: a URL, and whether it may read images, audio and video. Refused with the code
+            #: `feature_off` when off.
+            self.ingest_urls = ingest_urls
+            self.ingest_media = ingest_media
+            #: Whether `search()` and `recall()` accept `filters` and `filepath_prefix`. With
+            #: it off, a call that passes either is refused with `ValueError` rather than run
+            #: without the filter. The MCP server turns it off with
+            #: `MEMVARA_FEATURE_METADATA_FILTERS=0`.
+            self.metadata_filters = metadata_filters
+            self._documents = DocumentService(self)
+            #: Whether opening this store erases the claims whose `expires_at` has passed.
+            #: The MCP server reads the same switch (`MEMVARA_FEATURE_EXPIRY_ERASURE`) for its
+            #: hourly sweep. Off, `expires_at` is still stored and nothing erases on its own;
+            #: `erase_expired()` called directly still erases, because then the caller asked.
+            self.expiry_erasure = expiry_erasure
+            # The store leaves an expired claim out of its own queries (`hide_expired`), and
+            # an expiry that erases nothing should hide nothing either, so the switch reaches
+            # it. A store without the attribute is left as it is.
+            if hasattr(self.store, "hide_expired"):
+                self.store.hide_expired = expiry_erasure
 
-        # Last, because both need the fully wired object: the migration path calls
-        # `reembed()`, and neither is worth doing if construction is going to fail.
-        self._check_embedder(reembed)
-        self._warn_if_degraded(llm is not None)
+            # Last, because both need the fully wired object: the migration path calls
+            # `reembed()`, and neither is worth doing if construction is going to fail.
+            self._check_embedder(reembed)
+            self._warn_if_degraded(llm is not None)
+        except BaseException:
+            # Close a store this call opened: nothing else can reach it to close it. Left
+            # open, it would keep its lock on the database, and the `reembed=True` the
+            # mismatch error recommends would be refused as if another store had it open,
+            # for as long as the traceback lives, which in an interactive session is until
+            # the next error. A store passed in is the caller's to close.
+            if store is None:
+                try:
+                    self.store.close()
+                except Exception:
+                    # The original exception names the fault; one from closing would
+                    # bury it.
+                    pass
+            raise
         # After everything else, because it erases: a construction that was going to fail
         # must not delete anything first. A store that cannot list expired claims is
         # skipped here, and `erase_expired()` says so if it is called.
         # `sweep_expired=False` skips it and leaves the switch's other half on: a
         # read-only server passes it, because erasing is a write, while its reads still
         # leave the expired claims out.
+        # Outside the `try` above, because closing commits: an erasure that fails partway
+        # can leave some of its deletes uncommitted, and a store left for the garbage
+        # collector rolls them back.
         if (expiry_erasure and sweep_expired
                 and getattr(self.store, "expired_claims", None) is not None):
             self._erase_expired(utcnow(), at_open=True)

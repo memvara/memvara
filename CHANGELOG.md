@@ -222,6 +222,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `SQLiteStore` in the same process has the store open. To tell, every file-backed store
   holds a shared lock on a new, empty `<db>.lock` file while it is open, and a clear takes
   it exclusively. A store that opens during a clear waits for it, for up to 60 seconds.
+  A `Memvara` whose construction fails now closes the store it opened, unless what failed
+  was the expired-claims sweep at open, and a store that failed to open, or that nothing
+  refers to any more, does not count as open.
   `docs/UPGRADING.md` says what to stop before re-embedding.
 
 ## [0.15.0] — 2026-09-24

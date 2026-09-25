@@ -53,6 +53,7 @@ connection. See `_read`.
 
 from __future__ import annotations
 
+import gc
 import json
 import math
 import os
@@ -1708,9 +1709,6 @@ class SQLiteStore:
                 f"problem — SQLite is a C library bundled with the interpreter, so the "
                 f"fix is a newer build of Python (or of libsqlite3), not a newer memvara."
             )
-        # Before the database and the vector file are opened; see `_hold_presence`.
-        self._alone = False
-        self._presence = self._hold_presence()
         self._db = self._connect()
         if kind == "other":
             self._check_key()
@@ -1767,18 +1765,29 @@ class SQLiteStore:
         # the read is pinned to an instant, after it could not prove an answer for them.
         # Only keys still skipping are kept.
         self._text_first_skips: dict[tuple[tuple[Scope, ...], bool], int] = {}
-        with self._lock:
-            self._db.executescript(SCHEMA)
-            self._migrate()
-            self._db.executescript(_LATE_INDEXES)
-            self._db.commit()
-            if sealer is not None:
-                # Read after the first commit: a new database has no salt on disk until
-                # its first page is written, and this is the value every other process
-                # reads from the file.
-                sealer.salt = bytes.fromhex(
-                    self._db.execute("PRAGMA cipher_salt").fetchone()[0])
-            self._attach_vectors()
+        # Before this store writes to the database or opens the vector file; see
+        # `_hold_presence`.
+        self._alone = False
+        self._presence = self._hold_presence()
+        try:
+            with self._lock:
+                self._db.executescript(SCHEMA)
+                self._migrate()
+                self._db.executescript(_LATE_INDEXES)
+                self._db.commit()
+                if sealer is not None:
+                    # Read after the first commit: a new database has no salt on disk
+                    # until its first page is written, and this is the value every other
+                    # process reads from the file.
+                    sealer.salt = bytes.fromhex(
+                        self._db.execute("PRAGMA cipher_salt").fetchone()[0])
+                self._attach_vectors()
+        except BaseException:
+            # A store that failed to open would otherwise hold the lock until it was
+            # garbage collected, and an interactive session keeps the traceback, and with
+            # it the store, until the next error.
+            self._drop_presence()
+            raise
 
     # -- connections ---------------------------------------------------------
 
@@ -1812,7 +1821,6 @@ class SQLiteStore:
             self._db.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
         except self._sql.DatabaseError:
             self._db.close()
-            self._drop_presence()
             raise EncryptionError(
                 f"{self.path} could not be opened with the key from {self.key_source}. "
                 "Either that is not the key this store was encrypted with, or the file "
@@ -1829,9 +1837,10 @@ class SQLiteStore:
         it dies with SIGBUS on its next vector search, with no exception to catch. So
         every store that opens the database holds this lock shared, and a clear first
         takes it exclusively (`_claim_alone`). The lock is SQLite's own, on a file that
-        holds nothing, which makes it work the same on every platform and between two
-        stores in one process. It is taken before this store opens the vector file, so a
-        store that opens during a clear waits here, not after it has mapped the file.
+        holds nothing, so it needs no locking the database does not already need, and it
+        works between two stores in one process too. It is taken before this store writes
+        to the database or opens the vector file, so a store that opens during a clear
+        waits here, not after it has mapped the file.
         """
         path = _lock_path(self.path)
         if path is None:
@@ -1869,6 +1878,34 @@ class SQLiteStore:
         conn = self._presence
         if conn is None or self._alone:
             return
+        if not self._try_alone(conn):
+            # A store that nothing refers to any more holds its lock until Python frees
+            # it, and a store sits in a reference cycle, so that waits for the cycle
+            # collector. Collecting once keeps a store somebody forgot to close from
+            # counting as open.
+            gc.collect()
+            if not self._try_alone(conn):
+                raise StoreInUseError(
+                    f"{self.path} is open in another process, or in another SQLiteStore "
+                    "in this one, so its vectors were not cleared. Clearing truncates the "
+                    "vector file they share, and a process that still maps it would crash "
+                    "on its next vector search. Stop every other process using this store "
+                    "(the MCP server, a worker, a notebook) and close any other "
+                    "SQLiteStore on it, then run this again. Nothing was changed.")
+
+    def _try_alone(self, conn: sqlite3.Connection) -> bool:
+        """Ask once for `<db>.lock` exclusively, and hold it shared again if refused.
+
+        This store has to let go of its own shared lock to ask, and while it has let go,
+        a clear elsewhere cannot see it. So it holds the database's write lock throughout,
+        which one connection holds at a time in any process: no two stores are ever
+        between the two locks at once. Without that, two clears at once could each find
+        the other gone, and the one refused would go on mapping a file the other had
+        truncated.
+        """
+        began = not self._db.in_transaction
+        if began:
+            self._db.execute("BEGIN IMMEDIATE")
         conn.execute("COMMIT")  # this store's own shared lock would block it
         conn.execute("PRAGMA busy_timeout = 0")
         try:
@@ -1876,15 +1913,12 @@ class SQLiteStore:
         except sqlite3.OperationalError:
             conn.execute(f"PRAGMA busy_timeout = {int(_PRESENCE_WAIT * 1000)}")
             self._share(conn)
-            raise StoreInUseError(
-                f"{self.path} is open in another process, or in another SQLiteStore in "
-                "this one, so its vectors were not cleared. Clearing truncates the "
-                "vector file they share, and a process that still maps it would crash on "
-                "its next vector search. Stop every other process using this store (the "
-                "MCP server, a worker, a notebook) and close any other SQLiteStore on "
-                "it, then run this again. Nothing was changed.") from None
+            if began:
+                self._db.rollback()
+            return False
         conn.execute(f"PRAGMA busy_timeout = {int(_PRESENCE_WAIT * 1000)}")
         self._alone = True
+        return True
 
     def _share_again(self) -> None:
         """Give up the exclusive lock `_claim_alone` took and hold it shared again."""
@@ -4388,7 +4422,8 @@ class SQLiteStore:
         the vector file, and a process that still maps it dies with SIGBUS on its next
         vector search. Inside `batch()` the store stays its own until the batch ends,
         because a store that opened before the commit would map vectors the batch is
-        about to delete.
+        about to delete. A store that nothing refers to any more does not count: the
+        clear collects garbage once before it refuses.
         """
         with self._lock:
             self._claim_alone()
