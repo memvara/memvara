@@ -11,70 +11,13 @@ on a refusal — a check made after connecting is a check made too late.
 
 from __future__ import annotations
 
-from typing import Sequence
-
 import pytest
 
+from harness.fakes.url_fetch import FakeResolver, FakeResponse, FakeTransport
 from memvara.ingest import IngestError, SafeFetcher
 from memvara.ingest.url import refusal
 
 PUBLIC = "93.184.216.34"
-
-
-class FakeResponse:
-    """A minimal `Response`: a status, headers, and a body served in one chunk."""
-
-    def __init__(self, status: int = 200, headers: "dict[str, str] | None" = None,
-                 body: bytes = b"ok") -> None:
-        self.status = status
-        self._headers = headers or {}
-        self._chunks = [body, b""]
-
-    def getheader(self, name: str, default: "str | None" = None) -> "str | None":
-        return self._headers.get(name, default)
-
-    def read(self, _amt: int) -> bytes:
-        return self._chunks.pop(0) if self._chunks else b""
-
-    def settimeout(self, _seconds: float) -> None:
-        pass
-
-    def close(self) -> None:
-        pass
-
-
-class FakeTransport:
-    """Answers each URL from a table and records every request it was asked to make."""
-
-    def __init__(self, answers: "dict[str, FakeResponse] | None" = None) -> None:
-        self.answers = answers or {}
-        self.calls: "list[tuple[str, str, float]]" = []
-
-    def __call__(self, url: str, address: str, timeout: float) -> FakeResponse:
-        self.calls.append((url, address, timeout))
-        return self.answers.get(url, FakeResponse())
-
-
-class FakeResolver:
-    """Maps a host to the addresses it resolves to.
-
-    An unmapped host that is itself an IP literal resolves to itself, the way a real
-    resolver does, so a redirect to a literal address is checked as that address. Any
-    other unmapped host defaults to one public address.
-    """
-
-    def __init__(self, table: "dict[str, Sequence[str]] | None" = None) -> None:
-        self.table = table or {}
-
-    def __call__(self, host: str, _port: int) -> "list[str]":
-        if host in self.table:
-            return list(self.table[host])
-        import ipaddress
-        try:
-            ipaddress.ip_address(host)
-        except ValueError:
-            return [PUBLIC]
-        return [host]
 
 
 def _fetcher(transport: FakeTransport, resolver: FakeResolver, **kw) -> SafeFetcher:
@@ -91,7 +34,7 @@ NON_PUBLIC = [
     ("fe80::1", "link-local"),
     ("224.0.0.1", "multicast"),
     ("0.0.0.0", "unspecified"),
-    ("100.64.0.1", "globally routable|private"),   # carrier-grade NAT
+    ("100.64.0.1", "not a globally routable"),      # carrier-grade NAT
     ("::ffff:10.0.0.1", "private"),                # IPv4-mapped
     ("64:ff9b::a9fe:a9fe", "link-local"),          # NAT64 well-known, wraps 169.254.169.254
     ("2002:7f00:1::", "loopback"),                 # 6to4, wraps 127.0.0.1
@@ -120,12 +63,27 @@ def test_refusal_names_a_reason_for_each_non_public_class(address, reason) -> No
     assert re.search(reason, refusal(address) or "")
 
 
-@pytest.mark.parametrize("host", ["2130706433", "0177.0.0.1", "0x7f.1"])
-def test_a_decimal_or_octal_spelling_of_a_private_host_is_refused(host) -> None:
-    """A host written in decimal or octal is refused whatever spelling the caller used,
-    because the fetcher checks the address it resolves to, not the text of the host."""
+#: Decimal, octal and hex spellings of 127.0.0.1 that a fake resolver would only be
+#: pretending to check: `socket.getaddrinfo` on a numeric host does no network lookup, so
+#: these are resolved for real, and macOS and Linux agree on all three. The classic dotted
+#: octal spelling, "0177.0.0.1", is deliberately not among them — verified directly
+#: against both: glibc (Debian's python:3.13-slim image) reads its leading zero as octal
+#: and resolves it to 127.0.0.1, while macOS's libc reads it as decimal with an
+#: insignificant leading zero and resolves it to 177.0.0.1, a public-looking address.
+#: Testing it would pin one platform's answer as if it were the property under test.
+NUMERIC_LOOPBACK_SPELLINGS = ["2130706433", "017700000001", "0x7f.1"]  # decimal, octal, hex
+
+
+@pytest.mark.parametrize("host", NUMERIC_LOOPBACK_SPELLINGS)
+def test_a_numeric_spelling_of_a_private_host_is_refused(host) -> None:
+    """A host written in decimal, octal or hex is refused whatever spelling the caller
+    used, because the fetcher checks the address it resolves to, not the text of the
+    host. Unlike the other tests here, this drives the real resolver rather than a fake
+    one mapping the host to 127.0.0.1 by fiat: a fake that answers any host that way
+    cannot tell a numeric spelling that really resolves to a private address from one
+    that does not, so it would pass whether or not this property held."""
     transport = FakeTransport()
-    fetcher = _fetcher(transport, FakeResolver({host: ["127.0.0.1"]}))
+    fetcher = SafeFetcher(transport=transport, clock=lambda: 0.0)
     with pytest.raises(IngestError) as caught:
         fetcher.fetch(f"http://{host}/")
     assert caught.value.code == "url_refused"
@@ -169,7 +127,7 @@ def test_a_public_page_cannot_redirect_the_fetch_to_a_private_address() -> None:
 def test_the_connection_is_made_to_the_checked_address_not_the_name() -> None:
     """A public host is fetched, and the transport is handed the address that was checked,
     so a resolver that answered differently a second time could not move the request."""
-    transport = FakeTransport()
+    transport = FakeTransport({"https://ok.example/": FakeResponse(chunks=(b"ok",))})
     fetcher = _fetcher(transport, FakeResolver({"ok.example": [PUBLIC]}))
     fetched = fetcher.fetch("https://ok.example/")
     assert fetched.body == b"ok"
