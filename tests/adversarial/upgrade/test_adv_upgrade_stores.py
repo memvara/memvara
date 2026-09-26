@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pathlib
 import warnings
+from typing import Any
 
 import pytest
 
@@ -98,12 +99,6 @@ def test_every_claim_turn_and_document_of_an_upgraded_store_can_be_read(
         for row in data["documents"]:
             assert mem.get_document(row["id"], tenant=row["tenant"],
                                     user=row["usr"]) is not None
-        # No reader sees another user's or another tenant's claims.
-        for row in live:
-            if row["tenant"] != "default" or row["usr"] != golden.USER:
-                seen = [r.claim.id for r in mem.search(row["object"], k=10,
-                                                       user=golden.USER)]
-                assert row["id"] not in seen
     for row in live:
         if row["project"] is not None:
             with stores.file(db, project=row["project"]) as mem:
@@ -112,26 +107,122 @@ def test_every_claim_turn_and_document_of_an_upgraded_store_can_be_read(
                 assert row["id"] in found
 
 
+#: The readers the visibility test asks as: one in each scope the fixture writes claims
+#: in, and a sibling session and a sibling agent that it writes nothing in. The project
+#: reader asks through a handle bound to the project.
+READERS: dict[str, dict[str, Any]] = {
+    "user": {"tenant": "default", "user": golden.USER},
+    "session": {"tenant": "default", "user": golden.USER, "session": "s1"},
+    "sibling session": {"tenant": "default", "user": golden.USER, "session": "s2"},
+    "agent": {"tenant": "default", "user": golden.USER, "agent": "a1"},
+    "sibling agent": {"tenant": "default", "user": golden.USER, "agent": "a2"},
+    "other user": {"tenant": "default", "user": "u2"},
+    "other tenant": {"tenant": "acme", "user": golden.USER},
+    "project": {"tenant": "default", "user": golden.USER},
+}
+#: The scopes whose claims each reader sees, written out by hand for the fixture's
+#: scopes. The rule is `Scope.sees` in memvara/types.py: "a handle sees its own scope and
+#: every broader one, and never a deeper one", which `search` and `get_all` apply
+#: through `Scope.ancestors()`. So a user-wide reader does not see a session's claims.
+SEES: dict[str, set[str]] = {
+    "user": {"user"},
+    "session": {"user", "session"},
+    "sibling session": {"user"},
+    "agent": {"user", "agent"},
+    "sibling agent": {"user"},
+    "other user": {"other user"},
+    "other tenant": {"other tenant"},
+    "project": {"user", "project"},
+}
+
+
+def written_in(row: dict[str, object]) -> str:
+    """The scope, as one of the names `SEES` uses, that a claim was written in."""
+    if row["tenant"] != "default":
+        return "other tenant"
+    if row["usr"] != golden.USER:
+        return "other user"
+    for field in ("project", "session", "agent"):
+        if row[field] is not None:
+            return field
+    return "user"
+
+
+def by_project(live: list[dict[str, object]]) -> list[str | None]:
+    """The projects the live claims were recorded against, `None` first."""
+    projects = {str(row["project"]) for row in live if row["project"] is not None}
+    return [None, *sorted(projects)]
+
+
+@pytest.mark.parametrize("tag", golden.TAGS)
+def test_each_reader_of_an_upgraded_store_sees_exactly_the_scopes_it_should(
+        tag: str, tmp_path: pathlib.Path) -> None:
+    """Version 12 re-derived the hash that partitions slots by tenant, user and project,
+    and a read must still see a claim exactly when its scope allows. Every live claim is
+    asked for by id, by every reader. A reader that must not see it must not find it by
+    searching for its text either. Search is not used to show that a reader does see a
+    claim: its top ten can leave out a real match, while `get` cannot."""
+    db = golden.unpack(tag, tmp_path)
+    live = golden.live(golden.load(tag)["data"]["claims"])
+    for project in by_project(live):
+        readers = [name for name in READERS if (name == "project") == (project is not None)]
+        with stores.file(db, project=project) as mem:
+            for reader in readers:
+                for row in live:
+                    should = written_in(row) in SEES[reader]
+                    got = mem.get(row["id"], **READERS[reader])
+                    assert (got is not None) == should, (
+                        f"a {reader} reader {'cannot' if should else 'can'} get the "
+                        f"{written_in(row)} claim {row['object']!r}")
+                    if not should:
+                        found = [r.claim.id for r in mem.search(row["object"], k=10,
+                                                                **READERS[reader])]
+                        assert row["id"] not in found, (
+                            f"a {reader} reader found the {written_in(row)} claim "
+                            f"{row['object']!r}")
+
+
 @pytest.mark.parametrize("tag", golden.TAGS)
 def test_an_upgraded_store_recognises_the_facts_it_already_holds(
         tag: str, tmp_path: pathlib.Path) -> None:
     """Versions 6, 12 and 16 re-derive every claim's entity keys and both hashes, which
-    the golden dump leaves out. This checks what they are for: restating a stored value
-    reinforces the stored claim instead of adding a second one, and a new value in a
-    single-valued slot ends the stored one."""
+    the golden dump leaves out. This checks what the value hash is for, in every scope the
+    fixture writes in: restating a stored value in its own scope reinforces the stored
+    claim instead of adding a second one."""
     db = golden.unpack(tag, tmp_path)
-    mine = [row for row in golden.live(golden.load(tag)["data"]["claims"])
-            if golden.in_default_scope(row)]
-    with stores.file(db) as mem:
-        for row in mine:
-            receipt = mem.remember(row["subject"], row["predicate"], row["object"],
-                                   user=golden.USER)
-            assert ([c.id for c in receipt.reinforced], receipt.added) == ([row["id"]], []), (
-                f"restating {row['predicate']} {row['object']!r} did not reinforce "
-                f"{row['id']}")
-        home = next(row for row in mine if row["predicate"] == "lives_in")
-        receipt = mem.remember("user", "lives_in", "Porto", user=golden.USER)
-        assert [c.id for c in receipt.ended] == [home["id"]]
+    live = golden.live(golden.load(tag)["data"]["claims"])
+    for project in by_project(live):
+        with stores.file(db, project=project) as mem:
+            for row in live:
+                if row["project"] != project:
+                    continue
+                receipt = mem.remember(row["subject"], row["predicate"], row["object"],
+                                       **golden.scope(row))
+                assert ([c.id for c in receipt.reinforced], receipt.added) == (
+                    [row["id"]], []), (
+                    f"restating the {written_in(row)} claim {row['predicate']} "
+                    f"{row['object']!r} did not reinforce {row['id']}")
+
+
+@pytest.mark.parametrize("tag", golden.TAGS)
+def test_a_new_value_in_an_upgraded_store_ends_only_its_own_scopes_value(
+        tag: str, tmp_path: pathlib.Path) -> None:
+    """Version 12 mixes the tenant, user and project into the hash that names a slot. A
+    new home, written in each scope that has one, must end that scope's home and nothing
+    else. This runs on a store nothing has restated: a write re-saves the claim it
+    touches with freshly computed keys, which would hide a wrong hash the migration
+    stored."""
+    db = golden.unpack(tag, tmp_path)
+    live = golden.live(golden.load(tag)["data"]["claims"])
+    for project in by_project(live):
+        with stores.file(db, project=project) as mem:
+            for home in live:
+                if home["project"] != project or home["predicate"] != "lives_in":
+                    continue
+                receipt = mem.remember("user", "lives_in", "Porto", **golden.scope(home))
+                assert [c.id for c in receipt.ended] == [home["id"]], (
+                    f"a new home in the {written_in(home)} scope ended "
+                    f"{[c.object for c in receipt.ended]}, not {home['object']!r}")
 
 
 @pytest.mark.parametrize("tag", golden.TAGS)
