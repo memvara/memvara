@@ -4567,6 +4567,12 @@ class Memvara:
         `<db>.lock`, because it then cannot tell whether another process has the store
         open.
         """
+        # First, because this is the step that can refuse. A refusal has to leave this
+        # object as it was: rebound first, it held the new embedder beside the old
+        # vectors, and with one of the same width every search then compared two
+        # unrelated vector spaces with nothing raised.
+        _drop_vectors(self.store)
+
         if embedder is not None:
             self.embedder = embedder
             # Each subsystem holds its own reference, deliberately — they are
@@ -4574,8 +4580,6 @@ class Memvara:
             self.writer.embedder = embedder
             self.reader.embedder = embedder
             self.consolidator.embedder = embedder
-
-        _drop_vectors(self.store)
 
         with transaction(self.store):
             embedded = self._reencode(

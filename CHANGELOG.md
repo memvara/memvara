@@ -247,6 +247,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   did not exist. The lock file's connection now keeps its journal in memory, and a clear
   reports `StoreInUseError` only when another store really holds the file; any other error
   is raised as itself. #324.
+- **A `reembed()` that refuses now changes nothing.** It gave the `Memvara` and its writer,
+  reader and consolidator the new embedder before the clear could refuse with
+  `StoreInUseError` or `PermissionError`. So after a refusal the object held the new
+  embedder beside the old vectors, although the refusal said nothing had changed, and with
+  an embedder of the same width every search compared two unrelated vector spaces without
+  an error. The clear now runs first, so a refusal leaves the old embedder everywhere.
+  #324.
 
 ## [0.16.0] — 2026-09-25
 
