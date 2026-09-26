@@ -37,6 +37,24 @@ def _mode(path: pathlib.Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
+def short_dir() -> pathlib.Path:
+    """A fresh directory short enough to build a unix socket path under.
+
+    A unix socket path is capped near 104 bytes on macOS, and `runtime_dir()` in
+    plugin/hooks/lib/ipc.py adds about 49 more characters of its own after HOME
+    (`/.memvara/.hooks/run/recall-<16 hex digits>.sock`). macOS's own default TMPDIR is a
+    long per-process path — `/var/folders/<two>/<random>/T` — that leaves too little of
+    that budget even before `tempfile.mkdtemp()` adds its own suffix, which is what made
+    the daemon never bind its socket in a reviewer's environment that had not overridden
+    it. This keeps a short TMPDIR the caller already set, and falls back to /tmp — an
+    ordinary, always-short POSIX path — only when the configured one is not short enough.
+    """
+    configured = tempfile.gettempdir()
+    if len(configured) > 40 and os.path.isdir("/tmp"):
+        return pathlib.Path(tempfile.mkdtemp(dir="/tmp"))
+    return pathlib.Path(tempfile.mkdtemp())
+
+
 def test_the_vector_file_is_owner_only_and_the_database_takes_the_umask(
         tmp_path: pathlib.Path) -> None:
     """The `.vecs` sidecar is created 0600 whatever the umask, because it holds vectors
@@ -83,7 +101,7 @@ def test_the_daemon_socket_is_owner_only_inside_an_owner_only_directory(
     # A short HOME on purpose: the socket path is HOME/.memvara/.hooks/run/recall-*.sock,
     # and a unix socket path is capped near 104 bytes on macOS, which pytest's own long
     # tmp_path would blow past. The store file can live under the long tmp_path.
-    home = pathlib.Path(tempfile.mkdtemp())
+    home = short_dir()
     db = tmp_path / "store.db"
     with stores.file(db) as mem:
         mem.remember("user", "lives_in", "Lisbon", user="u")
@@ -93,7 +111,7 @@ def test_the_daemon_socket_is_owner_only_inside_an_owner_only_directory(
                             env=env)
     try:
         socket_file: "pathlib.Path | None" = None
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             found = list(run_dir.glob("recall-*.sock")) if run_dir.exists() else []
             if found:
