@@ -325,12 +325,9 @@ def open_pr(finding: Finding, fingerprint: str, *, issue: int | None,
             dry_run: bool = True, repo: str = REPO) -> Filed:
     """Push the worktree's current commit to the break's nightly branch, and open a draft
     pull request for it. The worktree must hold only committed work: the pull request
-    must contain what was reviewed and nothing else."""
+    must contain what was reviewed and nothing else. A dry run calls nothing, git
+    included, so it does not check the worktree either."""
     _public_only(finding)
-    status = _check(git, Command(("git", "-C", str(worktree), "status", "--porcelain")))
-    if status.stdout.strip():
-        raise FilingError(f"{worktree} has uncommitted changes; commit the strict-xfail "
-                          "test by name, or remove what does not belong, first")
     target = branch(fingerprint)
     push = Command(("git", "-C", str(worktree), "push", "origin", f"HEAD:refs/heads/{target}"))
     create = Command(("gh", "pr", "create", "--repo", repo, "--draft", "--base", "main",
@@ -339,6 +336,10 @@ def open_pr(finding: Finding, fingerprint: str, *, issue: int | None,
                      stdin=pr_body(finding, fingerprint, issue=issue, night=night))
     if dry_run:
         return Filed("pr", fingerprint, True, [push, create])
+    status = _check(git, Command(("git", "-C", str(worktree), "status", "--porcelain")))
+    if status.stdout.strip():
+        raise FilingError(f"{worktree} has uncommitted changes; commit the strict-xfail "
+                          "test by name, or remove what does not belong, first")
     _check(git, push)
     url = _last_line(_check(gh, create).stdout)
     return Filed("pr", fingerprint, False, [push, create], number=_number(url), url=url,
@@ -418,7 +419,9 @@ def _file(args: argparse.Namespace, layout: night.Layout, *, gh: Runner,
         if issue is None and not dry_run:
             raise FilingError("file the issue first (filing.py issue), so the strict "
                               "expected failure and the pull request can cite it")
-        severity = issue["severity"] if issue else "data-loss"
+        # Before the issue exists, a preview uses the break's own severity, so it refuses
+        # what a real run would refuse: an unclassified or security-class break.
+        severity = issue["severity"] if issue else failure.finding.severity
         finding = dataclasses.replace(failure.finding, severity=severity)
         result = open_pr(finding, args.fingerprint, issue=issue["number"] if issue else None,
                          worktree=pathlib.Path(args.worktree), night=args.night, gh=gh,

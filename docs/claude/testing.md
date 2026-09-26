@@ -508,6 +508,8 @@ python3 scripts/nightly/filing.py pr --night <date> --fingerprint <fingerprint> 
 python3 scripts/nightly/filing.py advisory --night <date> --fingerprint <fingerprint> --file
 ```
 
+A dry run calls nothing at all, git included, so a dry run of `pr` does not check the worktree for uncommitted changes; a real run does, before it pushes. Before a break's issue exists, a dry run of `pr` uses the break's own severity, so it refuses an unclassified or security-class break, just as a real run would.
+
 Every filing with `--file` is recorded in `local/nightly/history.jsonl`, so a later night knows the break is filed. Before anything goes to GitHub, the operator's paths are removed from the failure's text: the checkout, the home folder, the temporary folder, and the user name in pytest's temporary folders. The label has to exist before the first real filing; create it once with `gh label create nightly-break --repo memvara/memvara --description "Found by the nightly run"`.
 
 ### The watchdog

@@ -174,6 +174,18 @@ def test_a_pull_request_pushes_only_to_the_nightly_branch_and_opens_as_a_draft(
         "pr", 303, "https://github.com/memvara/memvara/pull/303")
 
 
+def test_a_dry_run_pull_request_calls_nothing_at_all(tmp_path: pathlib.Path) -> None:
+    """A dry run promises to call nothing, git included, and still plans the exact push
+    and the draft pull request a real run would make."""
+    finding = _finding()
+    fp = finding.signature()
+    filed = filing.open_pr(finding, fp, issue=302, worktree=tmp_path, night=NIGHT, gh=never,
+                           git=never)
+    assert filed.dry_run
+    assert [command.argv[:4] for command in filed.commands] == [
+        ("git", "-C", str(tmp_path), "push"), ("gh", "pr", "create", "--repo")]
+
+
 def test_a_pull_request_is_refused_for_a_security_class_break_or_unsaved_work(
         tmp_path: pathlib.Path) -> None:
     """A security-class pin lands together with its fix, never alone in public. And a pin
@@ -297,6 +309,25 @@ def test_a_pull_request_needs_the_issue_filed_first_when_filing_is_on(
                         "--file"], gh=never, git=never)
     assert code != 0
     assert "issue" in capsys.readouterr().err
+
+
+def test_a_pull_request_preview_uses_the_breaks_own_severity(
+        tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Before its issue exists, a dry run of the pull request must predict what a real run
+    does. A security-class break never gets a pull request, so its preview is refused; a
+    break its step classified as a crash is previewed as one."""
+    secret = regressions.Failure(_finding(severity="security"), "finding", (), "confirmed")
+    crash = regressions.Failure(_finding(severity="crash", invariant="a process died"),
+                                "finding", (), "confirmed")
+    _night_folder(tmp_path, secret, crash)
+    assert filing.main(["pr", "--checkout", str(tmp_path), "--night", NIGHT, "--fingerprint",
+                        secret.fingerprint, "--worktree", str(tmp_path)],
+                       gh=never, git=never) != 0
+    assert "security" in capsys.readouterr().err
+    assert filing.main(["pr", "--checkout", str(tmp_path), "--night", NIGHT, "--fingerprint",
+                        crash.fingerprint, "--worktree", str(tmp_path)],
+                       gh=never, git=never) == 0
+    assert "gh pr create" in capsys.readouterr().out
 
 
 def test_the_advisory_command_marks_the_break_as_security_class(
