@@ -22,7 +22,13 @@ DB_KEY = "d" * 64
 CONFIRM = "confirm-SENTINELSECRET"
 SENTINELS = (API_KEY, DB_KEY, CONFIRM)
 
+needs_extra = pytest.mark.skipif(
+    importlib.util.find_spec("sqlcipher3") is None,
+    reason="needs the encrypt extra: pip install 'memvara[encrypt]'")
 
+
+@needs_extra
+@pytest.mark.covers("env:MEMVARA_API_KEY", "env:MEMVARA_DB_KEY", "env:MEMVARA_CONFIRM_SECRET")
 def test_no_configured_secret_reaches_stderr_argv_or_stats(mcp) -> None:
     """A server started with all three secrets in its environment leaks none of them to
     its stderr, its argv, or the stats it renders to the model."""
