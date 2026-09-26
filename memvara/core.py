@@ -2700,6 +2700,14 @@ class Memvara:
         only a model's rephrasing of the query; reading it before confirming is the
         whole design.
 
+        **It closes only claims in force now, which is less than `forget()` closes.** The
+        preview is a present-tense search, and the confirming call refuses a claim that is
+        no longer live, so a value stored to begin later is never listed and never
+        closed. `forget()` closes such a value with the rest of its slot (#282). Listing
+        it here would need a search over values not yet in force, which `search()` does
+        not offer, and closing it without listing it would break the one promise the
+        preview makes. Close one with `forget()` on its slot, or with `delete()` by id.
+
         >>> mem = Memvara(llm=NullLLM(), user="alice")
         >>> _ = mem.remember("user", "works_at", "Acme")
         >>> preview = mem.forget_matching("Acme", close="ended", k=1)

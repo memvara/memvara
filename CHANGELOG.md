@@ -176,7 +176,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   say so in one term, "a value stored to begin later". A server started with
   `MEMVARA_MODE=cloud` does not say it: the hosted deployment runs its own `forget`, which
   does this only once the deployment runs a release with this fix, so there the two tools
-  promise every current value and nothing more. #282.
+  promise every current value and nothing more. `forget_matching()` and its two tools
+  are unchanged and still close only what is in force now, because their preview is a
+  present-tense search; their docstring and descriptions now say so, and say to close a
+  value stored to begin later by its id. #282.
 - **`memory_end` no longer says a value it ended before it began is true until then.**
   Ending a value that has not begun yet, by its `claim_id` or as part of its slot, ends
   it at its own start, so it is true at no instant. The reply counted its ending as one

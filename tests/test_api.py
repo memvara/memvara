@@ -2730,6 +2730,32 @@ def test_ending_a_slot_ends_a_scheduled_value_at_its_own_start(mem):
     assert mem.get_all(valid_at=later + timedelta(days=1)) == []
 
 
+@pytest.mark.parametrize("close", ["ended", "retired"])
+def test_forget_matching_closes_only_what_is_in_force_now(mem, close):
+    """Unlike `forget()`, which closes a value stored to begin later with its slot
+    (#282), `forget_matching` closes only claims in force now. Its preview is a
+    present-tense search, and its confirming call refuses a claim that is not live, so
+    a value stored to begin later is neither listed nor closed. The docstring states the
+    difference; this pins it, and shows the two ways that do close such a value."""
+    now = utcnow()
+    acme = mem.remember("user", "works_at", "Acme",
+                        valid_from=now - timedelta(days=30)).added[0]
+    globex = mem.remember("user", "works_at", "Globex",
+                          valid_from=now + timedelta(days=30)).added[0]
+    next_month = now + timedelta(days=60)
+
+    preview = mem.forget_matching("Globex Acme", close=close, k=10)
+    assert set(preview.matches) == {acme.id}
+    done = mem.forget_matching("Globex Acme", close=close, k=10,
+                               confirm=preview.confirm)
+    assert [c.object for c in done.closed] == ["Acme"]
+    assert [c.object for c in mem.get_all(valid_at=next_month)] == ["Globex"]
+
+    assert mem.delete(globex.id, close=close)
+    assert mem.get_all(valid_at=next_month) == []
+    assert "stored to begin later" in (Memvara.forget_matching.__doc__ or "")
+
+
 def test_forget_asks_the_store_for_the_open_values_instead_of_reading_the_whole_slot(
         mem, monkeypatch):
     """A slot restated hundreds of times holds a few values that have not ended and

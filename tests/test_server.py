@@ -2310,6 +2310,25 @@ def test_forget_an_unknown_slot_says_so_without_pretending(server):
                                        {"predicate": "favourite_colour"})
 
 
+@pytest.mark.parametrize("name, single", [("memory_end_matching", "memory_end"),
+                                          ("memory_forget_matching", "memory_forget")])
+def test_the_matching_tools_say_they_never_list_a_value_stored_to_begin_later(
+        server, name, single):
+    """The two matching tools preview with a present-tense search, so a fact stored to
+    begin later is never listed and never closed, while the slot form of memory_end and
+    memory_forget closes it. memory_history shows such a fact as live, and these tools
+    say they close every live fact that matches, so the description has to name the
+    exception and the way to close one, which works on every server: its claim_id."""
+    now = utcnow()
+    server._ctx.memory.remember("user", "works_at", "Globex",
+                                valid_from=now + timedelta(days=30))
+    description = BY_NAME[name].description
+
+    assert "Nothing matched 'Globex'" in text(server, name, {"query": "Globex"})
+    assert "a fact stored to begin later is never listed" in description
+    assert f"pass its claim_id from memory_history to {single}" in description
+
+
 @pytest.mark.parametrize("name", ["memory_forget", "memory_end"])
 def test_the_slot_form_names_a_value_stored_to_begin_later_in_one_term(server, name):
     """Given a predicate, both tools also close a value stored to begin later (#282).

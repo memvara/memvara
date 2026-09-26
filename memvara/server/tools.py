@@ -2279,7 +2279,9 @@ def _matching_tool(close: Closure) -> "Tool":
         "when any listed fact has changed since the preview; call again without confirm "
         "for a new list. The match is a search with no relevance floor, so the list can "
         "include facts that match only loosely, which is why the preview exists and why "
-        "reading it matters."
+        "reading it matters. The search reads the present, so a fact stored to begin "
+        "later is never listed, even though memory_history shows it as live; to "
+        f"{w['verb']} one, pass its claim_id from memory_history to {w['single']}."
     )
     return Tool(
         name=w["tool"],

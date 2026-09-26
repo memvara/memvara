@@ -1898,6 +1898,13 @@ and closes them all in one `batch()` only if every one is still live and visible
 otherwise it raises `ConfirmationRefused` and writes nothing. The query is not run again
 on the confirming call, so the set closed is the set the caller saw.
 
+It closes only claims in force now, which is less than `forget()` closes. The search is
+present tense and the confirming call refuses a claim that is not live, so a value
+stored to begin later is never listed and never closed, where `forget()` closes it with
+its slot. Listing it would need a search over values not yet in force, which `search()`
+does not offer. The docstring, both tool descriptions and
+`tests/test_api.py::test_forget_matching_closes_only_what_is_in_force_now` say so.
+
 The token (`memvara/confirm.py`) is the sorted ids, the closure and an expiry ten minutes
 out, serialised as JSON and followed by an HMAC-SHA256 of those bytes. The ids travel in
 the token, which is what lets the confirming call avoid a second search. The key is
