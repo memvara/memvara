@@ -79,29 +79,47 @@ def ledger(mem: Memvara) -> dict[str, Row]:
     return {c.id: Row(c.state, c.valid_to, c.invalidated_at) for c in claims}
 
 
-def fates(before: Mapping[str, Row], mem: Memvara) -> dict[str, str]:
-    """What has happened to each claim in `before` since it was recorded.
+def fate(was: Row, now: Row | None, *, erased: bool = False) -> str:
+    """What happened to one claim between two readings of its row.
 
-    `unchanged`; `ended`, when only its world clock closed, which says the fact stopped
-    being true; `retired`, when its belief clock closed, which says it was wrong; `erased`,
-    when its row is gone and an erasure record names it; `missing`, when its row is gone
-    and no record names it; and `changed` for anything else.
+    - `unchanged`: the row is the same.
+    - `ended`: the world clock closed, or an end it already had moved earlier. Either way
+      the fact stopped being true, and no sooner than the store said before.
+    - `extended`: an end it already had moved later.
+    - `reopened`: an end it already had was cleared.
+    - `retired`: the belief clock closed, which says the claim was wrong.
+    - `erased`: the row is gone and an erasure record names it (`erased=True`).
+    - `missing`: the row is gone and no erasure record names it.
+    - `changed`: anything else, such as a retirement that moved or was cleared.
+
+    `extended` and `reopened` break the rule that a closed clock never moves later, so
+    they are named before a retirement in the same change: a claim that was retired and
+    reopened at once reports `reopened`.
     """
+    if now is None:
+        return "erased" if erased else "missing"
+    if now == was:
+        return "unchanged"
+    if was.valid_to is not None:
+        if now.valid_to is None:
+            return "reopened"
+        if now.valid_to > was.valid_to:
+            return "extended"
+    if now.invalidated_at != was.invalidated_at:
+        return "retired" if was.invalidated_at is None else "changed"
+    if now.valid_to != was.valid_to:
+        return "ended"
+    return "changed"
+
+
+def fates(before: Mapping[str, Row], mem: Memvara) -> dict[str, str]:
+    """What `fate` says has happened to each claim in `before` since it was recorded."""
     after = ledger(mem)
     out: dict[str, str] = {}
     for claim_id, was in before.items():
         now = after.get(claim_id)
-        if now is None:
-            erased = mem.store.erasure_record(claim_id) is not None  # type: ignore[attr-defined]
-            out[claim_id] = "erased" if erased else "missing"
-        elif now == was:
-            out[claim_id] = "unchanged"
-        elif now.invalidated_at != was.invalidated_at:
-            out[claim_id] = "retired"
-        elif was.valid_to is None and now.valid_to is not None:
-            out[claim_id] = "ended"
-        else:
-            out[claim_id] = "changed"
+        erased = now is None and mem.store.erasure_record(claim_id) is not None  # type: ignore[attr-defined]
+        out[claim_id] = fate(was, now, erased=erased)
     return out
 
 

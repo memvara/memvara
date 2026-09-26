@@ -8,6 +8,7 @@ being ended, retired or erased. Both are checked here before anything relies on 
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import pytest
@@ -20,7 +21,9 @@ from memvara.llm.base import (
 from memvara.select import stages
 from memvara.store import SQLiteStore
 
-from .handles import fates, ledger, raised_in, seed, with_model, without_model
+from .handles import (
+    Row, fate, fates, ledger, raised_in, seed, with_model, without_model,
+)
 from .scripted import (
     APIConnectionError, APIError, APIStatusError, APITimeoutError, Answer,
     AuthenticationError, Call, Forever, Late, RateLimitError, ScriptedModel, Text,
@@ -317,6 +320,41 @@ def test_fates_name_every_way_a_claim_can_leave_the_live_set(scripted: Make) -> 
     assert mem.erase(ids["tea"])                        # erases green tea: gone
     assert fates(before, mem) == {ids["berlin"]: "ended", ids["acme"]: "retired",
                                   ids["tea"]: "erased", ids["speaks"]: "unchanged"}
+
+
+T0, T1, T2 = (datetime(2026, month, 1, tzinfo=timezone.utc) for month in (1, 2, 3))
+LIVE = Row("live", None, None)
+ENDED = Row("ended", T1, None)
+RETIRED = Row("retired", None, T1)
+
+
+@pytest.mark.parametrize("was, now, erased, expected", [
+    pytest.param(LIVE, LIVE, False, "unchanged", id="untouched"),
+    pytest.param(LIVE, Row("ended", T1, None), False, "ended", id="ended-now"),
+    pytest.param(ENDED, Row("ended", T0, None), False, "ended",
+                 id="an-end-moved-earlier-is-an-ending"),
+    pytest.param(ENDED, Row("ended", T2, None), False, "extended",
+                 id="an-end-moved-later"),
+    pytest.param(ENDED, LIVE, False, "reopened", id="an-end-cleared"),
+    pytest.param(LIVE, RETIRED, False, "retired", id="retired-now"),
+    pytest.param(RETIRED, Row("retired", None, T2), False, "changed",
+                 id="a-retirement-moved"),
+    pytest.param(RETIRED, LIVE, False, "changed", id="a-retirement-cleared"),
+    pytest.param(LIVE, Row("retired", T1, T1), False, "retired",
+                 id="ended-and-retired-at-once"),
+    pytest.param(ENDED, Row("retired", None, T1), False, "reopened",
+                 id="retired-and-reopened-at-once"),
+    pytest.param(LIVE, None, True, "erased", id="gone-with-an-erasure-record"),
+    pytest.param(LIVE, None, False, "missing", id="gone-with-no-record"),
+])
+def test_fate_names_what_happened_to_one_claim(
+        was: Row, now: Row | None, erased: bool, expected: str) -> None:
+    """A world clock that closes, or that moves to an earlier end, is an ending. A world
+    clock that moves to a later end is `extended`, and one that opens again is
+    `reopened`; both break the rule that a closed clock never moves later, so they get
+    names of their own. A belief clock that closes is a retirement, and any other change
+    to it is `changed`."""
+    assert fate(was, now, erased=erased) == expected
 
 
 def test_the_two_handles_share_one_store_and_only_one_has_a_model(scripted: Make) -> None:
