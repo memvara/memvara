@@ -36,6 +36,7 @@ fit, but would make the fixtures unlike any store a real user has.
 from __future__ import annotations
 
 import gzip
+import importlib
 import inspect
 import io
 import json
@@ -116,9 +117,15 @@ def write_with_release(tag: str, db: pathlib.Path, *, env: Mapping[str, str],
         argv = [sys.executable, str(pathlib.Path(__file__).resolve()), "--write", str(db)]
         if encrypted:
             argv.append("--encrypted")
-        done = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
-                              env={**env, "PYTHONPATH": str(release)}, cwd=scratch,
-                              timeout=WRITE_SECONDS, check=False)
+        try:
+            done = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                                  env={**env, "PYTHONPATH": str(release)}, cwd=scratch,
+                                  timeout=WRITE_SECONDS, check=False)
+        except subprocess.TimeoutExpired as exc:
+            raise BuildError(f"{tag}'s writer did not finish within {WRITE_SECONDS:g} s "
+                             f"and was stopped. Its output so far:\n"
+                             f"{_text(exc.stdout)[-3000:]}\n{_text(exc.stderr)[-3000:]}"
+                             ) from None
         if done.returncode != 0:
             raise BuildError(f"{tag} could not write its store (exit status "
                              f"{done.returncode}):\n{done.stderr[-3000:]}")
@@ -131,6 +138,13 @@ def write_with_release(tag: str, db: pathlib.Path, *, env: Mapping[str, str],
             raise BuildError(f"the writer imported memvara from {imported}, not from "
                              f"{tag}; an editable install is shadowing PYTHONPATH")
     return info
+
+
+def _text(output: str | bytes | None) -> str:
+    """A child's output as text. A timeout hands it over as bytes whatever `text=` said."""
+    if output is None:
+        return ""
+    return output.decode(errors="replace") if isinstance(output, bytes) else output
 
 
 def _check_closed(store: pathlib.Path) -> None:
@@ -179,11 +193,37 @@ def build(tag: str, root: pathlib.Path, *, env: Mapping[str, str]) -> dict[str, 
         (staged / "golden.json").write_text(
             json.dumps(record, indent=1, sort_keys=True) + "\n", encoding="utf-8",
             newline="\n")
-        out = root / tag
-        out.mkdir(parents=True, exist_ok=True)
-        for item in staged.iterdir():
-            shutil.copyfile(item, out / item.name)
+        install(staged, root / tag)
     return record
+
+
+def install(staged: pathlib.Path, out: pathlib.Path) -> None:
+    """Make the directory `out` hold exactly the files in `staged`: all of them, or,
+    when anything fails, none of them and `out` as it was.
+
+    The files are copied into a directory beside `out` first, so a copy that fails
+    partway touches nothing committed. Then `out` is renamed aside, the new directory is
+    renamed into its place with `os.replace`, and the old one is removed. An install
+    that was stopped between the two renames left the old directory aside and no `out`;
+    the next install puts it back first.
+    """
+    fresh = out.with_name(f".{out.name}.new")
+    aside = out.with_name(f".{out.name}.old")
+    if aside.exists() and not out.exists():
+        os.replace(aside, out)
+    shutil.rmtree(aside, ignore_errors=True)
+    shutil.rmtree(fresh, ignore_errors=True)
+    fresh.mkdir(parents=True)
+    try:
+        for item in sorted(staged.iterdir()):
+            shutil.copyfile(item, fresh / item.name)
+    except BaseException:
+        shutil.rmtree(fresh, ignore_errors=True)
+        raise
+    if out.exists():
+        os.replace(out, aside)
+    os.replace(fresh, out)
+    shutil.rmtree(aside, ignore_errors=True)
 
 
 def write(db: str, *, encrypted: bool = False) -> dict[str, Any]:
@@ -280,10 +320,8 @@ def write(db: str, *, encrypted: bool = False) -> dict[str, Any]:
     # a graph declaration (version 10), a graph predicate the engineering pack declares
     # learns one too, so its row carries that declaration for the migrations to keep.
     mem.store.put_spec(mem.registry.learn_alias("works_at", "employed_with"), "default")
-    try:
-        from memvara.schema import load_specs  # noqa: PLC0415 - absent before packs
-    except ImportError:
-        load_specs = None
+    # `memvara.schema` is in every release; `load_specs` arrived with the packs.
+    load_specs = getattr(importlib.import_module("memvara.schema"), "load_specs", None)
     if load_specs is not None:
         declared = {spec.name: spec for spec in load_specs("engineering")}.get("deploys_to")
         if declared is not None and getattr(declared, "graph", False):
