@@ -1904,6 +1904,11 @@ class SQLiteStore:
             raise StoreInUseError(
                 f"{self.path} {doing}, and it has not finished in "
                 f"{_PRESENCE_WAIT:.0f} seconds. Open it again when {done}.") from None
+        except BaseException:
+            # Anything else, an interrupt included: the connection may already hold its
+            # lock, and left open it would keep it until Python freed the connection.
+            conn.close()
+            raise
         return conn
 
     @staticmethod

@@ -2368,6 +2368,33 @@ def test_a_lock_file_that_is_not_a_database_is_named(tmp_path):
         SQLiteStore(str(tmp_path / "c.db"))
 
 
+@pytest.mark.parametrize("error", [sqlite3.InterfaceError, KeyboardInterrupt])
+def test_a_lock_that_fails_to_be_taken_leaves_no_connection_behind(tmp_path, monkeypatch,
+                                                                   error):
+    """The connection to `<db>.lock` is closed however taking the lock fails, not only when
+    SQLite refuses the lock. Left open, it would keep its shared lock until Python freed it,
+    and a clear would count a store that never opened. `failed` keeps the traceback, and
+    with it every frame of the failed open, alive until the check has run."""
+    path = str(tmp_path / "c.db")
+    share = SQLiteStore._share
+
+    def share_then_fail(conn):
+        share(conn)
+        raise error("interrupted")
+
+    monkeypatch.setattr(SQLiteStore, "_share", staticmethod(share_then_fail))
+    with pytest.raises(error) as failed:
+        SQLiteStore(path)
+    monkeypatch.undo()
+    alone = sqlite3.connect(path + ".lock", isolation_level=None, timeout=0)
+    try:
+        alone.execute("BEGIN EXCLUSIVE")    # refused while any other connection has a lock
+        alone.execute("ROLLBACK")
+    finally:
+        alone.close()
+    del failed
+
+
 def write_v2(path: str) -> str:
     """A store as the previous release left it: episodes, and no index over them.
 
