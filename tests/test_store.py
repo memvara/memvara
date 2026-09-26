@@ -2700,6 +2700,17 @@ def test_a_lock_file_that_is_not_a_database_is_named(tmp_path):
         SQLiteStore(str(tmp_path / "c.db"))
 
 
+def test_only_a_refused_permission_counts_as_a_refusal_to_write_the_lock_file(tmp_path):
+    """`_write_refusal` answers one question: may this process open the file for writing?
+    A missing file is no refusal, because SQLite creates it for writing. Both callers ask
+    once the presence connection has made the file, so a missing file means it went in
+    between, for example deleted by hand, and the open must not fail over it here."""
+    writable = tmp_path / "c.db.lock"
+    writable.touch()
+    assert sqlite_store._write_refusal(str(writable)) is None
+    assert sqlite_store._write_refusal(str(tmp_path / "gone.db.lock")) is None
+
+
 def test_a_lock_path_that_is_a_directory_fails_the_open_as_it_always_did(tmp_path):
     """The store asks, before SQLite opens `<db>.lock`, only whether this process may write
     it. Any other problem with the path is left to SQLite, which reports it as it always
