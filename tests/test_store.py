@@ -2474,6 +2474,43 @@ def test_a_clear_that_may_not_write_the_lock_file_refuses_and_changes_nothing(tm
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_lock_file_another_account_creates_as_the_store_opens_is_noticed(tmp_path,
+                                                                           monkeypatch):
+    """Whether this process may write `<db>.lock` is recorded for the connection SQLite
+    opened, so it is asked once the file exists. Asked before, it found no file when this
+    store was the first to open, and if another account created the file in that moment,
+    SQLite opened that file read-only while the record said nothing was wrong, and a
+    clear took a shared lock for an exclusive one, as in #350. The other account is
+    simulated by making the lock file, read-only, just before SQLite opens it."""
+    probe = tmp_path / "probe"
+    probe.touch()
+    probe.chmod(0o444)
+    if os.access(probe, os.W_OK):
+        pytest.skip("this user may write a read-only file")
+    path = tmp_path / "c.db"
+    with SQLiteStore(str(path)) as store:
+        store.set_episode_embedding(turn(store).id, onehot(1))
+    lock = tmp_path / "c.db.lock"
+    lock.unlink()
+    connect = sqlite3.connect
+
+    def another_account_first(target, *args, **kwargs):
+        if str(target).endswith(".lock") and not os.path.exists(target):
+            pathlib.Path(target).touch()
+            os.chmod(target, 0o444)
+        return connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", another_account_first)
+    try:
+        with SQLiteStore(str(path)) as store:
+            with pytest.raises(PermissionError, match=r"c\.db\.lock"):
+                store.clear_embeddings()
+            assert store.vector_search_episodes(onehot(1), [SCOPE], 1)
+    finally:
+        os.chmod(lock, 0o644)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
 def test_a_clear_works_in_a_directory_it_may_not_add_files_to(tmp_path):
     """A clear asks for the lock file exclusively on the store's presence connection, and
     on the empty lock file `BEGIN EXCLUSIVE` starts a first page. With SQLite's default

@@ -1906,18 +1906,21 @@ class SQLiteStore:
 
         Reading the file is enough to hold the shared lock, so a lock file this process
         may not write is no reason to refuse an open. But SQLite then opens it read-only,
-        and a clear could not take it exclusively (#350), so whether this process may
-        write it is recorded here, just before SQLite opens it, for `_claim_alone`.
+        and a clear could not take it exclusively (#350), so `_present` records whether
+        this process may write it, for `_claim_alone`.
         """
-        path = _lock_path(self.path)
-        self._presence_refusal = None if path is None else _write_refusal(path)
         return self._take_lock_file(
             self._present, _PRESENCE_WAIT, "is having its vectors cleared by another store",
             "that re-embedding has finished")
 
-    @staticmethod
-    def _present(conn: sqlite3.Connection) -> None:
-        """Hold the shared lock on a new presence connection, whose journal is in memory.
+    def _present(self, conn: sqlite3.Connection) -> None:
+        """Hold the shared lock on a new presence connection, whose journal is in memory,
+        and record whether this process may write the lock file.
+
+        The record is taken here, once SQLite has opened the file, so it describes the
+        connection SQLite opened. Taken before, it found no file when this store was the
+        first to open, and if another account created the file in that moment, SQLite
+        opened that file read-only while the record said nothing was wrong.
 
         A clear later asks this same connection for the lock exclusively (`_try_alone`),
         and on the empty lock file `BEGIN EXCLUSIVE` starts a first page, as
@@ -1926,8 +1929,10 @@ class SQLiteStore:
         not add files to refuses. Nothing is ever written through this connection either,
         so its rollback journal is kept in memory too.
         """
+        path = _lock_path(self.path)
+        self._presence_refusal = None if path is None else _write_refusal(path)
         conn.execute("PRAGMA journal_mode=MEMORY").fetchone()
-        SQLiteStore._share(conn)
+        self._share(conn)
 
     @contextmanager
     def _creating(self) -> Iterator[None]:
@@ -1952,6 +1957,9 @@ class SQLiteStore:
         upgraded. `_hold_presence` has already created the file if it was missing.
         """
         path = _lock_path(self.path)
+        # Asked again although `_present` asked it for the presence connection: this lock
+        # is taken on a connection of its own, and SQLite decides that connection's mode
+        # when it opens the file, which is next.
         refusal = None if path is None else _write_refusal(path)
         if refusal is not None:
             raise PermissionError(

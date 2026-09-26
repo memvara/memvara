@@ -2282,12 +2282,16 @@ The same silent downgrade let a clear go ahead while another process had the sto
 (`_try_alone`), and on a connection SQLite had opened read-only, `BEGIN EXCLUSIVE` also
 starts only a read transaction. The clear then believed it had the store to itself,
 truncated the vector file, and the other process died with SIGBUS on its next vector
-search. `_hold_presence` now records, just before SQLite opens the presence connection,
+search. `_present` now records, as soon as SQLite has opened the presence connection,
 whether this process may write the file. The mode is fixed when the connection opens, so
 the record is taken then and not at the clear: a lock file made writable later does not
-make that connection writable. When the record says no, `_claim_alone` raises
-`PermissionError` naming the file, with nothing changed. Opening the store still needs
-only to read the file.
+make that connection writable. It is taken after the open rather than before it, because
+before it a store that was the first to open found no file, and if another account created
+the file in that moment, SQLite opened it read-only while the record said nothing was
+wrong. When the record says no, `_claim_alone` raises `PermissionError` naming the file,
+with nothing changed. Opening the store still needs only to read the file. `_creating`
+asks the same question again for the creation lock, because that lock is taken on a
+connection of its own, whose mode SQLite decides when it opens the file.
 
 The same reasoning applies to both lock connections, so both keep their journal in
 memory. A clear upgrades the presence connection with `BEGIN EXCLUSIVE`, and on the empty
