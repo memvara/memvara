@@ -70,6 +70,8 @@ model chooses between them exactly as it chooses between `memory_end` and `memor
 
 from __future__ import annotations
 
+import sqlite3
+import sys
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence, cast
@@ -79,6 +81,7 @@ from ..confirm import ConfirmationRefused
 # given. The tool resolves the instant itself only so its header can print it.
 from ..core import PROFILE_WINDOW, Memvara, ScopedMemvara, is_derived, standing_order
 from ..filters import FILTER_KEY, FilterError
+from ..remote.errors import RemoteError
 # `_slugify` is private and imported anyway, for `Memvara._safe_line`'s reason a few
 # lines below: it is the store's own spelling rule, and a copy of it here would be a
 # second implementation that can disagree about whether a fold happened.
@@ -1563,8 +1566,8 @@ def _interval(args: Mapping[str, Any]) -> tuple[datetime | None, datetime | None
     return began, until
 
 
-def _interval_note(claims: Sequence[Claim],
-                   continued: frozenset[str] = frozenset()) -> str:
+def _interval_note(claims: Sequence[Claim], continued: frozenset[str],
+                   now: datetime) -> str:
     """Say when a stored value is deliberately not answering yet, or not any more.
 
     The sibling of `_pending`, one tool over. Both cover the same shape of failure: a
@@ -1578,8 +1581,11 @@ def _interval_note(claims: Sequence[Claim],
     `continued` names the claims whose period is over only because the same value is
     already stored from where they end (see `_continued`). The fact did not stop being
     true there, so their note says what holds instead.
+
+    `now` is the one instant the reply is written for. `_continued` decides against the
+    same instant, so the two cannot disagree about a claim that ends between two
+    readings of the clock.
     """
-    now = utcnow()
     lines = []
     for c in claims:
         if c.valid_from > now:
@@ -1612,8 +1618,8 @@ def _interval_note(claims: Sequence[Claim],
     return "\n".join(lines)
 
 
-def _continued(ctx: ToolContext, subject: str, predicate: str,
-               claims: Sequence[Claim]) -> frozenset[str]:
+def _continued(ctx: ToolContext, subject: str, predicate: str, claims: Sequence[Claim],
+               until: datetime | None, now: datetime) -> frozenset[str]:
     """The ids of the claims just added whose period is over only because the same value
     is already stored from where they end.
 
@@ -1623,25 +1629,48 @@ def _continued(ctx: ToolContext, subject: str, predicate: str,
     that a previous restatement stored and that runs up to it. That new claim is over,
     but the fact is not: a believed claim of the same value holds it from the same
     instant. A value that began before a different, later value is over because the
-    value changed, so one read of the slot tells the two apart. The read is made only
-    when an added claim is already over.
+    value changed. The receipt reads the same for the two, so one read of the slot tells
+    them apart.
 
-    A read that fails returns nothing, and the note falls back to its general wording.
-    The write has already happened, and a note must not turn it into an error the model
-    retries: a retried restatement would store its earlier period a second time. That is
-    the rule `Memvara._advise_replacements` follows for the same reason.
+    The read is made only when the note can apply: when an added claim is over at `now`
+    and the store, not the caller, set its end. `until` is the caller's `true_until`, or
+    `None`, and a claim that ends there gets the general note without a read. A claim
+    the store ended where a different value begins still costs the read, because nothing
+    in the receipt tells it apart from a restatement. `now` is the instant the reply is
+    written for, shared with `_interval_note`.
+
+    When the store or the deployment fails the read (`_read_failures`), the result is
+    empty and the note falls back to its general wording. The write has already
+    happened, and a note must not turn it into an error: the model would tell the user
+    the write failed, or write the fact again. Any other exception is a defect in
+    memvara, and it propagates rather than being hidden.
     """
-    now = utcnow()
-    over = [c for c in claims if c.valid_to is not None and c.valid_to <= now]
+    over = [c for c in claims if c.valid_to is not None and c.valid_to <= now
+            and (until is None or c.valid_to < until)]
     if not over:
         return frozenset()
+    failures = _read_failures()
     try:
         slot = ctx.memory.history(subject, predicate)
-    except Exception:  # the write is done; see the docstring
+    except failures:  # the write is done; see the docstring
         return frozenset()
     return frozenset(c.id for c in over for h in slot
                      if h.value_key == c.value_key and h.valid_from == c.valid_to
                      and h.state != "retired")
+
+
+def _read_failures() -> tuple[type[Exception], ...]:
+    """The errors a store or a deployment raises when a read fails.
+
+    `RemoteError` covers every failure of a hosted deployment, including a transport
+    failure that outlived its retries, and `sqlite3.Error` every failure of a local
+    store. An encrypted store raises SQLCipher's classes instead, which derive from no
+    `sqlite3` class. That module is loaded only when an encrypted store opens
+    (`store.encryption.require_sqlcipher`), so it is looked up rather than imported.
+    """
+    cipher = sys.modules.get("sqlcipher3.dbapi2")
+    extra: tuple[type[Exception], ...] = () if cipher is None else (cipher.Error,)
+    return (RemoteError, sqlite3.Error, *extra)
 
 
 def _fold_note(raw: str, claims: Sequence[Claim]) -> str:
@@ -1771,6 +1800,10 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
         # A `replaces` claim that is no longer live, or a reason over its limit. The
         # library's message says which and what to send instead.
         raise ToolError(f"Nothing written: {exc}") from None
+    # One instant for both interval helpers, so they agree about which claims are over.
+    now = utcnow()
+    continued = _continued(ctx, args["subject"], args["predicate"], receipt.added, until,
+                           now)
     return "\n".join(filter(None, _receipt_summary(ctx, receipt)
                             + [_fold_note(args["predicate"],
                                            # `added` first: it is where the fact landed.
@@ -1778,9 +1811,7 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
                                            # only displaced a value, which still names the
                                            # canonical slot.
                                            list(receipt.added) + list(receipt.closed)),
-                               _interval_note(receipt.added, _continued(
-                                   ctx, args["subject"], args["predicate"],
-                                   receipt.added)),
+                               _interval_note(receipt.added, continued, now),
                                _pending(receipt.closed),
                                _expiry_note(ctx, receipt.added)]))
 

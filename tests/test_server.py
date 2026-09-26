@@ -22,6 +22,7 @@ import io
 import json
 import pathlib
 import re
+import sqlite3
 import sys
 import types
 from dataclasses import replace
@@ -44,6 +45,7 @@ from memvara import (
     utcnow,
 )
 from memvara.embed import default_embedder as real_default_embedder, fingerprint_of
+from memvara.remote.errors import RemoteError
 from memvara.server import (
     MemvaraMCPServer,
     ProtocolError,
@@ -67,6 +69,7 @@ from memvara.server.protocol import (
 )
 from memvara.server.tools import BY_NAME, ToolContext, safe_line
 from memvara.server.validate import _ARTICLES, validate
+from memvara.types import Claim
 
 
 # -- fixtures ----------------------------------------------------------------
@@ -2895,18 +2898,31 @@ def test_restating_the_same_earlier_start_twice_is_already_known(server):
     assert len(server._ctx.memory.history("user", "likes")) == 2
 
 
+class _CipherError(Exception):
+    """Stands in for SQLCipher's `Error`, which derives from no `sqlite3` class."""
+
+
+@pytest.mark.parametrize("failure", [
+    RemoteError(503, "unavailable", "the deployment did not answer", True),
+    sqlite3.OperationalError("disk I/O error"),
+    _CipherError("file is not a database"),
+], ids=["hosted", "sqlite", "sqlcipher"])
 def test_a_failed_read_of_the_slot_leaves_the_write_and_the_general_note(
-        server, monkeypatch):
+        server, monkeypatch, failure):
     """Telling a restatement's earlier period from a value that stopped takes a read made
-    after the write. If that read fails, the reply must still report the write rather
-    than an error, because a model that retried would store the earlier period twice."""
+    after the write. If the store or the deployment fails that read, the reply must still
+    report the write rather than an error: the write happened, and a model told it failed
+    would say so to the user, or write the fact again. SQLCipher's module is loaded only
+    for an encrypted store, so a stand-in for it is put where that store would load it."""
+    monkeypatch.setitem(sys.modules, "sqlcipher3.dbapi2",
+                        types.SimpleNamespace(Error=_CipherError))
     now = utcnow()
     stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
     text(server, "memory_remember", {"predicate": "likes", "object": "tea",
                                      "true_since": stamp(now - timedelta(days=150))})
 
     def unreachable(*args, **kwargs):
-        raise RuntimeError("the deployment did not answer")
+        raise failure
 
     monkeypatch.setattr(type(server._ctx.memory), "history", unreachable)
     body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
@@ -2914,6 +2930,70 @@ def test_a_failed_read_of_the_slot_leaves_the_write_and_the_general_note(
 
     assert body.startswith("added 1, ended 0, retired 0, already-known 0")
     assert "already stopped being true" in body
+
+
+def test_a_defect_in_the_read_after_the_write_is_not_hidden(server, monkeypatch):
+    """The fallback covers a store or a deployment that fails the read, and nothing else.
+    An exception of any other kind is a defect in memvara, and a reply that hid it would
+    let it go unnoticed, so the call reports it, even though the write has happened."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                     "true_since": stamp(now - timedelta(days=150))})
+
+    def broken(*args, **kwargs):
+        raise TypeError("history() got an unexpected keyword argument")
+
+    monkeypatch.setattr(type(server._ctx.memory), "history", broken)
+    body, is_error = call(server, "memory_remember", {
+        "predicate": "likes", "object": "tea",
+        "true_since": stamp(now - timedelta(days=240))})
+
+    assert is_error and "TypeError" in body
+    assert len(server._ctx.memory.get_all(valid_at=now - timedelta(days=200))) == 1
+
+
+def test_the_slot_is_not_read_when_the_caller_set_the_end_the_store_kept(
+        server, monkeypatch):
+    """The note for a continued value can apply only to a claim whose end the store set,
+    where the next claim of its value begins. A claim that ends where the caller said,
+    with true_until, gets the general note, so the reply reads nothing more."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                     "true_since": stamp(now - timedelta(days=150))})
+
+    reads = []
+    history = type(server._ctx.memory).history
+
+    def counted(*args, **kwargs):
+        reads.append(args[1:])
+        return history(*args, **kwargs)
+
+    monkeypatch.setattr(type(server._ctx.memory), "history", counted)
+    body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                            "true_since": stamp(now - timedelta(days=240)),
+                                            "true_until": stamp(now - timedelta(days=200))})
+
+    assert body.startswith("added 1, ended 0, retired 0, already-known 0")
+    assert "already stopped being true" in body
+    assert reads == []
+
+
+def test_the_interval_notes_are_written_for_the_instant_they_are_given():
+    """`_continued` and `_interval_note` decide whether a claim is over against one
+    instant, taken once for the reply, so the two cannot disagree about a claim that
+    ends between two readings of the clock."""
+    from memvara.server.tools import _interval_note
+
+    ends = utcnow() - timedelta(days=1)
+    claim = Claim(subject="user", predicate="likes", object="tea",
+                  valid_from=ends - timedelta(days=30), valid_to=ends)
+
+    assert _interval_note([claim], frozenset(), ends - timedelta(seconds=1)) == ""
+    assert "already stopped being true" in _interval_note([claim], frozenset(), ends)
+    assert "the same value is already stored" in _interval_note(
+        [claim], frozenset({claim.id}), ends)
 
 
 def test_a_future_dated_write_is_stored_and_says_it_is_not_in_force_yet(server):
