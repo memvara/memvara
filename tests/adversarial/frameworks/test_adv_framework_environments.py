@@ -12,17 +12,20 @@ import base64
 import hashlib
 import json
 import os
+import signal
 import sys
 import textwrap
+import time
 import zipfile
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 from harness.env import REPO
+from harness.hooks import process_alive
 
 from . import environments, probe
 
@@ -58,7 +61,9 @@ class FakePip:
     It records each call as a tuple whose first item is its kind: "wheel", "resolve",
     "resolve with dependencies", "create", "install", "refresh" (an install with
     --force-reinstall) or "describe". A kind in `failing` raises `BuildError` instead,
-    every time, and a kind in `failing_once` raises it the next time only.
+    every time, and a kind in `failing_once` raises it the next time only. With
+    `blocks_marker`, an install leaves a folder where the marker's temporary file goes,
+    so that writing the marker fails the way it does on a full disk.
     """
 
     def __init__(self, latest: Mapping[str, str] | None = None) -> None:
@@ -66,6 +71,7 @@ class FakePip:
         self.calls: list[tuple[str, ...]] = []
         self.failing: set[str] = set()
         self.failing_once: set[str] = set()
+        self.blocks_marker = False
 
     def _call(self, kind: str, *details: str) -> None:
         self.calls.append((kind, *details))
@@ -112,6 +118,8 @@ class FakePip:
         self._call("refresh" if "--force-reinstall" in arguments else "install", *arguments)
         site = _site(python)
         site.mkdir(parents=True, exist_ok=True)
+        if self.blocks_marker:
+            (python.parent.parent / f"{environments.MARKER}.partial").mkdir(exist_ok=True)
         for argument in arguments:
             if "==" in argument:
                 name, version = argument.split("==")
@@ -149,6 +157,54 @@ def _cache(tmp_path: Path) -> tuple[FakePip, environments.Cache]:
     wheel = pip.wheel(REPO, tmp_path / "wheel")
     pip.calls.clear()
     return pip, environments.Cache(tmp_path / "cache", pip, wheel)  # type: ignore[arg-type]
+
+
+def _alive(pid: int) -> bool:
+    """Whether process `pid` still runs. On Windows the kernel is asked for the process's
+    exit code, because os.kill with signal 0 would end the process there."""
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    return process_alive(pid)
+
+
+def _poll(condition: Callable[[], bool], seconds: float) -> bool:
+    """Whether `condition` becomes true within `seconds`, checking every 50 ms."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if condition():
+            return True
+        time.sleep(0.05)
+    return condition()
+
+
+def _stop(pid: int) -> None:
+    """End process `pid` if it still runs, so that a failing test leaves nothing behind."""
+    if _alive(pid):
+        try:
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        except OSError:
+            pass
+
+
+#: Starts a process of its own, writes that process's id to a file, and hangs. Formatted
+#: with the file's path.
+STARTS_A_PROCESS_AND_HANGS = (
+    "import subprocess, sys, time\n"
+    "from pathlib import Path\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+    "Path({pid_file!r}).write_text(str(child.pid))\n"
+    "time.sleep(300)\n")
 
 
 def _record_row(path: str, content: bytes) -> str:
@@ -287,6 +343,59 @@ def test_an_environment_that_cannot_say_what_it_holds_is_built_again(tmp_path: P
     assert rebuilt.how == "rebuilt" and rebuilt.distributions["langchain-core"] == "0.3.0"
 
 
+def test_a_failed_rebuild_also_says_why_the_environment_was_not_reused(
+        tmp_path: Path) -> None:
+    """When reusing an environment fails and building it again fails too, the error keeps
+    both failures. The first one is often the one that explains the second."""
+    pip, cache = _cache(tmp_path)
+    prepared = cache.prepare(_wanted())
+    pip.failing_once.add("refresh")
+    pip.failing.add("install")
+    with pytest.raises(environments.BuildError) as raised:
+        cache.prepare(_wanted())
+    assert "planted failure of install" in str(raised.value)
+    assert "planted failure of refresh" in str(raised.value)
+    pip.failing.clear()
+    cache.prepare(_wanted())
+    for installed in prepared.purelib.glob("langchain-core==*"):
+        installed.unlink()
+    pip.failing.add("install")
+    with pytest.raises(environments.BuildError) as raised:
+        cache.prepare(_wanted())
+    assert "no longer holds langchain-core==0.3.0" in str(raised.value)
+
+
+def test_a_marker_that_cannot_be_written_is_a_build_error(tmp_path: Path) -> None:
+    """A full disk or a folder without write permission stops the marker from being
+    written. That must be a build error, which the session remembers, and not an OSError
+    that every test of the environment meets again by building it again."""
+    pip, cache = _cache(tmp_path)
+    pip.blocks_marker = True
+    with pytest.raises(environments.BuildError, match="writing the marker"):
+        cache.prepare(_wanted())
+
+
+def test_a_folder_that_cannot_be_measured_is_a_build_error(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = tmp_path / "environment"
+    folder.mkdir()
+    (folder / "data.bin").write_bytes(b"x")
+
+    class RefusingOs:
+        """The os module, except that reading a file's size is refused."""
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(os, name)
+
+        @staticmethod
+        def lstat(path: Any) -> Any:
+            raise PermissionError(f"planted: permission denied: {path}")
+
+    monkeypatch.setattr(environments, "os", RefusingOs())
+    with pytest.raises(environments.BuildError, match="planted: permission denied"):
+        environments.disk_usage(folder)
+
+
 def test_a_failed_build_leaves_no_marker(tmp_path: Path) -> None:
     pip, cache = _cache(tmp_path)
     pip.failing.add("install")
@@ -324,6 +433,38 @@ def test_disk_usage_counts_a_hard_linked_file_once(tmp_path: Path) -> None:
     assert environments.disk_usage(folder) == alone
     (folder / "more.bin").write_bytes(b"y" * 100_000)
     assert environments.disk_usage(folder) > alone
+
+
+def test_record_rows_written_with_backslashes_are_read_as_paths(tmp_path: Path) -> None:
+    """RECORD's rows use forward slashes, but a tool that wrote them on Windows may have
+    used backslashes. Those rows name memvara's files all the same."""
+    purelib = tmp_path / "site-packages"
+    info = purelib / "memvara-0.0.1.dist-info"
+    info.mkdir(parents=True)
+    rows = [_record_row("memvara\\__init__.py",
+                        (REPO / "memvara" / "__init__.py").read_bytes()),
+            _record_row("memvara\\core.py", b"an older copy")]
+    (info / "RECORD").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    assert environments.stale_files(purelib) == ["memvara/core.py"]
+
+
+def test_environments_over_the_disk_budget_are_named_with_their_sizes(tmp_path: Path) -> None:
+    """The check the nightly tier makes once every environment is ready. An environment
+    two pins share counts once."""
+    def ready(version: str, size: int) -> environments.Prepared:
+        wanted = _wanted(version=version)
+        return environments.Prepared(wanted, tmp_path / wanted.directory,
+                                     Path(sys.executable), "reused", 0.0, tmp_path, {}, size)
+
+    small, large = ready("0.3.0", 3_000_000_000), ready("1.6.5", 6_000_000_000)
+    assert environments.DISK_BUDGET == 8_000_000_000
+    assert environments.over_budget([small, large]) is not None
+    assert environments.over_budget([small, small], budget=6_000_000_000) is None
+    message = environments.over_budget([small, large, small])
+    assert message is not None
+    assert "9.00 GB together, over the budget of 8.00 GB" in message, message
+    assert message.splitlines()[1:] == [f"  {large.path.name}: 6000 MB",
+                                        f"  {small.path.name}: 3000 MB"], message
 
 
 def test_a_stale_installed_memvara_is_named_file_by_file(tmp_path: Path) -> None:
@@ -414,6 +555,45 @@ def test_each_checks_file_loads_the_way_the_probe_loads_it(
     assert probe.checks(module), f"{framework.checks.name} defines no check"
 
 
+def test_a_probe_past_its_time_limit_is_stopped_with_every_process_it_started(
+        tmp_path: Path) -> None:
+    """A framework can start processes of its own. When the probe runs past its time
+    limit, they must stop with it, or they run on after the night is over."""
+    pid_file = tmp_path / "child.pid"
+    checks = tmp_path / "checks_planted.py"
+    checks.write_text("def check_starts_a_process_and_hangs(ctx):\n" + textwrap.indent(
+        STARTS_A_PROCESS_AND_HANGS.format(pid_file=str(pid_file)), "    "), encoding="utf-8")
+    prepared = environments.Prepared(_wanted(), tmp_path, Path(sys.executable), "reused",
+                                     0.0, tmp_path, {}, 0)
+    probed = environments.run_probe(prepared, tmp_path / "work", checks=checks, timeout=5)
+    assert probed.exit_code is None, probed.output
+    assert pid_file.exists(), f"the check never started its process:\n{probed.output}"
+    child = int(pid_file.read_text())
+    try:
+        assert _poll(lambda: not _alive(child), 10), (
+            f"process {child}, started by a probe that ran past its limit, still runs")
+    finally:
+        _stop(child)
+
+
+def test_a_pip_command_past_its_time_limit_is_stopped_with_every_process_it_started(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same for pip and its build backends. Here the description of an environment
+    starts a process and hangs."""
+    pid_file = tmp_path / "child.pid"
+    monkeypatch.setattr(environments, "_DESCRIBE",
+                        STARTS_A_PROCESS_AND_HANGS.format(pid_file=str(pid_file)))
+    pip = environments.Pip(tmp_path / "home", timeout=3)
+    with pytest.raises(environments.BuildError, match="ran past 3 seconds"):
+        pip.describe(Path(sys.executable))
+    child = int(pid_file.read_text())
+    try:
+        assert _poll(lambda: not _alive(child), 10), (
+            f"process {child}, started by a command that ran past its limit, still runs")
+    finally:
+        _stop(child)
+
+
 # -- one run's session -------------------------------------------------------------------
 
 
@@ -444,6 +624,38 @@ def test_a_session_pins_every_framework_twice_and_prunes_the_rest(tmp_path: Path
     record = json.loads((root / "last-run.json").read_text(encoding="utf-8"))
     assert [e["version"] for e in record["environments"]] == ["1.6.5"]
     assert record["removed"] == [old.name]
+
+
+def test_the_session_resolves_exactly_the_pins_in_pins(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(environments, "PINS", ("floor",))
+    pip = FakePip()
+    with environments.session(tmp_path / "cache", tmp_path / "work", pip) as current:  # type: ignore[arg-type]
+        assert {pin for _, pin in current.wanted} == {"floor"}
+    assert pip.kinds().count("resolve") == 1
+
+
+def test_a_probe_that_cannot_start_is_a_build_error_the_session_remembers(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An environment whose interpreter was removed, or cannot be run, must fail as a
+    build error the session remembers: every test of that environment then reports the
+    one failure, rather than each starting the probe again. FakePip's interpreter is an
+    empty file, which the system refuses to run."""
+    started: list[str] = []
+    real = environments.run_probe
+
+    def counting(prepared: environments.Prepared, work: Path,
+                 **options: Any) -> environments.ProbeRun:
+        started.append(prepared.wanted.directory)
+        return real(prepared, work, **options)
+
+    monkeypatch.setattr(environments, "run_probe", counting)
+    pip = FakePip()
+    with environments.session(tmp_path / "cache", tmp_path / "work", pip) as current:  # type: ignore[arg-type]
+        for _ in range(2):
+            with pytest.raises(environments.BuildError, match="could not start"):
+                current.probe("langchain", "latest")
+    assert len(started) == 1
 
 
 def test_a_session_prepares_each_environment_once_and_remembers_a_failure(

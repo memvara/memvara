@@ -50,6 +50,10 @@ from packaging.utils import canonicalize_name
 
 from harness.env import REPO, child_env
 
+if str(REPO / "scripts") not in sys.path:
+    sys.path.insert(0, str(REPO / "scripts"))
+from nightly.steps import kill_tree  # noqa: E402 - scripts/ is not on the path until above
+
 from . import probe
 
 #: Where the environments live. It is read once, when pytest imports this module while it
@@ -66,8 +70,12 @@ MARKER = "memvara-environment.json"
 #: environment built the old way is built again.
 RECIPE = 1
 
-#: The two pins each framework is tested at.
+#: The two pins each framework is tested at. `pinned()` says what each one asks pip for.
 PINS = ("floor", "latest")
+
+#: The most disk the environments may take together: 8 GB, the budget the plan sets.
+#: `test_the_environments_fit_the_disk_budget` fails when they take more.
+DISK_BUDGET = 8_000_000_000
 
 #: The probe's script, which each environment's own interpreter runs.
 PROBE = Path(probe.__file__)
@@ -217,6 +225,18 @@ def floor(requirement: str) -> str:
     return f"{parsed.name}=={lowest[0]}"
 
 
+def pinned(pin: str, requirement: str) -> str:
+    """The requirement pip is asked to resolve at `pin`. At "floor", that is the
+    requirement pinned to the lowest version it admits. At "latest", it is the
+    requirement as memvara declares it, which pip resolves to the newest release it can
+    install on this interpreter."""
+    if pin == "floor":
+        return floor(requirement)
+    if pin == "latest":
+        return requirement
+    raise ValueError(f"{pin!r} is not one of the pins {PINS}")
+
+
 def interpreter() -> str:
     """This interpreter, as one line that changes whenever the interpreter does."""
     base = getattr(sys, "_base_executable", sys.executable)
@@ -264,12 +284,12 @@ class Wanted:
         return [_memvara(self.framework, wheel), f"{self.framework.dist}=={self.version}",
                 *(f"{name}=={version}" for name, version in self.companions)]
 
-    def held_by(self, distributions: Mapping[str, str]) -> bool:
-        """Whether an environment holding `distributions` holds the framework and every
-        companion at the versions this environment pins."""
-        pinned = [(self.framework.dist, self.version), *self.companions]
-        return all(distributions.get(canonicalize_name(name)) == version
-                   for name, version in pinned)
+    def missing_from(self, distributions: Mapping[str, str]) -> list[str]:
+        """The pinned releases, of the framework and of each companion, that an
+        environment holding `distributions` does not hold. Empty when it holds them all."""
+        pins = [(self.framework.dist, self.version), *self.companions]
+        return [f"{name}=={version}" for name, version in pins
+                if distributions.get(canonicalize_name(name)) != version]
 
 
 def _memvara(framework: Framework, wheel: Path) -> str:
@@ -295,6 +315,32 @@ def _tail(text: str, lines: int = 40) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
+def _run_in_group(command: Sequence[str | Path], *, timeout: float,
+                  **options: Any) -> subprocess.CompletedProcess[bytes]:
+    """Run `command` the way `subprocess.run` does, in a process group of its own.
+
+    Past `timeout`, the command and every process it started are stopped, not the
+    command alone, and `subprocess.TimeoutExpired` is raised. On POSIX, whatever the
+    command left running in its group is stopped when it exits, too. The stopping is
+    `kill_tree`, the nightly run's own helper in scripts/nightly/steps.py, so the two
+    stop a command the same way, on Windows as well.
+    """
+    if sys.platform == "win32":
+        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        options["start_new_session"] = True
+    process: subprocess.Popen[bytes]
+    with subprocess.Popen([str(part) for part in command], **options) as process:
+        try:
+            output, errors = process.communicate(timeout=timeout)
+        except BaseException:
+            kill_tree(process)
+            raise
+        if sys.platform != "win32":
+            kill_tree(process)
+    return subprocess.CompletedProcess(process.args, process.returncode, output, errors)
+
+
 def _json(text: str, what: str) -> Any:
     try:
         return json.loads(text)
@@ -318,7 +364,8 @@ class Pip:
     Every command gets the suite's child environment without `PYTHONPATH`, so pip and the
     environments see only what is installed in them. A command that cannot start, fails,
     runs past its time limit or answers with something unreadable raises `BuildError`,
-    with the end of its output where there is one.
+    with the end of its output where there is one. A command past its time limit is
+    stopped together with every process it started.
     """
 
     def __init__(self, home: Path, *, python: str = sys.executable,
@@ -333,17 +380,18 @@ class Pip:
                                     "PIP_NO_INPUT": "1"})
         env.pop("PYTHONPATH", None)
         try:
-            done = subprocess.run([str(part) for part in command], env=env,
-                                  capture_output=True, text=True, timeout=self.timeout,
-                                  stdin=subprocess.DEVNULL)
+            done = _run_in_group(command, timeout=self.timeout, env=env,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE)
         except subprocess.TimeoutExpired as exc:
             raise BuildError(f"{what} ran past {self.timeout:.0f} seconds") from exc
         except OSError as exc:
             raise BuildError(f"{what} could not start: {exc}") from exc
+        output = done.stdout.decode("utf-8", "replace")
         if done.returncode != 0:
             raise BuildError(f"{what} failed with exit status {done.returncode}:\n"
-                             f"{_tail(done.stdout + done.stderr)}")
-        return done.stdout
+                             f"{_tail(output + done.stderr.decode('utf-8', 'replace'))}")
+        return output
 
     def wheel(self, source: Path, folder: Path) -> Path:
         """Build memvara's wheel from the checkout at `source` into `folder`."""
@@ -414,8 +462,11 @@ def _read_marker(path: Path) -> dict[str, Any]:
 
 def _write_marker(path: Path, body: Mapping[str, Any]) -> None:
     partial = path / f"{MARKER}.partial"
-    partial.write_text(json.dumps(body, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(partial, path / MARKER)
+    try:
+        partial.write_text(json.dumps(body, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(partial, path / MARKER)
+    except OSError as exc:
+        raise BuildError(f"writing the marker {path / MARKER} failed: {exc}") from exc
 
 
 class Cache:
@@ -433,28 +484,44 @@ class Cache:
         A reused environment gets this checkout's memvara reinstalled. It is built again
         from nothing when that reinstall fails, when its interpreter cannot say what it
         holds, or when it no longer holds its pinned releases, so a damaged cache mends
-        itself instead of failing every night.
+        itself instead of failing every night. If building it again fails too, the error
+        says why it was not reused as well.
+
+        Every failure is a `BuildError`, which the session remembers, including a folder
+        that cannot be removed, a marker that cannot be written and a size that cannot be
+        measured.
         """
         path = self.root / wanted.directory
         python = python_in(path)
         started = time.monotonic()
         how = "built"
+        #: Why a reusable environment was built again instead.
+        not_reused = ""
         if _read_marker(path).get("key") == wanted.key:
             how = "rebuilt"
             try:
                 self.pip.install(python, ["--no-deps", "--force-reinstall", str(self.wheel)])
                 purelib, distributions = self.pip.describe(python)
-            except BuildError:
-                pass
+            except BuildError as exc:
+                not_reused = str(exc)
             else:
-                if wanted.held_by(distributions):
+                missing = wanted.missing_from(distributions)
+                if missing:
+                    not_reused = "it no longer holds " + ", ".join(missing)
+                else:
                     how = "reused"
         if how != "reused":
-            if path.exists():
-                shutil.rmtree(path)
-            python = self.pip.create(path)
-            self.pip.install(python, wanted.install_arguments(self.wheel))
-            purelib, distributions = self.pip.describe(python)
+            try:
+                if path.exists():
+                    _remove(path)
+                python = self.pip.create(path)
+                self.pip.install(python, wanted.install_arguments(self.wheel))
+                purelib, distributions = self.pip.describe(python)
+            except BuildError as exc:
+                if not not_reused:
+                    raise
+                raise BuildError(f"{exc}\n\nThe environment was being built again because "
+                                 f"reusing it failed: {not_reused}") from exc
         seconds = time.monotonic() - started
         if how != "reused":
             _write_marker(path, {
@@ -485,19 +552,52 @@ class Cache:
         return removed
 
 
+def _remove(path: Path) -> None:
+    """Remove an environment's folder, as a `BuildError` when that fails."""
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        raise BuildError(f"removing the old environment at {path} failed: {exc}") from exc
+
+
+def _refuse(error: OSError) -> None:
+    raise error
+
+
 def disk_usage(path: Path) -> int:
-    """Bytes the files under `path` take on disk. A file with several links counts once."""
+    """Bytes the files under `path` take on disk. A file with several links counts once.
+
+    A folder that cannot be listed, or a file whose size cannot be read, raises
+    `BuildError`: a size that silently leaves them out would pass the disk budget."""
     seen: set[tuple[int, int]] = set()
     total = 0
-    for folder, _, files in os.walk(path):
-        for name in files:
-            info = os.lstat(os.path.join(folder, name))
-            if (info.st_dev, info.st_ino) in seen:
-                continue
-            seen.add((info.st_dev, info.st_ino))
-            blocks = getattr(info, "st_blocks", None)
-            total += blocks * 512 if blocks is not None else info.st_size
+    try:
+        for folder, _, files in os.walk(path, onerror=_refuse):
+            for name in files:
+                info = os.lstat(os.path.join(folder, name))
+                if (info.st_dev, info.st_ino) in seen:
+                    continue
+                seen.add((info.st_dev, info.st_ino))
+                blocks = getattr(info, "st_blocks", None)
+                total += blocks * 512 if blocks is not None else info.st_size
+    except OSError as exc:
+        raise BuildError(f"measuring the size of {path} failed: {exc}") from exc
     return total
+
+
+def over_budget(ready: Iterable[Prepared], budget: int = DISK_BUDGET) -> str | None:
+    """None when the environments in `ready` fit in `budget` bytes together. Otherwise a
+    message with their total and each one's size, the largest first. An environment that
+    two pins share counts once."""
+    sizes = {prepared.path: prepared.size for prepared in ready}
+    total = sum(sizes.values())
+    if total <= budget:
+        return None
+    lines = [f"the environments take {total / 1e9:.2f} GB together, over the budget of "
+             f"{budget / 1e9:.2f} GB:"]
+    lines += [f"  {path.name}: {size / 1e6:.0f} MB"
+              for path, size in sorted(sizes.items(), key=lambda item: -item[1])]
+    return "\n".join(lines)
 
 
 def stale_files(purelib: Path, checkout: Path = REPO) -> list[str]:
@@ -513,17 +613,21 @@ def stale_files(purelib: Path, checkout: Path = REPO) -> list[str]:
     stale: list[str] = []
     checked = 0
     for row in csv.reader(records[0].read_text(encoding="utf-8").splitlines()):
-        if len(row) < 2 or not row[0].startswith("memvara/") or not row[1]:
+        if len(row) < 2 or not row[1]:
+            continue
+        # RECORD uses forward slashes, but a tool that wrote it on Windows may not have.
+        name = row[0].replace("\\", "/")
+        if not name.startswith("memvara/"):
             continue
         algorithm, _, expected = row[1].partition("=")
-        source = checkout / row[0]
+        source = checkout / name
         actual = ""
         if source.is_file():
             digest = hashlib.new(algorithm, source.read_bytes()).digest()
             actual = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
         checked += 1
         if actual != expected:
-            stale.append(row[0])
+            stale.append(name)
     if checked == 0:
         return ["RECORD lists no memvara file"]
     return stale
@@ -565,7 +669,9 @@ def run_probe(prepared: Prepared, work: Path, *, checks: Path | None = None,
     """Run the framework's checks in the environment, with the environment's interpreter.
 
     `checks` defaults to the framework's own checks file. The report, the log of what was
-    printed and the probe's home folder are kept in `work`.
+    printed and the probe's home folder are kept in `work`. An interpreter that cannot
+    be started raises `BuildError`. A probe past `timeout` is stopped together with every
+    process it started, and its exit code is None.
     """
     work.mkdir(parents=True, exist_ok=True)
     name = prepared.wanted.directory
@@ -577,14 +683,17 @@ def run_probe(prepared: Prepared, work: Path, *, checks: Path | None = None,
     started = time.monotonic()
     with open(log, "w", encoding="utf-8") as output:
         try:
-            done = subprocess.run(
-                [str(prepared.python), "-I", "-B", str(PROBE),
-                 str(checks or prepared.wanted.framework.checks), str(report)],
-                cwd=work, env=probe_env(home), stdin=subprocess.DEVNULL, stdout=output,
-                stderr=subprocess.STDOUT, timeout=timeout)
+            done = _run_in_group(
+                [prepared.python, "-I", "-B", PROBE,
+                 checks or prepared.wanted.framework.checks, report],
+                timeout=timeout, cwd=work, env=probe_env(home), stdin=subprocess.DEVNULL,
+                stdout=output, stderr=subprocess.STDOUT)
             code: int | None = done.returncode
         except subprocess.TimeoutExpired:
             code = None
+        except OSError as exc:
+            raise BuildError(f"the probe could not start with {prepared.python}: "
+                             f"{exc}") from exc
     printed = log.read_text(encoding="utf-8", errors="replace")
     return ProbeRun(probe.read(report), code, _tail(printed, 60),
                     time.monotonic() - started)
@@ -733,13 +842,14 @@ def session(root: Path, work: Path, pip: Pip | None = None) -> Iterator[Session]
         pip = pip or Pip(work / "home")
         wheel = pip.wheel(REPO, work / "wheel")
         needs = declared(wheel_metadata(wheel))
-        floors = pip.resolve([floor(needs.requirements[f.name]) for f in FRAMEWORKS])
-        latest = pip.resolve([needs.requirements[f.name] for f in FRAMEWORKS])
+        resolved = {pin: pip.resolve([pinned(pin, needs.requirements[f.name])
+                                      for f in FRAMEWORKS])
+                    for pin in PINS}
         this = interpreter()
         wanted: dict[tuple[str, str], Wanted] = {}
         for f in FRAMEWORKS:
-            for pin, versions in (("floor", floors), ("latest", latest)):
-                version = versions[canonicalize_name(f.dist)]
+            for pin in PINS:
+                version = resolved[pin][canonicalize_name(f.dist)]
                 wanted[(f.name, pin)] = Wanted(
                     f, version, needs.requirements[f.name], needs.dependencies, this,
                     _companions(pip, wheel, f, version))

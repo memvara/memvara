@@ -262,14 +262,34 @@ def test_nothing_in_the_environment_reached_the_network(
     docs/INTERNALS.md, "the library must run with no API key and no network", for every
     adapter and the mem0 shim, under the real framework."""
     probed = frameworks.probe(name, pin)
-    assert probed.run.finished, (f"the probe stopped early, so it did not see every "
-                                 f"phase:\n{probed.output}")
-    assert probed.exit_code == 0, (f"the probe exited with status {probed.exit_code}, so "
-                                   f"its shutdown did not finish cleanly:\n{probed.output}")
+    # The accesses come first: one that made the probe stop early, or exit with a
+    # failure, must still be named as the access it was.
     accesses = [f"{record['access']} during {record['phase']}, in thread "
                 f"{record['thread']}:\n{''.join(record['stack'][-4:])}"
                 for record in probed.run.network]
     assert accesses == [], "\n".join(accesses)
+    failed = probed.run.load_error
+    loading = (f" (loading {failed.check} failed with {failed.error_type}: "
+               f"{failed.message})" if failed is not None else "")
+    assert probed.run.finished, (f"the probe stopped early{loading}, so it did not see "
+                                 f"every phase:\n{probed.output}")
+    assert probed.exit_code == 0, (f"the probe exited with status {probed.exit_code}, so "
+                                   f"its shutdown did not finish cleanly:\n{probed.output}")
+
+
+def test_the_environments_fit_the_disk_budget(frameworks: environments.Session) -> None:
+    """The environments must fit in the disk budget the plan sets, 8 GB. A new release
+    that grows past it fails here, with each environment's size, before the disk fills.
+    An environment that failed to build is left out: its own tests report that."""
+    ready = []
+    for name in CHECKS:
+        for pin in environments.PINS:
+            try:
+                ready.append(frameworks.prepare(name, pin))
+            except environments.BuildError:
+                continue
+    problem = environments.over_budget(ready)
+    assert problem is None, problem
 
 
 @pytest.mark.parametrize("name, pin, check", list(_check_params()))
