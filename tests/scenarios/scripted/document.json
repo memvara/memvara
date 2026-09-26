@@ -1,0 +1,39 @@
+{
+  "id": "document",
+  "description": "The user asks the agent to keep the team's refund policy, a file in the workspace. Passages from it come back through memory_recall with include_episodes, memory_list_documents lists it by title and path, and deleting it erases its text so that no read finds it again.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "workspace": {"files": {"policies/refunds.md": "# Refund policy\n\nCustomers may ask for a refund within 30 days of purchase. Refunds go back to the original payment method within five business days. Gift cards cannot be refunded.\n"}},
+  "sessions": [
+    {"turns": [
+      {"user": "Please keep our refund policy in memory. It's in policies/refunds.md.",
+       "script": [
+         {"tool": "memory_add_document", "args": {"content": "{file:policies/refunds.md}", "custom_id": "policies/refunds.md", "filepath": "policies/refunds.md", "title": "Refund policy", "mime": "text/markdown"}}
+       ]}
+    ]},
+    {"turns": [
+      {"id": "ask", "user": "How long do customers have to ask for a refund?",
+       "script": [{"tool": "memory_recall", "args": {"query": "how long do customers have to ask for a refund", "include_episodes": true}}]},
+      {"id": "listed", "user": "Which documents do you have?",
+       "script": [{"tool": "memory_list_documents"}]},
+      {"user": "That policy is obsolete. Delete it.",
+       "script": [{"tool": "memory_delete_document", "args": {"id": "policies/refunds.md"}}]},
+      {"id": "after-delete", "user": "How long do customers have to ask for a refund?",
+       "script": [
+         {"tool": "memory_recall", "args": {"query": "how long do customers have to ask for a refund", "include_episodes": true}},
+         {"tool": "memory_list_documents"}
+       ]}
+    ]}
+  ],
+  "store_gold": [],
+  "answer_gold": [
+    {"id": "recall-quotes-the-policy", "turn": "ask", "must_contain": "within 30 days of purchase"},
+    {"id": "list-shows-the-title", "turn": "listed", "must_contain": "Refund policy"},
+    {"id": "list-shows-the-path", "turn": "listed", "must_contain": "policies/refunds.md"},
+    {"id": "nothing-after-delete", "turn": "after-delete", "abstain": true},
+    {"id": "text-erased", "turn": "after-delete", "must_not_contain": "30 days"}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}

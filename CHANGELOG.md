@@ -12,9 +12,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 ### Added
 
 - **An adversarial test suite that tries to break memvara the way agents use it.** It
-  lives in `tests/adversarial/`, with its support code in `tests/harness/`, and
-  `docs/claude/testing.md` describes it. This entry covers the suite's foundation, its
-  reference model and its crash tests. None of it changes the library.
+  lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
+  scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
+  covers the suite's foundation, its reference model, its crash tests and its scripted
+  agent sessions. None of it changes the library.
   - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
     which includes the doctests in `memvara/`, and the new `--tier nightly`,
     `--tier weekly`, `--tier local` and `--tier quarantine` options select the others.
@@ -35,6 +36,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     checks, keep every acknowledged write, and take the next write at once. Two handles,
     four threads and two real MCP servers share one store file. The nightly tier adds
     random server kills, a lock held past the busy timeout, and a full disk.
+  - **Scripted agent sessions.** `tests/scenarios/` holds agent sessions written as JSON,
+    in one format that the scripted layer runs now and the real-agent layer will run
+    later: what the user says, the tool calls and hook runs a deterministic agent makes,
+    and the gold the store and the answers must match. Fourteen scenarios cover learning
+    a preference, the three kinds of correction, a flip-flop, a restatement, time travel,
+    expiry, project isolation, a document, a bulk forget, read-only mode, a stored
+    instruction and a pasted log. Each gold item is its own test, and each scenario must
+    fail when memvara is switched off. Answers are compared with `phrase_in`, the
+    benchmark's whole-word rule, which `benchmarks/agent_memory/normalization.py` now
+    exports.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed

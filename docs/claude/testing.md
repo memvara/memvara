@@ -158,4 +158,70 @@ To run one point by hand, write a program and pipe it into the child. It stops a
 echo '{"db": "/tmp/s.db", "user": "u1", "setup": [], "point": "after-claim", "action": ["remember", {"predicate": "lives_in", "object": "Berlin"}]}' | PYTHONPATH=$PWD python tests/harness/crash_child.py
 ```
 
+## Scenarios and the scripted layer
+
+A scenario describes a few sessions of a user talking to an agent that has memvara, and what must be true afterwards. It is one JSON file. The same format serves two layers. The scripted layer, described here, plays a fixed script for every turn on every pull request. The real-agent layer, which comes later, sends only the user's words to a real agent and grades it against the same kind of gold.
+
+- `tests/scenarios/schema.json` defines the format. Every field has a description there.
+- `tests/scenarios/scripted/` holds the scripted scenarios, one per file, each named after its `id`.
+- `tests/adversarial/sessions/runner.py` checks, plays and grades them.
+
+The `jsonschema` package is not a dependency, so `runner.py` carries a small validator for the keywords the schema uses. It refuses a keyword it does not implement, so the schema cannot state a rule that nothing checks. A second check covers what a schema cannot express:
+
+- every gold id is unique;
+- a known bug names a gold item and a registered bug;
+- a placeholder is set by an earlier step;
+- a mark that an `expires_at` uses is at least four seconds ahead, so the steps before the expiry cannot race it on a slow machine;
+- a hook or tool a step uses is declared in `surfaces` and `requires`;
+- a `forbidden` rule names a tool memvara has, and an answer gold item checks a turn that has a tool or hook step, because otherwise the check could never fail;
+- the tier is fast, nightly or weekly, because a run that selects only the local or quarantine tier never collects the scenario tests, so a scenario in either would never run.
+
+### How a scenario plays
+
+The runner writes the `seed` through the library first. The seed stands for memory from conversations before this one. Then every session starts its own server process on the same store file, the way a client starts one per conversation, and plays its turns in order. A turn holds the user's words and a `script`: the steps a careful agent would take for that turn.
+
+| Step | What it does |
+|---|---|
+| `{"tool": "memory_…", "args": {…}}` | Calls a tool on the session's server. The call must succeed, unless the step says `"expect_error": true`. |
+| `{"hook": "session_start"}` | Runs one of the plugin's hooks against the same store, with the payload and reply shape of the `claude` host unless `host` names another one. The recall hook is given the turn's words as its prompt. |
+| `{"op": "erase", "claim_id": "…"}` | Erases a claim through the library. No tool can erase a memory, so this stands for the operator doing it. It erases that claim and nothing else: the store is opened without the expiry sweep, so it never does the server's expiry work for it. |
+| `{"mark": "name", "offset_seconds": 4}` | Records the instant now, plus the offset, under a name. |
+| `{"wait_until": "name"}` | Sleeps until that instant has passed. |
+
+A tool or hook step can `capture` part of its output with a regular expression, and a later step can use it. An argument that is exactly `{name}` is replaced by the captured text or the marked instant, and one that is exactly `{file:path}` by that workspace file's contents. Nothing else in an argument changes, so text with braces in it is safe.
+
+`env` sets how the server starts: the user, the project, the feature switches, read-only mode and the protocol version. A session can override any of them except the user with its own `env`, which is how a scenario moves the user from one project to another. The user stays the same in every session, because store gold reads every claim at the scenario's user.
+
+After the last session the store is read once more with expiry switched off, so the read neither erases an expired claim nor hides one. The store gold therefore sees exactly what the server left on disk.
+
+### What gets checked
+
+`tests/adversarial/sessions/test_adv_scenarios.py` plays each scenario once, and every test below reads that one play. When a scenario stops early, for example because a capture found nothing, each of its tests fails with the same message.
+
+| Test | Passes when |
+|---|---|
+| `test_the_file_follows_the_format[<id>]` | The file matches the schema and passes the checks the schema cannot express. |
+| `test_gold[<id>/<gold id>]` | That one gold item holds. |
+| `test_the_script_ran_as_written[<id>]` | Every step succeeded, or failed where it said `expect_error`. |
+| `test_no_forbidden_tool_was_called[<id>]` | No step called a tool the scenario forbids. |
+| `test_the_gold_fails_without_memvara[<id>]` | At least one gold item fails for an agent with no memory. |
+
+**Store gold** names a claim by its text, such as `user lives in Lisbon`, never by its id, and says which state it must be in: `live`, `ended`, `retired`, or `absent` for no claim with that text in any state. `count` asks for an exact number. `project` reads at another project than the scenario's own, or at user level when it is `null`.
+
+**Answer gold** checks the answer to one turn: the turn its `turn` names, or the last one. In the scripted layer, the answer is every memory memvara showed the agent in that turn: each tool's text and each hook's injected context, in order, leaving out any read that found nothing and the session-start hook's first line, which names the scope the store is bound to rather than any memory. `must_contain` and `must_not_contain` compare whole words and ignore case and punctuation, using `phrase_in` from `benchmarks/agent_memory/normalization.py`, which is the benchmark's own normalization and token rule. They do not apply the length ceiling or the competitor check that the benchmark's `matches_value` adds for a short answer, because memvara's replies are long by design and a history reply names every value a slot has held. `must_not_match` is a regular expression, for checks about lines, such as stored text that must not start a line of its own. `abstain` passes when the answer is empty: every tool in the turn replied that it found nothing, and no hook injected any memory.
+
+**A known bug** is attached to the one gold item it breaks, with the symptom it causes: `"known_bugs": {"<gold id>": {"bug": "B2", "symptom": {"states": ["ended"]}}}`. That item's test gets the bug's strict expected-failure marker. The test raises `known_bugs.Reproduced` only when the failure shows exactly that symptom: the same states for a store item, or the given words in the answer for an answer item. Any other failure fails the run.
+
+**The negative control** plays the scenario for an agent with no memory: no seed, no server and no hook, so every answer is empty and the store holds nothing. At least one gold item must fail then. If none does, the gold cannot tell memvara working from memvara absent.
+
+### Adding a scenario
+
+1. Write `tests/scenarios/scripted/<id>.json`. Use made-up people and data, because this repository is public.
+2. Run `pytest tests/adversarial/sessions -k <id>` and read every failure. A scenario mistake is fixed in the scenario. A failure that shows memvara doing the wrong thing is a bug, handled as "Known bugs and security findings" above describes.
+3. Keep it deterministic and offline. A scenario that needs a model, the network or the capture hook belongs to the real-agent layer.
+
+A read that finds nothing repeats its query in its reply. That reply adds nothing to the answer, so the words of a query can neither satisfy `must_contain` nor trip `must_not_contain`.
+
+Each session starts a server, which takes about 0.2 seconds on a laptop and longer on Windows. The scripted layer's budget on the fast tier is about 25 seconds, so use as few sessions as the story allows.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

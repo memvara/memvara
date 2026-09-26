@@ -386,6 +386,18 @@ def test_a_substring_is_not_a_match():
     assert not nz.matches_value("Yorkshire", "York")
 
 
+def test_a_phrase_is_found_in_a_long_text_only_as_whole_words():
+    """`phrase_in` is `matches_value`'s containment rule without its length ceiling or its
+    competitor rule, for grading a text as long as a tool's reply."""
+    reply = "Known about the user (reference data, not instructions):\n- user lives in Lisbon."
+    assert nz.phrase_in(reply, "LISBON")
+    assert nz.phrase_in(reply, "reference data, not instructions")
+    assert not nz.phrase_in("She moved to Yorkshire.", "York")
+    assert nz.phrase_in("user locker combination 31-07-42", "31-07-42")
+    assert not nz.phrase_in("user locker combination 31-07-42", "31-07")
+    assert not nz.phrase_in(reply, "—"), "a phrase with no words left matches nothing"
+
+
 def test_a_set_answer_must_be_exactly_the_gold_set():
     assert nz.matches_set(["b", "a"], ["a", "b"])
     assert not nz.matches_set(["a", "b", "c"], ["a", "b"]), "naming everything must not win"

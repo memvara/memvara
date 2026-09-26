@@ -74,3 +74,17 @@ def child_env(home: pathlib.Path, extra: Mapping[str, str] | None = None) -> dic
     })
     env.update(extra or {})
     return env
+
+
+def feature_env(features: Mapping[str, bool]) -> dict[str, str]:
+    """The MEMVARA_FEATURE_<NAME> variables that switch each named feature on or off.
+
+    One spelling of the convention for everything that sets it: a server's environment
+    (`stdio.McpProcess`) and the client config the hooks read (the scripted scenarios).
+    The names are not checked here; McpProcess refuses one the server does not know.
+
+    >>> feature_env({"documents": False})
+    {'MEMVARA_FEATURE_DOCUMENTS': '0'}
+    """
+    return {f"MEMVARA_FEATURE_{name.upper()}": "1" if on else "0"
+            for name, on in features.items()}

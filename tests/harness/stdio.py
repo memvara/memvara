@@ -21,7 +21,7 @@ from typing import Any, Iterable, Mapping, Protocol
 
 from memvara.server.config import FEATURES
 
-from .env import child_env
+from .env import child_env, feature_env
 
 #: The protocol version a client asks for when a test does not name one.
 PROTOCOL = "2025-06-18"
@@ -73,11 +73,11 @@ class McpProcess:
             if key not in _SCOPE_FIELDS:
                 raise ValueError(f"unknown scope field {key!r}; use one of {_SCOPE_FIELDS}")
             extra[f"MEMVARA_{key.upper()}"] = value
-        for name, on in (features or {}).items():
+        for name in features or {}:
             if name not in FEATURES:
                 raise ValueError(
                     f"unknown feature {name!r}; the server would refuse to start with it")
-            extra[f"MEMVARA_FEATURE_{name.upper()}"] = "1" if on else "0"
+        extra.update(feature_env(features or {}))
         if read_only:
             extra["MEMVARA_READ_ONLY"] = "1"
         extra.update(env or {})

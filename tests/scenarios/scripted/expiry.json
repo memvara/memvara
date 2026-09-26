@@ -1,0 +1,41 @@
+{
+  "id": "expiry",
+  "description": "The user shares a temporary door code and asks that it be kept only until check-out. memory_remember stores it with expires_at. Before that instant recall returns it; after it, no read returns it, even in the same session, and the next server to open the store erases it from disk.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "sessions": [
+    {"turns": [
+      {"id": "tell", "user": "The door code for the rental is 4417. Only keep it until we check out.",
+       "script": [
+         {"mark": "checkout", "offset_seconds": 4},
+         {"tool": "memory_remember", "args": {"predicate": "rental_door_code", "object": "4417", "expires_at": "{checkout}", "expire_reason": "temporary door code for the rental"}}
+       ]},
+      {"id": "before", "user": "What's the door code again?",
+       "script": [{"tool": "memory_recall", "args": {"query": "rental door code"}}]},
+      {"user": "We've checked out now.",
+       "script": [{"wait_until": "checkout"}]},
+      {"id": "same-session", "user": "What was the door code?",
+       "script": [{"tool": "memory_recall", "args": {"query": "rental door code"}}]}
+    ]},
+    {"turns": [
+      {"id": "next-session", "user": "Do you still have the rental's door code?",
+       "script": [
+         {"tool": "memory_recall", "args": {"query": "rental door code"}},
+         {"tool": "memory_history", "args": {"predicate": "rental_door_code"}}
+       ]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "erased-from-disk", "text": "user rental door code 4417", "state": "absent"}
+  ],
+  "answer_gold": [
+    {"id": "receipt-says-when", "turn": "tell", "must_contain": "this fact will be erased at"},
+    {"id": "known-before-expiry", "turn": "before", "must_contain": "4417"},
+    {"id": "hidden-after-expiry", "turn": "same-session", "abstain": true},
+    {"id": "gone-next-session", "turn": "next-session", "abstain": true},
+    {"id": "code-not-shown-again", "turn": "next-session", "must_not_contain": "4417"}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}

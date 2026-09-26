@@ -1,0 +1,46 @@
+{
+  "id": "correction-erased",
+  "description": "The user asks for a stored locker combination to be deleted outright. No tool can erase a memory, so the operator erases it through the library, with its source turns. From then on no read shows it in any state, in the same session or in the next one, and memory_why cannot find it.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "sessions": [
+    {"turns": [
+      {"user": "My gym locker combination is 31-07-42.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "locker_combination", "object": "31-07-42"}}
+       ]}
+    ]},
+    {"turns": [
+      {"user": "Delete my locker combination completely. I don't want it stored anywhere.",
+       "script": [
+         {"tool": "memory_search", "args": {"query": "locker combination"}, "capture": {"code_id": "id=(cl_[0-9a-f]+) [^\\]]*\\] user locker combination"}},
+         {"op": "erase", "claim_id": "{code_id}", "sources": true}
+       ]},
+      {"id": "same-session", "user": "Is it gone?",
+       "script": [{"tool": "memory_recall", "args": {"query": "locker combination"}}]}
+    ]},
+    {"turns": [
+      {"id": "next-session", "user": "What's my locker combination?",
+       "script": [
+         {"tool": "memory_recall", "args": {"query": "what is the user's locker combination"}},
+         {"tool": "memory_search", "args": {"query": "locker combination"}},
+         {"tool": "memory_history", "args": {"predicate": "locker_combination"}}
+       ]},
+      {"id": "why", "user": "Where did that code come from in the first place?",
+       "script": [{"tool": "memory_why", "args": {"claim_id": "{code_id}"}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "code-erased", "text": "user locker combination 31-07-42", "state": "absent"}
+  ],
+  "answer_gold": [
+    {"id": "gone-in-the-same-session", "turn": "same-session", "abstain": true},
+    {"id": "gone-in-the-next-session", "turn": "next-session", "abstain": true},
+    {"id": "code-never-shown-again", "turn": "next-session", "must_not_contain": "31-07-42"},
+    {"id": "why-finds-nothing", "turn": "why", "must_contain": "is not visible here"},
+    {"id": "why-shows-no-code", "turn": "why", "must_not_contain": "31-07-42"}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}
