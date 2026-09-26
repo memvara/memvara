@@ -92,6 +92,21 @@ def test_nan_is_refused_by_the_bounds_of_every_number_argument(
     raise known_bugs.Reproduced(f"{tool.name}.{name} accepted NaN")
 
 
+@pytest.mark.parametrize("tool", ["memory_search", "memory_recall"])
+@known_bugs.xfail("B35")
+def test_a_nan_floor_sent_over_the_pipe_is_refused(shared_server: McpProcess,
+                                                    tool: str) -> None:
+    """The validator lets NaN through, and a NaN `min_score` then acts as no floor at
+    all, so the read answers as if no floor had been given. It must be refused instead."""
+    replies = exchange(shared_server, call_line(1, tool, {"query": "tea",
+                                                          "min_score": math.nan}))
+    assert len(replies) == 1, replies
+    reply = replies[0]
+    if "result" in reply and reply["result"]["isError"] is False:
+        raise known_bugs.Reproduced(f"{tool} accepted a NaN floor: {text_of(reply)[:120]}")
+    assert "error" in reply or reply["result"]["isError"] is True, reply
+
+
 # -- B36: a refusal or a no-match reply quotes the whole argument -------------------------
 
 @known_bugs.xfail("B36")
