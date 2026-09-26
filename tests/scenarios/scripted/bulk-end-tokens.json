@@ -1,0 +1,92 @@
+{
+  "id": "bulk-end-tokens",
+  "description": "memory_end_matching closes a group of facts in two calls, and every way its confirmation token can be wrong is refused with nothing changed. A token whose listed facts changed after the preview is refused, and the next preview lists only what is still live. A token that memory_forget_matching issued is refused by memory_end_matching. A token used a second time is refused. A token that expired last month is refused; it was minted with memvara.confirm.Confirmer under this scenario's confirm_secret for an instant in August 2026, so only its expiry is wrong. The first two servers share that secret, so a preview from one session is confirmed in the next. The third server has a new secret, so a token from before the change is refused as not issued by this server. The ended facts still answer about the time before they ended. The previews name k, because a preview has no relevance floor and fills k with loose matches (see the tool's description).",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester", "confirm_secret": "scenario-confirm-secret-not-for-production"},
+  "seed": [
+    {"op": "remember", "subject": "Project Kestrel", "predicate": "status", "object": "in beta"},
+    {"op": "remember", "subject": "Project Kestrel", "predicate": "owner", "object": "Dana Whitfield"},
+    {"op": "remember", "subject": "Project Kestrel", "predicate": "beta_testers", "object": "40"},
+    {"op": "remember", "subject": "Nightjar", "predicate": "status", "object": "planning"},
+    {"op": "remember", "predicate": "lives_in", "object": "Lisbon"}
+  ],
+  "sessions": [
+    {"turns": [
+      {"id": "preview", "user": "Kestrel shipped last week, so its beta details are over. Please close them out.",
+       "script": [
+         {"mark": "while_in_beta"},
+         {"tool": "memory_end_matching", "args": {"query": "Project Kestrel", "k": 3, "reason": "Kestrel shipped"}, "capture": {"stale_token": "^confirm: (\\S+)$"}}
+       ]},
+      {"user": "Oh, and Dana has just handed Kestrel over to someone else.",
+       "script": [
+         {"tool": "memory_end", "args": {"subject": "Project Kestrel", "predicate": "owner", "reason": "Dana handed Kestrel over"}}
+       ]},
+      {"id": "stale", "user": "Right, go ahead and close the Kestrel ones.",
+       "script": [
+         {"tool": "memory_end_matching", "args": {"confirm": "{stale_token}", "reason": "Kestrel shipped"}, "expect_error": true}
+       ]},
+      {"id": "fresh-preview", "user": "OK, show me the list again.",
+       "script": [
+         {"tool": "memory_end_matching", "args": {"query": "Project Kestrel", "k": 2, "reason": "Kestrel shipped"}, "capture": {"end_token": "^confirm: (\\S+)$"}}
+       ]},
+      {"user": "And forget everything about Nightjar. There never was such a project; I misspoke.",
+       "script": [
+         {"tool": "memory_forget_matching", "args": {"query": "Nightjar", "k": 1}, "capture": {"forget_token": "^confirm: (\\S+)$"}}
+       ]}
+    ]},
+    {"turns": [
+      {"id": "confirm", "user": "Yes, close the Kestrel ones now. Hold off on Nightjar for the moment.",
+       "script": [
+         {"tool": "memory_end_matching", "args": {"confirm": "{forget_token}", "reason": "Kestrel shipped"}, "expect_error": true},
+         {"tool": "memory_end_matching", "args": {"confirm": "{end_token}", "reason": "Kestrel shipped"}}
+       ]},
+      {"id": "reused", "user": "Did that go through? Try it once more to be sure.",
+       "script": [
+         {"tool": "memory_end_matching", "args": {"confirm": "{end_token}"}, "expect_error": true}
+       ]},
+      {"id": "expired", "user": "I found an older confirm token in last month's notes. Try that one too.",
+       "script": [
+         {"tool": "memory_end_matching", "args": {"confirm": "eyJjbG9zZSI6ImVuZGVkIiwiZXhwaXJlcyI6MTc4NzIxNzAwMCwiaWRzIjpbImNsXzBmMGYwZjBmMGYwZjBmMGYwZjBmIl19.47ff12d38273c4a8871a192b62ec94369f815fff38eb88df1ef5a5f985cbf102"}, "expect_error": true}
+       ]},
+      {"id": "history", "user": "Why is Kestrel's status closed?",
+       "script": [{"tool": "memory_history", "args": {"subject": "Project Kestrel", "predicate": "status"}}]},
+      {"id": "in-beta-then", "user": "What was Kestrel's status when we started talking today?",
+       "script": [{"tool": "memory_search", "args": {"query": "Project Kestrel status", "valid_at": "{while_in_beta}"}}]}
+    ]},
+    {"env": {"confirm_secret": "rotated-scenario-secret-not-for-production"}, "turns": [
+      {"id": "rotated", "user": "OK, go ahead and forget Nightjar now.",
+       "script": [
+         {"tool": "memory_forget_matching", "args": {"confirm": "{forget_token}", "reason": "there never was a Nightjar project"}, "expect_error": true},
+         {"tool": "memory_forget_matching", "args": {"query": "Nightjar", "k": 1}, "capture": {"new_token": "^confirm: (\\S+)$"}},
+         {"tool": "memory_forget_matching", "args": {"confirm": "{new_token}", "reason": "there never was a Nightjar project"}}
+       ]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "status-ended", "text": "Project Kestrel status in beta", "state": "ended", "count": 1},
+    {"id": "status-not-retired", "text": "Project Kestrel status in beta", "state": "retired", "count": 0},
+    {"id": "testers-ended", "text": "Project Kestrel beta testers 40", "state": "ended", "count": 1},
+    {"id": "owner-ended", "text": "Project Kestrel owner Dana Whitfield", "state": "ended", "count": 1},
+    {"id": "nightjar-retired", "text": "Nightjar status planning", "state": "retired", "count": 1},
+    {"id": "home-untouched", "text": "user lives in Lisbon", "state": "live", "count": 1}
+  ],
+  "answer_gold": [
+    {"id": "preview-changes-nothing", "turn": "preview", "must_contain": "Nothing has changed yet"},
+    {"id": "preview-leaves-out-the-home", "turn": "preview", "must_not_contain": "Lisbon"},
+    {"id": "preview-leaves-out-nightjar", "turn": "preview", "must_not_contain": "Nightjar"},
+    {"id": "stale-token-refused", "turn": "stale", "must_contain": "is now ended. Nothing was changed"},
+    {"id": "stale-confirm-closed-nothing", "turn": "fresh-preview", "must_contain": "Preview: 2 live match(es)"},
+    {"id": "wrong-closure-refused", "turn": "confirm", "must_contain": "this token was issued to retire memories"},
+    {"id": "confirmed-after-a-restart", "turn": "confirm", "must_contain": "Ended 2 value(s), with the reason 'Kestrel shipped'"},
+    {"id": "reused-token-refused", "turn": "reused", "must_contain": "is now ended. Nothing was changed"},
+    {"id": "expired-token-refused", "turn": "expired", "must_contain": "this confirmation token expired at"},
+    {"id": "history-keeps-the-reason", "turn": "history", "must_contain": "ended because: Kestrel shipped"},
+    {"id": "past-still-answers", "turn": "in-beta-then", "must_contain": "Project Kestrel status in beta"},
+    {"id": "new-secret-refuses-an-old-token", "turn": "rotated", "must_contain": "was not issued by this memory server"},
+    {"id": "new-preview-retires-nightjar", "turn": "rotated", "must_contain": "Retired 1 value(s), with the reason 'there never was a Nightjar project'"}
+  ],
+  "forbidden": [{"tool": "memory_forget"}],
+  "requires": ["tools"],
+  "negative_control": true
+}

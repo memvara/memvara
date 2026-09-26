@@ -719,5 +719,9 @@ Ten scenarios cover the workflows the design lists for this workstream. Each fil
 | `correction-end-forms` | Ending one value by claim id, `replaces`, `true_until`, and an end at a future instant |
 | `correction-retire-forms` | Retiring every value of a fact at once, a third party's value, and one value of several |
 | `correction-erased-with-sources` | Erasing a claim together with the turn it came from |
+| `time-travel-three-readings` | `memory_ask`'s known_at reading, `valid_at` on recall, `memory_since`, and the refusals of `as_of` on recall and of both clocks on search |
+| `document-lifecycle` | Getting, updating in place, listing by folder and deleting a document |
+| `bulk-end-tokens` | `memory_end_matching`, and a stale, a wrong, a reused, an expired and a foreign confirmation token |
+| `graph-walk` | `memory_neighborhood`, `memory_paths` and `memory_link`, over a vocabulary whose relations the walk can follow |
 
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
