@@ -343,6 +343,11 @@ Three choices decide what the detectors see:
 
 **What the tests show.** `test_adv_soak_faults.py` runs a healthy 200-turn soak, on which no detector fails, and one 200-turn soak per injected fault, on which that fault's detector fires: predicate aliases that stop folding; reinforcement that counts a restatement but refreshes nothing, which is the bug `telemetry.py` describes; single-valued predicates declared as holding many values; a merge threshold nothing can reach; a ranking that puts salience before relevance; a gate that drops Han and kana turns as too short; a misspelt retraction; personal data that switches to unpunctuated phone numbers halfway; and a deployment with no redactor. `test_adv_soak_run.py` shows store growth failing when neither a repeated turn nor a restated fact is recognised any more. A gentler salience fault needs a longer run: at 10,000 turns, `read_w_salience=1.0` left only 427 of 1,361 probes right, while at 200 turns even a weight of 30 left every probe right, because a short run restates too little. `test_adv_soak_detectors.py` checks each detector's boundary on hand-built observations.
 
+**What it found.** Two bugs, each pinned as a strict expected failure in `test_adv_soak_known_bugs.py`:
+
+- **#332 (B50).** `add()` drops a turn repeated word for word after the value it stated has changed. A user who says "I live in Berlin.", then "I moved to Paris.", then "I live in Berlin." again stays recorded in Paris: tier 0 reads the third turn as a restatement of the first, whose claim has ended, so it reinforces nothing and extracts nothing. A like taken back and then stated again in the same words is lost the same way. The workload makes every one-off like a new word, so it never retracts the same sentence twice.
+- **#333 (B51).** A fact restated often enough to reach the salience cap outranks the fact a query asks about, although that fact has more evidence. The weekly soak found it: the relevant claim ranked first in 11,019 of 13,852 probes. The nightly soak's 10,000 turns do not restate any fact often enough to reach the cap, and every probe there ranked right. The weekly soak is pinned to B51: its salience detector failing counts as the known bug, and any other detector failing still fails the run.
+
 To run a soak by hand:
 
 ```bash
@@ -377,9 +382,9 @@ It prints a table and exits with 0 for a valid run that passes, 1 for a valid ru
 
 ### The tiers they run in
 
-- **Fast**, on every pull request: the statistics and the rules, the detectors on hand-built observations, the fault tests, a 200-turn soak through the command line, and a timing run at 40 claims with one cold process and two warm calls per series. They assert how the scripts behave and never how long anything took.
+- **Fast**, on every pull request: the statistics and the rules, the detectors on hand-built observations, the fault tests, a 200-turn soak through the command line, a timing run at 40 claims with one cold process and two warm calls per series, and the pins of the two bugs the soak found. They assert how the scripts behave and never how long anything took.
 - **Nightly** (`tests/adversarial/soak/nightly/`): the 10,000-turn soak, and the full timing run at the three sizes. An invalid timing run skips with "the performance run is invalid: " and its reasons, which the skip ledger explains.
-- **Weekly** (`tests/adversarial/soak/weekly/`): the 100,000-turn soak.
+- **Weekly** (`tests/adversarial/soak/weekly/`): the 100,000-turn soak, pinned to B51 until #333 is fixed.
 
 Measured once on a laptop that other work kept busy, which made the timing run invalid: the full timing run took 22 minutes, the 10,000-turn soak 15 seconds, and the 100,000-turn soak 8 minutes. The fast tier of this section takes about 10 seconds.
 

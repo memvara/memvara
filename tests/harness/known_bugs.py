@@ -66,6 +66,11 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B38", 315, "a lone surrogate in an object argument's key is stored"),
     KnownBug("B39", 316, "memory_recall reports ranked without include_episodes as a "
              "ValueError"),
+
+    KnownBug("B50", 332, "add() drops a turn repeated word for word after the value it "
+             "stated has changed"),
+    KnownBug("B51", 333, "a fact restated often enough to reach the salience cap outranks "
+             "the fact a query asks about"),
 )}
 
 
