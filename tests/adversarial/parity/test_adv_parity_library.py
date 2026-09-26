@@ -38,7 +38,7 @@ local one holding.
 **One difference is a known bug, and it is pinned where the program meets it.** A write
 receipt read through a hosted client leaves `accumulated`, `disputed`, `collapsed` and
 `retyped` empty where the local receipt reports what the write did (memvara/memvara#334,
-registered as B52). The program makes the four writes that fill those lists, and their
+registered as B52). The program makes the writes that fill those lists, and their
 step-by-step comparison on the hosted clients is a strict expected failure that raises
 `known_bugs.Reproduced` only when those emptied lists are the whole difference; anything
 else in the same receipt still fails the run. `test_adv_parity_known_bugs.py` pins #334
@@ -58,11 +58,12 @@ from typing import Any, Callable, Iterator
 import pytest
 
 from harness import known_bugs, stores
+from harness.fakes import fake_v1
 from harness.fakes.fake_v1 import FakeV1
 from memvara import AsyncMemvara, MemoryType
-from memvara.types import utcnow
+from memvara.types import Claim, utcnow
 
-from .compare import Raised, Run, assert_same, differences, labels, normalise
+from .compare import Raised, assert_same, differences, labels, normalise, timed
 
 UTC = timezone.utc
 
@@ -104,8 +105,9 @@ def _added(got: dict[str, Any], step: str) -> str:
     return str(got[step].added[0].id)
 
 
-def _token(got: dict[str, Any]) -> str:
-    return str(got["forget_matching.preview"].confirm)
+def _token(got: dict[str, Any], preview: str = "forget_matching.preview") -> str:
+    """The confirm token an earlier preview step returned."""
+    return str(got[preview].confirm)
 
 
 PROGRAM: tuple[Step, ...] = (
@@ -142,6 +144,9 @@ PROGRAM: tuple[Step, ...] = (
                                                           valid_from=TRIP_FROM)),
     Step("remember.refiled", lambda m, got: m.remember(
         "user", "likes", "jazz", memory_type=MemoryType.EPISODIC)),
+    # Procedural is for the user, so the store files this one as semantic and says so.
+    Step("remember.not_procedural", lambda m, got: m.remember(
+        "ci-server", "prefers", "fast builds", memory_type=MemoryType.PROCEDURAL)),
     Step("add", lambda m, got: m.add("My name is Ada.")),
     Step("remember.cited", lambda m, got: m.remember(
         "user", "speaks", "Portuguese", sources=[got["add"].episode_ids[0]])),
@@ -170,6 +175,10 @@ PROGRAM: tuple[Step, ...] = (
         "jazz", close="retired", k=1, confirm=_token(got))),
     Step("forget_matching.replayed", lambda m, got: m.forget_matching(
         "jazz", close="retired", k=1, confirm=_token(got))),
+    Step("end_matching.preview", lambda m, got: m.forget_matching(
+        "marathon", close="ended", k=1)),
+    Step("end_matching.confirm", lambda m, got: m.forget_matching(
+        "marathon", close="ended", k=1, confirm=_token(got, "end_matching.preview"))),
     Step("delete", lambda m, got: m.delete(_added(got, "remember.replacing"),
                                            reason="it was Porto")),
     Step("delete.missing", lambda m, got: m.delete(MISSING)),
@@ -264,16 +273,19 @@ def opened(name: str, loop: asyncio.AbstractEventLoop) -> Iterator[Any]:
 @pytest.fixture(scope="module")
 def played() -> dict[str, dict[str, Any]]:
     """Every client's normalised answer to every step it runs, played once per module."""
-    start = utcnow()
-    raw: dict[str, dict[str, Any]] = {}
     loop = asyncio.new_event_loop()
-    try:
+
+    def play_all() -> dict[str, dict[str, Any]]:
+        raw: dict[str, dict[str, Any]] = {}
         for name in CLIENTS:
             with opened(name, loop) as client:
                 raw[name] = play(client)
+        return raw
+
+    try:
+        raw, run = timed(play_all)
     finally:
         loop.close()
-    run = Run(start, utcnow())
     out: dict[str, dict[str, Any]] = {}
     for client, got in raw.items():
         names = labels(*got.values())
@@ -324,7 +336,8 @@ RECEIPT_GAP = ("accumulated", "disputed", "collapsed", "retyped")
 
 #: The steps whose local receipt fills one of those lists.
 RECEIPT_GAP_STEPS = frozenset({"remember.beside", "remember.disputed",
-                               "remember.same_start", "remember.refiled"})
+                               "remember.same_start", "remember.refiled",
+                               "remember.not_procedural"})
 
 
 def receipt_is_known_334(expected: Any, actual: Any) -> bool:
@@ -470,14 +483,45 @@ def test_a_missing_document_s_status_is_a_key_error_through_every_client(
         assert "docs/none" in refusal["message"], name
 
 
+def test_a_hosted_instant_stamped_seconds_off_is_a_difference(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A surface that stamps a write 35 seconds late must fail the comparison. The
+    instant is outside the run, though inside the minute of slack that text written to
+    the minute needs, so it would pass if raw instants had that slack too. The skew is
+    planted in the fake's rendering of `recorded_at`."""
+    rendered = fake_v1._memory
+
+    def skewed(claim: Claim) -> dict[str, Any]:
+        body = rendered(claim)
+        stamp = body["transaction_time"]["recorded_at"]
+        body["transaction_time"]["recorded_at"] = fake_v1._instant(
+            datetime.fromisoformat(stamp.replace("Z", "+00:00")) + timedelta(seconds=35))
+        return body
+
+    monkeypatch.setattr(fake_v1, "_memory", skewed)
+
+    def write(name: str, loop: asyncio.AbstractEventLoop) -> Any:
+        with opened(name, loop) as client:
+            return client.remember("user", "lives_in", "Berlin", valid_from=BERLIN_FROM)
+
+    loop = asyncio.new_event_loop()
+    try:
+        (local, hosted), run = timed(lambda: (write("Memvara", loop),
+                                              write("RemoteMemvara", loop)))
+    finally:
+        loop.close()
+    found = differences(as_hosted(normalise(local, labels(local), run=run)),
+                        normalise(hosted, labels(hosted), run=run))
+    assert [line.split(", found")[0] for line in found] == [
+        ".added[0].recorded_at.value: expected '<wall clock>'"], found
+
+
 @pytest.mark.parametrize("client", HOSTED)
 def test_the_hosted_end_method_closes_what_the_library_closes(client: str) -> None:
     """The hosted clients have `end()`, which sends `POST /v1/end`, as a second way to
     close a fact that stopped being true. The library closes the same two ways with
     `delete(close="ended")` and `forget(close="ended")`. Both must leave the store
     holding the same claims."""
-    start = utcnow()
-
     def end_both_ways(mem: Any, end_claim: Callable[[str], Any],
                       end_slot: Callable[[], Any]) -> list[Any]:
         """Store two facts, end one by its id and the other by its slot, and return
@@ -487,18 +531,21 @@ def test_the_hosted_end_method_closes_what_the_library_closes(client: str) -> No
         return [end_claim(taste), end_slot(), mem.get_all(states=["live", "ended", "retired"])]
 
     loop = asyncio.new_event_loop()
-    try:
+
+    def both() -> tuple[list[Any], list[Any]]:
         with opened("Memvara", loop) as local:
             expected = end_both_ways(
                 local, lambda claim_id: local.delete(claim_id, close="ended"),
                 lambda: local.forget("user", "works_at", close="ended", at=LEFT_ACME))
         with opened(client, loop) as hosted:
-            actual = end_both_ways(
+            return expected, end_both_ways(
                 hosted, lambda claim_id: hosted.end(claim_id=claim_id),
                 lambda: hosted.end(predicate="works_at", at=LEFT_ACME))
+
+    try:
+        (expected, actual), run = timed(both)
     finally:
         loop.close()
-    run = Run(start, utcnow())
     # `forget` returns the claims it closed, and `end` returns only whether it closed any.
     expected[1] = bool(expected[1])
     assert_same(as_hosted(normalise(expected, labels(expected), run=run)),

@@ -18,18 +18,17 @@ from typing import Any
 import pytest
 
 from harness import known_bugs, stores
-from harness.env import REPO, child_env
+from harness.env import REPO
 from harness.fakes.fake_v1 import FakeV1, _receipt
-from harness.stdio import McpProcess, kill_all
 from memvara import Memvara, MemoryType
 from memvara.core import ScopedMemvara
 from memvara.remote import hydrate
 from memvara.remote.api import RemoteMemvara, ScopedRemoteMemvara
-from memvara.types import WriteReceipt, utcnow
+from memvara.types import WriteReceipt
 
-from .compare import Run, assert_same, labels, normalise, normalise_text, text_labels
+from .compare import assert_same, labels, normalise, normalise_text, text_labels, timed
 from .test_adv_parity_library import RECEIPT_GAP
-from .test_adv_parity_mcp import InProcessServer, reply_is_known_334
+from .test_adv_parity_mcp import reply_is_known_334, serving
 
 #: The instant both values of the collapsing pair begin at.
 SAME_START = datetime(2025, 6, 1, tzinfo=timezone.utc)
@@ -59,19 +58,22 @@ def _four_writes(mem: Any) -> tuple[list[Any], dict[str, Any]]:
 def receipts() -> dict[str, tuple[Any, Any]]:
     """For each list, as the local library's receipt fills it and as the hosted client's
     receipt fills it, each normalised."""
-    start = utcnow()
-    local = stores.memory(user="alice")
-    try:
-        mine, mine_by_list = _four_writes(local)
-    finally:
-        local.close()
-    with FakeV1() as fake:
-        remote = fake.remote(user="alice")
+    Written = tuple[list[Any], dict[str, Any]]
+
+    def write_both() -> tuple[Written, Written]:
+        local = stores.memory(user="alice")
         try:
-            theirs, theirs_by_list = _four_writes(remote)
+            mine = _four_writes(local)
         finally:
-            remote.close()
-    run = Run(start, utcnow())
+            local.close()
+        with FakeV1() as fake:
+            remote = fake.remote(user="alice")
+            try:
+                return mine, _four_writes(remote)
+            finally:
+                remote.close()
+
+    ((mine, mine_by_list), (theirs, theirs_by_list)), run = timed(write_both)
     mine_names, theirs_names = labels(*mine), labels(*theirs)
     return {kind: (normalise(getattr(mine_by_list[kind], kind), mine_names, run=run),
                    normalise(getattr(theirs_by_list[kind], kind), theirs_names, run=run))
@@ -125,34 +127,18 @@ def _write_all(server: Any) -> dict[str, str]:
 def notes(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[list[str], list[str]]]:
     """For each list, the lines of the reply to the write that fills it, from a local
     server and from a server in cloud mode, each normalised."""
-    root = tmp_path_factory.mktemp("parity-notes")
-    home = root / "home"
-    home.mkdir()
-    start = utcnow()
-    replies: dict[str, dict[str, str]] = {}
-    started: list[Any] = []
-    try:
-        local = InProcessServer(child_env(home, {"MEMVARA_DB": str(root / "local.db"),
-                                                 "MEMVARA_USER": "alice"}))
-        started.append(local)
-        replies["local"] = _write_all(local)
-        with FakeV1() as fake:
-            cloud = McpProcess(root / "unused.db", home=home, user="alice",
-                               env={"MEMVARA_MODE": "cloud",
-                                    "MEMVARA_API_KEY": fake.api_key,
-                                    "MEMVARA_SERVER_URL": fake.serve()})
-            started.append(cloud)
-            replies["cloud"] = _write_all(cloud)
-            cloud.kill()
-    finally:
-        kill_all(started)
-    run = Run(start, utcnow())
+    def write_both() -> dict[str, dict[str, str]]:
+        with serving(tmp_path_factory.mktemp("parity-notes"),
+                     ("in-process", "stdio cloud")) as servers:
+            return {surface: _write_all(server) for surface, server in servers.items()}
+
+    replies, run = timed(write_both)
     lines: dict[str, dict[str, list[str]]] = {}
     for surface, texts in replies.items():
         names = text_labels(list(texts.values()))
         lines[surface] = {kind: normalise_text(text, names, run=run).split("\n")
                           for kind, text in texts.items()}
-    return {kind: (lines["local"][kind], lines["cloud"][kind]) for kind in NOTES}
+    return {kind: (lines["in-process"][kind], lines["stdio cloud"][kind]) for kind in NOTES}
 
 
 @pytest.mark.parametrize("kind", sorted(NOTES))
@@ -207,11 +193,22 @@ def _one_sided() -> set[str]:
     return set().union(*(_public(one) ^ _public(other) for one, other in pairs))
 
 
-def _named_in_the_hosted_section() -> set[str]:
-    """Every method docs/API.md names, as `name()`, in its section on a hosted deployment."""
-    text = (REPO / "docs" / "API.md").read_text(encoding="utf-8")
-    section = text.split("### A hosted deployment", 1)[1].split("\n### ", 1)[0]
+def _named_in_the_hosted_section(text: str | None = None) -> set[str]:
+    """Every method docs/API.md names, as `name()`, in its section on a hosted deployment.
+    `text` stands in for the file, for a test of how the section is found."""
+    if text is None:
+        text = (REPO / "docs" / "API.md").read_text(encoding="utf-8")
+    after = text.split("### A hosted deployment", 1)[1]
+    # The section ends at the next heading of its own level or a higher one; a level-four
+    # heading is part of it.
+    section = re.split(r"\n#{1,3} ", after, maxsplit=1)[0]
     return set(re.findall(r"`(\w+)\(\)`", section))
+
+
+def test_the_hosted_section_ends_at_the_next_heading_of_its_level_or_higher() -> None:
+    text = ("# API\n### A hosted deployment\n`one()`\n#### In depth\n`two()`\n"
+            "## Something else\n`three()`\n### And more\n`four()`\n")
+    assert _named_in_the_hosted_section(text) == {"one", "two"}
 
 
 @known_bugs.xfail("B54")

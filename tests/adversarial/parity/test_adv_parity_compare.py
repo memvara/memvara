@@ -17,8 +17,9 @@ import pytest
 from memvara.confirm import CONFIRM_TTL
 from memvara.core import PROFILE_WINDOW
 from memvara.types import (CLOSURE, Claim, Document, Episode, ForgetPreview, ForgetResult,
-                           MemoryType, WriteReceipt)
+                           MemoryType, WriteReceipt, utcnow)
 
+from . import compare
 from .compare import (PROFILE_STARTS, TOKEN_EXPIRES, WALL_CLOCK, Raised, Run, differences,
                       labels, normalise, normalise_text, text_labels)
 
@@ -71,10 +72,24 @@ def test_an_id_nobody_labelled_is_marked_rather_than_kept() -> None:
 
 
 def test_an_instant_taken_from_the_clock_during_the_run_is_replaced() -> None:
-    """The tools write an instant to the minute, rounding down, so a minute before the
-    run still counts."""
-    for inside in (NOW, NOW + timedelta(seconds=2), NOW - timedelta(seconds=59)):
+    for inside in (NOW, NOW + timedelta(seconds=1), RUN.end):
         assert normalise(inside, {}, run=RUN) == _at(WALL_CLOCK)
+
+
+def test_an_instant_seconds_outside_the_run_is_kept() -> None:
+    """A store reads its clock during the run, so an instant 35 seconds before or after
+    the run is a surface stamping the wrong time. It must fail, although 35 seconds is
+    inside the minute of slack that text written to the minute needs."""
+    for away in (NOW - timedelta(seconds=35), RUN.end + timedelta(seconds=35),
+                 NOW - timedelta(milliseconds=50)):
+        assert normalise(away, {}, run=RUN) == _at(away.isoformat())
+
+
+def test_text_written_to_the_minute_keeps_a_minute_of_slack() -> None:
+    """The tools write an instant to the minute, rounding down, so a stamp a minute
+    before the run is still a reading taken during it."""
+    assert normalise_text("recorded 2026-09-26 11:59Z", {}, run=RUN) == (
+        f"recorded {WALL_CLOCK}")
 
 
 def test_the_token_s_expiry_and_the_profile_s_start_have_markers_of_their_own() -> None:
@@ -84,12 +99,70 @@ def test_the_token_s_expiry_and_the_profile_s_start_have_markers_of_their_own() 
         PROFILE_STARTS)
 
 
+def test_a_token_s_expiry_may_fall_short_by_the_second_it_is_rounded_down_to() -> None:
+    """`memvara.confirm` keeps a token's expiry in whole seconds, so a preview made half
+    a second into a run expires half a second before the run's start plus the token's
+    lifetime."""
+    late = Run(NOW + timedelta(milliseconds=500), NOW + timedelta(seconds=2))
+    expiry = (late.start + timedelta(milliseconds=100) + CONFIRM_TTL).replace(microsecond=0)
+    assert expiry < late.start + CONFIRM_TTL
+    assert normalise(expiry, {}, run=late) == _at(TOKEN_EXPIRES)
+
+
 def test_an_instant_off_by_any_other_amount_is_kept() -> None:
     """So a surface that stamps a retirement five hours early, or lets a confirm token
     live two days longer than the library does, fails the comparison."""
     for away in (NOW - timedelta(hours=5), NOW + CONFIRM_TTL + timedelta(days=2),
                  NOW - timedelta(minutes=2), THEN):
         assert normalise(away, {}, run=RUN) == _at(away.isoformat())
+
+
+def test_a_run_long_enough_to_confuse_two_markers_is_refused() -> None:
+    """A clock reading and a token's expiry are ten minutes apart. With a minute of slack
+    either side for text, a run of about eight minutes lets one instant match both, and
+    the comparison could no longer tell them apart, so such a run is refused."""
+    Run(NOW, NOW + timedelta(minutes=7))
+    with pytest.raises(ValueError, match="too long"):
+        Run(NOW, NOW + timedelta(minutes=8))
+
+
+def test_a_run_that_ends_before_it_starts_is_refused() -> None:
+    with pytest.raises(ValueError, match="ends before it starts"):
+        Run(NOW, NOW - timedelta(seconds=1))
+
+
+def test_timed_returns_what_the_work_returned_and_the_run_around_it() -> None:
+    before = utcnow()
+    result, run = compare.timed(utcnow)
+    after = utcnow()
+    assert before <= run.start <= result <= run.end <= after
+
+
+def test_two_nans_are_equal_and_a_nan_against_a_number_is_a_difference() -> None:
+    nan = float("nan")
+    assert differences(nan, nan) == []
+    assert differences({"score": [nan]}, {"score": [nan]}) == []
+    assert differences(nan, 0.5) == [": expected nan, found 0.5"]
+    assert differences(0.5, nan) == [": expected 0.5, found nan"]
+
+
+class _Once(list[Any]):
+    """A list that can be walked only once, as a stream of results can."""
+
+    walked = False
+
+    def __iter__(self) -> Any:
+        if self.walked:
+            raise AssertionError("walked twice")
+        self.walked = True
+        return super().__iter__()
+
+
+def test_labels_walks_the_results_once() -> None:
+    claim = _claim("Lisbon")
+    names = labels(_Once([claim, "ep_0123456789abcdef0123"]))
+    assert names == {claim.id: "<claim user lives_in Lisbon>",
+                     "ep_0123456789abcdef0123": "<ep 1>"}
 
 
 def test_an_instant_and_the_same_instant_as_text_are_a_difference() -> None:

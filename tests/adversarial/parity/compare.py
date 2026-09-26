@@ -19,13 +19,16 @@ import enum
 import math
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping, TypeVar
 
+from harness.clock import within
 from memvara.confirm import CONFIRM_TTL
 from memvara.core import PROFILE_WINDOW
 from memvara.types import (CLOSURE, ENTITY_REKEY, LAST_OBSERVED, OBJECT_ENTITY,
                            SALIENCE_BASE, SUBJECT_ENTITY, Claim, Document, Episode,
-                           ForgetPreview, ForgetResult, WriteReceipt)
+                           ForgetPreview, ForgetResult, WriteReceipt, utcnow)
+
+T = TypeVar("T")
 
 #: An id the store mints: a claim, a stored turn or a document, then 20 hex digits.
 IDS = re.compile(r"\b(?:cl|ep|doc)_[0-9a-f]{20}\b")
@@ -46,18 +49,25 @@ TOKEN_EXPIRES = "<wall clock + the confirm token's lifetime>"
 #: minus `memvara.core.PROFILE_WINDOW`.
 PROFILE_STARTS = "<wall clock - the profile window>"
 
-#: The instants a store derives from its clock, as an offset from the moment it read the
-#: clock, and the marker each one is replaced with. An instant at any other distance from
-#: the run is compared as it is, so a surface that is off by hours or days fails.
-CLOCK_MARKERS: tuple[tuple[timedelta, str], ...] = (
-    (timedelta(0), WALL_CLOCK),
-    (CONFIRM_TTL, TOKEN_EXPIRES),
-    (-PROFILE_WINDOW, PROFILE_STARTS),
+#: The instants a store derives from its clock: the offset from the moment it read the
+#: clock, the marker each one is replaced with, and how far the store may round it down.
+#: `memvara.confirm` keeps a token's expiry in whole seconds. An instant at any other
+#: distance from the run is compared as it is, so a surface that is off fails.
+CLOCK_MARKERS: tuple[tuple[timedelta, str, timedelta], ...] = (
+    (timedelta(0), WALL_CLOCK, timedelta(0)),
+    (CONFIRM_TTL, TOKEN_EXPIRES, timedelta(seconds=1)),
+    (-PROFILE_WINDOW, PROFILE_STARTS, timedelta(0)),
 )
 
-#: How far outside the run such an instant may fall. The tools write an instant to the
-#: minute, rounding down, so a minute is the least that covers what they print.
-SLACK = timedelta(minutes=1)
+#: How far outside the run an instant a surface returns as a `datetime` may fall: the few
+#: milliseconds by which two readings of the clock, or a round trip through epoch seconds,
+#: can differ. A store reads its clock during the run, so anything further off is a
+#: surface stamping the wrong time.
+RESOLUTION = timedelta(milliseconds=5)
+
+#: How far outside the run an instant written in a tool's reply may fall. The tools write
+#: an instant to the minute, rounding down, so a minute is the least that covers it.
+TEXT_SLACK = timedelta(minutes=1)
 
 #: Two floats closer than this count as equal. A search score depends on how long before
 #: the search each fact began or was last restated (`Claim.trace_from`), so the same
@@ -68,10 +78,36 @@ TOLERANCE = 1e-6
 @dataclasses.dataclass(frozen=True)
 class Run:
     """When a program ran, from a moment before its first call to a moment after its
-    last. Every instant a store takes from its clock during the program is inside it."""
+    last. Every instant a store takes from its clock during the program is inside it.
+
+    A run that ends before it starts is refused, and so is one long enough that two
+    markers' windows in `CLOCK_MARKERS` overlap, because an instant in both could then
+    be replaced with either and a difference between two surfaces would go unseen. Text
+    has the widest windows, so they are the ones checked; a run shorter than about eight
+    minutes is accepted.
+    """
 
     start: datetime
     end: datetime
+
+    def __post_init__(self) -> None:
+        if self.end < self.start:
+            raise ValueError(f"a run that ends before it starts: {self.start} to {self.end}")
+        windows = sorted(_window(self, offset, rounding, TEXT_SLACK) + (marker,)
+                         for offset, marker, rounding in CLOCK_MARKERS)
+        for (_low, high, one), (low, _high, other) in zip(windows, windows[1:]):
+            if high >= low:
+                raise ValueError(
+                    f"a run that took {self.end - self.start} is too long: an instant could "
+                    f"be both {one} and {other}. Compare a shorter run.")
+
+
+def timed(work: Callable[[], T]) -> tuple[T, Run]:
+    """Call `work`, and return what it returned and the run it took: from a moment before
+    its first call to a moment after its last."""
+    start = utcnow()
+    result = work()
+    return result, Run(start, utcnow())
 
 
 @dataclasses.dataclass(frozen=True)
@@ -118,6 +154,9 @@ def labels(*results: Any) -> dict[str, str]:
     True
     """
     found: dict[str, str] = {}
+    # One walk. The strings are kept until it ends, because an object met later in the
+    # walk can name an id that a string cited earlier.
+    texts: list[str] = []
     for value in _every(results):
         if isinstance(value, Claim):
             _name(found, value.id, f"<claim {value.subject} {value.predicate} {value.object}>")
@@ -125,7 +164,9 @@ def labels(*results: Any) -> dict[str, str]:
             _name(found, value.id, f"<turn {value.content}>")
         elif isinstance(value, Document):
             _name(found, value.id, f"<document {value.custom_id or value.title}>")
-    _number_the_rest(found, (value for value in _every(results) if isinstance(value, str)))
+        elif isinstance(value, str):
+            texts.append(value)
+    _number_the_rest(found, texts)
     return found
 
 
@@ -149,10 +190,17 @@ def _number_the_rest(found: dict[str, str], texts: Iterable[str]) -> None:
                 found[match.group(0)] = f"<{kind} {counts[kind]}>"
 
 
-def _marker(value: datetime, run: Run) -> str | None:
-    """The marker for an instant a store took from its clock during `run`, or None."""
-    for offset, marker in CLOCK_MARKERS:
-        if run.start + offset - SLACK <= value <= run.end + offset + SLACK:
+def _window(run: Run, offset: timedelta, rounding: timedelta,
+            slack: timedelta) -> tuple[datetime, datetime]:
+    """Where an instant derived from a reading of the clock during `run` can fall."""
+    return run.start + offset - rounding - slack, run.end + offset + slack
+
+
+def _marker(value: datetime, run: Run, slack: timedelta) -> str | None:
+    """The marker for an instant a store derived from its clock during `run`, allowing
+    `slack` either side, or None."""
+    for offset, marker, rounding in CLOCK_MARKERS:
+        if within(value, *_window(run, offset, rounding, slack)):
             return marker
     return None
 
@@ -163,9 +211,10 @@ def normalise(value: Any, names: Mapping[str, str], *, run: Run) -> Any:
     `names` labels ids (see `labels`), and an id it does not know becomes
     `<unlabelled id>`. An instant becomes `{"__type__": "datetime", "value": ...}`, whose
     value is one of the markers in `CLOCK_MARKERS` when a store took it from its clock
-    during `run`, and the instant in ISO 8601 otherwise. An enum becomes its class name
-    and its value, and a dataclass keeps every field under its name, plus `__type__` for
-    its class. So a value of one type never equals a value of another.
+    during `run`, within `RESOLUTION`, and the instant in ISO 8601 otherwise. An enum
+    becomes its class name and its value, and a dataclass keeps every field under its
+    name, plus `__type__` for its class. So a value of one type never equals a value of
+    another.
 
     Five things are changed further, and each for a reason that holds on every surface:
 
@@ -193,7 +242,8 @@ def normalise(value: Any, names: Mapping[str, str], *, run: Run) -> Any:
     if isinstance(value, str):
         return IDS.sub(lambda found: names.get(found.group(0), "<unlabelled id>"), value)
     if isinstance(value, datetime):
-        return {"__type__": "datetime", "value": _marker(value, run) or value.isoformat()}
+        return {"__type__": "datetime",
+                "value": _marker(value, run, RESOLUTION) or value.isoformat()}
     if isinstance(value, Claim):
         return _claim(value, names, run)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
@@ -249,7 +299,7 @@ def differences(expected: Any, actual: Any, path: str = "") -> list[str]:
     """Every place where `actual` differs from `expected`, one line for each.
 
     A line names the path to the value, such as `.added[0].object_kind`, and both values.
-    Two floats within `TOLERANCE` of each other are equal.
+    Two floats within `TOLERANCE` of each other are equal, and so are two NaNs.
 
     >>> differences({"a": [1, 2.0], "b": "x"}, {"a": [1, 2.0000001], "c": "x"})
     [".b: only in the expected answer, 'x'", ".c: only in the actual answer, 'x'"]
@@ -273,8 +323,11 @@ def differences(expected: Any, actual: Any, path: str = "") -> list[str]:
         for index, (one, other) in enumerate(zip(expected, actual)):
             out += differences(one, other, f"{path}[{index}]")
         return out
-    if (isinstance(expected, float) and isinstance(actual, float)
-            and math.isclose(expected, actual, rel_tol=0.0, abs_tol=TOLERANCE)):
+    if isinstance(expected, float) and isinstance(actual, float) and (
+            math.isnan(expected) and math.isnan(actual)
+            or math.isclose(expected, actual, rel_tol=0.0, abs_tol=TOLERANCE)):
+        # Two NaNs are the same answer, although NaN never equals itself. NaN against a
+        # number fails `isclose` and is reported below.
         return []
     if expected != actual or type(expected) is not type(actual):
         return [f"{path}: expected {_short(expected)}, found {_short(actual)}"]
@@ -295,7 +348,7 @@ def assert_same(expected: Any, actual: Any, what: str) -> None:
 # -- the text an MCP tool returns ------------------------------------------------------
 
 #: A write receipt's line for a claim it added: `+ [<id>] <the claim's text>`.
-_ADDED = re.compile(r"^\+ \[(cl_[0-9a-f]{20})\] (.*)$", re.MULTILINE)
+ADDED = re.compile(r"^\+ \[(cl_[0-9a-f]{20})\] (.*)$", re.MULTILINE)
 
 #: An instant as the tools write one: to the minute, as `_stamp` does, or in ISO 8601
 #: with whole seconds or the six decimal places `datetime.isoformat` writes.
@@ -320,7 +373,7 @@ def text_labels(texts: list[str]) -> dict[str, str]:
     """
     names: dict[str, str] = {}
     for text in texts:
-        for found in _ADDED.finditer(text):
+        for found in ADDED.finditer(text):
             _name(names, found.group(1), f"<{found.group(2)}>")
     _number_the_rest(names, texts)
     return names
@@ -329,6 +382,8 @@ def text_labels(texts: list[str]) -> dict[str, str]:
 def normalise_text(text: str, names: Mapping[str, str], *, run: Run) -> str:
     """A tool's reply with ids labelled, the confirm token replaced, and every instant a
     store took from its clock during `run` replaced with its marker from `CLOCK_MARKERS`.
+    The tools write an instant to the minute, rounding down, so here an instant may fall
+    `TEXT_SLACK` outside the run.
 
     >>> from datetime import datetime, timezone
     >>> now = datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
@@ -342,7 +397,7 @@ def normalise_text(text: str, names: Mapping[str, str], *, run: Run) -> str:
             when = datetime.strptime(raw, "%Y-%m-%d %H:%MZ").replace(tzinfo=timezone.utc)
         else:
             when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return _marker(when, run) or raw
+        return _marker(when, run, TEXT_SLACK) or raw
 
     text = _TOKEN.sub(r"\1<token>", text)
     text = IDS.sub(lambda found: names.get(found.group(0), "<unlabelled id>"), text)

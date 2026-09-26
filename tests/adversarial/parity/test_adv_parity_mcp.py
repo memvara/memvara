@@ -28,20 +28,23 @@ difference is real:
 **One difference is a known bug, and it is pinned where the session meets it.** A write
 receipt read through the hosted client drops four lists the local receipt reports, so in
 cloud mode `memory_remember` leaves out the notes about a value added beside live ones, a
-weaker value kept beside a stronger one, a value closed at the instant it began, and a
-fact re-filed under another memory type (memvara/memvara#334, registered as B52). The
-session makes the four writes that produce those notes, and their comparison in cloud
-mode is a strict expected failure that raises `known_bugs.Reproduced` only when the
-missing notes are the whole difference; any other line that differs still fails the run.
+weaker value kept beside a stronger one, a value closed at the instant it began, a fact
+re-filed under a memory type the caller asserted, and `procedural` refused for a subject
+other than the user (memvara/memvara#334, registered as B52). The session makes the
+writes that produce those notes, and their comparison in cloud mode is a strict expected
+failure that raises `known_bugs.Reproduced` only when the missing notes are the whole
+difference; any other line that differs still fails the run.
 """
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
+import pathlib
 import re
 from datetime import timedelta
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import pytest
 
@@ -53,7 +56,7 @@ from memvara.server.config import ServerConfig, build_memvara
 from memvara.server.mcp import MemvaraMCPServer
 from memvara.types import utcnow
 
-from .compare import Run, assert_same, normalise_text, text_labels
+from .compare import ADDED, assert_same, normalise_text, text_labels, timed
 
 SURFACES = ("in-process", "stdio local", "stdio cloud")
 QUESTION = "where does the user live"
@@ -131,7 +134,7 @@ NO_TOKEN = "no-token-in-the-preview"
 
 def _claim(got: dict[str, str], step: str) -> str:
     """The id of the claim a write step added, from its receipt's `+ [<id>]` line."""
-    found = re.search(r"^\+ \[(cl_[0-9a-f]{20})\]", got.get(step, ""), re.MULTILINE)
+    found = ADDED.search(got.get(step, ""))
     return found.group(1) if found else NO_CLAIM
 
 
@@ -141,10 +144,9 @@ def _turn(got: dict[str, str]) -> str:
     return found.group(1) if found else NO_TURN
 
 
-def _token(got: dict[str, str]) -> str:
-    """The confirm token a preview ends with."""
-    found = re.search(r"^confirm: (\S+)$", got.get("forget_matching.preview", ""),
-                      re.MULTILINE)
+def _token(got: dict[str, str], preview: str = "forget_matching.preview") -> str:
+    """The confirm token the reply to an earlier preview step ends with."""
+    found = re.search(r"^confirm: (\S+)$", got.get(preview, ""), re.MULTILINE)
     return found.group(1) if found else NO_TOKEN
 
 
@@ -186,6 +188,10 @@ SESSION: tuple[Call, ...] = (
          _fact("job_title", "manager", true_since="2025-06-01T00:00:00Z")),
     Call("remember.refiled", "memory_remember",
          _fact("likes", "jazz", memory_type="episodic")),
+    # Procedural is for the user, so the store files this one as semantic and says so.
+    Call("remember.not_procedural", "memory_remember",
+         {"subject": "ci-server", "predicate": "prefers", "object": "fast builds",
+          "memory_type": "procedural"}),
     Call("add", "memory_add", {"text": "My name is Ada."}),
     Call("remember.cited", "memory_remember",
          lambda got: _fact("speaks", "Portuguese", sources=[_turn(got)])),
@@ -210,6 +216,9 @@ SESSION: tuple[Call, ...] = (
          lambda got: {"confirm": _token(got), "k": 1}),
     Call("forget_matching.replayed", "memory_forget_matching",
          lambda got: {"confirm": _token(got), "k": 1}),
+    Call("end_matching.preview", "memory_end_matching", {"query": "marathon", "k": 1}),
+    Call("end_matching.confirm", "memory_end_matching",
+         lambda got: {"confirm": _token(got, "end_matching.preview"), "k": 1}),
     Call("forget.claim", "memory_forget",
          lambda got: {"claim_id": _claim(got, "remember.replacing"),
                       "reason": "it was Porto"}),
@@ -257,36 +266,48 @@ def converse(server: Any) -> tuple[dict[str, Any], dict[str, tuple[bool, str]]]:
     return handshake, replies
 
 
+@contextlib.contextmanager
+def serving(root: pathlib.Path,
+            surfaces: Sequence[str] = SURFACES) -> Iterator[dict[str, Any]]:
+    """The named surfaces, by name, each over a store of its own under `root`, and all
+    stopped when the block ends.
+
+    The in-process server and the local stdio server open a store file each. The cloud
+    server talks to a `FakeV1` of its own on 127.0.0.1, and every server is stopped
+    before that fake closes, so nothing the fake sends meets a closed server.
+    """
+    home = root / "home"
+    home.mkdir()
+    started: list[Any] = []
+    with FakeV1() as fake:
+        try:
+            for surface in surfaces:
+                if surface == "in-process":
+                    server: Any = InProcessServer(child_env(home, {
+                        "MEMVARA_DB": str(root / "in-process.db"), "MEMVARA_USER": "alice"}))
+                elif surface == "stdio local":
+                    server = McpProcess(root / "stdio-local.db", home=home, user="alice")
+                else:
+                    # MEMVARA_DB is set by McpProcess and ignored in cloud mode, which
+                    # makes no file.
+                    server = McpProcess(root / "unused.db", home=home, user="alice",
+                                        env={"MEMVARA_MODE": "cloud",
+                                             "MEMVARA_API_KEY": fake.api_key,
+                                             "MEMVARA_SERVER_URL": fake.serve()})
+                started.append(server)
+            yield dict(zip(surfaces, started))
+        finally:
+            kill_all(started)
+
+
 @pytest.fixture(scope="module")
 def played(tmp_path_factory: pytest.TempPathFactory) -> Played:
     """Every surface's answers to the session, each surface over a store of its own."""
-    root = tmp_path_factory.mktemp("parity-mcp")
-    home = root / "home"
-    home.mkdir()
-    start = utcnow()
-    raw: dict[str, tuple[dict[str, Any], dict[str, tuple[bool, str]]]] = {}
-    started: list[Any] = []
-    try:
-        server = InProcessServer(child_env(home, {"MEMVARA_DB": str(root / "in-process.db"),
-                                                  "MEMVARA_USER": "alice"}))
-        started.append(server)
-        raw["in-process"] = converse(server)
-        local = McpProcess(root / "stdio-local.db", home=home, user="alice")
-        started.append(local)
-        raw["stdio local"] = converse(local)
-        with FakeV1() as fake:
-            # MEMVARA_DB is set by McpProcess and ignored in cloud mode; no file is made.
-            cloud = McpProcess(root / "unused.db", home=home, user="alice",
-                               env={"MEMVARA_MODE": "cloud",
-                                    "MEMVARA_API_KEY": fake.api_key,
-                                    "MEMVARA_SERVER_URL": fake.serve()})
-            started.append(cloud)
-            raw["stdio cloud"] = converse(cloud)
-            # Stopped before the fake closes, so nothing it sends meets a closed server.
-            cloud.kill()
-    finally:
-        kill_all(started)
-    run = Run(start, utcnow())
+    def play_all() -> dict[str, tuple[dict[str, Any], dict[str, tuple[bool, str]]]]:
+        with serving(tmp_path_factory.mktemp("parity-mcp")) as servers:
+            return {surface: converse(server) for surface, server in servers.items()}
+
+    raw, run = timed(play_all)
     replies: dict[str, dict[str, tuple[bool, str]]] = {}
     for surface, (_handshake, texts) in raw.items():
         names = text_labels([text for _error, text in texts.values()])
@@ -375,7 +396,7 @@ MISSING_NOTES = re.compile(
 
 #: The steps whose local reply carries one of those notes.
 NOTE_STEPS = frozenset({"remember.beside", "remember.disputed", "remember.same_start",
-                        "remember.refiled"})
+                        "remember.refiled", "remember.not_procedural"})
 
 
 def reply_is_known_334(local: list[str], cloud: list[str]) -> bool:
@@ -407,6 +428,17 @@ def _compared() -> Iterator[Any]:
                                marks=[known_bugs.xfail("B52")] if known else [])
 
 
+# Every tool the session calls, whose reply this test compares on all three surfaces, and
+# the three variables a cloud-mode server reads to reach the fake: if any were ignored,
+# the cloud replies would differ. `test_the_session_calls_every_tool_it_claims_to_cover`
+# keeps the tool list honest.
+@pytest.mark.covers(
+    "tool:memory_remember", "tool:memory_add", "tool:memory_search", "tool:memory_recall",
+    "tool:memory_history", "tool:memory_why", "tool:memory_stats", "tool:memory_standing",
+    "tool:memory_profile", "tool:memory_forget_matching", "tool:memory_end_matching",
+    "tool:memory_forget", "tool:memory_end", "tool:memory_add_document",
+    "tool:memory_get_document", "tool:memory_list_documents", "tool:memory_delete_document",
+    "env:MEMVARA_MODE", "env:MEMVARA_API_KEY", "env:MEMVARA_SERVER_URL")
 @pytest.mark.parametrize(("step", "surface"), list(_compared()))
 def test_every_surface_writes_what_the_in_process_server_writes(
         played: Played, step: str, surface: str) -> None:
@@ -421,6 +453,17 @@ def test_every_surface_writes_what_the_in_process_server_writes(
         raise known_bugs.Reproduced(f"B52: cloud mode's {step} leaves out {missing}")
     assert_same({"error": error, "lines": local}, {"error": actual_error, "lines": cloud},
                 f"{step} through {surface}")
+
+
+def test_the_session_calls_every_tool_it_claims_to_cover() -> None:
+    """The checklist reads the covers mark above from this file's source, without
+    running anything, so the mark could outlive a change to `SESSION`. The tools it
+    names must be exactly the tools the session calls."""
+    marks = getattr(test_every_surface_writes_what_the_in_process_server_writes,
+                    "pytestmark")
+    declared = {item.split(":", 1)[1] for mark in marks if mark.name == "covers"
+                for item in mark.args if item.startswith("tool:")}
+    assert declared == {call.tool for call in SESSION}
 
 
 @pytest.mark.parametrize("line", LOCAL_LINES, ids=lambda line: line.start.strip(" ("))
