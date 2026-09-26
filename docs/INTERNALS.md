@@ -500,6 +500,43 @@ claim:
    on the base, not on `salience`: the nightly pass recomputes `salience` from the
    base, so writing it there was erased once a claim aged past `0.415 * half_life`
    — 2.9 days for a FAST predicate, and permanently, since age only grows.
+
+   **A repeat that begins earlier is not a duplicate.** When every live claim with the
+   same `value_key` that the writer can see begins after the candidate does (`_is_after`,
+   so the precision of a resolved expression counts), the candidate carries a start the
+   store does not have. It is inserted for the earlier period only, and the action is
+   `add`. Nothing is reinforced and the live claims are not touched, so a read at a
+   `known_at` before this write returns what it did. Moving the stored claim's
+   `valid_from` back instead would change that read. A single-valued slot already treats
+   a different value that began before the live one this way. A repeat that names an
+   `expires_at` stays a duplicate, so the expiry lands on the claim on record; see *A
+   repeat with an expiry stays in its own scope*.
+
+   The earlier period ends where the value's stored claims begin (`_earlier_period`):
+   the earliest of those live claims, or an earlier claim of the value that runs up to
+   it without a gap, such as the claim a previous restatement stored for its own earlier
+   period. A `valid_to` the caller gave that is earlier still wins. When one claim of the
+   value that the store believes and the writer can see already holds the whole period,
+   from the candidate's start to that end, the candidate says nothing new: it is a
+   duplicate of that claim, which is reinforced, and nothing is inserted. The claim for
+   an earlier period is already over, so the live duplicate check above cannot find it,
+   and without this the same restatement made twice stored its period twice. So with
+   tea stored from April, restating it from January stores January to April; restating
+   it from January or February again reinforces that claim; and restating it from
+   October stores October to January only. A stored claim that ends before the next one
+   begins leaves a gap and does not move the end, so a restatement from before it still
+   covers the gap, and overlaps that claim. None of this reaches a turn that tier 0 of
+   `add()` takes for a repeat, a near-duplicate of a stored claim or an exact repeat of
+   the turn a claim came from: tier 0 reinforces the claim before the reconciler runs,
+   so such a turn still loses its earlier date (#318).
+
+   "Can see" is `Scope.sees`: the writer's own scope and the broader ones it reads, such
+   as the user-wide scope above a project. `value_key` covers the owner and not the
+   project, agent or session, so the lookup also finds the same value in a sibling
+   project, agent or session. Such a claim is left out of the comparison, because the
+   writer cannot read it and its start says nothing about when the fact began in the
+   writer's scope. `supersede()` writes its new claim through this same step, so the rule
+   holds there too.
 2. **Conflict** — the predicate is `Cardinality.ONE` and live claims share the candidate's
    `fact_key` with a different `value_key`: insert the new claim, and for each superseded
    claim set `invalidated_by=<new id>` plus `valid_to=<the new claim's valid_from>`,
@@ -575,6 +612,9 @@ class ReconcileResult:
     retyped: Retype | None       # a claim filed under a different memory_type than it
                                  # arrived with: an asserted type on a known claim, or
                                  # procedural refused for a subject other than the user
+    restated: Claim | None       # the live claim a restatement with an earlier start
+                                 # restated; it is not changed, and a link proposed for
+                                 # the candidate is recorded on it
 ```
 
 **Re-filing a claim's `memory_type`.** An identical triple is the same fact, so a
@@ -860,7 +900,13 @@ suggestion must not turn it into an exception the caller retries.
   reported as `not_applied` with the named memory left live. A proposed end becomes a
   retraction of exactly the named value through `Reconciler.apply(close="ended",
   reason=…)`, filed in the named memory's own scope and citing the turn the model named.
-  A proposed link becomes a `claim_links` row when both sides name a stored claim. The
+  A proposed link becomes a `claim_links` row when both sides name a stored claim. A side
+  named by a proposal's ref names the claim that proposal was stored as, or the claim it
+  repeated, with one exception: a proposal that restates a live value with an earlier
+  start is stored as a claim for the earlier period, or repeats one, and that claim is
+  over and answers only about that period. Its ref names the live claim on record instead
+  (`ReconcileResult.restated`), the claim a plain repeat's ref names, so the link is on
+  the claim `recall()` returns and `why()` shows it there. The
   batch falls back to the single call, and says why on `receipt.agentic_fallback`, when
   the backend is not a `ToolChat` (`unsupported`), the run times out (`timeout`), an answer
   cannot be used twice in a row (`malformed`), the model is still calling tools after 12

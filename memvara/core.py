@@ -1566,7 +1566,15 @@ class Memvara:
         `valid_from` and `recorded_at` are separately settable so historical records can
         be backfilled honestly: a fact that was true from 2019 but only imported today has
         a 2019 valid time and a today transaction time, and `as_of` queries stay correct
-        for both axes.
+        for both axes. Restating a value the store already holds, with a `valid_from`
+        before the claim on record begins, stores that earlier period as a claim of its
+        own, ending where the claim on record begins, and reports it under `added`. The
+        claim on record is not changed, and only a claim this scope can see, in its own
+        scope or a broader one, counts as on record here. A period already stored this
+        way is not stored twice: restating it reinforces the claim that holds it, and an
+        even earlier start stores only the part before that claim begins. A restatement
+        that also names `expires_at` is handled as a repeat instead, so the expiry lands
+        on the claim on record.
 
         `valid_to` at or before `valid_from` is a `ValueError`, matching what
         `memory_remember` does with the same interval. Both ends arrive in one call here,

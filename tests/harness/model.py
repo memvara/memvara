@@ -196,6 +196,18 @@ class ReferenceStore:
 
         if op.polarity > 0:
             same = [r for r in self.rows.values() if r.value == value and self.live_at(r, t)]
+            if (same and op.expires_at is None
+                    and all(r.valid_from > decide_from for r in same)):
+                # The same value from before every live row of it begins. A repeat that
+                # names an expiry stays a repeat, below.
+                end, covering = self._earlier_period(value, same, decide_from, op.valid_to, t)
+                if covering is not None:
+                    covering.observations += 1
+                    return Expect(reinforced=[covering.id])
+                e = Expect(added=True)
+                row = self._new_row(op, valid_from, clock_start, t, e)
+                row.valid_to = end
+                return e
             if same:
                 keep = min(same, key=self._tie)
                 keep.observations += 1
@@ -230,6 +242,32 @@ class ReferenceStore:
         self.add(row)
         e.new = handle
         return row
+
+    def _earlier_period(self, value: tuple[str, str, str, str, int], live: list[Row],
+                        start: datetime, valid_to: datetime | None,
+                        t: datetime) -> tuple[datetime, Row | None]:
+        """`Reconciler._earlier_period`: where a restatement that begins at `start`, before
+        every live row of its value, ends, and the row that already holds that period.
+
+        The period ends where the value's rows begin: the earliest live row, or an earlier
+        row that runs up to it without a gap. A `valid_to` the caller gave that is earlier
+        still wins. Only rows believed at `t` and not expired count."""
+        held = [r for r in self.rows.values()
+                if r.value == value and not r.expired(t) and r.recorded_at <= t
+                and (r.invalidated_at is None or r.invalidated_at > t)]
+        end = min(r.valid_from for r in live)
+        while True:
+            reaching = [r.valid_from for r in held
+                        if start < r.valid_from < end and r.valid_to is not None
+                        and r.valid_to >= end]
+            if not reaching:
+                break
+            end = min(reaching)
+        if valid_to is not None and valid_to < end:
+            end = valid_to
+        covering = [r for r in held
+                    if r.valid_from <= start and r.valid_to is not None and r.valid_to >= end]
+        return end, (min(covering, key=self._tie) if covering else None)
 
     def _close(self, row: Row, e: Expect, by: str, boundary: datetime | None,
                close: str, clock_boundary: bool) -> None:

@@ -81,7 +81,9 @@ the end of a stored memory, a replacement for one, or a link between two. The sy
 message carries the project's extraction guidance when there is some, and a proposed
 memory can carry an expiry the turn names. The proposals write nothing. A proposed memory goes through the same guards as single-call output and
 then `Reconciler.apply()`; a proposed end becomes a retraction with `close="ended"`; a
-proposed link becomes a `claim_links` row. A proposal naming a memory the model did not
+proposed link becomes a `claim_links` row. A link from a proposal that restated a live
+value with an earlier start lands on the live claim on record, not on the claim for the
+earlier period (`ReconcileResult.restated`). A proposal naming a memory the model did not
 read in the run, or asking to end or replace one in a broader scope than the write, is
 refused, and every refusal is on
 `receipt.proposals_refused`. A backend without tools, a timeout, an answer that cannot be
@@ -90,7 +92,11 @@ batch to the single call, and `receipt.agentic_fallback` says which. Off by defa
 because its release bar in the "Reversed" list of `docs/ROADMAP.md` has not been measured.
 
 Every claim that reaches the store passes through `Reconciler.apply()`, which decides one of
-four outcomes against the claims already in that slot: exact duplicate (do not insert),
+four outcomes against the claims already in that slot: exact duplicate (do not insert,
+unless the incoming claim begins before every live claim with its value that the writer
+can see, in which case it is inserted for that earlier period only and ends where the
+value's stored claims begin, or reinforces a stored claim that already holds that
+period),
 conflict (the predicate holds one value, so the incoming claim supersedes the old one),
 retraction (the incoming claim has `polarity == -1`, so matching live claims are closed out),
 or accumulate (insert alongside). `Memvara.supersede()` is the explicit form of the second

@@ -244,9 +244,8 @@ def test_forget_retires_a_scheduled_value_too() -> None:
     assert later == []
 
 
-# -- B17: a restatement with an earlier start loses the earlier start --------------------
+# -- B17, fixed: a restatement with an earlier start keeps the earlier start -------------
 
-@known_bugs.xfail("B17")
 def test_restating_a_fact_with_an_earlier_start_keeps_the_earlier_start() -> None:
     """The earlier start is new information. It must be kept, and what the store believed
     before the restatement must not change (#283)."""
@@ -258,10 +257,44 @@ def test_restating_a_fact_with_an_earlier_start_keeps_the_earlier_start() -> Non
     now_view = [c.object for c in user.get_all(valid_at=INSTANTS[1])]
     earlier_view = [c.object for c in user.get_all(valid_at=INSTANTS[1],
                                                    known_at=INSTANTS[3])]
-    if now_view == []:
-        raise known_bugs.Reproduced("B17: the earlier start was dropped")
     assert now_view == ["tea"]
     assert earlier_view == []
+
+
+# -- B46: tier 0 of add() reinforces a restatement dated before the claim --------------
+
+@pytest.mark.parametrize("path", ["near-duplicate", "exact repeat"])
+@known_bugs.xfail("B46")
+def test_a_turn_restating_a_fact_with_an_earlier_date_keeps_the_earlier_period(
+        path: str) -> None:
+    """Tier 0 reinforces a stored claim before the reconciler sees the turn, in two cases:
+    a turn that embeds as a near-duplicate of the claim, and a turn whose text is exactly
+    that of the turn the claim came from, which is taken for that turn and not stored.
+    Either way the rule #283 set for remember() never reaches add(), and a turn dated
+    before the claim loses the earlier period (#318)."""
+    from datetime import datetime, timezone
+
+    jan, feb, apr = (datetime(2026, month, 1, tzinfo=timezone.utc) for month in (1, 2, 4))
+    mem = stores.memory()
+    if path == "near-duplicate":
+        april = mem.remember("user", "likes", "tea", valid_from=apr, user="u").added[0]
+        turn, april_turns = "user likes tea", []
+    else:
+        first = mem.add("I like tea", ts=apr, user="u")
+        (april,) = first.added
+        turn, april_turns = "I like tea", first.episode_ids
+    receipt = mem.add(turn, ts=jan, user="u")
+    seen = [c.object for c in mem.get_all(valid_at=feb, user="u")]
+    # Each case raises only on its own symptom: the exact repeat is taken for the April
+    # turn, and the near-duplicate is stored as a turn of its own.
+    taken_for_the_april_turn = receipt.episode_ids == april_turns
+    if (seen == [] and not receipt.added
+            and [c.id for c in receipt.reinforced] == [april.id]
+            and taken_for_the_april_turn == (path == "exact repeat")):
+        raise known_bugs.Reproduced(
+            f"tier 0 took the {path} for a repeat of the April claim; February reads "
+            "nothing")
+    assert seen == ["tea"], seen
 
 
 # -- B18: a repeated retraction is folded into an expired tombstone ----------------------

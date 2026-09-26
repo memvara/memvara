@@ -542,6 +542,37 @@ def test_a_link_from_a_new_memory_to_a_read_one_is_recorded():
     assert link.by == "fake/tools"
 
 
+@pytest.mark.parametrize("period_stored", [False, True],
+                         ids=["the earlier period is new", "it is already stored"])
+def test_a_link_from_a_restatement_with_an_earlier_start_lands_on_the_claim_on_record(
+        period_stored):
+    """The turn restates a stored value from an earlier date, so the proposal becomes the
+    claim for the earlier period: a new one, or the one already stored for that period,
+    which is reinforced. Either way that claim is over and answers only about the earlier
+    period. The link describes the fact, so it lands on the live claim on record, the one
+    `recall()` returns and the one a plain repeat reinforces, where `why()` shows it."""
+    april = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    mem = memory(ScriptedChat())
+    on_record = mem.remember("user", "deploy_cluster", "Frankfurt",
+                             valid_from=april).added[0]
+    if period_stored:
+        mem.remember("user", "deploy_cluster", "Frankfurt", valid_from=T0)
+    office = mem.remember("user", "lives_in", "Porto").added[0]
+    mem.writer.llm = ScriptedChat([search("office Porto")], [
+        ("propose_claim", fact("user", "deploy_cluster", "Frankfurt"))], [
+        ("propose_link", {"from_ref": "new-1", "to_ref": office.id,
+                          "relation": "extends"})])
+
+    receipt = mem.add(CLUSTER, ts=T0)
+
+    (earlier,) = receipt.reinforced if period_stored else receipt.added
+    assert (earlier.valid_from, earlier.valid_to) == (T0, april)
+    assert [(k.from_id, k.to_id, k.relation) for k in mem.links(earlier.id)] == []
+    assert [(k.from_id, k.to_id, k.relation) for k in mem.links(on_record.id)] == [
+        (on_record.id, office.id, "extends")]
+    assert receipt.proposals_refused == []
+
+
 def test_a_link_to_a_proposal_the_guards_refused_is_not_applied():
     mem = memory(ScriptedChat())
     office = mem.remember("user", "lives_in", "Porto").added[0]

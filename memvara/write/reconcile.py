@@ -187,6 +187,13 @@ class ReconcileResult:
     #: record, or a `procedural` claim about a subject other than the user, which is
     #: filed as `semantic` whatever sent it — see `Retype`. `None` otherwise.
     retyped: "Retype | None" = None
+    #: Set when the candidate restated a value that is live on record, with an earlier
+    #: start: the live claim on record, which this write did not change and which a plain
+    #: repeat would have reinforced. `claim` is then the claim for the earlier period,
+    #: added (`add`) or already stored and reinforced (`reinforce`). A link proposed for
+    #: the candidate in the same batch attaches here, because the claim for the earlier
+    #: period is over and answers only about that period (`agentic.ProposalPlan`).
+    restated: Claim | None = None
 
 
 #: What each precision covers, as a lower bound and an exclusive upper bound. `instant`
@@ -321,7 +328,8 @@ class Reconciler:
         #    evidence, not a new fact.
         separate = False
         if claim.polarity > 0:
-            live_same = self._live(self.store.find_by_value(tenant, claim.value_key), t, owner)
+            found = self.store.find_by_value(tenant, claim.value_key)
+            live_same = self._live(found, t, owner)
             if getattr(self.store, "hide_expired", True):
                 # A claim whose expiry has passed is gone to every read, and the sweep
                 # will erase it. Reinforcing it would hand this new statement to the
@@ -336,8 +344,37 @@ class Reconciler:
                 # below, so the expiry is kept and the other claim is left as it was.
                 live_same = [c for c in live_same if c.scope == claim.scope]
                 separate = not live_same
-            if live_same:
+            # Where the value began is compared only with the claims the writer can see:
+            # its own scope and the broader ones it reads (`Scope.sees`). `value_key` also
+            # finds the value in a sibling project, agent or session, and a claim the
+            # writer cannot read says nothing about when the fact began in its own scope.
+            seen = [c for c in live_same if claim.scope.sees(c.scope)]
+            keep: Claim | None = None
+            restated: Claim | None = None
+            if (seen and claim.expires_at is None
+                    and all(_is_after(c, claim) for c in seen)):
+                # The same value, stated as true from before any claim on record for it
+                # begins. That earlier start is new, and reinforcing would drop it. Moving
+                # the claim on record back would change what reads of the past return, so
+                # the candidate is stored for the earlier period only, ending where the
+                # value's stored claims begin (`_earlier_period`). A single-valued slot
+                # does the same below with a different value that began before the live
+                # one (`newer`). The claims on record are not touched. When a believed
+                # claim already holds that whole period, the candidate is a repeat of it
+                # and reinforces it below. A repeat that names an expiry stays a repeat of
+                # the live claim, so the expiry still lands on the claim on record, which
+                # is the fact the caller asked to have erased.
+                end, keep = self._earlier_period(claim, found, seen, t, owner)
+                # The claim a plain repeat reinforces, among those the writer can see.
+                restated = self._canonical_of(seen)
+                if keep is None:
+                    claim.valid_to = end
+                    self.store.put_claim(claim)
+                    return ReconcileResult("add", claim, [], retyped=refiled,
+                                           restated=restated)
+            elif live_same:
                 keep = self._canonical_of(live_same)
+            if keep is not None:
                 # Decided before the write, because `reinforce` performs the single
                 # `put_claim` that persists both the reinforcement and the re-filing.
                 # Reporting it afterwards would need a second write for no gain.
@@ -359,7 +396,7 @@ class Reconciler:
                 return ReconcileResult(
                     "reinforce",
                     self.reinforce(keep, claim.sources, self._observed_at(claim, t)),
-                    [], retyped=retyped)
+                    [], retyped=retyped, restated=restated)
 
         # 2. Retraction: the user is taking something back.
         if claim.polarity < 0:
@@ -657,6 +694,52 @@ class Reconciler:
         # Earliest recording wins, id breaks ties: the choice must not depend on row
         # order coming back from the store.
         return min(claims, key=lambda c: (c.recorded_at, c.id))
+
+    def _earlier_period(self, claim: Claim, found: Sequence[Claim],
+                        seen: Sequence[Claim], t: datetime,
+                        owner: str) -> tuple[datetime, Claim | None]:
+        """Where a restatement's earlier period ends, and the claim that already holds it.
+
+        `claim` restates a value with a start before every live claim of the value in
+        `seen`. The period it adds ends where the value's stored claims begin: the
+        earliest of `seen`, or an earlier claim of the value that runs up to it without a
+        gap, such as the claim a previous restatement stored for its own earlier period.
+        So restating from October, when January to April and April onwards are stored,
+        adds October to January, and nothing twice. A claim that ends before the next one
+        begins leaves a gap, and does not move the end, so the restatement still covers
+        the gap. A `valid_to` the caller gave that is earlier still wins.
+
+        The second value is the claim that already holds the whole period, from the
+        restatement's start to that end, or `None`. When there is one, the restatement
+        says nothing the store does not hold, and it is a repeat of that claim. Without
+        this, the same restatement made twice stored its period twice, because the claim
+        for an earlier period is already over and the duplicate check sees live claims
+        only.
+
+        Only claims of the value that the store still believes and the writer can see
+        count, by the rules `seen` follows: a retired claim says the record was wrong, an
+        expired one is gone to every read, and a claim in a sibling project, agent or
+        session is not one the writer can read.
+        """
+        hide = getattr(self.store, "hide_expired", True)
+        held = [c for c in found
+                if owner_key(c.scope) == owner and claim.scope.sees(c.scope)
+                and c.recorded_at <= t
+                and (c.invalidated_at is None or c.invalidated_at > t)
+                and not (hide and expired(c, t))]
+        end = min(c.valid_from for c in seen)
+        while True:
+            reaching = [c.valid_from for c in held
+                        if c.valid_from < end and c.valid_to is not None
+                        and c.valid_to >= end and _is_after(c, claim)]
+            if not reaching:
+                break
+            end = min(reaching)
+        if claim.valid_to is not None and claim.valid_to < end:
+            end = claim.valid_to
+        covering = [c for c in held if c.valid_to is not None and c.valid_to >= end
+                    and not _is_after(c, claim)]
+        return end, (self._canonical_of(covering) if covering else None)
 
     def _victims(self, claim: Claim, t: datetime,
                  owner: str) -> tuple[list[Claim], list[Claim]]:

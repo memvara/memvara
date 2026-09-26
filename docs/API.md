@@ -42,6 +42,13 @@ mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, s
 #   It must be in the future (ValueError otherwise). expire_reason= says why, at most
 #   500 characters, and is a ValueError without expires_at. Repeating a fact the store
 #   holds puts the expiry on the claim on record. Not valid_to, which ends and keeps.
+#   Repeating a fact with a valid_from before the claim on record begins, and no
+#   expires_at, stores that earlier period as a claim of its own, ending where the
+#   claim on record begins; it is reported under added, and the claim on record is
+#   not changed. Only a claim this scope can see, in its own scope or a broader one,
+#   counts as the claim on record here. A period already stored this way is not stored
+#   twice: repeating it reinforces the claim that holds it, and an even earlier start
+#   stores only the part before that claim begins.
 #   With `Memvara(advise_replacements=True)` and a backend that implements
 #   `llm.ReplacementJudge`, a write that closed nothing fills `receipt.may_replace`
 #   with the nearest live claims in other slots the model judged it to be a newer
