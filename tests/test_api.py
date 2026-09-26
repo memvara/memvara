@@ -376,6 +376,128 @@ def test_a_same_width_model_swap_warns_because_nothing_else_would(tmp_path):
         Memvara(path, embedder=Rival(dim=128), llm=NullLLM()).close()
 
 
+def _damage_record(tmp_path, damage: str) -> pathlib.Path:
+    """Tear the record the way a crash during its write does, or delete it the way a
+    copy of the store taken without it does."""
+    record = tmp_path / "m.db.embedder.json"
+    if damage == "torn":
+        record.write_text('{"embedder": "hashing:1')
+    else:
+        record.unlink()
+    return record
+
+
+@pytest.mark.parametrize("damage", ["torn", "deleted"])
+def test_a_store_whose_record_is_damaged_warns_that_it_cannot_tell(tmp_path, damage):
+    """The record is the only thing that tells two embedders of the same width apart. When
+    it is torn or gone on a store that holds vectors, the open cannot tell whether this
+    embedder wrote them, so it says so and names the fix. Before the fix for #280 it said
+    nothing, so here a different embedder opened the store in silence."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    record = _damage_record(tmp_path, damage)
+
+    other = HashingEmbedder(dim=128, ngram=(2, 4))      # the same width, another space
+    with pytest.warns(EmbedderChangedWarning,
+                      match="cannot tell whether hashing:128:2-4 wrote") as caught:
+        Memvara(path, embedder=other, llm=NullLLM()).close()
+    [warning] = _memvara_warnings(caught)
+    message = str(warning.message)
+    assert str(record) in message, "must name the file that is damaged"
+    assert "mem.reembed()" in message, "must name the fix for vectors it did not write"
+    assert "the record will name hashing:128:2-4" in message
+    assert json.loads(record.read_text()) == {"embedder": "hashing:128:2-4", "dim": 128}
+
+
+def test_a_record_that_names_another_width_is_treated_as_damaged(tmp_path):
+    """A record names an embedder and a width. One whose width is not the width of the
+    vectors the store holds is wrong about them, whatever name it gives, and was never
+    checked, because only the name was compared. It is treated as damaged now: the open
+    warns that it cannot tell, and writes the record again with the true width."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    record = tmp_path / "m.db.embedder.json"
+    record.write_text(json.dumps({"embedder": "hashing:128:3-5", "dim": 64}))
+    with pytest.warns(EmbedderChangedWarning, match="cannot tell whether hashing:128:3-5"):
+        Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()).close()
+    assert json.loads(record.read_text()) == {"embedder": "hashing:128:3-5", "dim": 128}
+
+
+@pytest.mark.parametrize("damage", ["torn", "deleted"])
+def test_a_warning_turned_into_an_error_leaves_the_record_as_it_was(tmp_path, damage):
+    """The owner, X, lost its record, and an open with the wrong embedder, Y, raised the
+    warning as an error. That open had already written the record, so it named Y, and the
+    owner reopening with X was then told that Y wrote the vectors, which is backwards. The
+    warning now comes first, and the record is written only if the open goes on."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    record = _damage_record(tmp_path, damage)
+    before = record.read_bytes() if record.exists() else None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(EmbedderChangedWarning, match="cannot tell"):
+            Memvara(path, embedder=HashingEmbedder(dim=128, ngram=(2, 4)), llm=NullLLM())
+    assert (record.read_bytes() if record.exists() else None) == before
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()).close()
+    said = [str(w.message) for w in _memvara_warnings(caught)]
+    assert not any("hashing:128:2-4" in message for message in said), said
+
+
+def test_a_store_whose_record_was_lost_notices_the_next_embedder_change(tmp_path):
+    """The open that finds the record missing writes it again, so the check is lost for
+    one open and not for good."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    _damage_record(tmp_path, "deleted")
+    with pytest.warns(EmbedderChangedWarning, match="cannot tell"):
+        Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()).close()
+
+    with pytest.warns(EmbedderChangedWarning, match="written by hashing:128:3-5"):
+        Memvara(path, embedder=HashingEmbedder(dim=128, ngram=(2, 4)),
+                llm=NullLLM()).close()
+
+
+def test_a_record_that_cannot_be_written_again_says_the_warning_will_repeat(
+        tmp_path, monkeypatch):
+    """Where the record cannot be written, the next open cannot tell either. The warning
+    comes before the write, so it can say only what the open will do if it goes on, and a
+    second warning says the write failed and that the first will come back."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    record = _damage_record(tmp_path, "deleted")
+    monkeypatch.setattr(core_module, "write_fingerprint", lambda store, fp: False)
+
+    for _ in range(2):
+        with pytest.warns(EmbedderChangedWarning) as caught:
+            Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()).close()
+        said = [str(w.message) for w in _memvara_warnings(caught)]
+        assert len(said) == 2 and "cannot tell" in said[0], said
+        assert "could not be written" in said[1] and "every open" in said[1], said
+    assert not record.exists()
+
+
+def test_a_store_that_cannot_have_a_record_does_not_warn_about_one():
+    """An in-memory store has no file to keep a record beside, so a missing record there
+    is not damage, and a second `Memvara` over its vectors has nothing to warn about."""
+    store = SQLiteStore(":memory:")
+    first = Memvara(store=store, embedder=HashingEmbedder(dim=32), llm=NullLLM())
+    first.remember("user", "lives_in", "Lisbon")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        Memvara(store=store, embedder=HashingEmbedder(dim=32), llm=NullLLM())
+    assert not _memvara_warnings(caught)
+    first.close()
+
+
 # `LocalEmbedder()` moved from all-MiniLM-L6-v2 to bge-small-en-v1.5, two models of the
 # same width, 384. No dimension check can tell their vectors apart, so what keeps an
 # existing store on the model that wrote it is the name its fingerprint records.
@@ -418,12 +540,16 @@ def test_a_store_keeps_the_local_model_its_fingerprint_names(tmp_path, monkeypat
 def test_a_store_with_the_old_width_and_no_record_keeps_the_old_default(tmp_path,
                                                                         monkeypatch):
     """A store copied without its sidecar says only its width. At 384, the one local model
-    a default configuration could have written it with is the one the default was then."""
+    a default configuration could have written it with is the one the default was then.
+    That model is the likeliest writer and not a certain one, so the open still warns that
+    it cannot tell, and records the model it chose."""
     path = _written_by(tmp_path, _MINILM)
     (tmp_path / "m.db.embedder.json").unlink()
     asked = _default_asked_for(monkeypatch)
-    Memvara(path, llm=NullLLM()).close()
+    with pytest.warns(EmbedderChangedWarning, match="cannot tell"):
+        Memvara(path, llm=NullLLM()).close()
     assert asked == ["sentence-transformers/all-MiniLM-L6-v2"]
+    assert json.loads((tmp_path / "m.db.embedder.json").read_text())["embedder"] == _MINILM
 
 
 def test_a_store_with_no_vectors_takes_the_default_whatever_a_record_names(tmp_path,
@@ -564,12 +690,124 @@ def test_a_fingerprint_that_cannot_be_written_is_not_fatal(tmp_path, monkeypatch
     assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8))) is False
 
 
-@pytest.mark.parametrize("payload", ["not json at all", '{"embedder": "x"}', '{"dim": "wide"}'])
+@pytest.mark.parametrize("payload", [
+    "not json at all", '{"embedder": "x"}', '{"dim": "wide"}',
+    # A width that is not an int was read with `int()`, so "128" and 128.9 were believed,
+    # and so was true, which Python counts as the int 1.
+    '{"embedder": "x", "dim": "128"}', '{"embedder": "x", "dim": 128.9}',
+    '{"embedder": "x", "dim": true}'])
 def test_a_corrupt_fingerprint_file_is_ignored_rather_than_believed(tmp_path, payload):
     path = str(tmp_path / "m.db")
     (tmp_path / "m.db.embedder.json").write_text(payload)
     store = types.SimpleNamespace(path=path)
     assert read_fingerprint(store) is None
+
+
+class _DiskFull:
+    """The `json` module, except that `dump` writes part of the record and fails."""
+
+    def __getattr__(self, name):
+        return getattr(json, name)
+
+    @staticmethod
+    def dump(obj, fh, **kwargs):
+        fh.write('{"embedder": "hash')
+        raise OSError(28, "No space left on device")
+
+
+def test_a_record_write_that_fails_halfway_leaves_the_old_record_whole(
+        tmp_path, monkeypatch):
+    """A full disk or a crash in the middle of writing the record must leave the old
+    record or the new one, never half of one, because a torn record reads as no record at
+    all. `reembed()` rewrites the record on a store that already holds vectors, and there
+    a torn record would lose the one check that tells two embedders of the same width
+    apart."""
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+    old = make_fingerprint(HashingEmbedder(dim=8))
+    assert write_fingerprint(store, old) is True
+    monkeypatch.setattr(fingerprint_module, "json", _DiskFull())
+    assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=16))) is False
+    assert read_fingerprint(store) == old
+    assert [p.name for p in tmp_path.iterdir()] == ["m.db.embedder.json"], (
+        "a failed write must not leave its temporary file behind")
+
+
+def test_a_temporary_record_that_cannot_be_removed_is_not_fatal(tmp_path, monkeypatch):
+    """After a failed write the temporary file is removed, and when even that fails, the
+    write reports that it did not write rather than raising: the record is advisory, and
+    it must never be the reason a store does not open."""
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+
+    class NoRemove:
+        """The `os` module, except that `remove` is refused."""
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def remove(path):
+            raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(fingerprint_module, "json", _DiskFull())
+    monkeypatch.setattr(fingerprint_module, "os", NoRemove())
+    assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8))) is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_record_is_updated_in_place_in_a_directory_that_forbids_new_files(tmp_path):
+    """The record is written to a temporary file beside it and renamed, and a directory
+    where the account may write the existing files but may not add new ones refuses that
+    temporary file. The record used to be overwritten in place, which such a directory
+    allows, so when the temporary file is refused, the record is still written in place."""
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+    assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8))) is True
+    tmp_path.chmod(0o555)
+    try:
+        written = write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=16)))
+    finally:
+        tmp_path.chmod(0o755)
+    assert written is True
+    assert read_fingerprint(store) == make_fingerprint(HashingEmbedder(dim=16))
+    assert [p.name for p in tmp_path.iterdir()] == ["m.db.embedder.json"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_record_that_does_not_exist_cannot_be_written_where_new_files_are_refused(
+        tmp_path):
+    """Writing in place needs the record to exist already. Where there is none yet and the
+    directory refuses new files, nothing can be written, and the write says so."""
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+    tmp_path.chmod(0o555)
+    try:
+        if os.access(tmp_path, os.W_OK):
+            pytest.skip("this user may write a read-only file")
+        written = write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8)))
+    finally:
+        tmp_path.chmod(0o755)
+    assert written is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_record_that_is_a_link_stays_a_link_to_the_updated_file(tmp_path):
+    """`os.replace` replaces a link itself, so a record kept as a link to a file elsewhere
+    became a plain file beside the store, and the file the link named kept the old record.
+    The link is followed now: the temporary file is made beside the file it names, and
+    that file is the one replaced."""
+    elsewhere = tmp_path / "records"
+    elsewhere.mkdir()
+    target = elsewhere / "m.json"
+    target.write_text(json.dumps({"embedder": "hashing:8:3-5", "dim": 8}))
+    link = tmp_path / "m.db.embedder.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("this platform may not make a symbolic link")
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+    new = make_fingerprint(HashingEmbedder(dim=16))
+    assert write_fingerprint(store, new) is True
+    assert link.is_symlink() and link.resolve() == target.resolve()
+    assert json.loads(target.read_text()) == {"embedder": new.name, "dim": new.dim}
+    assert [p.name for p in elsewhere.iterdir()] == ["m.json"]
 
 
 def test_stored_dim_reads_the_vectors_through_the_protocol_alone():

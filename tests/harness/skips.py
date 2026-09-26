@@ -73,6 +73,9 @@ RULES: tuple[SkipRule, ...] = (
     SkipRule(r"^this user may write a read-only file$",
              "Root, or another account that ignores file modes, cannot be refused a write "
              "by one, so the test has no way to make the file read-only."),
+    SkipRule(r"^this platform may not make a symbolic link$",
+             "Windows makes a symbolic link only for an account allowed to, which a test "
+             "account may not be.", platforms=("win32",)),
     SkipRule(r"^the password database exists only on POSIX$",
              "Windows has no password database to fall back from.", platforms=("win32",)),
     SkipRule(r"^SIGSTOP exists only on POSIX$",

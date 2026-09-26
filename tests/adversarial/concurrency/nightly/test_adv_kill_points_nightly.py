@@ -48,16 +48,18 @@ def test_a_kill_while_the_vector_file_grows_keeps_every_acknowledged_claim(
         mem.close()
 
 
-def test_a_kill_while_the_embedder_record_is_written_heals_on_the_next_open(
+def test_a_kill_while_the_embedder_record_is_written_leaves_no_torn_record(
         tmp_path: pathlib.Path, home: pathlib.Path) -> None:
-    """`write_fingerprint` is not atomic, so the kill leaves a torn record. A store with
-    no vectors rewrites it on the next open, and the record then catches an embedder
-    change again."""
+    """`write_fingerprint` writes a temporary file and renames it over the record, so the
+    kill tears only the temporary file and the new store is left with no record at all.
+    The next open writes it, and the record then catches an embedder change again."""
     db = tmp_path / "s.db"
     killed("fingerprint-write", {"db": str(db), "setup": [], "action": ["open", {}]}, home)
     record = pathlib.Path(str(db) + ".embedder.json")
+    assert not record.exists(), f"the kill left a record: {record.read_text()!r}"
+    [torn] = tmp_path.glob("s.db.embedder.json.*.tmp")
     with pytest.raises(json.JSONDecodeError):
-        json.loads(record.read_text())
+        json.loads(torn.read_text())
     after_crash(db, USER, {}).close()
     assert json.loads(record.read_text())["embedder"] == "hashing:512:3-5"
     with pytest.warns(Warning, match="unrelated vector spaces"):

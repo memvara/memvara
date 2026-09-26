@@ -286,6 +286,26 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   an error. The clear now runs first, so a refusal leaves the old embedder everywhere.
   #324.
 
+- **A store whose embedder record is missing or unreadable now says so when it opens,
+  and records the embedder again.** `<db>.embedder.json` names the embedder that wrote a
+  store's vectors, and it is the only thing that can tell two embedders of the same width
+  apart. When the record was missing or torn on a store that held vectors, opening the
+  store with a different embedder of that width raised nothing and warned nothing, and the
+  record was never written again, so every later change went unnoticed too. Such an open
+  now warns with `EmbedderChangedWarning` that memvara cannot tell whether the embedder in
+  use wrote the vectors, and that `mem.reembed()` rebuilds them if it did not. If the open
+  goes on, it then records the embedder in use, so the next change is noticed; a warning
+  turned into an error stops the open before anything is recorded. Where the record cannot
+  be written, a second warning says so, and the first comes back on every open. A record
+  that names another width than the stored vectors have is treated as damaged in the same
+  way, where before only its name was compared, and so is one whose width is not a JSON
+  integer, such as "128", 128.9 or true. The record itself is now written to a temporary
+  file and renamed into place, so a crash or a full disk during the write leaves the old
+  record or the new one, never half of one. A record kept as a link stays a link, and the
+  file it names is the one replaced. In a directory where the account may write the
+  existing files but may not add new ones, the record is written in place, as it always
+  was. #280.
+
 ## [0.16.0] — 2026-09-25
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store moves to schema 16 on

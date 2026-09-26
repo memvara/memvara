@@ -47,7 +47,7 @@ The research for this plan read the code for each point and checked two of them 
 | `between-migrations` | fast | before `SQLiteStore._migrate_to_v7`, opening a version-2 store | undone: `user_version` is still 2, no table that existed changed, and the next open migrates fully and indexes the old episode |
 | `after-commit` | fast | after `remember()` returns | present, with its embedding and text-index rows |
 | `vecs-growth` | nightly | before `_VecIndex._remap`, writing the 257th vector | absent; the 256 acknowledged claims are all found by `search` |
-| `fingerprint-write` | nightly | inside `json.dump` in `embed/fingerprint.py`, after a few chunks | the torn sidecar is rewritten by the next open |
+| `fingerprint-write` | nightly | inside `json.dump` in `embed/fingerprint.py`, after a few chunks | absent: the record is written to a temporary file and renamed into place (#280), so only the temporary file is torn, and the next open writes the record |
 | `encrypt-between-renames` | nightly | after the first `os.replace` in `encrypt_store` | the next open with the key rebuilds the vector file; every claim is present |
 | `document-before-claims` | nightly | before `DocumentService._finish`, in `add_document` | the document and its chunks are present, and no claim cites them |
 
