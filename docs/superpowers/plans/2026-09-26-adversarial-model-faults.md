@@ -662,7 +662,7 @@ One table, one test per row. A row sets the store up (not counted), then runs on
   - A reply of 10,000 distinct claims under `likes` stores all of them from one call, each citing the turn, the seeded claims are `unchanged`, and a search finds one of them by its object.
   - The same 10,000 claims sent as JSON text, shaped as a shipped backend shapes them, are stored the same way.
   - **Review Focus 1.** A reply that restates one claim 10,000 times stores one claim, with an `observation_count` of 10,000.
-  - A reply of 10,000 claims under 10,000 invented predicates stores every claim, costs 201 calls, and finishes within 60 seconds on a laptop.
+  - A reply of 10,000 claims under 10,000 invented predicates stores every claim, costs 201 calls, and finishes within 60 seconds on a laptop. This test found #309. The test that pins #309 writes 5,000 predicates instead of 10,000, because 5,000 already take more than 100 seconds, while 10,000 took about 440.
 - [ ] **Step 2: Show the tests catch their fault:** `_tier2` keeping only the first 1,000 items.
 - [ ] **Step 3: Run them with `--tier nightly` and time them.** A failure is a finding.
 - [ ] **Step 4: Add the section's paragraph on the nightly tier.**
