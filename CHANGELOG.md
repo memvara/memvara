@@ -222,15 +222,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   started at once; when the server was the one that failed, the agent had no memory tools
   for that session. Now one store at a time runs the schema and the migrations, so a store
   that opens while another is creating or upgrading the file waits for it, for up to ten
-  minutes, and then opens the finished store. The wait is that long because an upgrade of
-  a large store takes long: 26.6 seconds for 300,000 claims, measured. Only an open that creates or upgrades the store does
-  this. The open of a store this version has already finished with takes no such lock,
-  so established stores never wait for one another. An open that creates or upgrades the
-  store must be able to write `<db>.lock`, and if the file exists and this user may not
-  write it, the open raises `PermissionError` naming the file and the fix. An open of an
-  established store needs only to read it, as before, and neither kind needs permission to
-  add a file to the store's directory. The switch to WAL mode is also tried again for up
-  to five seconds, for a connection from outside memvara that holds the write lock. #281.
+  minutes, and then opens the finished store. The wait is long because an upgrade can be:
+  one took 26.6 seconds for 300,000 claims. Only an open that creates or upgrades the store
+  takes this lock. The open of a store this version has already finished with does not, so
+  established stores never wait for one another. An open that creates or upgrades a store
+  must be able to write `<db>.lock`: if the file exists and this user may not write it, the
+  open raises `PermissionError`, naming the file and the fix. An open of an established
+  store needs only to read the file, as before, and neither kind needs permission to add a
+  file to the store's directory. The switch to WAL mode is also tried again for up to five
+  seconds, for a connection from outside memvara that holds the write lock. #281.
 
 ## [0.16.0] — 2026-09-25
 
