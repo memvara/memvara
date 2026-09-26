@@ -7,6 +7,39 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Creating or upgrading a store needs permission to write `<db>.lock`
+
+### What changed
+
+Only one process at a time now creates a store or upgrades it to a newer schema, so two
+processes that open it at once no longer get in each other's way (#281). The process doing
+it holds a write lock on `<db>.lock` while it works, and it needs permission to write that
+file to take the lock. An open of a store that needs neither only reads the file, as before.
+
+If `<db>.lock` exists and the account that opens the store may not write it, the open that
+would create or upgrade the store raises `PermissionError`. The message names the lock file,
+for `memory.db` the file `memory.db.lock`, and says what to do. Nothing has been created or
+upgraded when it is raised.
+
+### Who this changes
+
+**If `<db>.lock` belongs to another account,** for example because an MCP server once ran
+as another user, and the store needs an upgrade. The open that upgrades a store is the first
+open of it after you install a memvara version with a newer schema, or the first open of a
+store an older version wrote, so that is when you meet the refusal.
+
+### What to do
+
+Make `<db>.lock` writable by the account that opens the store, or delete it while nothing
+has the store open; the next open creates it again. It holds no data.
+
+### How to find it in your code
+
+This is about files, not code. `ls -l memory.db.lock` shows the file's owner and mode; the
+account that runs memvara must be able to write it.
+
+---
+
 ## `forget()` also closes a value stored to begin later
 
 ### What changed
