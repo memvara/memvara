@@ -10,7 +10,6 @@ confirmed by a re-measure, or a library p95 over a committed budget.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -22,7 +21,7 @@ def test_the_timing_budgets_hold(records_dir: Path,
                                  capsys: pytest.CaptureFixture[str]) -> None:
     folder = records_dir / "perf"
     folder.mkdir(exist_ok=True)
-    out = folder / f"perf-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+    out = folder / f"perf-{perf_budget.record_stamp()}.json"
     code = perf_budget.main(["--out", str(out), "--history", str(folder)])
     printed = capsys.readouterr().out
     if code == perf_budget.EXIT_INVALID:

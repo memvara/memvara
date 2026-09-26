@@ -359,11 +359,13 @@ class Conditions:
     """The state of the machine at one check during a run.
 
     `on_battery` is None where the platform cannot say, which counts as not on battery:
-    the nightly run is on a Mac, where it can always say.
+    the nightly run is on a Mac, where it can always say. `load_per_cpu` is None where
+    the load average cannot be read, as on Windows, and that makes the run invalid: a
+    load nobody measured is not an idle machine.
     """
 
     on_battery: bool | None
-    load_per_cpu: float
+    load_per_cpu: float | None
 
 
 def on_battery_from_pmset(text: str) -> bool | None:
@@ -405,12 +407,11 @@ def read_conditions() -> Conditions:
     else:
         on_battery = None
     try:
-        load = os.getloadavg()[0]
+        load: float | None = float(os.getloadavg()[0]) / (os.cpu_count() or 1)
     except (AttributeError, OSError):
-        # Windows has no load average. The nightly tiers run only on a Mac.
-        load = 0.0
-    return Conditions(on_battery=on_battery,
-                      load_per_cpu=float(load) / (os.cpu_count() or 1))
+        # Windows has no load average, and a platform can fail to report one.
+        load = None
+    return Conditions(on_battery=on_battery, load_per_cpu=load)
 
 
 def invalid_reasons(checks: Sequence[Conditions]) -> list[str]:
@@ -419,7 +420,12 @@ def invalid_reasons(checks: Sequence[Conditions]) -> list[str]:
     on_battery = sum(1 for c in checks if c.on_battery)
     if on_battery:
         reasons.append(f"the machine ran on battery at {on_battery} of {len(checks)} checks")
-    busiest = max((c.load_per_cpu for c in checks), default=0.0)
+    unread = sum(1 for c in checks if c.load_per_cpu is None)
+    if unread:
+        reasons.append(f"the load average could not be read at {unread} of {len(checks)} "
+                       "checks, so whether the machine was busy is unknown")
+    busiest = max((c.load_per_cpu for c in checks if c.load_per_cpu is not None),
+                  default=0.0)
     if busiest > MAX_LOAD_PER_CPU:
         reasons.append(f"the load average reached {busiest:.2f} per CPU, above the limit "
                        f"of {MAX_LOAD_PER_CPU}")
@@ -492,6 +498,21 @@ def _harness() -> tuple[ModuleType, ModuleType]:
 def _store(path: Path) -> Memvara:
     return Memvara(str(path), embedder=evalkit.build_embedder("hashing"), llm=NullLLM(),
                    user=PERF_USER, **PLAIN_READ)
+
+
+def store_files(path: Path) -> list[Path]:
+    """The files that make up the store at `path`, sorted by name.
+
+    They are the database and every file beside it whose name starts with the database's
+    own. Today those are the write-ahead log (`-wal`) and its index (`-shm`), the vector
+    file (`.vecs`) and the embedder record (`.embedder.json`). Matching by the name rather
+    than by that list means a file memvara starts keeping beside a store later is counted
+    too. The lock file (`.lock`) is left out: it holds no data, and it belongs to whichever
+    process has the store open.
+    """
+    return sorted(candidate for candidate in path.parent.iterdir()
+                  if candidate.name.startswith(path.name) and candidate.is_file()
+                  and candidate.name != path.name + ".lock")
 
 
 def build_store(path: Path, claims: int, *, seed: int = 0) -> list[str]:
@@ -661,9 +682,8 @@ class _Bench:
         """A copy of the built store for `remember`, so the reads keep their size."""
         source = self.stores[size]
         target = self.workdir / f"writes-{size}.db"
-        for path in source.parent.iterdir():
-            if path.name.startswith(source.name) and not path.name.endswith(".lock"):
-                shutil.copy2(path, target.parent / (target.name + path.name[len(source.name):]))
+        for path in store_files(source):
+            shutil.copy2(path, target.parent / (target.name + path.name[len(source.name):]))
         self.copies[size] = target
 
     def _home(self) -> Path:
@@ -741,9 +761,13 @@ def measure(config: PerfConfig, workdir: Path, *, history: Sequence[Mapping[str,
             runner_factory: Callable[..., Any] | None = None) -> dict[str, Any]:
     """Build a store of each size in `workdir`, time every series on it, and judge the run.
 
-    The machine's conditions are read before the first size, after each size and at the
-    end. A run they make invalid is not judged: its numbers describe the machine, and
-    measuring a series again on a busy machine would only double the time it wastes.
+    The machine's conditions are read before the first size, after each size, and once
+    more when the measuring is over, before anything is judged. Only a run that is still
+    valid then is judged: an invalid run's numbers describe the machine, and measuring
+    its series again would only double the time it wastes. Judging can measure series
+    again, so the conditions are read once more afterwards, and a machine that turned busy
+    while they ran makes the run invalid after all: a re-measure taken under load would
+    confirm a regression that is really the load.
     """
     workdir.mkdir(parents=True, exist_ok=True)
     started = datetime.now(timezone.utc)
@@ -762,10 +786,11 @@ def measure(config: PerfConfig, workdir: Path, *, history: Sequence[Mapping[str,
                 "samples_ms": [round(sample, 3) for sample in samples],
                 "timeouts": timeouts}
         checks.append(read_conditions())
+    checks.append(read_conditions())
     regressions: dict[str, Any] = {}
     if not invalid_reasons(checks):
         regressions = _judge_all(series, history, fingerprint["id"], bench, config)
-    checks.append(read_conditions())
+        checks.append(read_conditions())
     reasons = invalid_reasons(checks)
     return {
         "kind": RECORD_KIND, "version": RECORD_VERSION,
@@ -783,19 +808,34 @@ def measure(config: PerfConfig, workdir: Path, *, history: Sequence[Mapping[str,
 # --- nights, budgets and the command line -----------------------------------------------------
 
 
-def load_runs(directory: Path) -> list[dict[str, Any]]:
-    """Every timing record in `directory`, oldest first. Other files are skipped."""
+def record_stamp() -> str:
+    """The time a record is written, for its file name: UTC, to the second, with a
+    trailing Z, such as `20260926T015401Z`. Names in this form sort in time order."""
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def load_records(directory: Path, kind: str) -> list[dict[str, Any]]:
+    """Every record of `kind` in `directory`, oldest first by its `started` stamp.
+
+    A file that is not JSON, or not a record of that kind, is skipped, so timing and soak
+    records can share a folder. A folder that does not exist yet holds no records.
+    """
     if not directory.is_dir():
         return []
-    runs = []
+    records = []
     for path in sorted(directory.glob("*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if isinstance(data, dict) and data.get("kind") == RECORD_KIND:
-            runs.append(data)
-    return sorted(runs, key=lambda run: str(run.get("started", "")))
+        if isinstance(data, dict) and data.get("kind") == kind:
+            records.append(data)
+    return sorted(records, key=lambda record: str(record.get("started", "")))
+
+
+def load_runs(directory: Path) -> list[dict[str, Any]]:
+    """Every timing record in `directory`, oldest first. Other files are skipped."""
+    return load_records(directory, RECORD_KIND)
 
 
 def nights_for(runs: Sequence[Mapping[str, Any]], fingerprint_id: str) -> list[dict[str, Any]]:

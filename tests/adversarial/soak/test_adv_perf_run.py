@@ -10,15 +10,15 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 from typing import Any, Sequence
 
 import pytest
 
 import perf_budget as pb
+from harness import stores
 from harness.hooks import HookRunner, HookTimeout
 from harness.skips import explained
-from memvara import Memvara, NullLLM
-from memvara.embed import HashingEmbedder
 
 LIBRARY = ("search", "recall", "remember")
 HOOKS = ("hook.session_start", "hook.recall")
@@ -31,8 +31,7 @@ BUSY = pb.Conditions(on_battery=False, load_per_cpu=0.9)
 def test_a_built_store_holds_exactly_the_claims_asked_for(tmp_path: pathlib.Path) -> None:
     names = pb.build_store(tmp_path / "store.db", 40)
     assert len(names) == 10 and len(set(names)) == 10
-    mem = Memvara(str(tmp_path / "store.db"), embedder=HashingEmbedder(dim=512),
-                  llm=NullLLM(), user=pb.PERF_USER)
+    mem = stores.file(tmp_path / "store.db", user=pb.PERF_USER)
     assert mem.stats()["live_claims"] == 40
     mem.close()
 
@@ -95,13 +94,35 @@ class FixedSeries:
         return [self.ms, self.ms], 0
 
 
+class Readings:
+    """Stands in for read_conditions: answers with `conditions` in turn, then keeps
+    answering with the last one, and counts the readings taken."""
+
+    def __init__(self, *conditions: pb.Conditions) -> None:
+        self.left = list(conditions)
+        self.taken = 0
+
+    def __call__(self) -> pb.Conditions:
+        self.taken += 1
+        return self.left.pop(0) if len(self.left) > 1 else self.left[0]
+
+
 def fake_run(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *,
-             conditions: pb.Conditions, history: Sequence[dict[str, Any]] = (),
+             conditions: pb.Conditions | Readings, history: Sequence[dict[str, Any]] = (),
              ms: float = 5.0, budgets: dict[str, Any] | None = None,
              ) -> tuple[dict[str, Any], FixedSeries]:
+    """A run with every series replaced by fixed samples, and no store built, because
+    nothing reads one: what these tests check is how a run is judged."""
     series = FixedSeries(ms)
-    monkeypatch.setattr(pb, "read_conditions", lambda: conditions)
+
+    def prepare(bench: Any, size: int) -> None:
+        bench.stores[size] = tmp_path / f"store-{size}.db"
+        bench.names[size] = ["Talovimar"]
+
+    readings = conditions if isinstance(conditions, Readings) else Readings(conditions)
+    monkeypatch.setattr(pb, "read_conditions", readings)
     monkeypatch.setattr(pb._Bench, "series", series)
+    monkeypatch.setattr(pb._Bench, "prepare", prepare)
     budgets_path = tmp_path / "budgets.json"
     if budgets is not None:
         budgets_path.write_text(json.dumps(budgets), encoding="utf-8")
@@ -137,6 +158,35 @@ def test_a_series_slower_than_its_history_is_measured_again_and_fails(
     assert {v["outcome"] for v in record["regressions"].values()} == {"regression"}
     assert sorted(series.calls) == sorted([*KEYS, *KEYS]), "each series is measured twice"
     assert pb.exit_code(record) == 1
+
+
+def drifting_history() -> list[dict[str, Any]]:
+    """Seven valid nights on this machine at 10 ms, so a run at 50 ms drifts on every
+    series and every series would be measured again."""
+    mine = pb.machine_fingerprint()["id"]
+    return [night(f"2026-09-{day:02d}", 10.0, fingerprint=mine) for day in range(1, 8)]
+
+
+def test_a_machine_busy_at_the_closing_reading_is_neither_judged_nor_measured_again(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    # Before the first size, after it, and the closing reading, which comes before judging.
+    readings = Readings(VALID, VALID, BUSY)
+    record, series = fake_run(monkeypatch, tmp_path, conditions=readings,
+                              history=drifting_history(), ms=50.0)
+    assert record["valid"] is False and record["regressions"] == {}
+    assert len(series.calls) == len(KEYS), "no series is measured again on an invalid run"
+
+
+def test_a_machine_that_turns_busy_while_series_are_measured_again_is_invalid(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    # A re-measure taken under load would confirm a regression that is really the load, so
+    # a reading after the re-measures still makes the run invalid.
+    readings = Readings(VALID, VALID, VALID, BUSY)
+    record, series = fake_run(monkeypatch, tmp_path, conditions=readings,
+                              history=drifting_history(), ms=50.0)
+    assert len(series.calls) == 2 * len(KEYS)
+    assert record["valid"] is False and record["regressions"] == {}
+    assert readings.taken == 4
 
 
 def test_a_committed_budget_for_this_machine_fails_a_run_over_it(
@@ -219,6 +269,33 @@ def test_a_hook_that_times_out_is_recorded_at_its_limit_and_breaches_the_maximum
 
 
 # --- nights, budgets and exit codes -------------------------------------------------------
+
+
+def test_a_record_is_stamped_in_utc_to_the_second_with_a_trailing_z() -> None:
+    assert re.fullmatch(r"\d{8}T\d{6}Z", pb.record_stamp())
+
+
+def test_records_of_one_kind_are_read_oldest_first_and_everything_else_is_skipped(
+        tmp_path: pathlib.Path) -> None:
+    for name, record in (("late.json", {"kind": "memvara-soak", "started": "2026-09-02"}),
+                         ("early.json", {"kind": "memvara-soak", "started": "2026-09-01"}),
+                         ("timing.json", {"kind": "memvara-perf", "started": "2026-09-01"}),
+                         ("list.json", ["not", "a", "record"])):
+        (tmp_path / name).write_text(json.dumps(record), encoding="utf-8")
+    (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
+    loaded = pb.load_records(tmp_path, "memvara-soak")
+    assert [record["started"] for record in loaded] == ["2026-09-01", "2026-09-02"]
+
+
+def test_a_store_is_its_database_and_every_file_beside_it_except_the_lock(
+        tmp_path: pathlib.Path) -> None:
+    names = ("store.db", "store.db-wal", "store.db-shm", "store.db.vecs",
+             "store.db.embedder.json", "store.db.lock", "other.db", "other.db.vecs")
+    for name in names:
+        (tmp_path / name).write_bytes(b"x")
+    assert [path.name for path in pb.store_files(tmp_path / "store.db")] == [
+        "store.db", "store.db-shm", "store.db-wal", "store.db.embedder.json",
+        "store.db.vecs"]
 
 
 def test_only_timing_records_are_loaded_as_runs(tmp_path: pathlib.Path) -> None:

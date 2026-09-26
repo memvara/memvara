@@ -51,6 +51,28 @@ def test_battery_and_load_are_two_reasons() -> None:
     assert len(pb.invalid_reasons([pb.Conditions(True, 0.9)])) == 2
 
 
+def test_a_load_average_that_cannot_be_read_is_not_measured(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    def unreadable() -> tuple[float, float, float]:
+        raise OSError("no load average here")
+
+    monkeypatch.setattr(pb.os, "getloadavg", unreadable)
+    assert pb.read_conditions().load_per_cpu is None
+
+
+def test_a_platform_with_no_load_average_is_not_measured(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delattr(pb.os, "getloadavg")
+    assert pb.read_conditions().load_per_cpu is None
+
+
+def test_a_run_whose_load_could_not_be_read_is_invalid_rather_than_idle() -> None:
+    # Reading the missing load as 0.0 would call the machine idle, which is the one thing
+    # nobody measured.
+    reasons = pb.invalid_reasons([pb.Conditions(False, 0.2), pb.Conditions(False, None)])
+    assert len(reasons) == 1 and "could not be read" in reasons[0] and "1 of 2" in reasons[0]
+
+
 def test_the_conditions_of_this_machine_can_be_read() -> None:
     now = pb.read_conditions()
     assert isinstance(now.load_per_cpu, float) and now.load_per_cpu >= 0.0
