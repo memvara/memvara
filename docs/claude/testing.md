@@ -791,7 +791,7 @@ PYTHONPATH=$PWD python -m pytest -q -p no:cacheprovider tests/adversarial/framew
 PYTHONPATH=$PWD python -m pytest -q -p no:cacheprovider tests/adversarial/frameworks/nightly --tier nightly -k crewai
 ```
 
-Installing the packages needs PyPI; nothing else needs the network. To type-check the folder, put `tests/` and `scripts/` on mypy's path, because `environments.py` imports the nightly run's `nightly.steps`: `MYPYPATH=tests:scripts:. python -m mypy tests/adversarial/frameworks`. Measured on 2026-09-27 on a laptop, the folder took 3 minutes 44 seconds with every environment built from nothing, and 30 seconds reusing them, when each environment took 0.6 to 0.7 seconds to make ready. The ten environments took 2.83 GB.
+Installing the packages needs PyPI; nothing else needs the network. To type-check the folder, put `tests/` and `scripts/` on mypy's path, because `environments.py` imports the nightly run's `nightly.steps`: `MYPYPATH=tests:scripts:. python -m mypy tests/adversarial/frameworks`. Measured on 2026-09-27 on a laptop, the folder took 40 seconds reusing every environment, when each took 0.7 to 0.8 seconds to make ready. About 12 of those seconds are the fast tests, two of which wait out a time limit on purpose. Building every environment from nothing added about 3 minutes 15 seconds, and the table gives each build's time. The ten environments took 2.83 GB.
 
 | Environment | Built from nothing | Size |
 |---|---|---|
