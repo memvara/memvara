@@ -2473,6 +2473,63 @@ def test_a_clear_that_may_not_write_the_lock_file_refuses_and_changes_nothing(tm
     assert str(lock) in message and "Nothing was changed" in message, message
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_clear_works_in_a_directory_it_may_not_add_files_to(tmp_path):
+    """A clear asks for the lock file exclusively on the store's presence connection, and
+    on the empty lock file `BEGIN EXCLUSIVE` starts a first page. With SQLite's default
+    journal that needed a new `<db>.lock-journal`, so in a directory that forbids new
+    files it failed with "attempt to write a readonly database". The clear took that for
+    another store holding the file, raised `StoreInUseError` and told the operator to stop
+    processes that did not exist, every time. A plain connection keeps the database's
+    `-wal` and `-shm` files here and holds no lock file, so no other store has it open."""
+    path = tmp_path / "c.db"
+    with SQLiteStore(str(path)) as store:
+        store.set_episode_embedding(turn(store).id, onehot(1))
+    holder = sqlite3.connect(path)
+    holder.execute("SELECT count(*) FROM sqlite_master").fetchall()
+    os.chmod(tmp_path, 0o555)
+    try:
+        with SQLiteStore(str(path)) as store:
+            cleared = store.clear_embeddings()
+    finally:
+        os.chmod(tmp_path, 0o755)
+        holder.close()
+    assert cleared == 1
+
+
+def test_a_clear_that_fails_for_another_reason_raises_that_reason(tmp_path):
+    """Only "database is locked" means that another store holds the lock file. Any other
+    error from asking for it exclusively was reported as that too, with advice to stop
+    other processes. It is raised as itself now, the store keeps its shared lock, and
+    nothing is changed."""
+    path = str(tmp_path / "c.db")
+    store = SQLiteStore(path)
+    ep = turn(store)
+    store.set_episode_embedding(ep.id, onehot(1))
+    presence = store._presence
+
+    class Failing:
+        def execute(self, sql, *args):
+            if sql == "BEGIN EXCLUSIVE":
+                raise sqlite3.OperationalError("disk I/O error")
+            return presence.execute(sql, *args)
+
+    store._presence = Failing()
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            store.clear_embeddings()
+    finally:
+        store._presence = presence
+    assert store.vector_search_episodes(onehot(1), [SCOPE], 1)[0][0] == ep.id
+    alone = sqlite3.connect(path + ".lock", isolation_level=None, timeout=0)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            alone.execute("BEGIN EXCLUSIVE")     # refused while the store holds it shared
+    finally:
+        alone.close()
+        store.close()
+
+
 def test_clearing_vectors_another_store_in_this_process_maps_is_refused(tmp_path,
                                                                         monkeypatch):
     """Two stores in one process map the file separately, so each counts as another.

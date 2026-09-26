@@ -2289,6 +2289,17 @@ make that connection writable. When the record says no, `_claim_alone` raises
 `PermissionError` naming the file, with nothing changed. Opening the store still needs
 only to read the file.
 
+The same reasoning applies to both lock connections, so both keep their journal in
+memory. A clear upgrades the presence connection with `BEGIN EXCLUSIVE`, and on the empty
+lock file that starts a first page too, so with SQLite's default journal it needed a new
+`<db>.lock-journal`. In a directory that forbids new files every clear then failed with
+"attempt to write a readonly database", and `_try_alone`, which took every error for
+another store holding the file, raised `StoreInUseError` and advised stopping processes
+that did not exist. `_present` gives the presence connection the in-memory journal
+`_reserve` gives the creation lock's, and `_try_alone` now counts only "database is
+locked" as another store: any other error is raised as itself, once the store holds the
+file shared again.
+
 Measured scenario by scenario against the code before this change, what an opener needs is
 the same in every case but one: an open that runs the schema step must be able to write
 `<db>.lock`, where before it needed only to read it. In detail:

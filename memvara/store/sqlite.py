@@ -1912,8 +1912,22 @@ class SQLiteStore:
         path = _lock_path(self.path)
         self._presence_refusal = None if path is None else _write_refusal(path)
         return self._take_lock_file(
-            self._share, _PRESENCE_WAIT, "is having its vectors cleared by another store",
+            self._present, _PRESENCE_WAIT, "is having its vectors cleared by another store",
             "that re-embedding has finished")
+
+    @staticmethod
+    def _present(conn: sqlite3.Connection) -> None:
+        """Hold the shared lock on a new presence connection, whose journal is in memory.
+
+        A clear later asks this same connection for the lock exclusively (`_try_alone`),
+        and on the empty lock file `BEGIN EXCLUSIVE` starts a first page, as
+        `BEGIN IMMEDIATE` does for the creation lock (`_reserve`). With SQLite's default
+        journal that needed a new `<db>.lock-journal`, which a directory the account may
+        not add files to refuses. Nothing is ever written through this connection either,
+        so its rollback journal is kept in memory too.
+        """
+        conn.execute("PRAGMA journal_mode=MEMORY").fetchone()
+        SQLiteStore._share(conn)
 
     @contextmanager
     def _creating(self) -> Iterator[None]:
@@ -2068,6 +2082,10 @@ class SQLiteStore:
         between the two locks at once. Without that, two clears at once could each find
         the other gone, and the one refused would go on mapping a file the other had
         truncated.
+
+        Only "database is locked" means another store holds the file. Any other error is
+        raised as itself, after this store holds the file shared again, so that a fault
+        is never reported as another process to go and stop.
         """
         began = not self._db.in_transaction
         if began:
@@ -2076,11 +2094,13 @@ class SQLiteStore:
         conn.execute("PRAGMA busy_timeout = 0")
         try:
             conn.execute("BEGIN EXCLUSIVE")
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
             conn.execute(f"PRAGMA busy_timeout = {int(_PRESENCE_WAIT * 1000)}")
             self._share(conn)
             if began:
                 self._db.rollback()
+            if "database is locked" not in str(exc):
+                raise
             return False
         conn.execute(f"PRAGMA busy_timeout = {int(_PRESENCE_WAIT * 1000)}")
         self._alone = True

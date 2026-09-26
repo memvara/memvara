@@ -240,6 +240,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   read-only lock file, such as one another account created, the clear went ahead while
   another process had the store open, and that process then died with SIGBUS. The clear
   now raises `PermissionError`, naming the lock file, and changes nothing. #350.
+- **`clear_embeddings()`, and so `reembed()`, work in a directory where the account may not
+  add files.** A clear asks for `<db>.lock` exclusively, and on that empty file SQLite
+  needed a new `<db>.lock-journal` to do so. In such a directory every clear failed, and
+  the failure was reported as `StoreInUseError`, with advice to stop other processes that
+  did not exist. The lock file's connection now keeps its journal in memory, and a clear
+  reports `StoreInUseError` only when another store really holds the file; any other error
+  is raised as itself. #324.
 
 ## [0.16.0] — 2026-09-25
 
