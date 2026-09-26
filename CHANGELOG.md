@@ -135,6 +135,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   filtering took 7.3 ms (best of 200 runs on a laptop). The method is optional and listed
   in `OMITTABLE`: a store without it keeps working and closes the same values, reading the
   slot whole. `docs/UPGRADING.md` says what the new member does to `isinstance(x, Store)`.
+  - **Security properties.** `tests/adversarial/security/` checks the places where a
+    defect would be a vulnerability. Stored text that imitates a result row or a header
+    comes back harmless through every read tool and both hooks that read the store. Two
+    servers bound to sibling scopes on one store file answer an id from the other scope
+    exactly as they answer an id that never existed. The URL fetcher refuses every private
+    address class, including spellings and redirects that hide one. A tampered or
+    truncated vector record and a wrong key are detected rather than served. The redactor
+    sees every field before it is stored, confirmation tokens cannot be forged, replayed or
+    carried to another scope, secrets never reach standard error, argv or `memory_stats`,
+    and the vector file, the key file and the daemon socket are owner-only on POSIX.
+  - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed
 
