@@ -16,12 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from harness.env import child_env
-
-from . import probe
+from . import environments, probe
 
 #: The probe's script, run the way the nightly tests run it.
-PROBE = Path(probe.__file__)
+PROBE = environments.PROBE
 
 PLANTED = """
     import atexit
@@ -74,11 +72,10 @@ def _probe(folder: Path, source: str, *options: str) -> Probed:
     report = folder / "report.jsonl"
     home = folder / "home"
     home.mkdir()
-    env = child_env(home)
-    env.pop("PYTHONPATH", None)
     done = subprocess.run(
         [sys.executable, "-I", "-B", str(PROBE), str(checks), str(report), *options],
-        env=env, cwd=folder, capture_output=True, text=True, timeout=120)
+        env=environments.probe_env(home), cwd=folder, capture_output=True, text=True,
+        timeout=120)
     return probe.read(report), done
 
 
