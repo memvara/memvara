@@ -8,7 +8,7 @@ model the opposite of what will happen, and the model cannot check.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Collection
 
 import pytest
 
@@ -148,9 +148,25 @@ def test_the_real_descriptions_state_defaults() -> None:
     assert in_tools, "no default stated in a tool's description was read"
 
 
-#: The drift #296 pins: these tools state a default in words that their schema does not
-#: declare; each handler supplies the value itself.
-UNDECLARED = {"memory_recall": {"include_episodes"}, "memory_remember": {"extractor"}}
+#: The drift #296 pins, exactly: each tool, the argument, and the words that state a
+#: default its schema does not declare. Each handler supplies the value itself.
+UNDECLARED = {"memory_recall": {("include_episodes", "Default false")},
+              "memory_remember": {("extractor", "Defaults to 'api'")}}
+
+
+def _is_known_296(name: str, problems: Collection[tuple[str, str]]) -> bool:
+    """Whether `(argument, words)` problems found for a tool are exactly drift #296."""
+    return bool(problems) and set(problems) == UNDECLARED.get(name)
+
+
+def test_the_pin_for_296_absorbs_only_its_own_words() -> None:
+    """A strict expected failure absorbs whatever its test reports as the known bug. So the
+    changed words of a stated default, or another argument, must fail as a new drift."""
+    assert _is_known_296("memory_recall", {("include_episodes", "Default false")})
+    assert not _is_known_296("memory_recall", {("include_episodes", "Default true")})
+    assert not _is_known_296("memory_recall", {("include_episodes", "Default false"),
+                                               ("k", "Defaults to 8")})
+    assert not _is_known_296("memory_search", {("include_episodes", "Default false")})
 
 
 @pytest.mark.parametrize("name", [
@@ -169,6 +185,6 @@ def test_a_default_stated_in_words_is_declared_in_the_schema(name: str) -> None:
     report = "\n".join(
         f"{name}.{argument} says {words!r}, and its schema declares no default "
         f"({len(labels)} configurations)" for (argument, words), labels in problems.items())
-    if problems and {argument for argument, _ in problems} == UNDECLARED.get(name):
+    if _is_known_296(name, problems):
         raise known_bugs.Reproduced(report)
     assert not problems, report

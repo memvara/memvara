@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import pytest
 
@@ -319,16 +319,31 @@ def test_a_feature_set_to_its_stated_default_changes_nothing(tmp_path: pathlib.P
         "no help says which features are on by default")
 
 
-#: The drift #297 pins: both console scripts accept --version, and neither help names it.
-UNNAMED = ["--version"]
+#: The drift #297 pins, exactly: these two console scripts accept --version, and neither
+#: help names it. Another script, or another unnamed word, is a new drift and fails.
+UNNAMED = {"memvara": ["--version"], "memvara-mcp": ["--version"]}
 
 
-@pytest.mark.parametrize("command", [
-    pytest.param(command, id=command.name, marks=[known_bugs.xfail("B21")])
-    for command in command_lines() if command.top])
+def _script_params(commands: Iterable[CommandLine]) -> list[Any]:
+    """One parameter per console script, with the #297 marker on the scripts it names."""
+    return [pytest.param(command, id=command.name,
+                         marks=[known_bugs.xfail("B21")] if command.name in UNNAMED else [])
+            for command in commands if command.top]
+
+
+def test_the_pin_for_297_marks_only_the_scripts_it_names() -> None:
+    """A third console script with the same gap is a new drift, so its test must fail
+    rather than be absorbed by the marker on the two scripts #297 is about."""
+    third = CommandLine("memvara-third", planted_main, frozenset({"--version"}),
+                        frozenset(), "", top=True)
+    marked = {param.id for param in _script_params([*SCRIPTS, third]) if param.marks}
+    assert marked == {"memvara", "memvara-mcp"}
+
+
+@pytest.mark.parametrize("command", _script_params(command_lines()))
 def test_every_word_a_console_script_accepts_is_in_its_help(command: CommandLine) -> None:
     words = undocumented(command)
-    if words == UNNAMED:
+    if words and words == UNNAMED.get(command.name):
         raise known_bugs.Reproduced(f"{command.name} accepts {words}, and its help names "
                                     "none of them")
     assert not words, f"{command.name} accepts {words}, and its help names none of them"
