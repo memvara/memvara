@@ -709,4 +709,15 @@ The runner passes both to each session's server, and writes them into the client
 - **The three protocol versions.** `test_adv_protocols.py` agrees each version the server supports, 2025-06-18, 2025-03-26 and 2024-11-05, over a real pipe. The server echoes the version it was asked for, and nothing else differs: the capabilities, the instructions, the tools and a tool's result are the same under all three. A JSON-RPC batch is refused whichever version was agreed, which the design lists as documented behaviour, although batches belong to 2025-03-26. A version the server does not speak, or none at all, gets its newest.
 - **Read-only cloud credentials.** `test_adv_cloud_read_only.py` starts a server in cloud mode against `FakeV1`. With a key that may only read, the server lists only the read tools, refuses each write tool by name without sending anything to the deployment, and still answers reads. With a key that may write, it lists every tool, which shows that the difference comes from the credential.
 
+### The workflow scenarios
+
+Ten scenarios cover the workflows the design lists for this workstream. Each file's `description` says what it checks and why.
+
+| Scenario | What it adds to the fourteen before it |
+|---|---|
+| `session-recall-every-prompt` | The session-start hook, the recall hook on every prompt, and `memory_add` beside `memory_remember` with `sources` |
+| `correction-end-forms` | Ending one value by claim id, `replaces`, `true_until`, and an end at a future instant |
+| `correction-retire-forms` | Retiring every value of a fact at once, a third party's value, and one value of several |
+| `correction-erased-with-sources` | Erasing a claim together with the turn it came from |
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

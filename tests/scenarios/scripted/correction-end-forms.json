@@ -1,0 +1,87 @@
+{
+  "id": "correction-end-forms",
+  "description": "Four ways to end a fact that was true, in the forms correction-ended does not use. One of two pets dies, and memory_end closes that one value by its claim id, at the day it happened, leaving the other pet and the past alone. The user's taste moves from jazz to blues, and memory_remember with replaces ends the old value in the same write, because likes holds several values at once. A job on a contract that runs out later is written with true_until, and a gym membership is ended at a future instant with memory_end. Both still answer today and no longer answer after their end, and a claim with an end instant set is in the state ended even before that instant arrives (Claim.state in memvara/types.py). memory_history keeps every reason. None of these says the record was wrong, so nothing is retired.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "seed": [
+    {"op": "remember", "predicate": "member_of", "object": "FitHub gym"}
+  ],
+  "sessions": [
+    {"turns": [
+      {"user": "I have a cat called Miso, who I've had since June 2019, and a dog called Pepper, who I've had since March 2021. I like jazz and hiking.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "owns_pet", "object": "Miso the cat", "true_since": "2019-06-01"}},
+         {"tool": "memory_remember", "args": {"predicate": "owns_pet", "object": "Pepper the dog", "true_since": "2021-03-01"}},
+         {"tool": "memory_remember", "args": {"predicate": "likes", "object": "jazz"}},
+         {"tool": "memory_remember", "args": {"predicate": "likes", "object": "hiking"}}
+       ]}
+    ]},
+    {"turns": [
+      {"user": "Sad news: Pepper died on 10 April.",
+       "script": [
+         {"tool": "memory_search", "args": {"query": "what pets does the user own"}, "capture": {"pepper_id": "id=(cl_[0-9a-f]+) [^\\]]*\\] user owns pet Pepper the dog"}},
+         {"tool": "memory_end", "args": {"claim_id": "{pepper_id}", "at": "2026-04-10", "reason": "Pepper died"}}
+       ]},
+      {"id": "pets-now", "user": "Which pets do I have now?",
+       "script": [{"tool": "memory_recall", "args": {"query": "what pets does the user own"}}]},
+      {"id": "pets-2025", "user": "And which pets did I have in June 2025?",
+       "script": [{"tool": "memory_search", "args": {"query": "what pets does the user own", "valid_at": "2025-06-01"}}]},
+      {"user": "I've gone off jazz. These days I listen to blues instead.",
+       "script": [
+         {"tool": "memory_search", "args": {"query": "what music does the user like"}, "capture": {"jazz_id": "id=(cl_[0-9a-f]+) [^\\]]*\\] user likes jazz"}},
+         {"tool": "memory_remember", "args": {"predicate": "likes", "object": "blues", "replaces": "{jazz_id}", "reason": "the user moved from jazz to blues"}}
+       ]},
+      {"id": "likes-now", "user": "What do I like these days?",
+       "script": [{"tool": "memory_recall", "args": {"query": "what does the user like"}}]},
+      {"id": "planned", "user": "I'm working at Fabrikam on a contract that runs out in two months. And I've cancelled FitHub: the membership stops at the end of next month.",
+       "script": [
+         {"mark": "gym_end", "offset_seconds": 2592000},
+         {"mark": "contract_end", "offset_seconds": 5184000},
+         {"mark": "after_both", "offset_seconds": 10368000},
+         {"tool": "memory_remember", "args": {"predicate": "works_at", "object": "Fabrikam", "true_until": "{contract_end}", "until_reason": "the contract runs out"}},
+         {"tool": "memory_end", "args": {"predicate": "member_of", "at": "{gym_end}", "reason": "the user cancelled the membership"}}
+       ]},
+      {"id": "now", "user": "Where do I work, and which gym am I a member of?",
+       "script": [{"tool": "memory_recall", "args": {"query": "where does the user work and which gym is the user a member of"}}]},
+      {"id": "later", "user": "Looking four months ahead, what will still hold?",
+       "script": [{"tool": "memory_search", "args": {"query": "where does the user work and which gym is the user a member of", "valid_at": "{after_both}"}}]},
+      {"id": "history", "user": "Remind me what happened with Pepper, with jazz and with the contract.",
+       "script": [
+         {"tool": "memory_history", "args": {"predicate": "owns_pet"}},
+         {"tool": "memory_history", "args": {"predicate": "likes"}},
+         {"tool": "memory_history", "args": {"predicate": "works_at"}}
+       ]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "pepper-ended", "text": "user owns pet Pepper the dog", "state": "ended", "count": 1},
+    {"id": "pepper-not-retired", "text": "user owns pet Pepper the dog", "state": "retired", "count": 0},
+    {"id": "miso-live", "text": "user owns pet Miso the cat", "state": "live", "count": 1},
+    {"id": "jazz-ended", "text": "user likes jazz", "state": "ended", "count": 1},
+    {"id": "jazz-not-retired", "text": "user likes jazz", "state": "retired", "count": 0},
+    {"id": "blues-live", "text": "user likes blues", "state": "live", "count": 1},
+    {"id": "hiking-live", "text": "user likes hiking", "state": "live", "count": 1},
+    {"id": "contract-ends-later", "text": "user works at Fabrikam", "state": "ended", "count": 1},
+    {"id": "gym-ends-later", "text": "user member of FitHub gym", "state": "ended", "count": 1}
+  ],
+  "answer_gold": [
+    {"id": "miso-now", "turn": "pets-now", "must_contain": "Miso the cat"},
+    {"id": "pepper-not-now", "turn": "pets-now", "must_not_contain": "Pepper"},
+    {"id": "pepper-in-2025", "turn": "pets-2025", "must_contain": "Pepper the dog"},
+    {"id": "blues-now", "turn": "likes-now", "must_contain": "blues"},
+    {"id": "hiking-now", "turn": "likes-now", "must_contain": "hiking"},
+    {"id": "jazz-not-now", "turn": "likes-now", "must_not_contain": "jazz"},
+    {"id": "future-end-is-explained", "turn": "planned", "must_contain": "end at an instant still in the future"},
+    {"id": "contract-holds-today", "turn": "now", "must_contain": "Fabrikam"},
+    {"id": "gym-holds-today", "turn": "now", "must_contain": "FitHub gym"},
+    {"id": "contract-over-later", "turn": "later", "must_not_contain": "Fabrikam"},
+    {"id": "gym-over-later", "turn": "later", "must_not_contain": "FitHub"},
+    {"id": "pepper-reason-kept", "turn": "history", "must_contain": "ended because: Pepper died"},
+    {"id": "jazz-reason-kept", "turn": "history", "must_contain": "ended because: the user moved from jazz to blues"},
+    {"id": "contract-reason-kept", "turn": "history", "must_contain": "ended because: the contract runs out"}
+  ],
+  "forbidden": [{"tool": "memory_forget"}],
+  "requires": ["tools"],
+  "negative_control": true
+}

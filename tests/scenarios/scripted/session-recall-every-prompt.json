@@ -1,0 +1,56 @@
+{
+  "id": "session-recall-every-prompt",
+  "description": "An agent's host runs the session-start hook when a conversation opens and the recall hook on every prompt. The user gives a rental door code, which the fast path cannot read, so the agent stores the turn with memory_add and then the exact fact with memory_remember, citing that turn. The user also says where they now work, which memory_add stores on its own. A later prompt in the same session asks for the code, and the recall hook brings it; asked again, the hook does not repeat it. memory_why quotes the sentence the code came from, and the next session opens with both facts. A sentence that names another city does not change where the user lives.",
+  "tier": "fast",
+  "surfaces": ["stdio", "hooks"],
+  "env": {"user": "tester"},
+  "seed": [
+    {"op": "remember", "predicate": "prefers", "object": "short answers", "memory_type": "procedural"},
+    {"op": "remember", "predicate": "lives_in", "object": "Lisbon"}
+  ],
+  "sessions": [
+    {"turns": [
+      {"id": "opens", "user": "Morning! Can you help me plan my week?",
+       "script": [{"hook": "session_start"}, {"hook": "recall"}]},
+      {"id": "door-code", "user": "The door code for our rental in Porto is 7731.",
+       "script": [
+         {"hook": "recall"},
+         {"tool": "memory_add", "args": {"text": "The door code for our rental in Porto is 7731."}, "capture": {"code_turn": "turn id\\(s\\): (ep_[0-9a-f]+)"}},
+         {"tool": "memory_remember", "args": {"predicate": "rental_door_code", "object": "7731", "sources": ["{code_turn}"]}, "capture": {"code_id": "\\[(cl_[0-9a-f]+)\\] user rental door code 7731"}}
+       ]},
+      {"id": "new-job", "user": "Also, I work at Northwind Traders now.",
+       "script": [
+         {"hook": "recall"},
+         {"tool": "memory_add", "args": {"text": "Also, I work at Northwind Traders now."}}
+       ]},
+      {"id": "asks-code", "user": "What's the rental door code again?",
+       "script": [{"hook": "recall"}]},
+      {"id": "asks-again", "user": "Sorry, what was the rental door code?",
+       "script": [{"hook": "recall"}]},
+      {"id": "why", "user": "How do you know the door code?",
+       "script": [{"hook": "recall"}, {"tool": "memory_why", "args": {"claim_id": "{code_id}"}}]}
+    ]},
+    {"turns": [
+      {"id": "next-morning", "user": "Morning again. What's on today?",
+       "script": [{"hook": "session_start"}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "employer-stored-by-add", "text": "user works at Northwind Traders", "state": "live", "count": 1},
+    {"id": "code-stored-by-remember", "text": "user rental door code 7731", "state": "live", "count": 1},
+    {"id": "home-unchanged", "text": "user lives in Lisbon", "state": "live", "count": 1},
+    {"id": "no-home-from-the-code-sentence", "text": "user lives in Porto", "state": "absent"}
+  ],
+  "answer_gold": [
+    {"id": "session-start-brings-the-preference", "turn": "opens", "must_contain": "user prefers short answers"},
+    {"id": "session-start-brings-the-home", "turn": "opens", "must_contain": "user lives in Lisbon"},
+    {"id": "add-reads-the-employer", "turn": "new-job", "must_contain": "user works at Northwind Traders"},
+    {"id": "recall-hook-brings-this-sessions-write", "turn": "asks-code", "must_contain": "user rental door code 7731"},
+    {"id": "recall-hook-does-not-repeat-it", "turn": "asks-again", "must_not_contain": "7731"},
+    {"id": "why-quotes-the-source-turn", "turn": "why", "must_contain": "The door code for our rental in Porto is 7731"},
+    {"id": "next-session-brings-the-employer", "turn": "next-morning", "must_contain": "user works at Northwind Traders"},
+    {"id": "next-session-brings-the-code", "turn": "next-morning", "must_contain": "user rental door code 7731"}
+  ],
+  "requires": ["tools", "hooks.session_start", "hooks.recall"],
+  "negative_control": true
+}
