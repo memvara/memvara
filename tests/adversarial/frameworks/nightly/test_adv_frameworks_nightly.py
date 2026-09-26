@@ -24,12 +24,13 @@ from packaging.utils import canonicalize_name
 from harness import known_bugs
 
 from .. import environments, probe
-from . import checks_langchain, checks_langgraph, checks_llamaindex
+from . import checks_crewai, checks_langchain, checks_langgraph, checks_llamaindex
 
 #: Each framework's checks, which the probe runs in that framework's environments.
 CHECKS: dict[str, Any] = {
     "langchain": checks_langchain,
     "llamaindex": checks_llamaindex,
+    "crewai": checks_crewai,
     "langgraph": checks_langgraph,
 }
 
@@ -61,6 +62,19 @@ PINNED: dict[tuple[str, str, str], tuple[pytest.MarkDecorator, Symptom]] = {
     ("llamaindex", "latest", "the_retriever_docstring_example_builds_a_query_engine"): (
         known_bugs.xfail("B83"),
         Symptom("TypeError", "got multiple values for argument 'retriever'")),
+    # crewai 1.10.1's EncodingFlow takes storage.write_lock, which the StorageBackend
+    # protocol does not declare. From 1.11.0 on, CrewAI no longer asks for it.
+    ("crewai", "floor", "crewais_memory_remembers_and_recalls_through_the_storage"): (
+        known_bugs.xfail("B84"),
+        Symptom("AttributeError", "object has no attribute 'write_lock'")),
+    # The same bug stops this check before it can reach B85. The fix for B84 moves this
+    # pin to B85, with the symptom of the pin below.
+    ("crewai", "floor", "a_repeated_memory_reaches_crewais_consolidation"): (
+        known_bugs.xfail("B84"),
+        Symptom("AttributeError", "object has no attribute 'write_lock'")),
+    ("crewai", "latest", "a_repeated_memory_reaches_crewais_consolidation"): (
+        known_bugs.xfail("B85"),
+        Symptom("AssertionError", "CrewAI asked its model to consolidate 0 times")),
 }
 
 

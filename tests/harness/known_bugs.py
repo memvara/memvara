@@ -113,6 +113,10 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     # placeholders until the issues are filed.
     KnownBug("B83", 9004, "the as_query_engine example in the LlamaIndex MemvaraRetriever "
              "docstring raises TypeError"),
+    KnownBug("B84", 9005, "at crewai 1.10.1, memvara's declared floor, CrewAI's Memory "
+             "cannot save through MemvaraStorage, which has no write_lock"),
+    KnownBug("B85", 9006, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "
+             "consolidation threshold of 0.85, so a repeated memory is stored twice"),
 )}
 
 
