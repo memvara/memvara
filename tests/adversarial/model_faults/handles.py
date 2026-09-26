@@ -1,4 +1,5 @@
-"""Handles on one store for the model-faults tests, and the record of what a write did.
+"""Handles on one store for the model-faults tests, the record of what a write did, and the
+turns and model claims that several test files share.
 
 Two kinds of handle share a store: one whose model is a `ScriptedModel`, and one with no
 model at all. A read stage that fails must serve exactly what the second serves. And a
@@ -27,7 +28,7 @@ from memvara.types import WriteReceipt
 
 from harness import stores
 
-from .scripted import ScriptedModel
+from .scripted import ScriptedModel, Text
 
 #: The user every handle is bound to.
 USER = "u1"
@@ -38,6 +39,28 @@ FAST_TURN = "My name is Ada."
 #: A turn the salience gate passes and the fast path does not read, so it reaches the
 #: model.
 MODEL_TURN = "The team relocated the whole office to Porto over the summer."
+
+#: About 13,000 characters in 13 paragraphs, which the splitter cuts into three pieces.
+LONG = "\n\n".join(
+    f"Part {n} of the migration notes covers the database, the queue, the cache and the "
+    "search index, and says which team owns each step and how it is rolled back. " * 6
+    for n in range(13))
+
+
+def claim(subject: str, predicate: str, obj: str, **changes: Any) -> dict[str, Any]:
+    """A model claim citing turn 0, with every field of the claim schema."""
+    return {"subject": subject, "predicate": predicate, "object": obj, "polarity": 1,
+            "memory_type": "semantic", "confidence": 0.9, "source_index": 0,
+            "when": None, "amount": None, "unit": None, **changes}
+
+
+#: The claim most tests have the model read from `MODEL_TURN`.
+PORTO = claim("team", "based_in", "Porto")
+
+#: What an acquisition call answers when it reads a spelling as a new predicate that
+#: holds many values.
+NEW_MANY = Text('{"canonical": null, "cardinality": "many", "volatility": "slow", '
+                '"memory_type": "semantic"}')
 
 
 def with_model(model: ScriptedModel, path: pathlib.Path | None = None, *,
@@ -61,6 +84,16 @@ def with_model(model: ScriptedModel, path: pathlib.Path | None = None, *,
 def without_model(store: Store, *, user: str = USER) -> Memvara:
     """A handle with no model on `store`: the reads every failed read stage must match."""
     return stores.memory(store=store, user=user)
+
+
+def agentic(model: ScriptedModel) -> Memvara:
+    """A handle whose model is `model`, with agentic extraction switched on."""
+    return with_model(model, write_agentic_extraction=True)
+
+
+def model_claims(mem: Memvara) -> list[str]:
+    """The objects of the live claims the scripted model extracted, in sorted order."""
+    return sorted(c.object for c in mem.get_all() if c.extractor == ScriptedModel.name)
 
 
 @dataclass(frozen=True)

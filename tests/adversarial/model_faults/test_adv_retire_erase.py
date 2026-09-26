@@ -21,7 +21,7 @@ from harness import known_bugs
 from memvara.store import SQLiteStore
 from memvara.types import RefusedProposal, closure_reasons
 
-from .handles import fates, ledger, seed, with_model, without_model
+from .handles import agentic, claim, fates, ledger, seed, with_model, without_model
 from .scripted import Answer, Forever, ScriptedModel, Text
 
 Make = Callable[..., ScriptedModel]
@@ -32,13 +32,6 @@ IN_LISBON = "These days home is Lisbon, and it has been for a while."
 #: The six tools an agentic run is offered, in the order it is offered them.
 TOOLS = ["search_memories", "get_claim", "propose_claim", "propose_end",
          "propose_supersede", "propose_link"]
-
-
-def claim(subject: str, predicate: str, obj: str, **changes: Any) -> dict[str, Any]:
-    """A model claim citing turn 0, with every field of the claim schema."""
-    return {"subject": subject, "predicate": predicate, "object": obj, "polarity": 1,
-            "memory_type": "semantic", "confidence": 0.9, "source_index": 0,
-            "when": None, "amount": None, "unit": None, **changes}
 
 
 def read(claim_id: str) -> tuple[str, dict[str, Any]]:
@@ -54,10 +47,6 @@ def supersede(claim_id: str, predicate: str, obj: str) -> tuple[str, dict[str, A
         "claim_id": claim_id, "reason": "a new value", "subject": "user",
         "predicate": predicate, "object": obj, "source_index": 0, "confidence": 0.9,
         "memory_type": "semantic", "valid_from": None, "amount": None, "unit": None})
-
-
-def agentic(model: ScriptedModel) -> Any:
-    return with_model(model, write_agentic_extraction=True)
 
 
 # -- single-call extraction ------------------------------------------------------------

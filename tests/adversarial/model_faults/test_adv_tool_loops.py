@@ -12,11 +12,11 @@ to single-call extraction that says why, and "Every request the run sent is bill
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Callable
 
 import pytest
 
-from .handles import MODEL_TURN, fates, ledger, seed, with_model
+from .handles import MODEL_TURN, PORTO, agentic, fates, ledger, model_claims, seed
 from .scripted import (
     APITimeoutError, Answer, Forever, Late, RateLimitError, ScriptedModel, Truncated,
 )
@@ -25,24 +25,8 @@ Make = Callable[..., ScriptedModel]
 
 SEARCH = ("search_memories", {"query": "office", "k": 3})
 
-
-def claim(subject: str, predicate: str, obj: str, **changes: Any) -> dict[str, Any]:
-    """A model claim citing turn 0, with every field of the claim schema."""
-    return {"subject": subject, "predicate": predicate, "object": obj, "polarity": 1,
-            "memory_type": "semantic", "confidence": 0.9, "source_index": 0,
-            "when": None, "amount": None, "unit": None, **changes}
-
-
 #: What single-call extraction answers when a run falls back to it.
-FALLBACK = [claim("team", "based_in", "Porto")]
-
-
-def agentic(model: ScriptedModel) -> Any:
-    return with_model(model, write_agentic_extraction=True)
-
-
-def model_claims(mem: Any) -> list[str]:
-    return sorted(c.object for c in mem.get_all() if c.extractor == ScriptedModel.name)
+FALLBACK = [PORTO]
 
 
 def test_a_model_that_never_stops_is_stopped_at_twelve_answers_and_each_is_billed(

@@ -10,7 +10,7 @@ one that failed. Each error here is raised the way the provider SDKs raise it; s
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Callable
 
 import pytest
 
@@ -19,7 +19,8 @@ from memvara.store import SQLiteStore
 from memvara.write.split import split_for_extraction
 
 from .handles import (
-    FAST_TURN, MODEL_TURN, fates, ledger, seed, turns, with_model, without_model,
+    FAST_TURN, LONG, MODEL_TURN, PORTO, claim, fates, ledger, model_claims, seed, turns,
+    with_model, without_model,
 )
 from .scripted import (
     APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError,
@@ -27,20 +28,6 @@ from .scripted import (
 )
 
 Make = Callable[..., ScriptedModel]
-
-
-def claim(subject: str, predicate: str, obj: str, **changes: Any) -> dict[str, Any]:
-    """A model claim citing turn 0, with every field of the claim schema."""
-    return {"subject": subject, "predicate": predicate, "object": obj, "polarity": 1,
-            "memory_type": "semantic", "confidence": 0.9, "source_index": 0,
-            "when": None, "amount": None, "unit": None, **changes}
-
-
-PORTO = claim("team", "based_in", "Porto")
-
-
-def model_claims(mem: Any) -> list[str]:
-    return sorted(c.object for c in mem.get_all() if c.extractor == ScriptedModel.name)
 
 
 @pytest.mark.parametrize("failure", [
@@ -119,13 +106,6 @@ def test_a_failed_judge_leaves_the_write_whole_and_the_advice_empty(scripted: Ma
     assert receipt.may_replace == []
     assert receipt.llm_calls == model.count() == 1
     assert set(fates(before, mem).values()) == {"unchanged"}
-
-
-#: About 13,000 characters in 13 paragraphs, which the splitter cuts into three pieces.
-LONG = "\n\n".join(
-    f"Part {n} of the migration notes covers the database, the queue, the cache and the "
-    "search index, and says which team owns each step and how it is rolled back. " * 6
-    for n in range(13))
 
 
 def test_a_failed_piece_of_a_long_turn_defers_that_turn_only(scripted: Make) -> None:

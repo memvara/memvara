@@ -20,14 +20,13 @@ import pytest
 from memvara.store import SQLiteStore
 from memvara.types import WriteReceipt
 
-from .handles import MODEL_TURN, with_model, without_model
+from .handles import (
+    LONG, MODEL_TURN, NEW_MANY, PORTO, claim, with_model, without_model,
+)
 from .scripted import Answer, Forever, ScriptedModel, Text
 
 Make = Callable[..., ScriptedModel]
 Row = Callable[[Make, pathlib.Path], tuple[ScriptedModel, Callable[[], Any]]]
-
-NEW_MANY = Text('{"canonical": null, "cardinality": "many", "volatility": "slow", '
-                '"memory_type": "semantic"}')
 
 #: One reply that the query rewrite, the synthesis and the selector can each read.
 CHAT = Text('{"queries": [], "date_range": null, "synthesis": "The notes mention Lisbon.", '
@@ -40,21 +39,6 @@ KEEPS = Text('{"same_thing": false, "same_property": false, "newer_value": false
 OTHER_TURNS = ("The build now uses eight threads and finishes in about four minutes.",
                "Our deploy target moved to the Frankfurt cluster at the start of the month.")
 
-#: About 13,000 characters in 13 paragraphs, which the splitter cuts into three pieces.
-LONG = "\n\n".join(
-    f"Part {n} of the migration notes covers the database, the queue, the cache and the "
-    "search index, and says which team owns each step and how it is rolled back. " * 6
-    for n in range(13))
-
-
-def claim(subject: str, predicate: str, obj: str, **changes: Any) -> dict[str, Any]:
-    """A model claim citing turn 0, with every field of the claim schema."""
-    return {"subject": subject, "predicate": predicate, "object": obj, "polarity": 1,
-            "memory_type": "semantic", "confidence": 0.9, "source_index": 0,
-            "when": None, "amount": None, "unit": None, **changes}
-
-
-PORTO = claim("team", "based_in", "Porto")
 INVENTED = claim("team", "zqx_office_hub", "Porto")
 
 

@@ -26,26 +26,12 @@ from memvara.types import Dispute, MemoryType
 from memvara.write import pipeline, pollution
 
 from .handles import (
-    FAST_TURN, MODEL_TURN, fates, ledger, raised_in, seed, turns, with_model,
+    FAST_TURN, MODEL_TURN, NEW_MANY, PORTO, claim, fates, ledger, model_claims, raised_in,
+    seed, turns, with_model,
 )
 from .scripted import Forever, ScriptedModel, Text, Truncated
 
 Make = Callable[..., ScriptedModel]
-
-#: What an acquisition call answers when it reads a spelling as a new predicate that
-#: holds many values.
-NEW_MANY = Text('{"canonical": null, "cardinality": "many", "volatility": "slow", '
-                '"memory_type": "semantic"}')
-
-
-def claim(subject: str, predicate: str, obj: str, **changes: Any) -> dict[str, Any]:
-    """A model claim citing turn 0, with every field of the claim schema."""
-    return {"subject": subject, "predicate": predicate, "object": obj, "polarity": 1,
-            "memory_type": "semantic", "confidence": 0.9, "source_index": 0,
-            "when": None, "amount": None, "unit": None, **changes}
-
-
-PORTO = claim("team", "based_in", "Porto")
 
 
 def porto(**changes: Any) -> dict[str, Any]:
@@ -61,15 +47,9 @@ def text(*claims: Any) -> Text:
     return Text(json.dumps({"claims": list(claims)}))
 
 
-def objects(mem: Any, *, predicate: str | None = None,
-            extractor: str | None = None) -> list[str]:
-    """The objects of the live claims under `predicate`, or written by `extractor`."""
-    return sorted(c.object for c in mem.get_all()
-                  if predicate in (None, c.predicate) and extractor in (None, c.extractor))
-
-
-def model_claims(mem: Any) -> list[str]:
-    return objects(mem, extractor=ScriptedModel.name)
+def objects(mem: Any, *, predicate: str) -> list[str]:
+    """The objects of the live claims under `predicate`, in sorted order."""
+    return sorted(c.object for c in mem.get_all() if c.predicate == predicate)
 
 
 def write(model: ScriptedModel, **options: Any) -> tuple[Any, dict[str, Any], Any]:

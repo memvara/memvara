@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Callable
+from typing import Callable
 
 from harness import known_bugs
 from memvara.schema import DEFAULT_LEARNED_CAP
 
-from ..handles import fates, ledger, seed, with_model
+from ..handles import NEW_MANY, claim, fates, ledger, seed, with_model
 from ..scripted import Forever, ScriptedModel, Text
 
 Make = Callable[..., ScriptedModel]
@@ -23,14 +23,6 @@ Make = Callable[..., ScriptedModel]
 SNACK_TURN = "The team keeps a snack list for the office kitchen, and it is very long."
 
 MANY = 10_000
-
-
-def claim(subject: str, predicate: str, obj: str, **changes: Any) -> dict[str, Any]:
-    """A model claim citing turn 0, with every field of the claim schema."""
-    return {"subject": subject, "predicate": predicate, "object": obj, "polarity": 1,
-            "memory_type": "semantic", "confidence": 0.9, "source_index": 0,
-            "when": None, "amount": None, "unit": None, **changes}
-
 
 SNACKS = [claim("team", "likes", f"snack {i}") for i in range(MANY)]
 
@@ -78,9 +70,6 @@ def test_a_model_that_restates_one_fact_ten_thousand_times_stores_it_once(
 #: same write under one predicate takes one to two seconds, so a fixed write meets this
 #: easily; today it takes about 440 seconds on a laptop.
 BOUND = 60.0
-
-NEW_MANY = Text('{"canonical": null, "cardinality": "many", "volatility": "slow", '
-                '"memory_type": "semantic"}')
 
 
 @known_bugs.xfail("B32")
