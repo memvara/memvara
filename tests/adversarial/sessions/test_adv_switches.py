@@ -70,6 +70,28 @@ def test_a_combination_refuses_a_setting_that_does_not_change_the_list() -> None
         Combination.of("encryption")
 
 
+@pytest.mark.covers(
+    "tool-switch:memory_add/read_only", "tool-switch:memory_add_document/read_only",
+    "tool-switch:memory_ask/anchored", "tool-switch:memory_delete_document/documents",
+    "tool-switch:memory_delete_document/read_only", "tool-switch:memory_end/end_reason",
+    "tool-switch:memory_end/read_only", "tool-switch:memory_end_matching/end_reason",
+    "tool-switch:memory_end_matching/forget_matching",
+    "tool-switch:memory_end_matching/read_only", "tool-switch:memory_forget/end_reason",
+    "tool-switch:memory_forget/read_only", "tool-switch:memory_forget_matching/end_reason",
+    "tool-switch:memory_forget_matching/forget_matching",
+    "tool-switch:memory_forget_matching/read_only",
+    "tool-switch:memory_get_document/documents", "tool-switch:memory_link/links",
+    "tool-switch:memory_link/read_only", "tool-switch:memory_list_documents/documents",
+    "tool-switch:memory_profile/profile", "tool-switch:memory_recall/anchored",
+    "tool-switch:memory_recall/metadata_filters",
+    "tool-switch:memory_recall/query_rewrite", "tool-switch:memory_recall/synthesis",
+    "tool-switch:memory_remember/end_reason", "tool-switch:memory_remember/expiry_erasure",
+    "tool-switch:memory_remember/read_only", "tool-switch:memory_search/anchored",
+    "tool-switch:memory_search/metadata_filters",
+    "tool-switch:memory_search/query_rewrite", "switch:anchored", "switch:documents",
+    "switch:end_reason", "switch:expiry_erasure", "switch:forget_matching", "switch:links",
+    "switch:metadata_filters", "switch:profile", "switch:query_rewrite",
+    "switch:read_only", "switch:synthesis")
 def test_every_combination_lists_and_refuses_what_the_oracle_predicts(
         base: dict[str, str]) -> None:
     runs = switches.every_combination()
