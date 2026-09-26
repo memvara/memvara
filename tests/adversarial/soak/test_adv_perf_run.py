@@ -16,6 +16,7 @@ import pytest
 
 import perf_budget as pb
 from harness.hooks import HookRunner, HookTimeout
+from harness.skips import explained
 from memvara import Memvara, NullLLM
 from memvara.embed import HashingEmbedder
 
@@ -140,6 +141,22 @@ def test_history_from_another_machine_is_not_compared(
     assert {v["outcome"] for v in record["regressions"].values()} == {"no history"}
 
 
+def test_a_child_is_given_a_bounded_command_line_whatever_the_store_size(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    # A child's queries travel on its command line, which macOS caps at 1 MB together
+    # with the environment. Naming all 25,000 people of a 100,000-claim store came close
+    # to that; a run needs only as many queries as it makes calls.
+    given: list[str] = []
+    monkeypatch.setattr(pb, "_run_child",
+                        lambda spec, home, *, timeout: given.append(json.dumps(spec)) or [1.0])
+    bench = pb._Bench(pb.PerfConfig(), tmp_path, None)
+    bench.stores[100_000] = bench.copies[100_000] = tmp_path / "store.db"
+    bench.names[100_000] = [f"Person{n:05d}" for n in range(25_000)]
+    bench.series("search", 100_000, "warm")
+    bench.series("remember", 100_000, "cold")
+    assert max(len(spec) for spec in given) < 20_000
+
+
 # --- hooks that did not read the store ----------------------------------------------------
 
 
@@ -241,6 +258,13 @@ def test_a_committed_budget_is_checked_only_on_the_machine_that_measured_it(
         "search@40/warm": {"p95": 25.0, "budget_ms": 20.0, "over": True}}
     assert pb.check_budgets(series, {"id": "other"}, path) is None
     assert pb.check_budgets(series, {"id": "m"}, tmp_path / "missing.json") is None
+
+
+def test_an_invalid_night_skips_with_a_reason_the_skip_ledger_explains() -> None:
+    reason = pb.skip_reason({"invalid_reasons": ["the machine ran on battery at 2 of 5 checks"]})
+    assert reason == ("the performance run is invalid: the machine ran on battery at 2 of 5 "
+                      "checks")
+    assert explained(reason)
 
 
 @pytest.mark.parametrize("changes, code", [

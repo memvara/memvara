@@ -11,9 +11,9 @@ is what this script makes: a seeded workload of user turns, direct writes and re
 driven through the real library with the hashing embedder and no model, and a detector
 for each failure mode that reads what the run recorded.
 
-The design of the adversarial suite (`docs/superpowers/specs/2026-09-25-adversarial-test-
-suite-design.md`, "Phase 4") fixes when each detector fails. `docs/claude/testing.md`
-explains how the run works and how each detector is shown to fire.
+The design of the adversarial suite fixes when each detector fails, in its section "Phase 4"
+of `docs/superpowers/specs/2026-09-25-adversarial-test-suite-design.md`.
+`docs/claude/testing.md` explains how the run works and how each detector is shown to fire.
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ from memvara.telemetry import (  # noqa: E402
     REDACT_INSPECTED,
     RETRIEVAL_OBSERVATION_RANK_CORR,
     RETRIEVAL_QUALITY_FACTOR,
+    WRITE_RECONCILE,
     WRITE_RETRACTION,
     WRITE_TURNS,
     MemoryRecorder,
@@ -775,7 +776,7 @@ def record(obs: Observations, findings: Sequence[Finding]) -> dict[str, Any]:
                            else obs.store_bytes / obs.config.turns),
         "elapsed_s": round(obs.elapsed_s, 3),
         "counts": {
-            "reconcile": {action: rec.total("write.reconcile", action=action)
+            "reconcile": {action: rec.total(WRITE_RECONCILE, action=action)
                           for action in ("add", "reinforce", "supersede", "retract",
                                          "noop")},
             "retraction": {outcome: rec.total(WRITE_RETRACTION, outcome=outcome)
