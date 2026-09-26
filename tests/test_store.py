@@ -1976,9 +1976,10 @@ def test_opening_a_new_store_waits_for_another_connections_write_lock(tmp_path):
 def test_opening_a_new_store_gives_up_when_the_lock_outlasts_the_busy_timeout(
         tmp_path, monkeypatch):
     """The open waits as long as any write waits, and no longer, then raises the error
-    SQLite gave. The busy timeout is shortened here so the test does not wait five
-    seconds."""
-    monkeypatch.setattr(sqlite_store, "_BUSY_TIMEOUT", 0.2)
+    SQLite gave. `_run_schema`'s own wait is shortened here so the test does not wait five
+    seconds; the busy timeout the connections are opened with is left alone."""
+    run_schema = SQLiteStore._run_schema
+    monkeypatch.setattr(SQLiteStore, "_run_schema", lambda self: run_schema(self, wait=0.2))
     path = tmp_path / "c.db"
     other = _writing(path)
     started = time.monotonic()

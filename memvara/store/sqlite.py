@@ -1801,6 +1801,10 @@ class SQLiteStore:
         try:
             with self._lock:
                 if self._needs_schema_step():
+                    # Nothing may ever be written through `_creating`'s connection to the
+                    # lock file. A commit there would have to write the file's first page,
+                    # and that waits for every other open store's shared lock to go, which
+                    # happens only when they close.
                     with self._creating():
                         self._run_schema()
                         self._migrate()
@@ -2162,25 +2166,29 @@ class SQLiteStore:
             "SELECT name FROM sqlite_master WHERE type = 'index'")}
         return not _LATE_INDEX_NAMES <= indexes
 
-    def _run_schema(self) -> None:
+    def _run_schema(self, wait: float = _BUSY_TIMEOUT) -> None:
         """Run `SCHEMA`, waiting for another connection's write lock as every write does.
+
+        This runs inside `_creating`, so no other memvara store is running its schema
+        step at the same time. The retry here is for a connection from outside memvara
+        that holds the database's write lock, such as the `sqlite3` shell or a backup
+        tool, which `_creating` cannot hold back.
 
         `SCHEMA` starts by switching the database to WAL mode. On a file that is not in
         WAL mode yet, which is every new store, the switch needs a stronger lock than the
         connection holds, and while another connection holds the write lock SQLite
         refuses that lock at once instead of calling the busy handler, because waiting
-        for it there could deadlock. So the open failed within a few milliseconds with
-        "database is locked" (#281), where every other write waits for up to
-        `_BUSY_TIMEOUT` seconds. `_creating` keeps two stores from running this step at
-        once, but it cannot hold back a connection from outside memvara, such as the
-        `sqlite3` shell or a backup tool.
+        for it there could deadlock. So the open used to fail within a few milliseconds
+        with "database is locked" (#281), where every other write waits for up to
+        `_BUSY_TIMEOUT` seconds.
 
-        So a "database is locked" here is tried again until `_BUSY_TIMEOUT` has passed.
-        By then the other connection has usually let go, and a file already in WAL mode
-        needs no stronger lock. Every statement in `SCHEMA` is a pragma or an `IF NOT
-        EXISTS`, so running it again changes nothing. Any other error is raised at once.
+        So "database is locked", and only that error, is tried again until `wait` seconds
+        have passed, which is the busy timeout unless a test shortens it. By then the
+        other connection has usually let go, and a file already in WAL mode needs no
+        stronger lock. Every statement in `SCHEMA` is a pragma or an `IF NOT EXISTS`, so
+        running it again changes nothing. Any other error is raised at once.
         """
-        deadline = time.monotonic() + _BUSY_TIMEOUT
+        deadline = time.monotonic() + wait
         while True:
             try:
                 self._db.executescript(SCHEMA)

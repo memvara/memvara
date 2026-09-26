@@ -2294,16 +2294,19 @@ processes opening one new store at once, 3 of 360 opens failed that way, and the
 test failed in 3 of 10 runs. With the schema step run one store at a time, none of 1,100
 opens failed, from three and from five processes at once, and 8 of 8 nightly runs passed.
 
-**The switch to WAL mode is retried.** `SCHEMA` begins with `PRAGMA journal_mode=WAL`. On a
-file that is not in WAL mode yet, the switch needs a stronger lock than the connection
-holds, and while another connection holds the write lock, SQLite refuses it at once instead
-of calling the busy handler, because waiting there could deadlock. `_creating` cannot hold
-back a connection from outside memvara, such as the `sqlite3` shell. So `_run_schema` runs
-`SCHEMA` again after "database is locked", every 10 milliseconds, until `_BUSY_TIMEOUT`
-has passed: five seconds, the busy timeout `_connect` gives every connection, so the open
-waits exactly as long as any write. On a file already in WAL mode the switch needs no
-stronger lock. `SCHEMA` holds only pragmas and `IF NOT EXISTS` statements, so running it
-again changes nothing, and any other error is raised at once.
+**The switch to WAL mode is retried, for connections outside memvara.** With `_creating` in
+place, no other memvara store runs its schema step at the same time, so this retry exists
+for a connection from outside memvara that holds the database's write lock, such as the
+`sqlite3` shell or a backup tool, which `_creating` cannot hold back. `SCHEMA` begins with
+`PRAGMA journal_mode=WAL`. On a file that is not in WAL mode yet, the switch needs a
+stronger lock than the connection holds, and while another connection holds the write lock,
+SQLite refuses it at once instead of calling the busy handler, because waiting there could
+deadlock. So `_run_schema` runs `SCHEMA` again after "database is locked", and after no
+other error, every 10 milliseconds, until `_BUSY_TIMEOUT` has passed: five seconds, the busy
+timeout `_connect` gives every connection, so the open waits exactly as long as any write.
+On a file already in WAL mode the switch needs no stronger lock. `SCHEMA` holds only
+pragmas and `IF NOT EXISTS` statements, so running it again changes nothing. Any other error
+is raised at once.
 
 ### Encryption at rest
 
