@@ -146,11 +146,20 @@ def _lead(report: Mapping[str, Any], fresh: list[Any], known: list[Any], flakes:
         counts += [f"{len(flakes)} {'flake' if len(flakes) == 1 else 'flakes'}"] if flakes else []
         # A step that did not pass found nothing because it did not finish its work, so a
         # night with one must never read as quiet.
-        stalled = [f"{step['name']} {step['status']}" for step in report.get("steps", [])
+        all_steps = report.get("steps", [])
+        stalled = [f"{step['name']} {step['status']}" for step in all_steps
                    if step["status"] not in ("passed", "not built yet")]
         if stalled:
             counts.append(f"steps that did not pass: {', '.join(stalled)}")
-        headline = f"**{'; '.join(counts)}.**" if counts else "**Nothing broke.**"
+        ran = sum(step["status"] not in ("not built yet", "not run") for step in all_steps)
+        headline = (f"**{'; '.join(counts)}.**" if counts else
+                    f"**Nothing broke in the {ran} {'step' if ran == 1 else 'steps'} that ran.**")
+        # "Nothing broke" says nothing about the steps that do not exist yet, so the
+        # headline counts them, rather than read as if the whole night checked everything.
+        unbuilt = sum(step["status"] == "not built yet" for step in all_steps)
+        if unbuilt:
+            headline += (f" {unbuilt} {'step is' if unbuilt == 1 else 'steps are'} not built "
+                         "yet.")
     commit = report.get("commit") or ""
     tested = (f" The run tested `{commit[:12]}`" if commit else " The run tested nothing")
     tested += (", a checkout it was given rather than a fresh worktree of origin/main."

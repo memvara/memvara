@@ -402,8 +402,25 @@ def test_the_reports_first_line_never_calls_a_night_with_a_failed_step_quiet() -
     assert "preflight failed" in lead and "regressions not run" in lead
     assert "agents" not in lead
     quiet = dict(report, steps=[_step("preflight", "passed"), _step("regressions", "passed"),
-                                _step("agents", "not built yet")])
-    assert "Nothing broke" in render.markdown(quiet).splitlines()[2]
+                                *(_step(name, "not built yet") for name in ("agents", "soak"))])
+    lead = render.markdown(quiet).splitlines()[2]
+    assert lead.startswith("**Nothing broke in the 2 steps that ran.** 2 steps are not built "
+                           "yet.")
+    whole = dict(report, steps=[_step("preflight", "passed")])
+    assert render.markdown(whole).splitlines()[2].startswith(
+        "**Nothing broke in the 1 step that ran.** The run tested")
+
+
+def test_the_headline_never_says_nothing_broke_while_steps_are_not_built() -> None:
+    """Most of the design's steps are not built yet. A bare "Nothing broke." would read as
+    if the whole night had checked everything, when only two steps ran."""
+    report = {"night": "2026-09-26", "status": "finished", "commit": "c" * 40,
+              "steps": [_step(step.name, "passed" if step.run else "not built yet")
+                        for step in run.STEPS], "failures": []}
+    lead = render.markdown(report).splitlines()[2]
+    assert "**Nothing broke.**" not in lead
+    assert lead.startswith("**Nothing broke in the 2 steps that ran.** 8 steps are not built "
+                           "yet.")
 
 
 def test_the_report_never_says_a_checkout_it_was_given_will_be_removed() -> None:

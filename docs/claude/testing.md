@@ -401,7 +401,7 @@ The code under test always comes from the fresh worktree, but the run's own code
 
 The run writes these files in `local/nightly/<date>/` in the main checkout, however it was started:
 
-- `report.md` for a person and `report.json` for a program. The first line of `report.md` counts the breaks and names every step that did not pass, so a night whose preflight failed never reads as a quiet one. The reports list every step with its result, time and cap, every new, recurred and known break with what filing it still needs and the exact commands, the failures that need a person, the flakes, the flake rate of each layer, the canary, the dependencies and the notifications sent.
+- `report.md` for a person and `report.json` for a program. The first line of `report.md` counts the breaks and names every step that did not pass, so a night whose preflight failed never reads as a quiet one. It also says how many steps are not built yet, and on a quiet night how many ran, for example "Nothing broke in the 2 steps that ran. 8 steps are not built yet.", so a quiet night never reads as if every step had checked the code. The reports list every step with its result, time and cap, every new, recurred and known break with what filing it still needs and the exact commands, the failures that need a person, the flakes, the flake rate of each layer, the canary, the dependencies and the notifications sent.
 - `findings.jsonl`, every break the night saw, one `Finding` per line.
 - One folder per step with its output; `regressions/results.jsonl` holds one line per test.
 - `heartbeat.json`, which the watchdog reads.
