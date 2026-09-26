@@ -343,7 +343,7 @@ git commit -m "Run the LangChain adapter against the real langchain-core at its 
   - `the_refusals_name_the_supported_shape`: `as_vector_store()` names `MemvaraRetriever`, `as_chat_memory()` names `Memory.from_defaults`.
   - `search_and_history_on_the_block_reach_the_structure`.
 - [ ] **Step 2: Run the nightly tier with `-k llamaindex`.** Expected, measured while this plan was written: every check passes at 0.13.0 and 0.14.25 except the docstring example, which raises `TypeError: RetrieverQueryEngine.from_args() got multiple values for argument 'retriever'` at both, because `as_query_engine` builds its own retriever from its keyword arguments and passes them on to `from_args` too. It is not security-class.
-- [ ] **Step 3: Register B83 in `known_bugs.py`** with the placeholder issue 9004, and pin the check at both pins with `Symptom("TypeError", "got multiple values for argument 'retriever'")`.
+- [ ] **Step 3: Register B83 in `known_bugs.py`** under its issue, #362, and pin the check at both pins with `Symptom("TypeError", "got multiple values for argument 'retriever'")`.
 - [ ] **Step 4: Run it again.** Expected: the two docstring cases are xfailed, everything else passes.
 - [ ] **Step 5: Commit** the checks file, the test module and `known_bugs.py`.
 
@@ -399,7 +399,7 @@ CrewAI's `Memory` builds its analysis model the first time it saves anything, ev
   - At 1.10.1, the floor, `Memory.remember()` fails in both checks that call it with `AttributeError: 'MemvaraStorage' object has no attribute 'write_lock'`. CrewAI 1.10.1's `EncodingFlow.execute_plans` takes `storage.write_lock`, which its protocol does not declare; 1.11.0 and later do not. So memvara's declared floor cannot save anything through CrewAI's `Memory`.
   - At the newest release, the consolidation check fails: an exact duplicate scores 0.50 through `MemvaraStorage.search`, CrewAI consolidates only at 0.85, so it never asks, and two live copies remain.
   - Neither is security-class.
-- [ ] **Step 3: Register B84 (placeholder 9005) and B85 (placeholder 9006)** and pin: both remember checks at the floor with `Symptom("AttributeError", "object has no attribute 'write_lock'")`, and the consolidation check at the newest release with `Symptom("AssertionError", "CrewAI asked its model to consolidate 0 times")`. The floor's consolidation check fails on B84 before it can reach B85; the comment on its pin says that the fix for B84 moves that pin to B85.
+- [ ] **Step 3: Register B84 (#363) and B85 (#364)** and pin: both remember checks at the floor with `Symptom("AttributeError", "object has no attribute 'write_lock'")`, and the consolidation check at the newest release with `Symptom("AssertionError", "CrewAI asked its model to consolidate 0 times")`. The floor's consolidation check fails on B84 before it can reach B85; the comment on its pin says that the fix for B84 moves that pin to B85.
 - [ ] **Step 4: Run it again.** Expected: three xfailed, everything else passes, nothing reaches the network.
 - [ ] **Step 5: Commit** the checks file, the test module and `known_bugs.py`.
 
@@ -426,7 +426,7 @@ The shim says it is mem0 2.x's method surface, so that an existing call site kee
   - The defaults differ: `search(top_k=10)` and `get_all(top_k=100)` where mem0 has 20 for both.
   - `import_mem0` dates each event at its row's `created_at`, which for an UPDATE or DELETE is the memory's creation time. So the update is dated 2024-03-01 and the delete 2024-03-02, and with the ADD sorting last the import leaves the old value and the deleted memory live.
   - None is security-class under `SECURITY.md`: they are refusals, missing arguments, different defaults, and an import that dates and orders mem0's events wrongly.
-- [ ] **Step 3: Register B80 (placeholder 9001, the entity ids), B81 (9002, the missing surface), B82 (9003, the defaults) and B86 (9007, the importer's dates),** and pin each failing check at the pins where it fails, with the exact symptom texts measured in Step 2.
+- [ ] **Step 3: Register B80 (#359, the entity ids), B81 (#360, the missing surface), B82 (#361, the defaults) and B86 (#365, the importer's dates),** and pin each failing check at the pins where it fails, with the exact symptom texts measured in Step 2.
 - [ ] **Step 4: Run it again.** Expected: the pinned cases are xfailed, the rest pass, nothing reaches the network.
 - [ ] **Step 5: Commit** the checks file, the test module and `known_bugs.py`.
 

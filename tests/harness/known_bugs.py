@@ -108,23 +108,21 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "the fact a query asks about"),
     KnownBug("B73", 353, "memory_add says a turn was not stored when only no fact was "
              "extracted from it"),
-
-    # Found by the framework tests against the real packages. The issue numbers are
-    # placeholders until the issues are filed.
-    KnownBug("B80", 9001, "the mem0 shim's add() and delete_all() refuse the entity ids "
+    # Found by the framework tests against the real packages.
+    KnownBug("B80", 359, "the mem0 shim's add() and delete_all() refuse the entity ids "
              "mem0 2.x takes there, and search() and get_all() refuse them with TypeError "
              "where mem0 raises ValueError"),
-    KnownBug("B81", 9002, "the mem0 shim lacks close(), the with statement, arguments mem0 "
+    KnownBug("B81", 360, "the mem0 shim lacks close(), the with statement, arguments mem0 "
              "2.x's methods take, and the score key of mem0's get() row"),
-    KnownBug("B82", 9003, "the mem0 shim's search() and get_all() default to top_k 10 and "
+    KnownBug("B82", 361, "the mem0 shim's search() and get_all() default to top_k 10 and "
              "100, where mem0 2.x defaults to 20"),
-    KnownBug("B83", 9004, "the as_query_engine example in the LlamaIndex MemvaraRetriever "
+    KnownBug("B83", 362, "the as_query_engine example in the LlamaIndex MemvaraRetriever "
              "docstring raises TypeError"),
-    KnownBug("B84", 9005, "at crewai 1.10.1, memvara's declared floor, CrewAI's Memory "
+    KnownBug("B84", 363, "at crewai 1.10.1, memvara's declared floor, CrewAI's Memory "
              "cannot save through MemvaraStorage, which has no write_lock"),
-    KnownBug("B85", 9006, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "
+    KnownBug("B85", 364, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "
              "consolidation threshold of 0.85, so a repeated memory is stored twice"),
-    KnownBug("B86", 9007, "import_mem0 dates mem0's UPDATE and DELETE rows by created_at, "
+    KnownBug("B86", 365, "import_mem0 dates mem0's UPDATE and DELETE rows by created_at, "
              "which mem0 fills with the memory's creation time, and orders them by it"),
 )}
 

@@ -148,10 +148,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     from night to night while nothing it is built from changes, with this checkout's
     memvara reinstalled on every run. A probe inside each environment blocks and records
     any network access, so a framework that reaches the network fails the run. Seven bugs
-    it found are pinned as strict expected failures, B80 to B86. Among them are a mem0
-    shim that refuses the `user_id` a mem0 `add()` call passes, an importer that dates
-    mem0's updates at the memory's creation, and a CrewAI floor at which nothing can be
-    saved.
+    it found are pinned as strict expected failures, B80 to B86, filed as #359 to #365.
+    Among them are a mem0 shim that refuses the `user_id` a mem0 `add()` call passes, an
+    importer that dates mem0's updates at the memory's creation, and a CrewAI floor at
+    which nothing can be saved.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`,
     `bench/soak.py` and `bench/perf_budget.py`.
 - **`Store.unended_claims`, `store.unended_predicate()` and `Claim.is_unended()`.**
