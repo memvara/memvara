@@ -114,6 +114,10 @@ def _status_line(host: str, reply: dict[str, Any] | None) -> None:
         assert status is not None and status.startswith("⋈ Memvara · "), status
 
 
+@pytest.mark.covers("hook:codex/session_start",
+                     "hook:copilot/session_start",
+                     "hook:cursor/session_start",
+                     "hook:opencode/session_start")
 @pytest.mark.parametrize("host", support.HOSTS)
 def test_session_start_answers_in_the_envelope_the_host_reads(runs: support.Runs,
                                                               host: str) -> None:
@@ -124,6 +128,10 @@ def test_session_start_answers_in_the_envelope_the_host_reads(runs: support.Runs
     _status_line(host, result.reply)
 
 
+@pytest.mark.covers("hook:claude/recall",
+                     "hook:codex/recall",
+                     "hook:copilot/recall",
+                     "hook:opencode/recall")
 @pytest.mark.parametrize("host", RECALL_HOSTS)
 def test_recall_answers_in_the_envelope_the_host_reads(runs: support.Runs,
                                                        host: str) -> None:
@@ -143,6 +151,10 @@ def test_cursor_has_no_recall_and_the_dispatcher_says_it_skipped_it(
     assert result.log("hooks") == ("skipped=cursor has no event for recall",)
 
 
+@pytest.mark.covers("hook:codex/approve",
+                     "hook:copilot/approve",
+                     "hook:cursor/approve",
+                     "hook:opencode/approve")
 @pytest.mark.parametrize("host", support.HOSTS)
 def test_approve_answers_in_the_envelope_the_host_reads(runs: support.Runs,
                                                         host: str) -> None:
@@ -159,6 +171,11 @@ def test_approve_says_nothing_about_a_tool_that_writes(runs: support.Runs,
     assert (result.exit_code, result.stdout, result.stderr) == (0, "", "")
 
 
+@pytest.mark.covers("hook:claude/capture",
+                     "hook:codex/capture",
+                     "hook:copilot/capture",
+                     "hook:cursor/capture",
+                     "hook:opencode/capture")
 @pytest.mark.parametrize("host", support.HOSTS)
 def test_capture_prints_nothing_and_stores_the_fact_its_turn_states(
         runs: support.Runs, host: str) -> None:
