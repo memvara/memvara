@@ -293,9 +293,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   store with a different embedder of that width raised nothing and warned nothing, and the
   record was never written again, so every later change went unnoticed too. Such an open
   now warns with `EmbedderChangedWarning` that memvara cannot tell whether the embedder in
-  use wrote the vectors, and that `mem.reembed()` rebuilds them if it did not. It then
-  records the embedder in use, so the next change is noticed; where the record cannot be
-  written, the warning says so and comes back on every open. The record itself is now
+  use wrote the vectors, and that `mem.reembed()` rebuilds them if it did not. If the open
+  goes on, it then records the embedder in use, so the next change is noticed; a warning
+  turned into an error stops the open before anything is recorded. Where the record cannot
+  be written, a second warning says so, and the first comes back on every open. The
+  record itself is now
   written to a temporary file and renamed into place, so a crash or a full disk during the
   write leaves the old record or the new one, never half of one. #280.
 

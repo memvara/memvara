@@ -1242,6 +1242,7 @@ class Memvara:
             return
 
         mine = fingerprint_of(self.embedder)
+        record = sidecar_path(self.store)
         recorded = read_fingerprint(self.store)
         actual = stored_dim(self.store)
 
@@ -1256,15 +1257,22 @@ class Memvara:
         if actual != mine.dim:
             raise EmbedderMismatchError(self._mismatch_message(mine, recorded, actual))
 
-        if recorded is None and sidecar_path(self.store) is not None:
+        if recorded is None and record is not None:
             # The record is missing or unreadable, because the store was copied without it
             # or a crash tore it. The widths match, and only the record can tell two
             # embedders of the same width apart, so this open cannot know whether this
             # embedder wrote the vectors. It warns, and it records this embedder so that
-            # the next open can check again.
-            written = write_fingerprint(self.store, mine)
-            warnings.warn(self._unrecorded_message(mine, actual, written),
+            # the next open can check again. The warning comes first: raised as an error,
+            # it stops the open before the record names an embedder that may be wrong.
+            warnings.warn(self._unrecorded_message(mine, actual, record),
                           EmbedderChangedWarning, stacklevel=3)
+            if not write_fingerprint(self.store, mine):
+                warnings.warn(
+                    f"{self._store_label()}: the record {record} could not be written "
+                    "either, so the next open cannot tell whether its embedder wrote the "
+                    "vectors, and the warning above will come back on every open until "
+                    "the record can be written.",
+                    EmbedderChangedWarning, stacklevel=3)
             return
 
         if (recorded is not None and recorded.name != mine.name
@@ -1297,18 +1305,15 @@ class Memvara:
         )
 
     def _unrecorded_message(self, mine: EmbedderFingerprint, actual: int,
-                            written: bool) -> str:
-        after = (f"The record now names {mine}, so the next change of embedder will be "
-                 "noticed." if written else
-                 "The record could not be written either, so this warning will come back "
-                 "on every open until it can be.")
+                            record: str) -> str:
         return (
             f"{self._store_label()}: the record of which embedder wrote this store's "
-            f"vectors ({sidecar_path(self.store)}) is missing or unreadable, so memvara "
-            f"cannot tell whether {mine.name} wrote the {actual}-dimensional vectors the "
-            "store holds. If it did not, every similarity between those vectors and new "
-            "ones is meaningless, and nothing will raise, because the widths match. Run "
-            "mem.reembed() to rebuild them with this embedder. " + after
+            f"vectors ({record}) is missing or unreadable, so memvara cannot tell whether "
+            f"{mine.name} wrote the {actual}-dimensional vectors the store holds. If it "
+            "did not, every similarity between those vectors and new ones is meaningless, "
+            "and nothing will raise, because the widths match. Run mem.reembed() to "
+            "rebuild them with this embedder. If this open goes on, the record will name "
+            f"{mine}, so the next change of embedder will be noticed."
         )
 
     def _store_label(self) -> str:

@@ -160,8 +160,10 @@ JSON, under a header that names the text as data rather than instruction.
 - **A store whose record is lost says so, and records the embedder again.** When
   `<db>.embedder.json` is missing or unreadable on a store that holds vectors, the width
   still has to match, but nothing can tell whether the embedder in use wrote them. So
-  `_check_embedder` warns with `EmbedderChangedWarning` and writes the record naming that
-  embedder, so the next change is caught (#280). A store with no file beside it, such as an
+  `_check_embedder` warns with `EmbedderChangedWarning`, and then, if the open goes on,
+  writes the record naming that embedder, so the next change is caught (#280). The warning
+  comes first so that, raised as an error, it stops the open before the record names an
+  embedder that may be the wrong one. A store with no file beside it, such as an
   in-memory one, has no record to lose, and is not warned about. `write_fingerprint` writes
   a temporary file and renames it over the record, so a crash never leaves half a record.
 - **A cosine threshold belongs to an embedding space.** The grounding rescue, the

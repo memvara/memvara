@@ -406,8 +406,33 @@ def test_a_store_whose_record_is_damaged_warns_that_it_cannot_tell(tmp_path, dam
     message = str(warning.message)
     assert str(record) in message, "must name the file that is damaged"
     assert "mem.reembed()" in message, "must name the fix for vectors it did not write"
-    assert "The record now names hashing:128:2-4" in message
+    assert "the record will name hashing:128:2-4" in message
     assert json.loads(record.read_text()) == {"embedder": "hashing:128:2-4", "dim": 128}
+
+
+@pytest.mark.parametrize("damage", ["torn", "deleted"])
+def test_a_warning_turned_into_an_error_leaves_the_record_as_it_was(tmp_path, damage):
+    """The owner, X, lost its record, and an open with the wrong embedder, Y, raised the
+    warning as an error. That open had already written the record, so it named Y, and the
+    owner reopening with X was then told that Y wrote the vectors, which is backwards. The
+    warning now comes first, and the record is written only if the open goes on."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    record = _damage_record(tmp_path, damage)
+    before = record.read_bytes() if record.exists() else None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(EmbedderChangedWarning, match="cannot tell"):
+            Memvara(path, embedder=HashingEmbedder(dim=128, ngram=(2, 4)), llm=NullLLM())
+    assert (record.read_bytes() if record.exists() else None) == before
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()).close()
+    said = [str(w.message) for w in _memvara_warnings(caught)]
+    assert not any("hashing:128:2-4" in message for message in said), said
 
 
 def test_a_store_whose_record_was_lost_notices_the_next_embedder_change(tmp_path):
@@ -427,8 +452,9 @@ def test_a_store_whose_record_was_lost_notices_the_next_embedder_change(tmp_path
 
 def test_a_record_that_cannot_be_written_again_says_the_warning_will_repeat(
         tmp_path, monkeypatch):
-    """In a read-only directory the record cannot be rewritten, so the next open cannot
-    tell either. The warning says so rather than promising a check that will not run."""
+    """Where the record cannot be written, the next open cannot tell either. The warning
+    comes before the write, so it can say only what the open will do if it goes on, and a
+    second warning says the write failed and that the first will come back."""
     path = str(tmp_path / "m.db")
     with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
         mem.remember("user", "lives_in", "Lisbon")
@@ -436,11 +462,11 @@ def test_a_record_that_cannot_be_written_again_says_the_warning_will_repeat(
     monkeypatch.setattr(core_module, "write_fingerprint", lambda store, fp: False)
 
     for _ in range(2):
-        with pytest.warns(EmbedderChangedWarning,
-                          match="could not be written either") as caught:
+        with pytest.warns(EmbedderChangedWarning) as caught:
             Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()).close()
-        [warning] = _memvara_warnings(caught)
-        assert "The record now names" not in str(warning.message)
+        said = [str(w.message) for w in _memvara_warnings(caught)]
+        assert len(said) == 2 and "cannot tell" in said[0], said
+        assert "could not be written" in said[1] and "every open" in said[1], said
     assert not record.exists()
 
 
