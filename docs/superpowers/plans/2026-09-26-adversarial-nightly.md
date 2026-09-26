@@ -233,3 +233,19 @@
 - [ ] Run each new test file 20 times in a row and record the result.
 - [ ] Run the full gate as two commands with a private coverage file, and both mypy runs on `tests/harness`, and `mypy -p memvara`. Quote the result lines.
 - [ ] Run `run.py` for real once, against this worktree (`--worktree` and `--python`, with `--no-notify`), and read the report it writes.
+
+## Changes during implementation
+
+The tasks above are the plan as it was committed. These interfaces and rules changed while it was built, each for the reason given. The testing guide's section "The nightly run" describes what was built.
+
+- **`Finding.artifacts` is a mapping** of names to paths, stored as a dict, rather than pairs, because a mapping is its JSON shape. A finding hashes by its signature, and `to_json()` escapes text outside ASCII, so no character in a failure's text, not even a Unicode line separator, can split a finding's line.
+- **`run_steps` also takes the worktree as a function**, called when a step is reached, because preflight creates the worktree during the night.
+- **`flakes.rerun(nodeid, run, *, python, tier, times)`** takes the interpreter as a keyword.
+- **The regressions step passes `--continue-on-collection-errors`**, so one file that fails to import cannot stop every other test from running. `regressions.failures` takes `log_tail`, and adds a session failure for any exit status other than 0 and 1 as well, because an interrupted run hides the tests it never ran. When pytest dies before it records its exit status, the process's own status stands in for it.
+- **`Failure` has a fourth kind, `finding`**: a finding a step wrote into its own folder and confirmed itself, which may be filed as it stands. `Failure.to_record()` and `from_record()` are the form report.json keeps, which the filing command reads back.
+- **Filing has no `triaged` flag.** The scheduled session states its classification as a severity (`filing.py issue --severity data-loss|wrong-result|crash`), and `file_issue` and `open_pr` refuse both `unclassified` and `security` outright. `Command` has no `cwd`, because git runs with `-C`. `Filed` carries `ghsa_id` for an advisory. `open_pr` checks the worktree with a local `git status` even in a dry run, which calls nothing on GitHub.
+- **`triage(failures, history, remote)`** reads both kinds of history record, and `plan(failure, context, done)` works on one failure with what is already filed for it.
+- **The rerun reserve is a fifth of the regressions step's remaining time, at most 15 minutes**, which is exactly 15 of the real 75. A fixed 15 minutes would leave a short cap no time for the test run.
+- **A crash of the run's own code leaves the heartbeat without a finish**, so the watchdog reports the night, and the report still compares the canary. The first line of report.md names every step that did not pass, so a night whose preflight failed never reads as quiet.
+- **The canary watches `~/.memvara/credentials.json` and `~/.memvara/db.key` by default.** Other files are added with `--canary`.
+- **The regressions cap stands.** A full `pytest --tier nightly` run took 16 minutes 37 seconds on origin/main, and the real run through the regressions step in Task 9 took 17 minutes 6 seconds, both with other suites running, so a normal night uses well under half of the 75 minutes.
