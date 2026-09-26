@@ -22,20 +22,28 @@ checks that it is real, so the day it goes away the test says so:
   `explanation`);
 * `stats()` also carries the two join counts, which `connectivity()` reads back out
   (`memvara/remote/api.py`, `RemoteMemvara.connectivity`);
-* `recall(budget=...)` is refused (`memvara/remote/api.py`, the module docstring and
-  `RemoteMemvara.recall`);
+* `recall(budget=...)` and `recall(valid_at=...)` are refused (`memvara/remote/api.py`,
+  the module docstring and `RemoteMemvara.recall`, and docs/API.md); memvara/memvara#298
+  tracks giving the hosted recall a time axis;
 * the status of a document the caller cannot see is a `KeyError` on both sides, and
   each side words its own message (`Memvara.document_status` and
   `RemoteMemvara.document_status`).
 
-The hosted clients also have `end()`, which sends `POST /v1/end`. The library ends a
-fact with `delete(close="ended")` and a slot with `forget(close="ended")`, so the
-program ends them that way on every client, and a test of its own checks that `end()`
-leaves a hosted store holding what those two leave a local one holding.
+The hosted clients also have `end()`, which sends `POST /v1/end`. The library has no
+`end()`: it ends a fact with `delete(close="ended")` and a slot with
+`forget(close="ended")`, so the program ends them that way on every client, and a test
+of its own checks that `end()` leaves a hosted store holding what those two leave a
+local one holding.
 
-**One step runs on the local clients only.** `recall(valid_at=...)` is refused by the
-hosted clients, and memvara/memvara#298 tracks that, so the dated recall is compared
-between the two local clients and the hosted refusal is left to that issue.
+**What the program does not compare yet.** Two differences were found that nothing
+documents, so they were reported to the maintainer to be filed and pinned as strict
+expected failures, rather than asserted here:
+
+* a write receipt read through a hosted client has empty `accumulated`, `disputed`,
+  `collapsed` and `retyped` lists where the local receipt reports what the write did,
+  so the program leaves out the writes that produce those four outcomes for now;
+* the hosted `end()` has no local twin, while docs/API.md says `service()` is the only
+  hosted method without one.
 """
 
 from __future__ import annotations
@@ -53,7 +61,7 @@ from harness.fakes.fake_v1 import FakeV1
 from memvara import AsyncMemvara, MemoryType
 from memvara.types import utcnow
 
-from .compare import Raised, assert_same, labels, normalise
+from .compare import Raised, Run, assert_same, labels, normalise
 
 UTC = timezone.utc
 
@@ -83,13 +91,11 @@ class Step:
     """One operation of the program: a name, and what it does to a client.
 
     `run` receives the client and every earlier step's result, by name, so a step can
-    use an id an earlier step returned. `local_only` says why the hosted clients leave
-    the step out, or is None when every client runs it.
+    use an id an earlier step returned.
     """
 
     name: str
     run: Callable[[Any, dict[str, Any]], Any]
-    local_only: str | None = None
 
 
 def _added(got: dict[str, Any], step: str) -> str:
@@ -126,9 +132,7 @@ PROGRAM: tuple[Step, ...] = (
     Step("search.past", lambda m, got: m.search(QUESTION, k=5, valid_at=IN_BERLIN)),
     Step("recall", lambda m, got: m.recall(QUESTION)),
     Step("recall.budget", lambda m, got: m.recall(QUESTION, budget=12)),
-    Step("recall.past", lambda m, got: m.recall(QUESTION, valid_at=IN_BERLIN),
-         local_only="the hosted clients refuse recall(valid_at=...), which "
-                    "memvara/memvara#298 tracks"),
+    Step("recall.past", lambda m, got: m.recall(QUESTION, valid_at=IN_BERLIN)),
     Step("get", lambda m, got: m.get(_added(got, "remember.replacing"))),
     Step("get.missing", lambda m, got: m.get(MISSING)),
     Step("history", lambda m, got: m.history("user", "lives_in")),
@@ -192,7 +196,7 @@ class _Blocking:
         return lambda *args, **kwargs: self._loop.run_until_complete(method(*args, **kwargs))
 
 
-def play(client: Any, *, hosted: bool) -> dict[str, Any]:
+def play(client: Any) -> dict[str, Any]:
     """Run the program on `client` and return every step's result, by step name.
 
     A step that raises is recorded as `Raised` rather than stopping the program, so a
@@ -200,8 +204,6 @@ def play(client: Any, *, hosted: bool) -> dict[str, Any]:
     """
     got: dict[str, Any] = {}
     for step in PROGRAM:
-        if hosted and step.local_only is not None:
-            continue
         try:
             got[step.name] = step.run(client, got)
         except Exception as exc:  # noqa: BLE001 - a refusal is an answer to compare
@@ -245,19 +247,20 @@ def opened(name: str, loop: asyncio.AbstractEventLoop) -> Iterator[Any]:
 @pytest.fixture(scope="module")
 def played() -> dict[str, dict[str, Any]]:
     """Every client's normalised answer to every step it runs, played once per module."""
-    near = utcnow()
+    start = utcnow()
     raw: dict[str, dict[str, Any]] = {}
     loop = asyncio.new_event_loop()
     try:
         for name in CLIENTS:
             with opened(name, loop) as client:
-                raw[name] = play(client, hosted=name in HOSTED)
+                raw[name] = play(client)
     finally:
         loop.close()
+    run = Run(start, utcnow())
     out: dict[str, dict[str, Any]] = {}
     for client, got in raw.items():
         names = labels(*got.values())
-        out[client] = {step: normalise(result, names, near=near)
+        out[client] = {step: normalise(result, names, run=run)
                        for step, result in got.items()}
     return out
 
@@ -277,7 +280,7 @@ NOT_RANKED_ON_THE_WIRE = ("graph_rank", "graph_score", "temporal_rank", "tempora
 
 #: The steps whose hosted answer a documented rule of its own describes, each checked by
 #: its own test below rather than by the step-by-step comparison.
-HOSTED_BY_OWN_TEST = frozenset({"recall.budget", "stats", "stats.after",
+HOSTED_BY_OWN_TEST = frozenset({"recall.budget", "recall.past", "stats", "stats.after",
                                 "document.status.missing"})
 
 
@@ -299,8 +302,7 @@ def as_hosted(value: Any) -> Any:
 def _compared() -> Iterator[Any]:
     for step in PROGRAM:
         for client in CLIENTS[1:]:
-            hosted = client in HOSTED
-            if hosted and (step.local_only is not None or step.name in HOSTED_BY_OWN_TEST):
+            if client in HOSTED and step.name in HOSTED_BY_OWN_TEST:
                 continue
             yield pytest.param(step.name, client, id=f"{step.name}-{client}")
 
@@ -379,6 +381,21 @@ def test_a_hosted_client_refuses_a_recall_budget(
 
 
 @pytest.mark.parametrize("client", HOSTED)
+def test_a_hosted_client_refuses_a_dated_recall(
+        played: dict[str, dict[str, Any]], client: str) -> None:
+    """`memvara/remote/api.py`, the module docstring and `RemoteMemvara.recall`, and
+    docs/API.md: `POST /v1/recall` has no time axis, so `valid_at` is refused rather than
+    answered with the present. memvara/memvara#298 tracks giving it one; when that lands,
+    this test fails, and the dated recall joins the step-by-step comparison."""
+    local = played["Memvara"]["recall.past"]
+    hosted = played[client]["recall.past"]
+    assert isinstance(local, str) and "as things were on 31 January 2024" in local
+    assert hosted["__type__"] == "Raised" and hosted["kind"] == "ValueError"
+    assert hosted["message"].startswith(
+        "recall(valid_at=...) is not available against a hosted deployment")
+
+
+@pytest.mark.parametrize("client", HOSTED)
 def test_a_missing_document_s_status_is_a_key_error_through_every_client(
         played: dict[str, dict[str, Any]], client: str) -> None:
     """`Memvara.document_status` and `RemoteMemvara.document_status` both document a
@@ -398,7 +415,7 @@ def test_the_hosted_end_method_closes_what_the_library_closes(client: str) -> No
     close a fact that stopped being true. The library closes the same two ways with
     `delete(close="ended")` and `forget(close="ended")`. Both must leave the store
     holding the same claims."""
-    near = utcnow()
+    start = utcnow()
 
     def end_both_ways(mem: Any, end_claim: Callable[[str], Any],
                       end_slot: Callable[[], Any]) -> list[Any]:
@@ -420,7 +437,8 @@ def test_the_hosted_end_method_closes_what_the_library_closes(client: str) -> No
                 lambda: hosted.end(predicate="works_at", at=LEFT_ACME))
     finally:
         loop.close()
+    run = Run(start, utcnow())
     # `forget` returns the claims it closed, and `end` returns only whether it closed any.
     expected[1] = bool(expected[1])
-    assert_same(as_hosted(normalise(expected, labels(expected), near=near)),
-                normalise(actual, labels(actual), near=near), f"end() through {client}")
+    assert_same(as_hosted(normalise(expected, labels(expected), run=run)),
+                normalise(actual, labels(actual), run=run), f"end() through {client}")

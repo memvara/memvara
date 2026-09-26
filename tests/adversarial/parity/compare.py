@@ -5,7 +5,7 @@ of its own. Two stores that were told the same things still differ in three ways
 nothing about the surfaces:
 
 * every id is random, so the same claim has a different id in each store;
-* every instant a store takes from the clock is the moment that store ran;
+* every instant a store takes from its clock is the moment that store ran;
 * a few lists come back in id order, so their order is random too.
 
 `normalise` removes those three and turns a result into plain dicts and lists, and
@@ -19,8 +19,10 @@ import enum
 import math
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
+from memvara.confirm import CONFIRM_TTL
+from memvara.core import PROFILE_WINDOW
 from memvara.types import (CLOSURE, ENTITY_REKEY, LAST_OBSERVED, OBJECT_ENTITY,
                            SALIENCE_BASE, SUBJECT_ENTITY, Claim, Document, Episode,
                            ForgetPreview, ForgetResult, WriteReceipt)
@@ -35,19 +37,41 @@ IDS = re.compile(r"\b(?:cl|ep|doc)_[0-9a-f]{20}\b")
 BOOKKEEPING = frozenset({SALIENCE_BASE, LAST_OBSERVED, SUBJECT_ENTITY, OBJECT_ENTITY,
                          ENTITY_REKEY})
 
-#: How close to the run an instant must be to count as one a store took from its clock.
-#: It is wide enough for the default seven-day window of `memory_profile`, whose header
-#: prints the start of that window. Every instant a parity test passes on purpose is
-#: much further away than this, so it is compared as it is.
-CLOCK_WINDOW = timedelta(days=8)
-
-#: What an instant taken from the clock is replaced with.
+#: What an instant a store took from its clock during the run is replaced with.
 WALL_CLOCK = "<wall clock>"
+#: What the instant a confirm token stops being accepted is replaced with: the preview's
+#: moment plus `memvara.confirm.CONFIRM_TTL`.
+TOKEN_EXPIRES = "<wall clock + the confirm token's lifetime>"
+#: What the start of `memory_profile`'s default window is replaced with: the call's moment
+#: minus `memvara.core.PROFILE_WINDOW`.
+PROFILE_STARTS = "<wall clock - the profile window>"
 
-#: Two floats closer than this count as equal. A search score depends on how long ago a
-#: claim was written, so the same search on two stores a few seconds apart differs in the
-#: ninth decimal place.
+#: The instants a store derives from its clock, as an offset from the moment it read the
+#: clock, and the marker each one is replaced with. An instant at any other distance from
+#: the run is compared as it is, so a surface that is off by hours or days fails.
+CLOCK_MARKERS: tuple[tuple[timedelta, str], ...] = (
+    (timedelta(0), WALL_CLOCK),
+    (CONFIRM_TTL, TOKEN_EXPIRES),
+    (-PROFILE_WINDOW, PROFILE_STARTS),
+)
+
+#: How far outside the run such an instant may fall. The tools write an instant to the
+#: minute, rounding down, so a minute is the least that covers what they print.
+SLACK = timedelta(minutes=1)
+
+#: Two floats closer than this count as equal. A search score depends on how long before
+#: the search each fact began or was last restated (`Claim.trace_from`), so the same
+#: search on two stores a few seconds apart differs in the ninth decimal place.
 TOLERANCE = 1e-6
+
+
+@dataclasses.dataclass(frozen=True)
+class Run:
+    """When a program ran, from a moment before its first call to a moment after its
+    last. Every instant a store takes from its clock during the program is inside it."""
+
+    start: datetime
+    end: datetime
 
 
 @dataclasses.dataclass(frozen=True)
@@ -125,58 +149,59 @@ def _number_the_rest(found: dict[str, str], texts: Iterable[str]) -> None:
                 found[match.group(0)] = f"<{kind} {counts[kind]}>"
 
 
-def _instant(value: datetime, near: datetime) -> str:
-    """`WALL_CLOCK` for an instant near `near`, and the instant itself otherwise."""
-    return WALL_CLOCK if abs(value - near) <= CLOCK_WINDOW else value.isoformat()
+def _marker(value: datetime, run: Run) -> str | None:
+    """The marker for an instant a store took from its clock during `run`, or None."""
+    for offset, marker in CLOCK_MARKERS:
+        if run.start + offset - SLACK <= value <= run.end + offset + SLACK:
+            return marker
+    return None
 
 
-def normalise(value: Any, names: Mapping[str, str], *, near: datetime) -> Any:
+def normalise(value: Any, names: Mapping[str, str], *, run: Run) -> Any:
     """`value` as plain dicts, lists, strings and numbers, ready for `differences`.
 
     `names` labels ids (see `labels`), and an id it does not know becomes
-    `<unlabelled id>`. `near` is when the run happened: an instant within
-    `CLOCK_WINDOW` of it becomes `WALL_CLOCK`, and any other instant stays as it is.
-    A dataclass keeps its fields under their names, plus `__type__` for its class.
+    `<unlabelled id>`. An instant becomes `{"__type__": "datetime", "value": ...}`, whose
+    value is one of the markers in `CLOCK_MARKERS` when a store took it from its clock
+    during `run`, and the instant in ISO 8601 otherwise. An enum becomes its class name
+    and its value, and a dataclass keeps every field under its name, plus `__type__` for
+    its class. So a value of one type never equals a value of another.
 
-    Four things are changed further, and each for a reason that holds on every surface:
+    Five things are changed further, and each for a reason that holds on every surface:
 
     * a claim leaves out its bookkeeping keys (see `BOOKKEEPING`) and gains its `state`,
       `salience_base` and `last_observed`;
     * a write receipt leaves out `latency_ms`, which is how long the write took;
     * a preview's confirm token becomes `<token>`, because it is a signature over ids;
+    * a preview's matches become a list of pairs, so their ranked order is compared;
     * a `ForgetResult` sorts what it closed, because it closes in the token's id order.
 
     >>> from datetime import datetime, timezone
     >>> now = datetime(2026, 9, 26, tzinfo=timezone.utc)
     >>> normalise({"at": now, "then": datetime(2024, 1, 1, tzinfo=timezone.utc)}, {},
-    ...           near=now)
-    {'at': '<wall clock>', 'then': '2024-01-01T00:00:00+00:00'}
+    ...           run=Run(now, now))
+    {'at': {'__type__': 'datetime', 'value': '<wall clock>'}, \
+'then': {'__type__': 'datetime', 'value': '2024-01-01T00:00:00+00:00'}}
     """
     def again(item: Any) -> Any:
-        return normalise(item, names, near=near)
+        return normalise(item, names, run=run)
 
+    # Before the check for a string, because `MemoryType` and other enums here are
+    # strings too, and would otherwise compare equal to their plain value.
+    if isinstance(value, enum.Enum):
+        return {"__type__": type(value).__name__, "value": value.value}
     if isinstance(value, str):
         return IDS.sub(lambda found: names.get(found.group(0), "<unlabelled id>"), value)
     if isinstance(value, datetime):
-        return _instant(value, near)
-    if isinstance(value, enum.Enum):
-        return value.value
+        return {"__type__": "datetime", "value": _marker(value, run) or value.isoformat()}
     if isinstance(value, Claim):
-        return _claim(value, names, near)
-    if isinstance(value, ForgetPreview):
-        return {"__type__": "ForgetPreview", "close": value.close,
-                "matches": again(list(value.matches.items())), "confirm": "<token>",
-                "expires_at": again(value.expires_at)}
-    if isinstance(value, ForgetResult):
-        closed = [again(claim) for claim in value.closed]
-        return {"__type__": "ForgetResult", "close": value.close, "reason": value.reason,
-                "closed": sorted(closed, key=repr)}
+        return _claim(value, names, run)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         out: dict[str, Any] = {"__type__": type(value).__name__}
         for field in dataclasses.fields(value):
-            if isinstance(value, WriteReceipt) and field.name == "latency_ms":
-                continue
-            out[field.name] = again(getattr(value, field.name))
+            item = _field(value, field.name, getattr(value, field.name), again)
+            if item is not _LEFT_OUT:
+                out[field.name] = item
         return out
     if isinstance(value, Mapping):
         return {again(key): again(item) for key, item in value.items()}
@@ -185,21 +210,38 @@ def normalise(value: Any, names: Mapping[str, str], *, near: datetime) -> Any:
     return value
 
 
-def _claim(claim: Claim, names: Mapping[str, str], near: datetime) -> dict[str, Any]:
+#: What `_field` returns for a field that is left out of the comparison.
+_LEFT_OUT = object()
+
+
+def _field(owner: Any, name: str, item: Any, again: Callable[[Any], Any]) -> Any:
+    """How one field of a dataclass is normalised: through `again`, except for the four
+    fields `normalise` names, each for its own reason."""
+    if isinstance(owner, WriteReceipt) and name == "latency_ms":
+        return _LEFT_OUT
+    if isinstance(owner, ForgetPreview) and name == "confirm":
+        return "<token>"
+    if isinstance(owner, ForgetPreview) and name == "matches":
+        return again(list(item.items()))
+    if isinstance(owner, ForgetResult) and name == "closed":
+        return sorted((again(claim) for claim in item), key=repr)
+    return again(item)
+
+
+def _claim(claim: Claim, names: Mapping[str, str], run: Run) -> dict[str, Any]:
     out: dict[str, Any] = {"__type__": "Claim"}
     for field in dataclasses.fields(claim):
         if field.name != "meta":
-            out[field.name] = normalise(getattr(claim, field.name), names, near=near)
+            out[field.name] = normalise(getattr(claim, field.name), names, run=run)
     meta = {key: item for key, item in claim.meta.items() if key not in BOOKKEEPING}
     if CLOSURE in meta:
         # Each closure records its instant as epoch seconds.
-        meta[CLOSURE] = [
-            {**entry, "at": _instant(datetime.fromtimestamp(entry["at"], timezone.utc), near)}
-            for entry in meta[CLOSURE]]
-    out["meta"] = normalise(meta, names, near=near)
+        meta[CLOSURE] = [{**entry, "at": datetime.fromtimestamp(entry["at"], timezone.utc)}
+                         for entry in meta[CLOSURE]]
+    out["meta"] = normalise(meta, names, run=run)
     out["state"] = claim.state
     out["salience_base"] = claim.salience_base
-    out["last_observed"] = normalise(claim.last_observed, names, near=near)
+    out["last_observed"] = normalise(claim.last_observed, names, run=run)
     return out
 
 
@@ -284,14 +326,14 @@ def text_labels(texts: list[str]) -> dict[str, str]:
     return names
 
 
-def normalise_text(text: str, names: Mapping[str, str], *, near: datetime) -> str:
-    """A tool's reply with ids labelled, the confirm token replaced, and every instant
-    within `CLOCK_WINDOW` of `near` replaced with `WALL_CLOCK`.
+def normalise_text(text: str, names: Mapping[str, str], *, run: Run) -> str:
+    """A tool's reply with ids labelled, the confirm token replaced, and every instant a
+    store took from its clock during `run` replaced with its marker from `CLOCK_MARKERS`.
 
     >>> from datetime import datetime, timezone
-    >>> near = datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
-    >>> normalise_text("recorded 2026-09-26 11:59Z true from 2024-01-01 00:00Z", {},
-    ...                near=near)
+    >>> now = datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
+    >>> normalise_text("recorded 2026-09-26 12:00Z true from 2024-01-01 00:00Z", {},
+    ...                run=Run(now, now))
     'recorded <wall clock> true from 2024-01-01 00:00Z'
     """
     def stamp(found: re.Match[str]) -> str:
@@ -300,7 +342,7 @@ def normalise_text(text: str, names: Mapping[str, str], *, near: datetime) -> st
             when = datetime.strptime(raw, "%Y-%m-%d %H:%MZ").replace(tzinfo=timezone.utc)
         else:
             when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return WALL_CLOCK if abs(when - near) <= CLOCK_WINDOW else raw
+        return _marker(when, run) or raw
 
     text = _TOKEN.sub(r"\1<token>", text)
     text = IDS.sub(lambda found: names.get(found.group(0), "<unlabelled id>"), text)

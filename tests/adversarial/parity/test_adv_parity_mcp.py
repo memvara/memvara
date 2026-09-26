@@ -21,12 +21,17 @@ difference is real:
   `_storage_fact`);
 * `memory_standing` ends with a "more not shown" line only for a local store, because
   `GET /v1/standing` reports no total (`memvara/server/tools.py`, `_standing`);
-* `memory_recall` refuses `budget` in cloud mode (`memvara/server/memory_api.py`,
-  `MemoryAPI.recall`).
+* `memory_recall` refuses `budget` and `valid_at` in cloud mode
+  (`memvara/server/memory_api.py`, `MemoryAPI.recall`); memvara/memvara#298 tracks
+  giving the hosted recall a time axis.
 
-**One step runs on the local surfaces only.** `memory_recall` with `valid_at` is refused
-in cloud mode, and memvara/memvara#298 tracks that, so the dated recall is compared
-between the two local surfaces and the cloud refusal is left to that issue.
+**What the session does not compare yet.** A write receipt read through the hosted
+client drops four lists the local receipt reports, so in cloud mode `memory_remember`
+leaves out the notes about a value added beside live ones, a weaker value kept beside a
+stronger one, a value closed at the instant it began, and a fact re-filed under another
+memory type. Nothing documents that difference, so it was reported to the maintainer to
+be filed and pinned as a strict expected failure, and until then the session leaves out
+the writes that produce those notes.
 """
 
 from __future__ import annotations
@@ -46,7 +51,7 @@ from memvara.server.config import ServerConfig, build_memvara
 from memvara.server.mcp import MemvaraMCPServer
 from memvara.types import utcnow
 
-from .compare import assert_same, normalise_text, text_labels
+from .compare import Run, assert_same, normalise_text, text_labels
 
 SURFACES = ("in-process", "stdio local", "stdio cloud")
 QUESTION = "where does the user live"
@@ -106,30 +111,39 @@ class Call:
 
     `arguments` is the call's arguments, or a function that builds them from the text
     every earlier step returned, by step name, so a step can use an id an earlier reply
-    named. `local_only` says why cloud mode leaves the step out, or is None.
+    named.
     """
 
     name: str
     tool: str
     arguments: Mapping[str, Any] | Callable[[dict[str, str]], Mapping[str, Any]]
-    local_only: str | None = None
+
+
+#: What a step uses when the earlier reply it reads names no such id or token: ones no
+#: store issued. The step then still runs, and the comparison of the reply that lacked
+#: the id, and of the step that needed it, each show what differs.
+NO_CLAIM = "cl_ffffffffffffffffffff"
+NO_TURN = "ep_ffffffffffffffffffff"
+NO_TOKEN = "no-token-in-the-preview"
 
 
 def _claim(got: dict[str, str], step: str) -> str:
     """The id of the claim a write step added, from its receipt's `+ [<id>]` line."""
-    found = re.search(r"^\+ \[(cl_[0-9a-f]{20})\]", got[step], re.MULTILINE)
-    assert found, got[step]
-    return found.group(1)
+    found = re.search(r"^\+ \[(cl_[0-9a-f]{20})\]", got.get(step, ""), re.MULTILINE)
+    return found.group(1) if found else NO_CLAIM
 
 
 def _turn(got: dict[str, str]) -> str:
-    found = re.search(r"turn id\(s\): (ep_[0-9a-f]{20})", got["add"])
-    assert found, got["add"]
-    return found.group(1)
+    """The id of the turn `memory_add` stored, from its receipt's `turn id(s):` line."""
+    found = re.search(r"turn id\(s\): (ep_[0-9a-f]{20})", got.get("add", ""))
+    return found.group(1) if found else NO_TURN
 
 
 def _token(got: dict[str, str]) -> str:
-    return got["forget_matching.preview"].rsplit("confirm: ", 1)[1].strip()
+    """The confirm token a preview ends with."""
+    found = re.search(r"^confirm: (\S+)$", got.get("forget_matching.preview", ""),
+                      re.MULTILINE)
+    return found.group(1) if found else NO_TOKEN
 
 
 def _fact(predicate: str, value: str, **more: Any) -> dict[str, Any]:
@@ -161,9 +175,7 @@ SESSION: tuple[Call, ...] = (
     Call("search.past", "memory_search", {"query": QUESTION, "valid_at": IN_BERLIN}),
     Call("recall", "memory_recall", {"query": QUESTION}),
     Call("recall.budget", "memory_recall", {"query": QUESTION, "budget": 12}),
-    Call("recall.past", "memory_recall", {"query": QUESTION, "valid_at": IN_BERLIN},
-         local_only="cloud mode refuses memory_recall with valid_at, which "
-                    "memvara/memvara#298 tracks"),
+    Call("recall.past", "memory_recall", {"query": QUESTION, "valid_at": IN_BERLIN}),
     Call("history", "memory_history", {"subject": "user", "predicate": "lives_in"}),
     Call("why", "memory_why",
          lambda got: {"claim_id": _claim(got, "remember.replacing")}),
@@ -200,8 +212,6 @@ SESSION: tuple[Call, ...] = (
 )
 
 
-
-
 @dataclasses.dataclass(frozen=True)
 class Played:
     """What every surface answered, played once per module."""
@@ -212,18 +222,16 @@ class Played:
     replies: dict[str, dict[str, tuple[bool, str]]]
 
 
-def converse(server: Any, *, cloud: bool) -> tuple[dict[str, Any], dict[str, tuple[bool, str]]]:
+def converse(server: Any) -> tuple[dict[str, Any], dict[str, tuple[bool, str]]]:
     """Run the session on `server`: the handshake a client opens with, then every call.
 
     Returns the answers to `initialize` and `tools/list`, and every call's error flag and
-    text by step name. In cloud mode a call marked `local_only` is left out.
+    text by step name.
     """
     handshake = {"initialize": server.initialize(), "tools/list": server.list_tools()}
     replies: dict[str, tuple[bool, str]] = {}
     got: dict[str, str] = {}
     for call in SESSION:
-        if cloud and call.local_only is not None:
-            continue
         arguments = call.arguments(got) if callable(call.arguments) else call.arguments
         result = server.call(call.tool, **arguments)
         got[call.name] = result.text
@@ -237,17 +245,17 @@ def played(tmp_path_factory: pytest.TempPathFactory) -> Played:
     root = tmp_path_factory.mktemp("parity-mcp")
     home = root / "home"
     home.mkdir()
-    near = utcnow()
+    start = utcnow()
     raw: dict[str, tuple[dict[str, Any], dict[str, tuple[bool, str]]]] = {}
     started: list[Any] = []
     try:
         server = InProcessServer(child_env(home, {"MEMVARA_DB": str(root / "in-process.db"),
                                                   "MEMVARA_USER": "alice"}))
         started.append(server)
-        raw["in-process"] = converse(server, cloud=False)
+        raw["in-process"] = converse(server)
         local = McpProcess(root / "stdio-local.db", home=home, user="alice")
         started.append(local)
-        raw["stdio local"] = converse(local, cloud=False)
+        raw["stdio local"] = converse(local)
         with FakeV1() as fake:
             # MEMVARA_DB is set by McpProcess and ignored in cloud mode; no file is made.
             cloud = McpProcess(root / "unused.db", home=home, user="alice",
@@ -255,18 +263,40 @@ def played(tmp_path_factory: pytest.TempPathFactory) -> Played:
                                     "MEMVARA_API_KEY": fake.api_key,
                                     "MEMVARA_SERVER_URL": fake.serve()})
             started.append(cloud)
-            raw["stdio cloud"] = converse(cloud, cloud=True)
+            raw["stdio cloud"] = converse(cloud)
             # Stopped before the fake closes, so nothing it sends meets a closed server.
             cloud.kill()
     finally:
         kill_all(started)
+    run = Run(start, utcnow())
     replies: dict[str, dict[str, tuple[bool, str]]] = {}
     for surface, (_handshake, texts) in raw.items():
         names = text_labels([text for _error, text in texts.values()])
-        replies[surface] = {step: (error, normalise_text(text, names, near=near))
+        replies[surface] = {step: (error, normalise_text(text, names, run=run))
                             for step, (error, text) in texts.items()}
     return Played(handshake={surface: shake for surface, (shake, _texts) in raw.items()},
                   replies=replies)
+
+
+class _Forgetful:
+    """A server whose every reply names no id, as a surface that dropped them would."""
+
+    def initialize(self) -> dict[str, Any]:
+        return {}
+
+    def list_tools(self) -> list[Any]:
+        return []
+
+    def call(self, name: str, /, **arguments: Any) -> ToolResult:
+        return ToolResult(text=f"{name} answered", is_error=False, raw={})
+
+
+def test_a_reply_that_lacks_an_id_does_not_stop_the_session() -> None:
+    """A step that needs an id from an earlier reply still runs, with an id no store
+    holds, so its own comparison shows what differs. Otherwise one missing id would stop
+    the session and fail every test, without saying which surface or step it was."""
+    _handshake, replies = converse(_Forgetful())
+    assert list(replies) == [call.name for call in SESSION]
 
 
 @pytest.mark.parametrize("surface", SURFACES[1:])
@@ -304,7 +334,7 @@ LOCAL_LINES = (
 
 #: The steps whose cloud reply a documented rule of its own describes, each checked by its
 #: own test below rather than by the step-by-step comparison.
-CLOUD_BY_OWN_TEST = frozenset({"recall.budget"})
+CLOUD_BY_OWN_TEST = frozenset({"recall.budget", "recall.past"})
 
 
 def without_local_lines(step: str, text: str) -> str:
@@ -318,8 +348,7 @@ def without_local_lines(step: str, text: str) -> str:
 def _compared() -> Iterator[Any]:
     for call in SESSION:
         for surface in SURFACES[1:]:
-            if surface == "stdio cloud" and (call.local_only is not None
-                                             or call.name in CLOUD_BY_OWN_TEST):
+            if surface == "stdio cloud" and call.name in CLOUD_BY_OWN_TEST:
                 continue
             yield pytest.param(call.name, surface, id=f"{call.name}-{surface}")
 
@@ -347,6 +376,21 @@ def test_a_line_documented_as_local_is_written_locally_and_not_in_cloud_mode(
                 assert found == [], f"{step} in cloud mode: {line.documented}"
             else:
                 assert len(found) == 1, f"{step} through {surface}: {rows}"
+
+
+def test_cloud_mode_refuses_a_dated_recall(played: Played) -> None:
+    """`memvara/server/memory_api.py`, `MemoryAPI.recall`: `valid_at` is refused against a
+    hosted deployment, because `POST /v1/recall` has no time axis and a dated read that
+    silently answered with the present would be a wrong prompt. memvara/memvara#298
+    tracks giving it one; when that lands, this test fails, and the dated recall joins
+    the step-by-step comparison."""
+    for surface in ("in-process", "stdio local"):
+        error, text = played.replies[surface]["recall.past"]
+        assert not error and "as things were on 31 January 2024" in text, (surface, text)
+    error, text = played.replies["stdio cloud"]["recall.past"]
+    assert error
+    assert text.startswith("memory_recall failed: ValueError: recall(valid_at=...) is not "
+                           "available against a hosted deployment"), text
 
 
 def test_cloud_mode_refuses_a_recall_budget(played: Played) -> None:
