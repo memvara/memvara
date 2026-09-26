@@ -59,6 +59,12 @@ lookup and points `HOME` at a temporary directory for every test. The suite runs
 entirely offline against `HashingEmbedder` and `NullLLM`; a test that needs a model uses a
 fake that counts its own calls. **If a test you add reaches the network, it is wrong.**
 
+**A fixture that runs for every test must not call `tmp_path_factory.mktemp()`.** To number
+the directory it makes, `mktemp()` lists every directory the session has made so far, so a
+call for every test makes the suite's run time grow with the square of its size. Make the
+directory with `tempfile.mkdtemp(dir=...)` inside one directory the session makes once, as
+the `_homes` fixture in `tests/conftest.py` does.
+
 **Slow tests go in a tier folder.** A test under a folder named `nightly/`, `weekly/`, `local/` or `quarantine/` is left out of a plain `python3 -m pytest -q`, which is what CI runs. `--tier nightly`, `--tier weekly`, `--tier local` and `--tier quarantine` collect them, and every run prints which tier folders it left out. `docs/claude/testing.md` has the details.
 
 **Every skip needs a rule.** A test that skips for a reason with no rule in `tests/harness/skips.py` fails the run. So when you add a skip, add a rule that says why the skip is legitimate. `docs/claude/testing.md` explains the rule, and the test tiers that keep slow tests out of the default run without skipping them.
