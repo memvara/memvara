@@ -15,7 +15,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
   scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
   covers the suite's foundation, its reference model, its crash tests, its scripted
-  agent sessions and its fakes. None of it changes the library.
+  agent sessions, its fakes and its documentation checks. None of it changes the
+  library.
   - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
     which includes the doctests in `memvara/`, and the new `--tier nightly`,
     `--tier weekly`, `--tier local` and `--tier quarantine` options select the others.
