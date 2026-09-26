@@ -24,7 +24,7 @@ from packaging.utils import canonicalize_name
 
 from harness.env import REPO
 
-from . import environments
+from . import environments, probe
 
 #: The lines hatchling writes into memvara's METADATA, with an extra no framework uses.
 METADATA = textwrap.dedent("""\
@@ -47,26 +47,31 @@ METADATA = textwrap.dedent("""\
     Requires-Dist: llama-index-core>=0.13; extra == 'llama-index'
 """)
 
-#: What FakePip says the newest release of each framework is.
+#: What FakePip says the newest release of each framework, and of each companion, is.
 LATEST = {"langchain-core": "1.6.5", "llama-index-core": "0.14.25", "crewai": "1.15.22",
-          "langgraph-checkpoint": "4.2.0", "mem0ai": "2.2.1"}
+          "langgraph-checkpoint": "4.2.0", "mem0ai": "2.2.1", "langgraph": "1.2.12"}
 
 
 class FakePip:
     """Stands in for `environments.Pip`, touching nothing but temporary folders.
 
     It records each call as a tuple whose first item is its kind: "wheel", "resolve",
-    "create", "install", "refresh" (an install with --force-reinstall) or "describe".
-    A kind in `failing` raises `BuildError` instead.
+    "resolve with dependencies", "create", "install", "refresh" (an install with
+    --force-reinstall) or "describe". A kind in `failing` raises `BuildError` instead,
+    every time, and a kind in `failing_once` raises it the next time only.
     """
 
     def __init__(self, latest: Mapping[str, str] | None = None) -> None:
         self.latest = dict(LATEST if latest is None else latest)
         self.calls: list[tuple[str, ...]] = []
         self.failing: set[str] = set()
+        self.failing_once: set[str] = set()
 
     def _call(self, kind: str, *details: str) -> None:
         self.calls.append((kind, *details))
+        if kind in self.failing_once:
+            self.failing_once.discard(kind)
+            raise environments.BuildError(f"planted failure of {kind}")
         if kind in self.failing:
             raise environments.BuildError(f"planted failure of {kind}")
 
@@ -81,10 +86,12 @@ class FakePip:
             archive.writestr("memvara-0.0.1.dist-info/METADATA", METADATA)
         return path
 
-    def resolve(self, requirements: Sequence[str]) -> dict[str, str]:
-        self._call("resolve", *requirements)
+    def resolve(self, requirements: Sequence[str], *, deps: bool = False) -> dict[str, str]:
+        self._call("resolve with dependencies" if deps else "resolve", *requirements)
         found: dict[str, str] = {}
         for text in requirements:
+            if ".whl" in text:
+                continue
             requirement = Requirement(text)
             name = canonicalize_name(requirement.name)
             pinned = [spec.version for spec in requirement.specifier if spec.operator == "=="]
@@ -129,6 +136,12 @@ def _wanted(**changes: object) -> environments.Wanted:
         "interpreter": "cpython 3.13.14 macosx-11.0-arm64 /usr/local/bin/python3.13"}
     values.update(changes)
     return environments.Wanted(**values)  # type: ignore[arg-type]
+
+
+def _langgraph(companion: str = "1.2.12") -> environments.Wanted:
+    return _wanted(framework=environments.framework("langgraph"), version="4.1.0",
+                   requirement="langgraph-checkpoint>=4.1",
+                   companions=(("langgraph", companion),))
 
 
 def _cache(tmp_path: Path) -> tuple[FakePip, environments.Cache]:
@@ -193,15 +206,17 @@ def test_the_key_changes_with_everything_the_environment_depends_on() -> None:
         assert _wanted(**change).key != base.key, change
     assert _wanted().directory == base.directory
     assert base.directory == f"langchain-core-0.3.0-{base.key[:12]}"
+    # A new release of a companion builds a new environment, rather than leaving the
+    # release the environment was first built with in place for good.
+    assert _langgraph("1.2.13").key != _langgraph("1.2.12").key
 
 
 def test_the_install_arguments_pin_the_framework_beside_memvaras_own_extra() -> None:
     wheel = Path("memvara-0.0.1-py3-none-any.whl")
     assert _wanted().install_arguments(wheel) == [f"{wheel}[langchain]",
                                                   "langchain-core==0.3.0"]
-    langgraph = _wanted(framework=environments.framework("langgraph"), version="4.1.0")
-    assert langgraph.install_arguments(wheel) == [
-        f"{wheel}[langgraph]", "langgraph-checkpoint==4.1.0", "langgraph"]
+    assert _langgraph().install_arguments(wheel) == [
+        f"{wheel}[langgraph]", "langgraph-checkpoint==4.1.0", "langgraph==1.2.12"]
     mem0 = _wanted(framework=environments.framework("mem0"), version="2.0.0")
     assert mem0.install_arguments(wheel) == [str(wheel), "mem0ai==2.0.0"]
 
@@ -248,6 +263,26 @@ def test_an_environment_without_its_pinned_release_is_built_again(tmp_path: Path
     prepared = cache.prepare(_wanted())
     for installed in prepared.purelib.glob("langchain-core==*"):
         installed.unlink()
+    rebuilt = cache.prepare(_wanted())
+    assert rebuilt.how == "rebuilt" and rebuilt.distributions["langchain-core"] == "0.3.0"
+
+
+def test_an_environment_without_its_pinned_companion_is_built_again(tmp_path: Path) -> None:
+    pip, cache = _cache(tmp_path)
+    prepared = cache.prepare(_langgraph())
+    assert prepared.distributions["langgraph"] == "1.2.12"
+    (prepared.purelib / "langgraph==1.2.12").unlink()
+    rebuilt = cache.prepare(_langgraph())
+    assert rebuilt.how == "rebuilt" and rebuilt.distributions["langgraph"] == "1.2.12"
+
+
+def test_an_environment_that_cannot_say_what_it_holds_is_built_again(tmp_path: Path) -> None:
+    """The reinstall of memvara worked, but asking the environment's interpreter what it
+    holds failed. The environment cannot be trusted, so it is built again rather than
+    failing every test of it, night after night."""
+    pip, cache = _cache(tmp_path)
+    cache.prepare(_wanted())
+    pip.failing_once.add("describe")
     rebuilt = cache.prepare(_wanted())
     assert rebuilt.how == "rebuilt" and rebuilt.distributions["langchain-core"] == "0.3.0"
 
@@ -311,6 +346,27 @@ def test_a_stale_installed_memvara_is_named_file_by_file(tmp_path: Path) -> None
         "2 installed copies of memvara, where there should be one"]
 
 
+def test_a_command_that_cannot_start_is_a_build_error(tmp_path: Path) -> None:
+    """An environment whose interpreter has gone must fail as a build error, which the
+    cache answers by building the environment again. Any other exception would escape
+    the session and fail every test of that environment, every night."""
+    pip = environments.Pip(tmp_path / "home", python=str(tmp_path / "no-such-python"))
+    with pytest.raises(environments.BuildError, match="could not start"):
+        pip.create(tmp_path / "environment")
+    with pytest.raises(environments.BuildError, match="could not start"):
+        pip.describe(tmp_path / "environment" / "bin" / "python")
+
+
+def test_an_answer_that_is_not_json_is_a_build_error(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Something that prints to standard output when the interpreter starts, such as a
+    `.pth` file, would spoil the description. That is a build error too."""
+    monkeypatch.setattr(environments, "_DESCRIBE", "print('not json')")
+    pip = environments.Pip(tmp_path / "home")
+    with pytest.raises(environments.BuildError, match="not JSON: not json"):
+        pip.describe(Path(sys.executable))
+
+
 # -- what the probe runs with ------------------------------------------------------------
 
 
@@ -347,6 +403,17 @@ def test_run_probe_runs_the_checks_with_the_environments_interpreter(tmp_path: P
     assert probed.run.network == []
 
 
+@pytest.mark.parametrize("framework", environments.FRAMEWORKS, ids=lambda f: f.name)
+def test_each_checks_file_loads_the_way_the_probe_loads_it(
+        framework: environments.Framework) -> None:
+    """The probe loads a checks file by its path, outside any package, in an environment
+    that holds one framework. A relative import, or a framework imported at the top of the
+    file, would stop every check in it, and without this test only the nightly run would
+    say so. The suite has no framework installed, so this loads each file the same way."""
+    module = probe.load(framework.checks)
+    assert probe.checks(module), f"{framework.checks.name} defines no check"
+
+
 # -- one run's session -------------------------------------------------------------------
 
 
@@ -366,9 +433,14 @@ def test_a_session_pins_every_framework_twice_and_prunes_the_rest(tmp_path: Path
         assert (current.wanted[("mem0", "floor")].directory
                 == current.wanted[("mem0", "latest")].directory)
         assert current.removed == [old] and not old.exists()
+        # A companion is resolved beside the framework at each pin, and pinned.
+        assert current.wanted[("langgraph", "floor")].companions == (("langgraph", "1.2.12"),)
         current.prepare("langchain", "latest")
         assert any("langchain-core 1.6.5" in line for line in current.summary())
     assert pip.kinds().count("wheel") == 1 and pip.kinds().count("resolve") == 2
+    together = [call[2:] for call in pip.calls if call[0] == "resolve with dependencies"]
+    assert together == [("langgraph-checkpoint==4.1", "langgraph"),
+                        ("langgraph-checkpoint==4.2.0", "langgraph")]
     record = json.loads((root / "last-run.json").read_text(encoding="utf-8"))
     assert [e["version"] for e in record["environments"]] == ["1.6.5"]
     assert record["removed"] == [old.name]

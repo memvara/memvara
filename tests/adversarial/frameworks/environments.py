@@ -9,11 +9,14 @@ exactly, and at the newest release pip can install on this interpreter.
 Each environment is a virtual environment of its own under CACHE, built with this
 interpreter's `venv` and pip. It holds memvara, installed from a wheel built from this
 checkout, and the framework at its pin. It is reused from one run to the next while its
-key stays the same. The key covers the framework's pinned version, the requirement
-memvara declares on it, memvara's own dependencies and this interpreter, so a change to
-any of them builds a new environment, and pruning removes every environment the current
-pins no longer need. memvara itself is reinstalled into a reused environment on every
-run, because the code under test changes far more often than anything in the key.
+key stays the same. The key covers the framework's pinned version, the versions of the
+companions installed beside it, the requirement memvara declares on the framework,
+memvara's own dependencies and this interpreter, so a change to any of them builds a new
+environment, and pruning removes every environment the current pins no longer need.
+Everything else the framework depends on is resolved when the environment is built, and
+stays at that version until the key changes. memvara itself is reinstalled into a reused
+environment on every run, because the code under test changes far more often than
+anything in the key.
 
 Everything that runs pip goes through `Pip`, which the fast tests replace with a fake.
 Nothing in this module imports a framework.
@@ -116,7 +119,8 @@ class Framework:
     #: Whether memvara is installed with that extra. mem0's requirement lives in the
     #: bench extra, which also pulls in nltk, so memvara goes in without it.
     install_extra: bool = True
-    #: Other distributions the checks need, installed beside the framework, unpinned.
+    #: Other distributions the checks need. At each pin, pip resolves them beside the
+    #: framework, and the environment installs exactly the versions it chose.
     companions: tuple[str, ...] = ()
 
     @property
@@ -233,6 +237,8 @@ class Wanted:
     dependencies: tuple[str, ...]
     #: `interpreter()` of the interpreter the environment is built with.
     interpreter: str
+    #: Each of the framework's companions, with the version pip resolved beside it.
+    companions: tuple[tuple[str, str], ...] = ()
 
     @property
     def key(self) -> str:
@@ -242,8 +248,9 @@ class Wanted:
             "recipe": RECIPE, "framework": self.framework.name, "dist": self.framework.dist,
             "version": self.version,
             "extra": self.framework.extra if self.framework.install_extra else None,
-            "companions": list(self.framework.companions), "requirement": self.requirement,
-            "dependencies": list(self.dependencies), "interpreter": self.interpreter,
+            "companions": [list(pair) for pair in self.companions],
+            "requirement": self.requirement, "dependencies": list(self.dependencies),
+            "interpreter": self.interpreter,
         }, sort_keys=True)
         return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
@@ -254,9 +261,21 @@ class Wanted:
 
     def install_arguments(self, wheel: Path) -> list[str]:
         """What `pip install` is given to build the environment."""
-        memvara = (f"{wheel}[{self.framework.extra}]" if self.framework.install_extra
-                   else str(wheel))
-        return [memvara, f"{self.framework.dist}=={self.version}", *self.framework.companions]
+        return [_memvara(self.framework, wheel), f"{self.framework.dist}=={self.version}",
+                *(f"{name}=={version}" for name, version in self.companions)]
+
+    def held_by(self, distributions: Mapping[str, str]) -> bool:
+        """Whether an environment holding `distributions` holds the framework and every
+        companion at the versions this environment pins."""
+        pinned = [(self.framework.dist, self.version), *self.companions]
+        return all(distributions.get(canonicalize_name(name)) == version
+                   for name, version in pinned)
+
+
+def _memvara(framework: Framework, wheel: Path) -> str:
+    """memvara's wheel as `pip install` is given it, with the framework's extra if the
+    framework installs it."""
+    return f"{wheel}[{framework.extra}]" if framework.install_extra else str(wheel)
 
 
 def python_in(path: Path) -> Path:
@@ -276,6 +295,14 @@ def _tail(text: str, lines: int = 40) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
+def _json(text: str, what: str) -> Any:
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise BuildError(f"{what} printed something that is not JSON: "
+                         f"{_tail(text, 5)}") from exc
+
+
 #: Run with `-I` in an environment: its installed distributions and where they live.
 _DESCRIBE = (
     "import importlib.metadata, json, re, sysconfig\n"
@@ -289,8 +316,9 @@ class Pip:
     """Runs this interpreter's `venv` and pip, and each environment's own interpreter.
 
     Every command gets the suite's child environment without `PYTHONPATH`, so pip and the
-    environments see only what is installed in them. A command that fails, or runs past
-    its time limit, raises `BuildError` with the end of its output.
+    environments see only what is installed in them. A command that cannot start, fails,
+    runs past its time limit or answers with something unreadable raises `BuildError`,
+    with the end of its output where there is one.
     """
 
     def __init__(self, home: Path, *, python: str = sys.executable,
@@ -310,6 +338,8 @@ class Pip:
                                   stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired as exc:
             raise BuildError(f"{what} ran past {self.timeout:.0f} seconds") from exc
+        except OSError as exc:
+            raise BuildError(f"{what} could not start: {exc}") from exc
         if done.returncode != 0:
             raise BuildError(f"{what} failed with exit status {done.returncode}:\n"
                              f"{_tail(done.stdout + done.stderr)}")
@@ -325,15 +355,17 @@ class Pip:
             raise BuildError(f"building memvara's wheel left {len(wheels)} wheels in {folder}")
         return wheels[0]
 
-    def resolve(self, requirements: Sequence[str]) -> dict[str, str]:
-        """The version pip would install for each requirement on this interpreter."""
+    def resolve(self, requirements: Sequence[str], *, deps: bool = False) -> dict[str, str]:
+        """The version pip would install for each requirement on this interpreter. With
+        `deps`, pip resolves the requirements' dependencies as well, and the answer names
+        every distribution the install would bring."""
+        what = "asking pip what " + ", ".join(requirements) + " resolve to"
         with tempfile.TemporaryDirectory() as folder:
             report = Path(folder) / "report.json"
             self._run([self.python, "-m", "pip", "install", "--quiet", "--dry-run",
-                       "--no-deps", "--ignore-installed", "--no-cache-dir", "--report",
-                       report, *requirements],
-                      "asking pip what " + ", ".join(requirements) + " resolve to")
-            return versions_from_report(json.loads(report.read_text(encoding="utf-8")))
+                       *([] if deps else ["--no-deps"]), "--ignore-installed",
+                       "--no-cache-dir", "--report", report, *requirements], what)
+            return versions_from_report(_json(report.read_text(encoding="utf-8"), what))
 
     def create(self, path: Path) -> Path:
         """Create a virtual environment at `path`, and return its interpreter."""
@@ -348,8 +380,8 @@ class Pip:
 
     def describe(self, python: Path) -> tuple[Path, dict[str, str]]:
         """The environment's site-packages folder and its installed distributions."""
-        body = json.loads(self._run([python, "-I", "-c", _DESCRIBE],
-                                    f"asking {python} what it has installed"))
+        what = f"asking {python} what it has installed"
+        body = _json(self._run([python, "-I", "-c", _DESCRIBE], what), what)
         return Path(body["purelib"]), dict(body["distributions"])
 
 
@@ -399,23 +431,24 @@ class Cache:
         """Make the environment ready: reuse it when its key matches, else build it.
 
         A reused environment gets this checkout's memvara reinstalled. It is built again
-        from nothing when that reinstall fails or when it no longer holds its pinned
-        release, so a damaged cache mends itself instead of failing every night.
+        from nothing when that reinstall fails, when its interpreter cannot say what it
+        holds, or when it no longer holds its pinned releases, so a damaged cache mends
+        itself instead of failing every night.
         """
         path = self.root / wanted.directory
         python = python_in(path)
         started = time.monotonic()
         how = "built"
         if _read_marker(path).get("key") == wanted.key:
+            how = "rebuilt"
             try:
                 self.pip.install(python, ["--no-deps", "--force-reinstall", str(self.wheel)])
-                how = "reused"
+                purelib, distributions = self.pip.describe(python)
             except BuildError:
-                how = "rebuilt"
-        if how == "reused":
-            purelib, distributions = self.pip.describe(python)
-            if distributions.get(canonicalize_name(wanted.framework.dist)) != wanted.version:
-                how = "rebuilt"
+                pass
+            else:
+                if wanted.held_by(distributions):
+                    how = "reused"
         if how != "reused":
             if path.exists():
                 shutil.rmtree(path)
@@ -670,13 +703,26 @@ def _locked(path: Path) -> Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+def _companions(pip: Pip, wheel: Path, framework: Framework,
+                version: str) -> tuple[tuple[str, str], ...]:
+    """Each of the framework's companions, with the version pip would install beside
+    memvara and the framework at `version`. Pinning it puts it in the environment's key,
+    so a new release of a companion builds a new environment."""
+    if not framework.companions:
+        return ()
+    found = pip.resolve([_memvara(framework, wheel), f"{framework.dist}=={version}",
+                         *framework.companions], deps=True)
+    return tuple((name, found[canonicalize_name(name)]) for name in framework.companions)
+
+
 @contextlib.contextmanager
 def session(root: Path, work: Path, pip: Pip | None = None) -> Iterator[Session]:
     """Resolve every framework's two pins, prune the cache, and hand out environments.
 
     memvara's wheel is built once, from this checkout, and read for what memvara
     declares. Then pip resolves each floor and each newest release on this interpreter,
-    every environment no pin needs is removed, and the session is handed out. When it
+    and each companion beside each of them. Every environment no pin needs is removed,
+    and the session is handed out. When it
     ends, `root/last-run.json` records what each environment resolved to, its size and
     how long it took.
     """
@@ -690,11 +736,13 @@ def session(root: Path, work: Path, pip: Pip | None = None) -> Iterator[Session]
         floors = pip.resolve([floor(needs.requirements[f.name]) for f in FRAMEWORKS])
         latest = pip.resolve([needs.requirements[f.name] for f in FRAMEWORKS])
         this = interpreter()
-        wanted = {
-            (f.name, pin): Wanted(f, versions[canonicalize_name(f.dist)],
-                                  needs.requirements[f.name], needs.dependencies, this)
-            for f in FRAMEWORKS
-            for pin, versions in (("floor", floors), ("latest", latest))}
+        wanted: dict[tuple[str, str], Wanted] = {}
+        for f in FRAMEWORKS:
+            for pin, versions in (("floor", floors), ("latest", latest)):
+                version = versions[canonicalize_name(f.dist)]
+                wanted[(f.name, pin)] = Wanted(
+                    f, version, needs.requirements[f.name], needs.dependencies, this,
+                    _companions(pip, wheel, f, version))
         cache = Cache(root, pip, wheel)
         current = Session(cache, wanted, work, cache.prune(wanted.values()))
         try:
