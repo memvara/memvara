@@ -299,6 +299,14 @@ def test_only_a_confirmed_break_of_that_night_can_be_filed(
                        gh=never, git=never) != 0
 
 
+def test_a_night_named_in_another_form_is_refused_with_the_form_to_use(
+        tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code = filing.main(["issue", "--checkout", str(tmp_path), "--night", "27-09-2026",
+                        "--fingerprint", "f" * 64, "--severity", "crash"], gh=never, git=never)
+    assert code != 0
+    assert "YYYY-MM-DD" in capsys.readouterr().err
+
+
 def test_a_pull_request_needs_the_issue_filed_first_when_filing_is_on(
         tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The strict expected failure cites its issue, so the issue must exist first."""

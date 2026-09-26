@@ -20,10 +20,11 @@ import contextlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Mapping
 
 # The prefixes of the variables no child process of the suite may inherit: the
@@ -61,7 +62,22 @@ class Layout:
         return self.root / "home"
 
     def night(self, date: str) -> pathlib.Path:
-        return self.root / date
+        """The folder of the night named `date`, which must be YYYY-MM-DD."""
+        return self.root / night_date(date)
+
+
+def night_date(text: str) -> str:
+    """`text`, when it is a real date written YYYY-MM-DD, the name the watchdog looks for.
+    A night saved under any other name would never be checked, and the watchdog would
+    report it as a night that did not run."""
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            date.fromisoformat(text)
+            return text
+    except ValueError:
+        pass
+    raise ValueError(f"{text!r} is not a night's date: a night is named YYYY-MM-DD, such as "
+                     "2026-09-27")
 
 
 def main_checkout(path: pathlib.Path | str) -> pathlib.Path:

@@ -381,6 +381,15 @@ def test_a_test_run_that_dies_before_writing_a_result_is_a_failure_for_a_person(
     assert {step["name"]: step["status"] for step in report["steps"]}["regressions"] == "failed"
 
 
+def test_a_night_given_a_malformed_date_is_refused_before_it_writes_anything(
+        tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A typo in --date would put the night where the watchdog never looks."""
+    assert run.main(["--checkout", str(tmp_path), "--date", "2026-9-27", "--python",
+                     sys.executable], steps=(), notify=Notifications(), gh=never) == 2
+    assert "YYYY-MM-DD" in capsys.readouterr().err
+    assert not (tmp_path / "local").exists()
+
+
 def test_the_drift_warning_covers_the_harness_the_run_imports(tmp_path: pathlib.Path) -> None:
     """The run computes fingerprints with tests/harness/report.py from its own checkout,
     not from origin/main. If that copy differs, the fingerprints can differ from the ones

@@ -258,6 +258,17 @@ def test_a_history_line_torn_by_a_killed_run_is_skipped_and_reported(
     assert night.read_jsonl(tmp_path / "missing.jsonl") == ([], [])
 
 
+@pytest.mark.parametrize("date", ["2026-9-27", "2026-02-30", "tonight", "2026-09-27/..", ""])
+def test_a_night_is_named_by_a_real_date_in_the_form_the_watchdog_reads(
+        tmp_path: pathlib.Path, date: str) -> None:
+    """The watchdog looks for local/nightly/YYYY-MM-DD. A night saved under any other name
+    would never be checked, and the watchdog would report that night as not run."""
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        night.Layout(tmp_path).night(date)
+    assert night.Layout(tmp_path).night("2026-09-27") == (
+        tmp_path / "local" / "nightly" / "2026-09-27")
+
+
 def test_the_heartbeat_is_readable_json_with_its_start_and_finish(
         tmp_path: pathlib.Path) -> None:
     path = tmp_path / "heartbeat.json"

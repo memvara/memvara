@@ -433,7 +433,10 @@ def _file(args: argparse.Namespace, layout: night.Layout, *, gh: Runner,
 
 
 def _confirmed(layout: night.Layout, date: str, fingerprint: str) -> regressions.Failure:
-    report = layout.night(date) / night.REPORT_JSON
+    try:
+        report = layout.night(date) / night.REPORT_JSON
+    except ValueError as exc:
+        raise FilingError(str(exc)) from None
     if not report.exists():
         raise FilingError(f"there is no report for the night of {date} at {report}")
     for record in night.read_json(report).get("failures", []):

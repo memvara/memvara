@@ -554,9 +554,13 @@ def main(argv: Sequence[str] | None = None, *, steps: Sequence[steps.Step] = STE
     checkout = (pathlib.Path(args.checkout) if args.checkout
                 else night.main_checkout(HERE)).resolve()
     started = clock()
+    try:
+        date = night.night_date(args.date or started.date().isoformat())
+    except ValueError as exc:
+        print(f"Not run: {exc}", file=sys.stderr)
+        return 2
     context = Night(
-        layout=night.Layout(checkout), date=args.date or started.date().isoformat(),
-        filing_on=args.file, gh=gh,
+        layout=night.Layout(checkout), date=date, filing_on=args.file, gh=gh,
         canary_paths=[pathlib.Path(path).expanduser() for path in (*CANARY, *args.canary)])
     context.folder.mkdir(parents=True, exist_ok=True)
     heartbeat = context.folder / night.HEARTBEAT

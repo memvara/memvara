@@ -418,7 +418,7 @@ python3 scripts/nightly/run.py --date 2026-09-27    # a named night, such as one
 python3 scripts/nightly/run.py --worktree <checkout> --python <interpreter> --no-notify
 ```
 
-The last form tests an existing checkout with an existing interpreter, and sends no notification. It is for a supervised run, and the report says the checkout was given rather than fresh. `--canary PATH` adds a file to the canary, and `--file` turns filing on.
+A night's name must be a real date written `YYYY-MM-DD`, because that is the folder the watchdog looks for. The run refuses any other form before it writes anything, and `filing.py` refuses it too. The last form tests an existing checkout with an existing interpreter, and sends no notification. It is for a supervised run, and the report says the checkout was given rather than fresh. `--canary PATH` adds a file to the canary, and `--file` turns filing on.
 
 Notifications go out only for a new or recurred break, for an isolation breach (a file the canary watches changed during the night), and for a dependency such as `origin` that is down for the second night in a row. The canary watches `~/.memvara/credentials.json` and `~/.memvara/db.key` by default. It keeps only their hashes, never their contents.
 
