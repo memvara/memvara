@@ -90,6 +90,18 @@ EXACT_WORDS = frozenset({"allow"} | {event for events in EVENTS.values()
 #: turn is never held (hosts/<id>.py, `detach_capture`).
 DETACHES = frozenset({"codex", "copilot", "cursor"})
 
+#: The limit, in seconds, each host gives each hook: the hook contract the design names
+#: (session start 20, recall 10, approve 5, capture 180), as each host record declares it
+#: in `timeouts`. Capture's limit is 120 seconds on the hosts other than Claude Code,
+#: where only the single-call extraction runs.
+LIMITS: Mapping[str, Mapping[str, int]] = {
+    "claude": {"session_start": 20, "recall": 10, "capture": 180, "approve": 5},
+    "codex": {"session_start": 20, "recall": 10, "capture": 120, "approve": 5},
+    "copilot": {"session_start": 20, "recall": 10, "capture": 120, "approve": 5},
+    "cursor": {"session_start": 20, "capture": 120, "approve": 5},
+    "opencode": {"session_start": 20, "recall": 10, "capture": 120, "approve": 5},
+}
+
 #: The names each host gives a tool of the memvara server when it reaches the approve
 #: hook. Claude Code and Codex prefix `mcp__<server>__` (hosts/claude.py, hosts/codex.py),
 #: and a server a plugin installed is named `plugin_memvara_memvara` (approve.py).
