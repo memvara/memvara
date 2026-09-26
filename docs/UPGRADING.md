@@ -15,6 +15,8 @@ The MCP server's argument validator now refuses these values, which it used to a
 
 - NaN for a number argument, such as `confidence` or `min_score`. A NaN `min_score` used
   to act as no floor at all.
+- A metadata filter key that ends in a newline, such as `"team\n"`, in the `filters`
+  argument of `memory_search` or `memory_recall`.
 
 Each refusal is an ordinary tool result with `isError: true` whose message names the
 argument, like every other argument the validator refuses.

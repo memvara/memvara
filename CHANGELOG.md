@@ -175,6 +175,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   no floor at all. The validator now refuses NaN for every number argument, with
   `<tool>.<argument> must be a number, got NaN`, before anything is read or written.
   #312.
+- **A metadata filter key that ends in a newline is refused.** The key pattern
+  `^[A-Za-z0-9_.-]{1,64}$` was checked with Python's `re.search`, where `$` also matches
+  just before a newline at the end of the value, so `memory_search` and `memory_recall`
+  accepted the filter key `"team\n"`. The validator now matches a pattern against the
+  whole value, which is what `$` means in a JSON Schema pattern. #314.
 - **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
   decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
   interpreter's stack allows, and the server let it escape, so a single such line ended

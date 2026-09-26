@@ -9,10 +9,10 @@ client, which typically renders them as a failed call and moves on.
 
 The validated subset of JSON Schema is exactly what the tools in this package declare:
 `type` (string/integer/number/boolean/array/object, or a list of those when a value may
-be any of several), `enum`, `minimum`, `maximum`, `maxLength`, `pattern` on a string,
-`default`, `required`, `additionalProperties` (`false` on a tool's own arguments, and a
-schema for every value of an `object` argument), and `propertyNames` for the keys of an
-`object` argument. Anything wider would be untested code in a validator, which is the one
+be any of several), `enum`, `minimum`, `maximum`, `maxLength`, `pattern` on a string
+(anchored at both ends, as every declared one is), `default`, `required`,
+`additionalProperties` (`false` on a tool's own arguments, and a schema for every value of
+an `object` argument), and `propertyNames` for the keys of an `object` argument. Anything wider would be untested code in a validator, which is the one
 place that is not acceptable.
 
 That sentence is load-bearing, and `boolean` was missing from it for as long as it was
@@ -226,7 +226,12 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
                 "twice. Send the whole character or drop it.") from None
 
     pattern = spec.get("pattern")
-    if pattern is not None and not re.search(pattern, value):
+    # Matched against the whole value. In a JSON Schema pattern, as in JavaScript, `$`
+    # matches only at the end of the value, but in Python it also matches just before a
+    # newline at the end, so `re.search` let a filter key "team\n" through the pattern
+    # ^[A-Za-z0-9_.-]{1,64}$. Every pattern the tools declare is anchored at both ends,
+    # so a full match means the same thing as the schema's pattern.
+    if pattern is not None and not re.fullmatch(pattern, value):
         raise ToolError(f"{label} must match the pattern {pattern}, got {value!r}")
 
     allowed = spec.get("enum")
