@@ -81,6 +81,8 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B45", 317, "a backdated retraction's tombstone is live in reads of the past"),
     KnownBug("B69", 349, "a repeated future-dated retraction writes a new tombstone each "
              "time"),
+    KnownBug("B46", 318, "tier 0 of add() reinforces a restatement dated before the claim, "
+             "and the earlier period is lost"),
 )}
 
 

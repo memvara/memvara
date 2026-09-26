@@ -261,6 +261,25 @@ def test_restating_a_fact_with_an_earlier_start_keeps_the_earlier_start() -> Non
     assert earlier_view == []
 
 
+# -- B46: tier 0 of add() reinforces a restatement dated before the claim --------------
+
+@known_bugs.xfail("B46")
+def test_a_turn_restating_a_fact_with_an_earlier_date_keeps_the_earlier_period() -> None:
+    """Tier 0 reinforces a turn that embeds as a near-duplicate of a stored claim before
+    the reconciler sees it, so the rule #283 set for remember() never reaches add()
+    (#318)."""
+    from datetime import datetime, timezone
+
+    jan, feb, apr = (datetime(2026, month, 1, tzinfo=timezone.utc) for month in (1, 2, 4))
+    mem = stores.memory()
+    mem.remember("user", "likes", "tea", valid_from=apr, user="u")
+    receipt = mem.add("user likes tea", ts=jan, user="u")
+    seen = [c.object for c in mem.get_all(valid_at=feb, user="u")]
+    if seen == [] and not receipt.added and len(receipt.reinforced) == 1:
+        raise known_bugs.Reproduced("tier 0 reinforced the April claim; February reads nothing")
+    assert seen == ["tea"], seen
+
+
 # -- B18: a repeated retraction is folded into an expired tombstone ----------------------
 
 @known_bugs.xfail("B18")
