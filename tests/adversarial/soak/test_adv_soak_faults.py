@@ -90,6 +90,7 @@ def test_a_store_that_keeps_a_stale_value_fails_current_facts(
     assert findings["flip-flop row growth"].status == "ok", "the value is stale, not doubled"
 
 
+@pytest.mark.covers("silent:predicate-explosion")
 def test_aliases_that_stop_folding_are_a_predicate_explosion(
         monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(PredicateRegistry, "normalize", lambda self, raw: _slugify(raw))
@@ -99,6 +100,7 @@ def test_aliases_that_stop_folding_are_a_predicate_explosion(
     assert finding.flagged and set(finding.flagged) <= aliases
 
 
+@pytest.mark.covers("silent:reinforcement-not-refreshing-recency")
 def test_reinforcement_that_refreshes_nothing_is_caught_by_recency(
         monkeypatch: pytest.MonkeyPatch) -> None:
     # The bug memvara/telemetry.py describes: a restatement is counted, but neither its
@@ -115,6 +117,7 @@ def test_reinforcement_that_refreshes_nothing_is_caught_by_recency(
     assert finding.status == "fail" and finding.value is not None and finding.value <= 0
 
 
+@pytest.mark.covers("silent:flip-flop-row-growth-counters-reset")
 def test_single_valued_predicates_declared_as_many_are_row_growth() -> None:
     many = {"lives_in", "works_at", "working_on"}
     specs = tuple(dataclasses.replace(spec, cardinality=Cardinality.MANY)
@@ -125,6 +128,7 @@ def test_single_valued_predicates_declared_as_many_are_row_growth() -> None:
     assert {slot.split()[-1] for slot in finding.flagged} <= many
 
 
+@pytest.mark.covers("silent:flip-flop-row-growth-counters-reset")
 def test_a_merge_that_never_fires_is_row_growth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("memvara.consolidate.merge.calibration_of",
                         lambda embedder: SimpleNamespace(merge=1.01))
@@ -132,6 +136,7 @@ def test_a_merge_that_never_fires_is_row_growth(monkeypatch: pytest.MonkeyPatch)
     assert finding.status == "fail" and "merged nothing" in finding.detail
 
 
+@pytest.mark.covers("silent:salience-overriding-relevance")
 def test_a_ranking_that_puts_salience_before_relevance_is_caught_by_the_probes(
         monkeypatch: pytest.MonkeyPatch) -> None:
     # Salience decides the order and relevance only breaks ties. A weight fault is the
@@ -151,6 +156,7 @@ def test_a_ranking_that_puts_salience_before_relevance_is_caught_by_the_probes(
     assert finding.value is not None and finding.value < 0.95
 
 
+@pytest.mark.covers("silent:gate-fast-path-english-centrism")
 def test_a_gate_that_drops_unspaced_scripts_is_tracked_by_name(
         monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("memvara.write.gate._MIN_UNSPACED_CHARS", 10**6)
@@ -160,6 +166,7 @@ def test_a_gate_that_drops_unspaced_scripts_is_tracked_by_name(
     assert [f.detector for f in findings.values() if f.status == "fail"] == []
 
 
+@pytest.mark.covers("silent:poisoning-a-retraction-that-retires-nothing")
 def test_a_retraction_of_a_misspelt_like_retires_nothing(
         monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(soak.Workload, "retraction_text",
@@ -168,6 +175,7 @@ def test_a_retraction_of_a_misspelt_like_retires_nothing(
     assert finding.status == "fail" and finding.value is not None and finding.value >= 1
 
 
+@pytest.mark.covers("silent:redaction-seam")
 def test_personal_data_in_a_format_the_rules_miss_is_redaction_drift(
         monkeypatch: pytest.MonkeyPatch) -> None:
     # Unpunctuated phone numbers are one of the misses PatternRedactor's docstring lists,
@@ -185,6 +193,7 @@ def test_personal_data_in_a_format_the_rules_miss_is_redaction_drift(
     assert finding.value is not None and finding.value < 0.99
 
 
+@pytest.mark.covers("silent:redaction-seam")
 def test_a_deployment_that_dropped_its_redactor_is_caught() -> None:
     finding = findings_of(options={"redactor": None})["redaction drift"]
     assert finding.status == "fail" and "not running" in finding.detail
