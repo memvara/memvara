@@ -50,6 +50,15 @@ class ToolResult:
     is_error: bool
     raw: dict[str, Any] = field(repr=False)
 
+    @classmethod
+    def parse(cls, result: dict[str, Any]) -> ToolResult:
+        """The `result` member of a tools/call reply, read the way a client reads it: the
+        text of every content block, joined, and the error flag. `McpProcess.call` reads
+        a real server's replies with it, and the tool-surface tests read the replies of a
+        server in their own process with it."""
+        text = "".join(str(block.get("text", "")) for block in result.get("content", []))
+        return cls(text=text, is_error=bool(result.get("isError")), raw=result)
+
 
 def claim_id_of(result: ToolResult) -> str:
     """The id a `memory_remember` reply names, read from its `+ [cl_...]` line.
@@ -256,9 +265,8 @@ class McpProcess:
 
     def call(self, name: str, /, **arguments: Any) -> ToolResult:
         """Call one tool. A tool that ran and failed comes back with is_error set."""
-        result = self.request("tools/call", {"name": name, "arguments": arguments})
-        text = "".join(str(block.get("text", "")) for block in result.get("content", []))
-        return ToolResult(text=text, is_error=bool(result.get("isError")), raw=result)
+        return ToolResult.parse(
+            self.request("tools/call", {"name": name, "arguments": arguments}))
 
     # -- ending it -----------------------------------------------------------
 

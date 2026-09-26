@@ -264,8 +264,7 @@ def test_a_question_must_be_a_non_empty_string(fake_v1: FakeV1) -> None:
 
 def test_a_cloud_mode_server_process_reaches_the_fake_over_a_real_url(
         fake_v1: FakeV1, mcp: Start) -> None:
-    server = mcp(env={"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": fake_v1.api_key,
-                      "MEMVARA_SERVER_URL": fake_v1.serve()})
+    server = mcp(env=fake_v1.cloud_env())
     server.initialize()
     stored = server.call("memory_remember", subject="user", predicate="lives_in",
                          object="Lisbon")

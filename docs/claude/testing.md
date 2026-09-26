@@ -244,7 +244,7 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 
 **`FakeV1` is the hosted `/v1` REST API.** It answers the 34 routes that `RemoteMemvara` and `AsyncRemoteMemvara` call, from a real local `Memvara` with the hashing embedder and no model. It writes each answer the way memvara-cloud's `rest/render.py` does, so the client's own hydration code reads it back. A self-test reads the two clients' source and fails when either one calls a route the fake does not serve.
 
-- `fake.remote(user="alice")` and `fake.aremote(...)` return a client wired to the fake through a mock transport. For a real URL, pass `fake.serve()` as `base_url` with `api_key=fake.api_key`. That is also how to start an MCP server in cloud mode against it: `MEMVARA_MODE=cloud`, `MEMVARA_API_KEY` and `MEMVARA_SERVER_URL`.
+- `fake.remote(user="alice")` and `fake.aremote(...)` return a client wired to the fake through a mock transport. For a real URL, pass `fake.serve()` as `base_url` with `api_key=fake.api_key`. That is also how to start an MCP server in cloud mode against it: `MEMVARA_MODE=cloud`, `MEMVARA_API_KEY` and `MEMVARA_SERVER_URL`, which `fake.cloud_env()` returns together.
 - A route's name is its method and path template, such as `POST /v1/facts` or `GET /v1/memories/{id}`. `FakeV1.ROUTES` lists them.
 - The credential is one key, bound to the whole tenant with the admin privilege, so a client may narrow to any user. A wrong key is a 401, an agent or a session named without a user is a 400, and `FakeV1(read_only=True)` refuses every write with a 403.
 - A write retried with the same `Idempotency-Key`, method and path is carried out once, as on a deployment with one worker.

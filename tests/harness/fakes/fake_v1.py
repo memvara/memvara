@@ -279,6 +279,13 @@ class FakeV1(HttpFake):
         client._http._client._transport = self.async_transport()
         return client
 
+    def cloud_env(self) -> dict[str, str]:
+        """The variables that start a memvara server process in cloud mode against this
+        fake, served on a real local URL by `serve()`. A server that the mcp fixture
+        starts also gets MEMVARA_DB, which cloud mode ignores."""
+        return {"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": self.api_key,
+                "MEMVARA_SERVER_URL": self.serve()}
+
     def close(self) -> None:
         super().close()
         if self._owns_store:

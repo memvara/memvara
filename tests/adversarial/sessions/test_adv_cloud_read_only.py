@@ -17,18 +17,11 @@ from harness.stdio import McpProcess
 from . import switches
 
 
-def cloud(fake: FakeV1) -> dict[str, str]:
-    """The variables that point a server at the fake in cloud mode. The mcp fixture also
-    sets MEMVARA_DB, which cloud mode ignores."""
-    return {"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": fake.api_key,
-            "MEMVARA_SERVER_URL": fake.serve()}
-
-
 def test_a_read_only_key_lists_only_read_tools_and_refuses_every_write_by_name(
         mcp: Callable[..., McpProcess]) -> None:
     read_only = switches.Combination.of("read_only")
     with FakeV1(read_only=True) as fake:
-        server = mcp(env=cloud(fake))
+        server = mcp(env=fake.cloud_env())
         server.initialize()
         problems = (switches.listing_problems(server, read_only)
                     + switches.refusal_problems(server, read_only,
@@ -50,7 +43,7 @@ def test_a_writable_key_lists_every_tool(mcp: Callable[..., McpProcess]) -> None
     """The control for the test above: with a key that may write, the same server lists
     the write tools, so the difference comes from the credential."""
     with FakeV1() as fake:
-        server = mcp(env=cloud(fake))
+        server = mcp(env=fake.cloud_env())
         server.initialize()
         problems = switches.listing_problems(server, switches.Combination.of())
         assert server.close() == 0

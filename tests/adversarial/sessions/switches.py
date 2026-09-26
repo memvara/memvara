@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from harness import stores
-from harness.env import child_env
+from harness.env import child_env, feature_env
 from harness.stdio import McpProcess, ToolResult
 from memvara import Memvara
 from memvara.server import tools as server_tools
@@ -121,8 +121,7 @@ class Combination:
 
     def env(self) -> dict[str, str]:
         """The variables that start a server this way, one for every setting."""
-        found = {f"MEMVARA_FEATURE_{f.upper()}": "1" if self.feature_on(f) else "0"
-                 for f in FEATURE_SWITCHES}
+        found = feature_env({feature: self.feature_on(feature) for feature in FEATURE_SWITCHES})
         found["MEMVARA_READ_ONLY"] = "1" if self.read_only else "0"
         found["MEMVARA_ANCHORED"] = "1" if self.anchored else "0"
         return found
@@ -298,9 +297,8 @@ class InProcess:
         return list(self.request("tools/list")["tools"])
 
     def call(self, name: str, /, **arguments: Any) -> ToolResult:
-        result = self.request("tools/call", {"name": name, "arguments": arguments})
-        text = "".join(str(block.get("text", "")) for block in result.get("content", []))
-        return ToolResult(text=text, is_error=bool(result.get("isError")), raw=result)
+        return ToolResult.parse(
+            self.request("tools/call", {"name": name, "arguments": arguments}))
 
 
 def base_env(home: pathlib.Path) -> dict[str, str]:
@@ -527,6 +525,13 @@ def store_dump(path: pathlib.Path) -> Dump:
     nothing. Every row of every table is compared, including rows no read returns, such as
     links, turns and the records of erasures. The two files beside the database are
     compared by their hashes.
+
+    This is not the upgrade tests' `golden.snapshot()`, because that one also records
+    SQLite's write-ahead log and shared-memory file. The writer that seeds the template
+    leaves an empty log and a shared-memory file beside it, and a read-only server removes
+    both when it closes, without changing a row, so `golden.changes()` would report every
+    read-only run as a change. `golden.snapshot()` also opens the database for writing,
+    which removes those two files from the store it reads.
     """
     connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     try:
