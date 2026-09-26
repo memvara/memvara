@@ -336,6 +336,22 @@ class Reconciler:
                 # below, so the expiry is kept and the other claim is left as it was.
                 live_same = [c for c in live_same if c.scope == claim.scope]
                 separate = not live_same
+            if (live_same and claim.expires_at is None
+                    and all(_is_after(c, claim) for c in live_same)):
+                # The same value, stated as true from before any claim on record for it
+                # begins. That earlier start is new, and reinforcing would drop it. Moving
+                # the claim on record back would change what reads of the past return, so
+                # the candidate is stored for the earlier period only, ending where the
+                # earliest claim on record begins. A single-valued slot does the same below
+                # with a different value that began before the live one (`newer`). The
+                # claim on record is not touched. A repeat that names an expiry stays a
+                # repeat, so the expiry still lands on the claim on record, which is the
+                # fact the caller asked to have erased.
+                boundary = min(c.valid_from for c in live_same)
+                if claim.valid_to is None or claim.valid_to > boundary:
+                    claim.valid_to = boundary
+                self.store.put_claim(claim)
+                return ReconcileResult("add", claim, [], retyped=refiled)
             if live_same:
                 keep = self._canonical_of(live_same)
                 # Decided before the write, because `reinforce` performs the single

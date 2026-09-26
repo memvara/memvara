@@ -196,6 +196,17 @@ class ReferenceStore:
 
         if op.polarity > 0:
             same = [r for r in self.rows.values() if r.value == value and self.live_at(r, t)]
+            if (same and op.expires_at is None
+                    and all(r.valid_from > decide_from for r in same)):
+                # The same value from before every live row of it begins: a row for the
+                # earlier period only, ending where the earliest of those rows begins. A
+                # repeat that names an expiry stays a repeat, below.
+                e = Expect(added=True)
+                row = self._new_row(op, valid_from, clock_start, t, e)
+                boundary = min(r.valid_from for r in same)
+                if row.valid_to is None or row.valid_to > boundary:
+                    row.valid_to = boundary
+                return e
             if same:
                 keep = min(same, key=self._tie)
                 keep.observations += 1

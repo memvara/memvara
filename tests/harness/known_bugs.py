@@ -42,7 +42,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B14", 281, "two processes opening a new store at once: one can fail at "
              "startup"),
     KnownBug("B16", 282, "forget() leaves a scheduled value believed"),
-    KnownBug("B17", 283, "a restatement with an earlier start loses the earlier start"),
     KnownBug("B18", 284, "a repeated retraction is folded into an expired tombstone"),
     KnownBug("B19", 295, "memory_recall's description names arguments that a feature "
              "switch removes"),

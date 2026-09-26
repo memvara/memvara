@@ -30,7 +30,10 @@ print(receipt.added[0].id)
 `+1` means one new claim was added. `llm=0` confirms no model was called — writing an
 exact fact never needs one. If you write the exact same fact twice, the second write
 doesn't add a new claim; it *reinforces* the existing one, and the receipt looks like
-`<WriteReceipt +0 ~1 -0>` instead.
+`<WriteReceipt +0 ~1 -0>` instead. The exception is a second write whose `valid_from` is
+earlier than the stored fact's and that sets no `expires_at`: the store adds a claim for
+that earlier period, ending where the stored fact begins, so the receipt shows `+1` and
+the fact now answers for the earlier dates too.
 
 ## Cite where a fact came from
 

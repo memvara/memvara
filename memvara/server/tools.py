@@ -1563,7 +1563,8 @@ def _interval(args: Mapping[str, Any]) -> tuple[datetime | None, datetime | None
     return began, until
 
 
-def _interval_note(claims: Sequence[Claim]) -> str:
+def _interval_note(claims: Sequence[Claim],
+                   continued: frozenset[str] = frozenset()) -> str:
     """Say when a stored value is deliberately not answering yet, or not any more.
 
     The sibling of `_pending`, one tool over. Both cover the same shape of failure: a
@@ -1573,6 +1574,10 @@ def _interval_note(claims: Sequence[Claim]) -> str:
     receipt above says `added 1`, so a model that checks its own work sees a stored fact
     it cannot find and reaches for the tool that would "fix" it, which is a second write
     with the argument left off. That is the original defect, arrived at through the fix.
+
+    `continued` names the claims whose period is over only because the same value is
+    already stored from where they end (see `_continued`). The fact did not stop being
+    true there, so their note says what holds instead.
     """
     now = utcnow()
     lines = []
@@ -1585,16 +1590,56 @@ def _interval_note(claims: Sequence[Claim]) -> str:
                 "failing. memory_history shows it immediately, and memory_search with "
                 "valid_at set past that instant finds it.")
         elif c.valid_to is not None and c.valid_to <= now:
+            if c.id in continued:
+                head = (
+                    f"note: stored for the period before {_stamp(c.valid_to)}, where the "
+                    "same value is already stored and still in force, so the two "
+                    f"together say it has held since {_stamp(c.valid_from)}. "
+                    "memory_recall returns the value already stored, not this claim, "
+                    "which answers about the earlier period only.")
+            else:
+                head = (
+                    f"note: stored as a fact that had already stopped being true at "
+                    f"{_stamp(c.valid_to)}, so memory_recall will not return it — a "
+                    "backfilled interval that is over answers about the period it held, "
+                    "not about now.")
             lines.append(
-                f"note: stored as a fact that had already stopped being true at "
-                f"{_stamp(c.valid_to)}, so memory_recall will not return it — a "
-                "backfilled interval that is over answers about the period it held, not "
-                "about now. memory_history shows it, by subject and predicate, and "
+                head + " memory_history shows it, by subject and predicate, and "
                 "memory_search finds it with valid_at set inside that period. as_of will "
                 "not, at any instant: as_of moves both clocks together, and reaching this "
                 "claim needs one that is inside a period already over and also at or "
                 "after this write, which no instant is.")
     return "\n".join(lines)
+
+
+def _continued(ctx: ToolContext, subject: str, predicate: str,
+               claims: Sequence[Claim]) -> frozenset[str]:
+    """The ids of the claims just added whose period is over only because the same value
+    is already stored from where they end.
+
+    Restating a stored fact with a start earlier than the claim on record stores the
+    earlier period as a claim of its own, ending where the claim on record begins
+    (`Reconciler.apply`). That claim is over, but the fact is not: the claim on record
+    holds it from the same instant. A value that began before a different, later value
+    is over because the value changed, so one read of the slot tells the two apart. The
+    read is made only when an added claim is already over.
+
+    A read that fails returns nothing, and the note falls back to its general wording.
+    The write has already happened, and a note must not turn it into an error the model
+    retries: a retried restatement would store its earlier period a second time. That is
+    the rule `Memvara._advise_replacements` follows for the same reason.
+    """
+    now = utcnow()
+    over = [c for c in claims if c.valid_to is not None and c.valid_to <= now]
+    if not over:
+        return frozenset()
+    try:
+        slot = ctx.memory.history(subject, predicate)
+    except Exception:  # the write is done; see the docstring
+        return frozenset()
+    return frozenset(c.id for c in over for h in slot
+                     if h.value_key == c.value_key and h.valid_from == c.valid_to
+                     and h.is_live())
 
 
 def _fold_note(raw: str, claims: Sequence[Claim]) -> str:
@@ -1731,7 +1776,10 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
                                            # only displaced a value, which still names the
                                            # canonical slot.
                                            list(receipt.added) + list(receipt.closed)),
-                               _interval_note(receipt.added), _pending(receipt.closed),
+                               _interval_note(receipt.added, _continued(
+                                   ctx, args["subject"], args["predicate"],
+                                   receipt.added)),
+                               _pending(receipt.closed),
                                _expiry_note(ctx, receipt.added)]))
 
 

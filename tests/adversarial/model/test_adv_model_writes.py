@@ -62,6 +62,19 @@ def test_a_repeat_reinforces_the_live_row(pair: Pair) -> None:
     assert e.reinforced == ["r1"] and pair.model.rows["r1"].observations == 2
 
 
+def test_a_repeat_with_an_earlier_start_is_stored_for_the_earlier_period(pair: Pair) -> None:
+    pair.apply(Remember("u1", "likes", "tea", valid_from=I3, recorded_at=I3))
+    e = pair.apply(Remember("u1", "likes", "tea", valid_from=I0, recorded_at=I4))
+    assert e.new == "r2" and e.added and e.reinforced == []
+    assert pair.model.rows["r2"].valid_to == I3 and pair.model.rows["r1"].observations == 1
+
+
+def test_a_repeat_with_an_earlier_start_and_an_expiry_still_reinforces(pair: Pair) -> None:
+    pair.apply(Remember("u1", "likes", "tea", valid_from=I3))
+    e = pair.apply(Remember("u1", "likes", "tea", valid_from=I0, expires_at=FAR_FUTURE))
+    assert e.reinforced == ["r1"] and pair.model.rows["r1"].expires_at == FAR_FUTURE
+
+
 def test_a_retraction_ends_the_value_it_names_and_leaves_a_tombstone(pair: Pair) -> None:
     pair.apply(Remember("u1", "likes", "tea", valid_from=I0))
     e = pair.apply(Remember("u1", "likes", "tea", polarity=-1, valid_from=I2))

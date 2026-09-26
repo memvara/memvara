@@ -500,6 +500,17 @@ claim:
    on the base, not on `salience`: the nightly pass recomputes `salience` from the
    base, so writing it there was erased once a claim aged past `0.415 * half_life`
    — 2.9 days for a FAST predicate, and permanently, since age only grows.
+
+   **A repeat that begins earlier is not a duplicate.** When every live claim with the
+   same `value_key` begins after the candidate does (`_is_after`, so the precision of a
+   resolved expression counts), the candidate carries a start the store does not have.
+   It is inserted for the earlier period only, with `valid_to` set where the earliest of
+   those claims begins, and the action is `add`. Nothing is reinforced and the claims on
+   record are not touched, so a read at a `known_at` before this write returns what it
+   did. Moving the stored claim's `valid_from` back instead would change that read. A
+   single-valued slot already treats a different value that began before the live one
+   this way. A repeat that names an `expires_at` stays a duplicate, so the expiry lands
+   on the claim on record; see *A repeat with an expiry stays in its own scope*.
 2. **Conflict** — the predicate is `Cardinality.ONE` and live claims share the candidate's
    `fact_key` with a different `value_key`: insert the new claim, and for each superseded
    claim set `invalidated_by=<new id>` plus `valid_to=<the new claim's valid_from>`,

@@ -108,6 +108,21 @@ def test_repeating_a_fact_with_an_expiry_puts_the_expiry_on_the_claim_on_record(
     assert m.get(first.id).expire_reason == "temporary"
 
 
+def test_a_repeat_with_an_expiry_and_an_earlier_start_still_puts_the_expiry_on_record(m):
+    """A repeat that says the fact began earlier than the claim on record is normally
+    stored as a claim of its own for that earlier period. One that names an expiry stays
+    a repeat, so the expiry reaches the claim on record. Otherwise the claim for the
+    earlier period would be erased and the fact the caller asked to have erased would
+    stay."""
+    now = utcnow()
+    first = m.remember("user", "door_code", "4411", valid_from=now - DAY).added[0]
+    when = now + DAY
+    receipt = m.remember("user", "door_code", "4411", valid_from=now - 10 * DAY,
+                         expires_at=when)
+    assert [c.id for c in receipt.reinforced] == [first.id] and receipt.added == []
+    assert m.get(first.id).expires_at == when
+
+
 # --- the sweep ----------------------------------------------------------------
 
 def test_nothing_is_erased_before_the_instant_and_everything_due_is_erased_after(m):

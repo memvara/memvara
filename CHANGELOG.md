@@ -129,6 +129,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   still closes at the write, and the value it retracts still ends at the retraction's
   start. `Reconciler.apply` also reads a naive `now` as UTC, as the rest of the library
   reads an instant built without a time zone, instead of raising `TypeError`. #275.
+- **Restating a fact with an earlier start keeps the earlier start.** Writing a value the
+  store already held live, with a `valid_from` before the stored claim's, was treated as
+  a repeat: the stored claim was reinforced and the earlier start was dropped, so a read
+  of the earlier period returned nothing. The write now stores a claim for the earlier
+  period, ending where the stored claim begins, and reports it under `added`. That is the
+  rule a single-valued slot already applied to a different value that began before the
+  live one, and it applies to every predicate. The stored claim is not changed, so a
+  read of the past as the store believed it before the write returns what it did. A
+  repeat that names `expires_at` is still a repeat, so the expiry lands on the claim on
+  record. `memory_remember`'s reply no longer says such a fact stopped being true where
+  the stored claim begins; it says the same value is stored from there. #283.
 
 ## [0.16.0] — 2026-09-25
 

@@ -244,9 +244,8 @@ def test_forget_retires_a_scheduled_value_too() -> None:
     assert later == []
 
 
-# -- B17: a restatement with an earlier start loses the earlier start --------------------
+# -- B17, fixed: a restatement with an earlier start keeps the earlier start -------------
 
-@known_bugs.xfail("B17")
 def test_restating_a_fact_with_an_earlier_start_keeps_the_earlier_start() -> None:
     """The earlier start is new information. It must be kept, and what the store believed
     before the restatement must not change (#283)."""
@@ -258,8 +257,6 @@ def test_restating_a_fact_with_an_earlier_start_keeps_the_earlier_start() -> Non
     now_view = [c.object for c in user.get_all(valid_at=INSTANTS[1])]
     earlier_view = [c.object for c in user.get_all(valid_at=INSTANTS[1],
                                                    known_at=INSTANTS[3])]
-    if now_view == []:
-        raise known_bugs.Reproduced("B17: the earlier start was dropped")
     assert now_view == ["tea"]
     assert earlier_view == []
 

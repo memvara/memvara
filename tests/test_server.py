@@ -2842,6 +2842,47 @@ def test_a_past_dated_write_behind_a_later_value_is_history_not_news(server):
     assert "already stopped being true" in body
 
 
+def test_restating_a_stored_fact_with_an_earlier_start_does_not_say_it_stopped(server):
+    """The same value restated with an earlier true_since is stored for the earlier
+    period, ending where the claim on record begins (#283). That claim is over, but the
+    fact is not, so the note must not tell the model it stopped being true there: the
+    model would repeat that to the user, or write the fact a third time."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    april, january = now - timedelta(days=150), now - timedelta(days=240)
+    text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                     "true_since": stamp(april)})
+    body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                            "true_since": stamp(january)})
+
+    assert body.startswith("added 1, ended 0, retired 0, already-known 0")
+    assert "already stopped being true" not in body
+    assert "the same value is already stored and still in force" in body
+    assert [c.object for c in server._ctx.memory.get_all(
+        valid_at=january + timedelta(days=30))] == ["tea"]
+
+
+def test_a_failed_read_of_the_slot_leaves_the_write_and_the_general_note(
+        server, monkeypatch):
+    """Telling a restatement's earlier period from a value that stopped takes a read made
+    after the write. If that read fails, the reply must still report the write rather
+    than an error, because a model that retried would store the earlier period twice."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                     "true_since": stamp(now - timedelta(days=150))})
+
+    def unreachable(*args, **kwargs):
+        raise RuntimeError("the deployment did not answer")
+
+    monkeypatch.setattr(type(server._ctx.memory), "history", unreachable)
+    body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                            "true_since": stamp(now - timedelta(days=240))})
+
+    assert body.startswith("added 1, ended 0, retired 0, already-known 0")
+    assert "already stopped being true" in body
+
+
 def test_a_future_dated_write_is_stored_and_says_it_is_not_in_force_yet(server):
     """A fact that becomes true tomorrow is legitimate, and invisible unless it says so.
 

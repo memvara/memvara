@@ -328,6 +328,31 @@ def test_a_future_dated_restatement_cannot_backdate_the_present(rec, store):
     assert res.claim.last_observed == now
 
 
+def test_a_restatement_with_an_earlier_start_is_kept_for_the_period_before_the_claim(
+        rec, store):
+    """The same value, stated as true from before the claim on record begins.
+    Reinforcing that claim dropped the earlier start, so no read of the earlier period
+    found the fact (#283). Moving the claim's start instead would change what reads of
+    the past return. So the earlier period is stored as a claim of its own, ending where
+    the claim on record begins, and the claim on record is left exactly as it was."""
+    april = utcnow() - timedelta(days=150)
+    january = april - timedelta(days=90)
+    first = rec.apply(claim("likes", "tea", valid_from=april, recorded_at=april),
+                      now=april).claim
+    res = rec.apply(claim("likes", "tea", valid_from=january, sources=["ep_2"]))
+
+    assert res.action == "add" and res.invalidated == []
+    assert (res.claim.valid_from, res.claim.valid_to) == (january, april)
+    kept = store.get_claim(first.id)
+    assert (kept.valid_from, kept.valid_to, kept.observation_count) == (april, None, 1)
+    february = january + timedelta(days=30)
+    assert [c.id for c in store.competing_claims("acme", first.fact_key,
+                                                 valid_at=february)] == [res.claim.id]
+    assert store.competing_claims("acme", first.fact_key, valid_at=february,
+                                  known_at=april + timedelta(days=1)) == [], (
+        "what the store believed before the restatement has not changed")
+
+
 def test_reinforcement_works_on_a_store_whose_decay_pass_never_ran(rec, store):
     """No `salience_base` in `meta` means salience *is* the base - the honest reading
     for a claim nothing has decayed, and the one that keeps a library used without the
