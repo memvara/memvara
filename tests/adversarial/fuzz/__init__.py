@@ -231,9 +231,12 @@ def conforming(spec: Mapping[str, Any]) -> st.SearchStrategy[Any]:
         return st.integers(spec.get("minimum"), spec.get("maximum"))
     if kind == "number":
         low, high = spec.get("minimum"), spec.get("maximum")
-        whole = st.integers(None if low is None else math.ceil(low),
-                            None if high is None else math.floor(high))
-        return st.floats(low, high, allow_nan=False, allow_infinity=False) | whole
+        numbers = st.floats(low, high, allow_nan=False, allow_infinity=False)
+        first = None if low is None else math.ceil(low)
+        last = None if high is None else math.floor(high)
+        if first is not None and last is not None and first > last:
+            return numbers      # a range such as 0.1 to 0.2 holds no whole number
+        return numbers | st.integers(first, last)
     if kind == "boolean":
         return st.booleans()
     if kind == "array":
@@ -310,8 +313,12 @@ def arguments(properties: Mapping[str, Mapping[str, Any]], required: Sequence[st
     """Arguments that follow a tool's schema: every required one, and any of the others.
 
     An argument named in `leave_out` is never drawn. That is for an argument a test must
-    not send, such as a URL the server would fetch.
+    not send, such as a URL the server would fetch. Naming a required argument there is
+    refused, because a required argument is always drawn.
     """
+    both = sorted(set(leave_out) & set(required))
+    if both:
+        raise ValueError(f"cannot leave out a required argument: {both}")
     return st.fixed_dictionaries(
         {name: conforming(properties[name]) for name in required},
         optional={name: conforming(spec) for name, spec in properties.items()

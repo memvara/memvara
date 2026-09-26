@@ -12,12 +12,13 @@ import pathlib
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
 
 from harness import stores
 from harness.stdio import McpProcessError
 from memvara.server.tools import TOOLS
 
-from . import SCHEMA_KEYWORDS, changed, exchange, request_line, rows
+from . import SCHEMA_KEYWORDS, arguments, changed, conforming, exchange, request_line, rows
 
 
 class Scripted:
@@ -91,3 +92,23 @@ def test_every_schema_keyword_a_tool_uses_is_one_the_strategies_understand() -> 
         for spec in tool.properties.values():
             walk(spec)
     assert used <= SCHEMA_KEYWORDS, sorted(used - SCHEMA_KEYWORDS)
+
+
+def test_a_number_range_with_no_whole_number_in_it_draws_numbers_inside_it() -> None:
+    """A range such as 0.1 to 0.2 holds no integer, so the strategy must not try to draw
+    one from an empty integer range."""
+
+    @settings(max_examples=30, database=None, derandomize=True)
+    @given(conforming({"type": "number", "minimum": 0.1, "maximum": 0.2}))
+    def draws(value: float) -> None:
+        assert 0.1 <= value <= 0.2
+
+    draws()
+
+
+def test_an_argument_that_must_not_be_sent_cannot_also_be_required() -> None:
+    """`leave_out` promises that an argument is never drawn, and a required argument is
+    always drawn, so asking for both is a mistake in the test and is refused."""
+    with pytest.raises(ValueError, match="url"):
+        arguments({"url": {"type": "string"}}, ["url"], leave_out={"url"})
+
