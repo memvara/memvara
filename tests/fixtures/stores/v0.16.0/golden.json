@@ -4,7 +4,7 @@
   "claim_links": [
    {
     "by": "api",
-    "created_at": "2026-09-25T22:56:40.356254+00:00",
+    "created_at": "2026-09-26T01:34:23.552141+00:00",
     "from_id": "cl_0ccd36ddb7c74fb8bc0b",
     "relation": "extends",
     "tenant": "default",
@@ -31,7 +31,7 @@
     "expires_at": null,
     "extractor": "api",
     "id": "cl_013eaa565fe946e693a2",
-    "invalidated_at": "2026-09-25T22:56:40.353709+00:00",
+    "invalidated_at": "2026-09-26T01:34:23.550788+00:00",
     "invalidated_by": null,
     "memory_type": "semantic",
     "meta": {},
@@ -52,7 +52,7 @@
     "unit": null,
     "usr": "u1",
     "valid_from": "2024-03-01T00:00:00+00:00",
-    "valid_to": "2026-09-25T22:56:40.353709+00:00"
+    "valid_to": "2026-09-26T01:34:23.550788+00:00"
    },
    {
     "agent": null,
@@ -305,7 +305,7 @@
     "polarity": 1,
     "predicate": "lives_in",
     "project": null,
-    "recorded_at": "2026-09-25T22:56:40.339492+00:00",
+    "recorded_at": "2026-09-26T01:34:23.544569+00:00",
     "salience": 1.0,
     "session": null,
     "sources": [
@@ -923,7 +923,7 @@
    {
     "agent": null,
     "content_hash": "33b085406df86e637b6184cdb963ceb9",
-    "created_at": "2026-09-25T22:56:40.359550+00:00",
+    "created_at": "2026-09-26T01:34:23.553502+00:00",
     "custom_id": "onboarding",
     "error": null,
     "filepath": null,
@@ -937,7 +937,7 @@
     "status": "stored",
     "tenant": "default",
     "title": "Onboarding notes",
-    "updated_at": "2026-09-25T22:56:40.360594+00:00",
+    "updated_at": "2026-09-26T01:34:23.553980+00:00",
     "usr": "u1"
    }
   ],
@@ -1164,7 +1164,7 @@
     "role": "system",
     "session": null,
     "tenant": "default",
-    "ts": "2026-09-25T22:56:40.359552+00:00",
+    "ts": "2026-09-26T01:34:23.553505+00:00",
     "usr": "u1"
    }
   ],
@@ -1177,13 +1177,63 @@
      "entities": 1,
      "episodes": 0
     },
-    "erased_at": "2026-09-25T22:56:40.386626+00:00",
+    "erased_at": "2026-09-26T01:34:23.572262+00:00",
     "scope": "default/u1/*/*/*",
     "sources": 0,
     "tenant": "default"
    }
   ],
-  "predicates": []
+  "predicates": [
+   {
+    "aliases": [
+     "deployed_to",
+     "deployment_target",
+     "ships_to"
+    ],
+    "cardinality": "one",
+    "graph": 1,
+    "inverse": null,
+    "inverse_cardinality": null,
+    "learned": 0,
+    "memory_type": "semantic",
+    "name": "deploys_to",
+    "object_type": [
+     "environment"
+    ],
+    "subject_type": [
+     "component"
+    ],
+    "supersedes": [],
+    "tenant": "default",
+    "traversal_cost": 1.0,
+    "volatility": "slow"
+   },
+   {
+    "aliases": [
+     "employed_at",
+     "employer",
+     "employed_by",
+     "company",
+     "works_for",
+     "joined",
+     "workplace",
+     "employed_with"
+    ],
+    "cardinality": "one",
+    "graph": 0,
+    "inverse": null,
+    "inverse_cardinality": null,
+    "learned": 0,
+    "memory_type": "semantic",
+    "name": "works_at",
+    "object_type": [],
+    "subject_type": [],
+    "supersedes": [],
+    "tenant": "default",
+    "traversal_cost": 1.0,
+    "volatility": "slow"
+   }
+  ]
  },
  "schema_version": 16,
  "tag": "v0.16.0"

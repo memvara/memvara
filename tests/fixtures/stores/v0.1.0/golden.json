@@ -22,7 +22,7 @@
     "expires_at": null,
     "extractor": "api",
     "id": "cl_013eaa565fe946e693a2",
-    "invalidated_at": "2026-09-25T22:56:37.747392+00:00",
+    "invalidated_at": "2026-09-26T01:34:21.479569+00:00",
     "invalidated_by": null,
     "memory_type": "semantic",
     "meta": {},
@@ -43,7 +43,7 @@
     "unit": null,
     "usr": "u1",
     "valid_from": "2024-03-01T00:00:00+00:00",
-    "valid_to": "2026-09-25T22:56:37.747392+00:00"
+    "valid_to": "2026-09-26T01:34:21.479569+00:00"
    },
    {
     "agent": null,
@@ -150,7 +150,7 @@
     "expires_at": null,
     "extractor": "api",
     "id": "cl_22d3eb299b034cfb8d70",
-    "invalidated_at": "2026-09-25T22:56:37.747392+00:00",
+    "invalidated_at": "2026-09-26T01:34:21.479569+00:00",
     "invalidated_by": "cl_013eaa565fe946e693a2",
     "memory_type": "semantic",
     "meta": {},
@@ -259,7 +259,7 @@
     "polarity": 1,
     "predicate": "lives_in",
     "project": null,
-    "recorded_at": "2026-09-25T22:56:37.735760+00:00",
+    "recorded_at": "2026-09-26T01:34:21.474518+00:00",
     "salience": 1.0,
     "session": null,
     "sources": [
@@ -381,7 +381,7 @@
     "expires_at": null,
     "extractor": "api",
     "id": "cl_661a247ff9114163b4f7",
-    "invalidated_at": "2026-09-25T22:56:37.729459+00:00",
+    "invalidated_at": "2026-09-26T01:34:21.470117+00:00",
     "invalidated_by": "cl_8f33092299cb4d56a2b3",
     "memory_type": "semantic",
     "meta": {},
@@ -445,7 +445,7 @@
     "expires_at": null,
     "extractor": "api",
     "id": "cl_8f33092299cb4d56a2b3",
-    "invalidated_at": "2026-09-25T22:56:37.735760+00:00",
+    "invalidated_at": "2026-09-26T01:34:21.474518+00:00",
     "invalidated_by": "cl_2fc80bb3faf946799049",
     "memory_type": "semantic",
     "meta": {},
@@ -765,7 +765,33 @@
    }
   ],
   "erasures": [],
-  "predicates": []
+  "predicates": [
+   {
+    "aliases": [
+     "employed_at",
+     "employer",
+     "employed_by",
+     "company",
+     "works_for",
+     "joined",
+     "workplace",
+     "employed_with"
+    ],
+    "cardinality": "one",
+    "graph": 0,
+    "inverse": null,
+    "inverse_cardinality": null,
+    "learned": 0,
+    "memory_type": "semantic",
+    "name": "works_at",
+    "object_type": [],
+    "subject_type": [],
+    "supersedes": [],
+    "tenant": "default",
+    "traversal_cost": 1.0,
+    "volatility": "slow"
+   }
+  ]
  },
  "schema_version": 5,
  "tag": "v0.1.0"

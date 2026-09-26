@@ -22,7 +22,7 @@
     "expires_at": null,
     "extractor": "api",
     "id": "cl_013eaa565fe946e693a2",
-    "invalidated_at": "2026-09-25T22:56:38.518621+00:00",
+    "invalidated_at": "2026-09-26T01:34:22.083749+00:00",
     "invalidated_by": null,
     "memory_type": "semantic",
     "meta": {},
@@ -43,7 +43,7 @@
     "unit": null,
     "usr": "u1",
     "valid_from": "2024-03-01T00:00:00+00:00",
-    "valid_to": "2026-09-25T22:56:38.518621+00:00"
+    "valid_to": "2026-09-26T01:34:22.083749+00:00"
    },
    {
     "agent": null,
@@ -267,7 +267,7 @@
     "polarity": 1,
     "predicate": "lives_in",
     "project": null,
-    "recorded_at": "2026-09-25T22:56:38.507558+00:00",
+    "recorded_at": "2026-09-26T01:34:22.078002+00:00",
     "salience": 1.0,
     "session": null,
     "sources": [
@@ -813,13 +813,39 @@
      "entities": 1,
      "episodes": 0
     },
-    "erased_at": "2026-09-25T22:56:38.532124+00:00",
+    "erased_at": "2026-09-26T01:34:22.095280+00:00",
     "scope": "default/u1/*/*",
     "sources": 0,
     "tenant": "default"
    }
   ],
-  "predicates": []
+  "predicates": [
+   {
+    "aliases": [
+     "employed_at",
+     "employer",
+     "employed_by",
+     "company",
+     "works_for",
+     "joined",
+     "workplace",
+     "employed_with"
+    ],
+    "cardinality": "one",
+    "graph": 0,
+    "inverse": null,
+    "inverse_cardinality": null,
+    "learned": 0,
+    "memory_type": "semantic",
+    "name": "works_at",
+    "object_type": [],
+    "subject_type": [],
+    "supersedes": [],
+    "tenant": "default",
+    "traversal_cost": 1.0,
+    "volatility": "slow"
+   }
+  ]
  },
  "schema_version": 8,
  "tag": "v0.3.0"

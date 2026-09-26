@@ -42,6 +42,33 @@ def test_a_dump_reads_a_table_or_column_the_store_lacks_as_empty(
     assert [row["valid_from"] for row in data["claims"]] == ["2024-01-01T00:00:00+00:00"]
 
 
+def test_a_predicates_graph_declaration_is_dumped_and_reads_as_version_10s_defaults_when_absent(
+        tmp_path: pathlib.Path) -> None:
+    """Version 10 gave predicates a graph declaration. A store written before it has no
+    such columns, and the migration adds them with constant defaults, so the dump reads
+    an absent column as that default and a corrupted value still shows as a change."""
+    db = written(tmp_path / "s.db")
+    raw = sqlite3.connect(db)
+    raw.execute("INSERT INTO predicates (tenant, name, cardinality, volatility, memory_type,"
+                " aliases, supersedes, learned, subject_type, object_type, graph, inverse,"
+                " inverse_cardinality, traversal_cost) VALUES ('default', 'deploys_to',"
+                " 'one', 'slow', 'semantic', '[\"ships_to\"]', '[]', 0, '[\"component\"]',"
+                " '[\"environment\"]', 1, 'hosts', 'many', 2.5)")
+    raw.commit()
+    [row] = golden.dump(db)["predicates"]
+    assert (row["subject_type"], row["object_type"], row["graph"], row["inverse"],
+            row["inverse_cardinality"], row["traversal_cost"]) == (
+        ["component"], ["environment"], 1, "hosts", "many", 2.5)
+    for column in ("subject_type", "object_type", "graph", "inverse",
+                   "inverse_cardinality", "traversal_cost"):
+        raw.execute(f"ALTER TABLE predicates DROP COLUMN {column}")
+    raw.commit()
+    raw.close()
+    [row] = golden.dump(db)["predicates"]
+    assert (row["subject_type"], row["object_type"], row["graph"], row["inverse"],
+            row["inverse_cardinality"], row["traversal_cost"]) == ([], [], 0, None, None, 1.0)
+
+
 def test_compare_names_a_changed_field_a_missing_row_and_a_new_row(
         tmp_path: pathlib.Path) -> None:
     db = written(tmp_path / "s.db")

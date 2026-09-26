@@ -8,12 +8,17 @@ may change what a store holds.
 
 `dump` reads what a migration must keep: every claim with its scope, text, both clocks
 and sources, every episode, and the provenance edges, erasure records, links, documents,
-entities and predicates. It leaves out what a migration recomputes on purpose: the entity
-keys and the two hashes that versions 6, 12 and 16 re-derive, and the two type columns
-version 12 derives from the keys. It also leaves out the vectors, which the integrity
-checks and the search tests cover. A table or column the store's version does not have
-reads as an empty list or as `None`, so a store dumps the same before and after its
-migration.
+entities and predicates, each predicate with the graph declaration version 10 added. It
+leaves out what a migration recomputes on purpose: the entity keys and the two hashes
+that versions 6, 12 and 16 re-derive, and the two type columns version 12 derives from
+the keys. It also leaves out the vectors, which the integrity checks and the search tests
+cover.
+
+A table the store's version does not have reads as an empty list. A column it does not
+have reads as the value the migration that adds the column gives existing rows: `None`
+for the nullable columns, and version 10's defaults for a predicate's graph declaration.
+So a store dumps the same before and after its migration, and a migration that writes
+anything else into those columns shows as a change.
 
 Nothing here imports memvara, so the builder can dump a store any release wrote. Nothing
 here writes to a committed file: the tests `unpack` a copy first.
@@ -21,6 +26,7 @@ here writes to a committed file: the tests `unpack` a copy first.
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import gzip
 import hashlib
@@ -29,7 +35,7 @@ import pathlib
 import shutil
 import sqlite3
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 #: tests/fixtures/stores, where the committed stores live.
@@ -70,12 +76,18 @@ def at(day: int) -> dt.datetime:
 @dataclass(frozen=True)
 class Table:
     """How `dump` reads one table: the columns it keeps, the ones that order the rows,
-    the ones that hold instants as seconds since the epoch, and the ones that hold JSON."""
+    the ones that hold instants as seconds since the epoch, and the ones that hold JSON.
+
+    `absent` gives, for a column that a migration adds with a constant default, that
+    default: a store written before the column existed reads as if the migration had
+    already added it. A column missing from `absent` reads as `None`, which is what the
+    migrations that add nullable columns give existing rows."""
 
     columns: tuple[str, ...]
     key: tuple[str, ...]
     instants: tuple[str, ...] = ()
     json: tuple[str, ...] = ()
+    absent: Mapping[str, Any] = field(default_factory=dict)
 
 
 TABLES: dict[str, Table] = {
@@ -113,8 +125,13 @@ TABLES: dict[str, Table] = {
                       json=("aliases",)),
     "predicates": Table(
         ("tenant", "name", "cardinality", "volatility", "memory_type", "aliases",
-         "supersedes", "learned"),
-        key=("tenant", "name"), json=("aliases", "supersedes")),
+         "supersedes", "learned", "subject_type", "object_type", "graph", "inverse",
+         "inverse_cardinality", "traversal_cost"),
+        key=("tenant", "name"),
+        json=("aliases", "supersedes", "subject_type", "object_type"),
+        # The graph declaration version 10 added, with the defaults it gives existing rows.
+        absent={"subject_type": [], "object_type": [], "graph": 0, "inverse": None,
+                "inverse_cardinality": None, "traversal_cost": 1.0}),
 }
 
 
@@ -192,8 +209,11 @@ def _rows(conn: Any, name: str, table: Table) -> list[dict[str, Any]]:
         for column in table.instants:
             row[column] = instant(row[column])
         for column in table.json:
-            if row[column] is not None:
+            if column in present and row[column] is not None:
                 row[column] = json.loads(row[column])
+        for column, default in table.absent.items():
+            if column not in present:
+                row[column] = copy.deepcopy(default)
         rows.append(row)
     rows.sort(key=lambda row: _key(row, table))
     return rows

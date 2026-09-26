@@ -275,6 +275,20 @@ def write(db: str, *, encrypted: bool = False) -> dict[str, Any]:
         mem.add_document("Onboarding notes. The staging database is PostgreSQL 16.",
                          title="Onboarding notes", custom_id="onboarding", extract=False,
                          user=golden.USER)
+    # Predicate rows, persisted the way the write pipeline persists an alias a model
+    # proposes: a built-in learns one in every release, and from the first release with
+    # a graph declaration (version 10), a graph predicate the engineering pack declares
+    # learns one too, so its row carries that declaration for the migrations to keep.
+    mem.store.put_spec(mem.registry.learn_alias("works_at", "employed_with"), "default")
+    try:
+        from memvara.schema import load_specs  # noqa: PLC0415 - absent before packs
+    except ImportError:
+        load_specs = None
+    if load_specs is not None:
+        declared = {spec.name: spec for spec in load_specs("engineering")}.get("deploys_to")
+        if declared is not None and getattr(declared, "graph", False):
+            mem.registry.register(declared)
+            mem.store.put_spec(mem.registry.learn_alias("deploys_to", "ships_to"), "default")
     mem.close()
     if takes("__init__", "project"):
         # 0.12.0 and later: an undeclared predicate is recorded against the project the
