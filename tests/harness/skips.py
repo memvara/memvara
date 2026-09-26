@@ -75,6 +75,10 @@ RULES: tuple[SkipRule, ...] = (
     SkipRule(r"^RLIMIT_FSIZE exists only on POSIX$",
              "Windows has no per-process limit on file size to simulate a full disk with.",
              platforms=("win32",)),
+    SkipRule(r"^the fake agent CLIs are POSIX shell scripts$",
+             "On Windows a program started without a shell is found on PATH only as an "
+             ".exe, and the fake claude and codex are shell scripts. Linux and macOS run "
+             "these tests.", platforms=("win32",)),
     SkipRule(r"^the hooks' copy of the vectors is not in this checkout yet$",
              "A packaging state that the test detects before skipping."),
     SkipRule(r"^git is not installed$",

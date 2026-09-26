@@ -14,8 +14,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **An adversarial test suite that tries to break memvara the way agents use it.** It
   lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
   scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
-  covers the suite's foundation, its reference model, its crash tests and its scripted
-  agent sessions. None of it changes the library.
+  covers the suite's foundation, its reference model, its crash tests, its scripted
+  agent sessions and its fakes. None of it changes the library.
   - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
     which includes the doctests in `memvara/`, and the new `--tier nightly`,
     `--tier weekly`, `--tier local` and `--tier quarantine` options select the others.
@@ -46,6 +46,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     fail when memvara is switched off. Answers are compared with `phrase_in`, the
     benchmark's whole-word rule, which `benchmarks/agent_memory/normalization.py` now
     exports.
+  - **Fakes for the services a client talks to.** `tests/harness/fakes/` stands in for
+    the hosted `/v1` REST API and the hosted `/mcp` endpoint, each answered by a real local
+    store, for an OpenAI-compatible model endpoint, and for the two agent executables the
+    capture hook starts. A test can make any route fail, answer slowly or never answer,
+    and each fake is checked by driving it with the real client code it stands in for.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed
