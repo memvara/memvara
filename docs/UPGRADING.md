@@ -72,6 +72,9 @@ for c in mem.store.iter_claims():
     if c.valid_from > now and (c.valid_to is None or c.valid_to > c.valid_from):
         print(c.id, c.subject, c.predicate, repr(c.object), "begins", c.valid_from)
 ```
+
+---
+
 ## A restatement with an earlier start is added, not reinforced
 
 ### What changed
