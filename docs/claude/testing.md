@@ -351,4 +351,28 @@ PYTHONPATH=$PWD python bench/soak.py --turns 10000 --out local/soak.json --histo
 
 It prints one line per detector and exits with 1 when one fails. `--store <folder>` keeps the store for inspection. With `--history`, store growth is judged against the records in that folder, and a suspected regression runs the soak again to confirm it.
 
+### Timing
+
+`bench/perf_budget.py` builds stores of 1,000, 10,000 and 100,000 claims through `remember()`, four made-up claims per made-up person, and times five operations on each: `search`, `recall` and `remember` from the library, and the session-start and recall hooks.
+
+- **Cold and warm.** A cold library series is the first call in each of 30 new child processes; a warm one is 200 calls in one process, after five untimed ones. Every child gets its environment from `harness.env.child_env`. `remember` writes to a copy of the store, so that the reads always see the size they are named for.
+- **The hooks** run through `harness.hooks.HookRunner` as Claude Code runs them, without their background daemon, which the child environment switches off. A cold run gets a new home directory, so none of the state the hooks keep there carries over; warm runs share one. Each reply must show that the hook read the store: a recall that says "not configured", or never says "recalled", and a session start that sees no claim are refused rather than timed, because they answer faster than a read and would pass for a fast one. A run that passes the host's time limit is recorded at the limit and counted as a timeout.
+- **What is reported.** For each series, the p50, p90, p95, p99 and maximum, each percentile taken by nearest rank as `bench/evalkit.py` takes it, with a 95% bootstrap interval. Each record also holds the raw samples and the fingerprint of the machine: its processor, CPU count, memory and system, and the Python, SQLite and memvara versions and the commit. The fingerprint's id hashes only the hardware, so an operating-system update keeps a machine's budgets.
+
+**The budget rule**, which the design fixed before any number was measured:
+
+1. **Hard ceilings, from the first run.** The recall hook's p95 may not pass 7.5 seconds at any size, cold or warm, and no recall may take longer than 10 seconds; a run that times out counts as a breach of that limit. Session start's p95 may not pass 20 seconds.
+2. **Library budgets, after 14 valid nights.** `--write-budgets bench/expected/perf_budgets.json --history <folder>` sets each library series' budget to 1.5 times its median p95 over the last 14 valid nights on this machine, rounded up to the next step of 1, 2, 5, 10, 20, 50 and so on. It writes the file once, with the machine's fingerprint, and refuses to overwrite it. From then on, a valid run on that machine fails when a library p95 is over its budget. No budget has been committed yet.
+3. **A regression** needs all three of these: the p95 is more than 1.20 times the median of the last 7 valid nights on this machine; the increase is more than 2 ms and more than 3 times those nights' median absolute deviation; and measuring that series again at once shows the same.
+
+**An invalid night.** A run is invalid when the machine is on battery, or when the one-minute load average per CPU is above 0.5 at any of the checks made before, between and after the store sizes. An invalid run is reported and not failed: it exits with 3, it is not judged against history, and it never becomes history. The rule for "under load" is this workstream's reading of the design, which does not define it.
+
+To run it by hand:
+
+```bash
+PYTHONPATH=$PWD python bench/perf_budget.py --out local/perf/$(date +%F).json --history local/perf
+```
+
+It prints a table and exits with 0 for a valid run that passes, 1 for a valid run that breaches a ceiling, regresses or goes over a budget, and 3 for an invalid run. `--sizes 1000 --cold 5 --warm 20` gives a quick look.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

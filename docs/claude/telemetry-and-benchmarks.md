@@ -35,6 +35,11 @@ answer quality with no error, no exception and nothing in any log.
   seeded workload of thousands of turns through the real library and fails when one of
   the failure modes in `memvara/telemetry.py` appears. `docs/claude/testing.md` describes
   its detectors.
+- Timing budgets for what an agent waits for: `bench/perf_budget.py`, which times
+  `search`, `recall`, `remember` and the two reading hooks at 1,000, 10,000 and 100,000
+  claims, and applies the adversarial suite's budget rule: the hook contract's hard
+  ceilings, budgets derived after 14 valid nights, and a regression rule. Where `bench/perf.py`
+  shows how cost scales, this script decides pass or fail.
 - The release bar for agentic extraction: `bench/extraction_bar.py`, which runs the same
   turns through two stores that differ only in the `agentic_extraction` switch, and the
   199-question LongMemEval sample it reads, `bench/samples/longmemeval_s_199.txt`.
