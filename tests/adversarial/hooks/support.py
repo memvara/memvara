@@ -270,6 +270,44 @@ def script_clis(directory: pathlib.Path, host: str, runs: int = 1) -> FakeClis:
     return clis
 
 
+class HangingClis:
+    """A `claude` and a `codex` that never answer: each sleeps until it is killed, or for
+    two minutes. POSIX only, like the fakes they stand in for."""
+
+    def __init__(self, directory: pathlib.Path) -> None:
+        self.bin = pathlib.Path(directory)
+        self.bin.mkdir(parents=True, exist_ok=True)
+        for name in ("claude", "codex"):
+            script = self.bin / name
+            script.write_text("#!/bin/sh\nexec sleep 120\n", encoding="utf-8")
+            script.chmod(0o755)
+
+    def path(self, rest: str | None = None) -> str:
+        """A PATH value with these first and `rest` after them."""
+        rest = os.environ.get("PATH", "") if rest is None else rest
+        return os.pathsep.join(part for part in (str(self.bin), rest) if part)
+
+
+def check_capture_frees_the_turn(make: Callable[..., HookRunner], work: pathlib.Path,
+                                 host: str) -> None:
+    """On a host that hands capture to a child, the hook returns at once however long the
+    extraction takes: here the extractor never answers, and the hook returns within 3
+    seconds with the child still running. The runner kills that child, and the stub it
+    started, when it closes."""
+    if sys.platform == "win32":
+        pytest.skip(NO_FAKES)
+    env = {"MEMVARA_DB": str(make_store(work / "capture.db", memory=False)),
+           "MEMVARA_USER": USER}
+    runner = make(host, env=env, stubs=HangingClis(work / "hanging"))
+    transcript = write_transcript(host, work / "t.jsonl", [(USER_TURN, ASSISTANT_TURN)])
+    result = runner.run("capture", session="s", transcript_path=str(transcript),
+                        wait_detached=False)
+    assert (result.exit_code, result.stdout) == (0, "")
+    assert result.detached_pid is not None
+    assert result.elapsed < 3, result.elapsed
+    os.kill(result.detached_pid, 0)  # raises when the child has already ended
+
+
 def make_store(path: pathlib.Path, *, memory: bool = True) -> pathlib.Path:
     """A store file at `path`, holding MEMORY for USER unless `memory` is False."""
     with stores.file(path) as mem:
