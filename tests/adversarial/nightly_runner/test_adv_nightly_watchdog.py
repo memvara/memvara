@@ -123,6 +123,50 @@ def test_a_second_check_of_the_same_night_sends_no_second_notification(
     assert len(notify.sent) == 1
 
 
+def test_a_check_stopped_partway_notifies_exactly_once_when_it_runs_again(
+        tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A watchdog killed partway, while it writes its files or before its notification
+    goes out, must still notify once when it runs again, and only once. If the files it
+    had written counted as "reported", the missed night would never be notified."""
+    folder = _folder(tmp_path, "2026-09-27")
+    real_write = watchdog._write_record
+    stops = ["between the two writes"]
+
+    def stop_once(path: pathlib.Path, record: dict[str, object]) -> None:
+        if stops:
+            stops.pop()
+            raise RuntimeError("killed between writing the report and the record")
+        real_write(path, record)
+
+    monkeypatch.setattr(watchdog, "_write_record", stop_once)
+    notify = Notifications()
+    with pytest.raises(RuntimeError):
+        watchdog.check(tmp_path, now=_at(27, 6, 31), start=START, deadline=DEADLINE,
+                       notify=notify)
+    assert (folder / "DID-NOT-RUN.md").exists() and notify.sent == []
+    assert watchdog.check(tmp_path, now=_at(27, 6, 40), start=START, deadline=DEADLINE,
+                          notify=notify).notified
+    assert len(notify.sent) == 1
+
+    attempts: list[str] = []
+
+    def dies_while_notifying(title: str, message: str) -> bool:
+        attempts.append(message)
+        if len(attempts) == 1:
+            raise RuntimeError("killed before the notification went out")
+        return True
+
+    for day in (28, 28, 28):
+        try:
+            watchdog.check(tmp_path, now=_at(day, 6, 31), start=START, deadline=DEADLINE,
+                           notify=dies_while_notifying)
+        except RuntimeError:
+            pass
+    assert len(attempts) == 2, "one attempt killed, then one delivered, then none"
+    record = json.loads((_folder(tmp_path, "2026-09-28") / "DID-NOT-RUN.json").read_text())
+    assert record["notified"] is True
+
+
 def test_the_notification_text_is_passed_as_arguments_and_never_run_as_script() -> None:
     """osascript runs the text after -e as AppleScript. A message spliced into it could
     run commands, so the title and message go in as arguments to a fixed script."""

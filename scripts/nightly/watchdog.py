@@ -12,10 +12,14 @@ latest night whose deadline has passed:
   every step's cap. It writes DID-NOT-FINISH.md and DID-NOT-FINISH.json;
 * a finished heartbeat: it does nothing.
 
-For a missed night it also sends one macOS notification, through osascript. A report
-already in the folder means that night was reported, so a second check sends nothing. The
-watchdog uses no model and does nothing else. It imports nothing from the nightly
-package, so launchd can run it with any Python 3.10 or later:
+For a missed night it also sends one macOS notification, through osascript. It writes the
+.md report first, then the .json record with "notified" false, then sends the
+notification, then sets "notified" to true. The record alone says whether the night was
+reported: a check stopped anywhere before the notification went out sends it when it
+runs again, and a check after that sends nothing. Only a stop in the moment after the
+notification went out and before the record says so can send it twice. The watchdog uses
+no model and does nothing else. It imports nothing from the nightly package, so launchd
+can run it with any Python 3.10 or later:
 
     python3 scripts/nightly/watchdog.py --checkout C --start 01:30 --deadline 06:30
 """
@@ -24,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -77,8 +82,11 @@ def check(checkout: pathlib.Path, *, now: datetime, start: time, deadline: time,
         return Verdict(night, "finished", None, False)
     state, name = (("did-not-run", DID_NOT_RUN) if heartbeat is None
                    else ("did-not-finish", DID_NOT_FINISH))
-    report = folder / f"{name}.md"
-    if report.exists():
+    report, record_path = folder / f"{name}.md", folder / f"{name}.json"
+    earlier = _read(record_path)
+    if earlier is not None and (earlier.get("notified") or notify is None):
+        # Reported already: the record, written after the report, says the notification
+        # went out, or this check was asked to send none.
         return Verdict(night, state, report, False)
     folder.mkdir(parents=True, exist_ok=True)
     shown = f"{deadline:%H:%M}"
@@ -105,12 +113,20 @@ def check(checkout: pathlib.Path, *, now: datetime, start: time, deadline: time,
                 "report.md, if it got that far, and each step's output.\n")
         message = f"The nightly run of {night} started but did not finish. See {where}."
     record = {"night": night.isoformat(), "state": state, "deadline": shown,
-              "checked_at": now.isoformat(), "heartbeat": heartbeat}
-    (folder / f"{name}.json").write_text(json.dumps(record, indent=2) + "\n",
-                                         encoding="utf-8")
+              "checked_at": now.isoformat(), "heartbeat": heartbeat, "notified": False}
     report.write_text(text, encoding="utf-8")
+    _write_record(record_path, record)
     sent = bool(notify(TITLE, message)) if notify is not None else False
+    if sent:
+        _write_record(record_path, {**record, "notified": True})
     return Verdict(night, state, report, sent)
+
+
+def _write_record(path: pathlib.Path, record: dict[str, Any]) -> None:
+    """Write the record all at once, so a reader sees the old one or the new one."""
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _read(path: pathlib.Path) -> dict[str, Any] | None:
