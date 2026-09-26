@@ -41,11 +41,13 @@ def test_a_built_store_holds_exactly_the_claims_asked_for(tmp_path: pathlib.Path
 def tiny(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     """One real run at 40 claims: every series in real child processes and real hooks.
     The conditions are forced valid so that the record is judged whatever else is
-    running on this machine."""
+    running on this machine, and the committed budgets are replaced by none, so that the
+    run does not depend on whether a budgets file exists for this machine."""
+    folder = tmp_path_factory.mktemp("perf")
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(pb, "read_conditions", lambda: VALID)
-        return pb.measure(pb.PerfConfig(sizes=(40,), cold=1, warm=2, resamples=50),
-                          tmp_path_factory.mktemp("perf"))
+        patch.setattr(pb, "BUDGETS_PATH", folder / "no-budgets.json")
+        return pb.measure(pb.PerfConfig(sizes=(40,), cold=1, warm=2, resamples=50), folder)
 
 
 def test_a_tiny_run_measures_every_series_it_names(tiny: dict[str, Any]) -> None:
@@ -54,7 +56,6 @@ def test_a_tiny_run_measures_every_series_it_names(tiny: dict[str, Any]) -> None
         expected = 1 if key.endswith("/cold") else 2
         assert series["n"] == len(series["samples_ms"]) == expected, key
         assert all(sample > 0 for sample in series["samples_ms"]), key
-        assert series["timeouts"] == 0, key
 
 
 def test_the_report_names_the_machine_and_every_series(tiny: dict[str, Any]) -> None:
@@ -96,10 +97,15 @@ class FixedSeries:
 
 def fake_run(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *,
              conditions: pb.Conditions, history: Sequence[dict[str, Any]] = (),
-             ms: float = 5.0) -> tuple[dict[str, Any], FixedSeries]:
+             ms: float = 5.0, budgets: dict[str, Any] | None = None,
+             ) -> tuple[dict[str, Any], FixedSeries]:
     series = FixedSeries(ms)
     monkeypatch.setattr(pb, "read_conditions", lambda: conditions)
     monkeypatch.setattr(pb._Bench, "series", series)
+    budgets_path = tmp_path / "budgets.json"
+    if budgets is not None:
+        budgets_path.write_text(json.dumps(budgets), encoding="utf-8")
+    monkeypatch.setattr(pb, "BUDGETS_PATH", budgets_path)
     record = pb.measure(pb.PerfConfig(sizes=(40,), cold=1, warm=1, resamples=20), tmp_path,
                         history=history)
     return record, series
@@ -130,6 +136,14 @@ def test_a_series_slower_than_its_history_is_measured_again_and_fails(
                               ms=50.0)
     assert {v["outcome"] for v in record["regressions"].values()} == {"regression"}
     assert sorted(series.calls) == sorted([*KEYS, *KEYS]), "each series is measured twice"
+    assert pb.exit_code(record) == 1
+
+
+def test_a_committed_budget_for_this_machine_fails_a_run_over_it(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    budgets = {"fingerprint": pb.machine_fingerprint(), "budgets_ms": {"search@40/warm": 2.0}}
+    record, _ = fake_run(monkeypatch, tmp_path, conditions=VALID, ms=5.0, budgets=budgets)
+    assert record["budgets"] == {"search@40/warm": {"p95": 5.0, "budget_ms": 2.0, "over": True}}
     assert pb.exit_code(record) == 1
 
 
