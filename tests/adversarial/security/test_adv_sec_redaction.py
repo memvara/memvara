@@ -41,6 +41,7 @@ def _store(tmp_path, recorder: Recorder) -> Any:
     return stores.file(tmp_path / "store.db", redactor=recorder, user="alice")
 
 
+@pytest.mark.covers("silent:redaction-seam")
 def test_a_user_turn_offers_the_episode_and_all_three_claim_fields(tmp_path) -> None:
     """`add` of a user turn redacts the turn (EPISODE) and, because the fast path extracts
     a claim from it, that claim's subject, object and text — every field in FIELDS."""
