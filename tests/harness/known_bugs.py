@@ -83,6 +83,24 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "and the earlier period is lost"),
     KnownBug("B70", 351, "a different value written twice for a period before the "
              "current one is stored twice"),
+    KnownBug("B55", 337, 'a configured local store that cannot open is reported as "not '
+             'configured"'),
+    KnownBug("B56", 338, 'on Codex, Copilot and OpenCode, "not configured" and "no matching '
+             'memories" look identical'),
+    KnownBug("B57", 339, "session start reports an unreachable hosted store wrongly"),
+    KnownBug("B58", 340, 'the "_" approve separator never recovers a tool name on Cursor and '
+             "OpenCode"),
+    KnownBug("B59", 341, "the hooks never find a store configured in Codex's, Cursor's or "
+             "OpenCode's own MCP config"),
+    KnownBug("B60", 342, "capture returns without a log line on four paths"),
+    KnownBug("B61", 343, "the first prompt of a session injects the standing preferences a "
+             "second time"),
+    KnownBug("B62", 344, "a recall whose first read finds nothing starts two daemons"),
+    KnownBug("B63", 345, "a hosted endpoint that never answers keeps session start and recall "
+             "past their limits"),
+    KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
+    KnownBug("B65", 347, "half a surrogate pair in a prompt makes recall fail"),
+    KnownBug("B66", 348, "a prompt of a few megabytes runs past recall's 10-second limit"),
 )}
 
 

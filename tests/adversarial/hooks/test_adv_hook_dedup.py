@@ -5,6 +5,9 @@ record per session of what it injected and does not inject it again
 (plugin/hooks/recall.py, "It does not repeat itself"). `Stop` can fire more than once over
 one reply, so capture records the size of each transcript it mined and skips one that has
 not grown (plugin/hooks/capture.py, "It repeats").
+
+The first prompt of a session injects the standing preferences that session start has
+just injected, which B61 (#343) pins.
 """
 
 from __future__ import annotations
@@ -15,9 +18,10 @@ from typing import Callable
 
 import pytest
 
-from harness import stores
+from harness import known_bugs, stores
 from harness.fakes.cli import FakeClis
 from harness.hooks import HookRunner
+from memvara import MemoryType
 
 from . import support
 
@@ -61,3 +65,33 @@ def test_capture_mines_a_turn_once_however_often_stop_fires(
     with stores.file(db) as mem:
         facts = sorted(claim.object for claim in mem.scope(user=support.USER).get_all())
     assert facts == ["Acme Robotics", "Lisbon"]
+
+
+# -- known bugs --------------------------------------------------------------------------
+
+#: A standing preference: a procedural memory, which session start injects.
+PREFERENCE = "tabs for indentation in every file of every project"
+
+
+@pytest.mark.parametrize("host", ("claude", "opencode"))
+@known_bugs.xfail("B61")
+def test_the_standing_preferences_are_injected_once_when_a_session_opens(
+        hooks: Make, tmp_path: pathlib.Path, host: str) -> None:
+    """Recall re-checks the standing preferences every 15 minutes (recall.py,
+    `_standing_refresh`), comparing a digest with the one it recorded for the session.
+    Session start injects them and records no digest, so the first prompt of every session
+    finds the check due and the digest different, and injects the whole block again."""
+    db = tmp_path / "standing.db"
+    with stores.file(db) as mem:
+        mem.scope(user=support.USER).remember("user", "prefers", PREFERENCE,
+                                              memory_type=MemoryType.PROCEDURAL)
+    runner = hooks(host, env={"MEMVARA_DB": str(db), "MEMVARA_USER": support.USER})
+    opened = support.context_of(host, runner.run("session_start", session="one").reply)
+    assert support.STANDING_WORDS in opened and PREFERENCE in opened, opened
+    first = runner.run("recall", session="one", prompt=support.UNRELATED)
+    context = support.context_of(host, first.reply)
+    if support.STANDING_WORDS in context and PREFERENCE in context:
+        raise known_bugs.Reproduced(
+            f"B61: the first prompt of a session on {host} injects the standing preferences "
+            f"that session start injected")
+    assert support.STANDING_WORDS not in context

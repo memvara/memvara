@@ -11,16 +11,21 @@ in-process route needs it. `PYTHONPROFILEIMPORTTIME=1` makes Python list every i
 stderr, which is how these tests tell the two routes apart. The second recall is in the
 same session as the first, because the first prompt of a session refreshes the standing
 preferences in the hook's own process, whichever route serves the recall itself.
+
+A recall whose first read finds nothing starts two daemons, which B62 (#344) pins.
 """
 
 from __future__ import annotations
 
+import pathlib
 import stat
 import sys
+import time
 from typing import Callable
 
 import pytest
 
+from harness import known_bugs
 from harness.hooks import HOOKS_HOME, HookRunner, socket_peer_pid
 
 from . import support
@@ -82,3 +87,30 @@ def test_a_hook_with_no_daemon_imports_the_library_itself(
     assert support.MEMORY in support.context_of("claude", result.reply)
     assert imports_memvara(result.stderr)
     assert runner.daemon_sockets() == []
+
+
+# -- known bugs --------------------------------------------------------------------------
+
+@known_bugs.xfail("B62")
+def test_a_recall_whose_first_read_finds_nothing_starts_one_daemon(
+        hooks: Make, tmp_path: pathlib.Path) -> None:
+    """lib/fast.py, `recall`, starts the daemon after every read it makes in its own
+    process, and recall.py reads a second time, wider, when the first read finds nothing
+    fresh. So a prompt that matches nothing, with no daemon running, starts two daemons
+    for one store. This counts the starts, which does not depend on which of the two ends
+    up listening."""
+    db = support.make_store(tmp_path / "empty.db", memory=False)
+    runner = hooks("claude", daemon=True,
+                   env={"MEMVARA_DB": str(db), "MEMVARA_USER": support.USER})
+    result = runner.run("recall", session="one", prompt=support.UNRELATED)
+    assert support.status_of("claude", result.reply) == support.status_line(
+        "no matching memories")
+    runner.wait_for_daemon()
+    # A second daemon, if the hook started one, records its pid as its Python starts.
+    deadline = time.monotonic() + 1.0
+    while len(runner.daemon_pids()) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    pids = runner.daemon_pids()
+    if len(pids) == 2:
+        raise known_bugs.Reproduced(f"B62: one recall started two daemons, pids {pids}")
+    assert len(pids) == 1, pids

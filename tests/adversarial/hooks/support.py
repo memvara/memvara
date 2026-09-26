@@ -19,7 +19,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence, TypeVar
 
 import pytest
 
-from harness import stores
+from harness import known_bugs, stores
 from harness.fakes.cli import FakeClis
 from harness.fakes.hosted_mcp import FakeHostedMcp
 from harness.hooks import HookResult, HookRunner
@@ -37,6 +37,17 @@ PROMPT = "user lives in Lisbon"
 
 #: A prompt that matches nothing in such a store.
 UNRELATED = "which database does the billing service use"
+
+#: Words from the header of the standing preferences block, which session start injects
+#: and recall refreshes (plugin/hooks/session_start.py and recall.py, STANDING_HEADER).
+STANDING_WORDS = "how this user wants work done"
+
+
+def status_line(words: str) -> str:
+    """The status line the hooks show a person for `words`, on the one host that shows
+    one."""
+    return f"⋈ Memvara · {words}"
+
 
 #: One turn of a conversation that states a fact, for a capture to mine. "remember" is
 #: one of the words that make capture mine a turn however short it is.
@@ -511,6 +522,59 @@ def check_told_apart(runs: Runs, host: str, hook: str, one: str, other: str) -> 
         f"{hook} on {host} looks the same for {one!r} and {other!r}: {observed(first)}")
 
 
+def silent_hosts(hosts: Sequence[str]) -> list[str]:
+    """The hosts among `hosts` that show a person no status line."""
+    return [host for host in hosts if SHAPES[host][1] is None]
+
+
+def _not_configured_reply(host: str) -> dict[str, str] | None:
+    """What a reading hook prints on `host` when nothing is configured."""
+    status = SHAPES[host][1]
+    return None if status is None else {status: status_line("not configured")}
+
+
+def pin_cannot_open(runs: Runs, host: str, hook: str) -> None:
+    """B55: a configured local store that cannot open reads exactly as no store at all:
+    the reply for "not configured", no line in any log."""
+    broken, missing = runs[host, hook, "store cannot open"], runs[host, hook, "not configured"]
+    if (broken.reply == _not_configured_reply(host) and broken.logs == {}
+            and observed(broken) == observed(missing)):
+        raise known_bugs.Reproduced(
+            f"B55: {hook} on {host} reports a store that cannot open as not configured")
+    check_told_apart(runs, host, hook, "store cannot open", "not configured")
+
+
+def pin_nothing_matches(runs: Runs, host: str) -> None:
+    """B56: on a host that shows no status line, recall prints nothing and logs nothing,
+    both when nothing matches and when nothing is configured."""
+    nothing = runs[host, "recall", "nothing matches"]
+    missing = runs[host, "recall", "not configured"]
+    if (nothing.reply, nothing.logs, missing.reply, missing.logs) == (None, {}, None, {}):
+        raise known_bugs.Reproduced(
+            f"B56: recall on {host} prints and logs nothing both when nothing matches and "
+            f"when nothing is configured")
+    check_told_apart(runs, host, "recall", "nothing matches", "not configured")
+
+
+def pin_unreachable(runs: Runs, host: str) -> None:
+    """B57: session start says "nothing stored yet" of a hosted store it could not reach,
+    where the host shows a status line, and elsewhere looks exactly as it does when
+    nothing is configured."""
+    unreachable = runs[host, "session_start", "store unreachable"]
+    missing = runs[host, "session_start", "not configured"]
+    if SHAPES[host][1] is not None:
+        wrong = status_of(host, unreachable.reply) == status_line("nothing stored yet")
+    else:
+        wrong = (unreachable.reply, unreachable.logs, missing.reply, missing.logs) == (
+            None, {}, None, {})
+    if wrong:
+        raise known_bugs.Reproduced(
+            f"B57: session start on {host} reports an unreachable store as "
+            f"{'empty' if SHAPES[host][1] else 'no store at all'}")
+    assert status_of(host, unreachable.reply) != status_line("nothing stored yet")
+    check_told_apart(runs, host, "session_start", "store unreachable", "not configured")
+
+
 # -- hostile payloads --------------------------------------------------------------------
 
 @dataclasses.dataclass
@@ -577,3 +641,20 @@ def check_no_extraction(hostile: Hostile) -> None:
         pytest.skip(NO_FAKES)
     assert hostile.clis.calls("claude") == []
     assert hostile.clis.calls("codex") == []
+
+
+#: The hostile payload that B64 is about.
+DEEP = "nesting 100,000 levels deep"
+
+
+def pin_deep_nesting(hostile: Hostile, host: str, hook: str) -> None:
+    """B64: json.loads raises RecursionError on the payload, which neither
+    plugin/hooks/lib/ipc.py, `payload`, nor core/envelope.py, `read_event`, catches, so the
+    hook's body raises and only run.py's last guard keeps the exit code at 0."""
+    if hook == "capture" and hostile.clis is None:
+        pytest.skip(NO_FAKES)
+    crashed = [line for line in crashes(hostile.runs[host, hook, DEEP])
+               if "RecursionError" in line]
+    if crashed:
+        raise known_bugs.Reproduced(f"B64: {hook} on {host}: {crashed[0]}")
+    check_read_as_empty(hostile, host, hook, DEEP)

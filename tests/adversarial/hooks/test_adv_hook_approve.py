@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import sys
 from types import ModuleType
+from typing import Callable
 
 import pytest
 
 from harness import known_bugs
-from harness.hooks import HOOKS_DIR
+from harness.hooks import HOOKS_DIR, HookRunner, host_record
 from harness.stdio import McpProcess
 
 from . import support
@@ -76,6 +77,23 @@ def test_the_approve_list_is_the_servers_read_only_tools(server_tools: dict[str,
     allowed = set(_approve_module().READ_ONLY)
     assert allowed - read_only == set(), "approved, but the server does not mark it read-only"
     assert read_only - allowed <= _known_gap(), "read-only on the server, but not approved"
+
+
+@pytest.mark.parametrize("host", ("cursor", "opencode"))
+@pytest.mark.parametrize("name", ("memvara_memory_search", "memory_search"))
+@known_bugs.xfail("B58")
+def test_a_read_only_tool_named_with_a_single_underscore_is_approved(
+        hooks: Callable[..., HookRunner], host: str, name: str) -> None:
+    """Cursor's and OpenCode's records list "_" as an approve separator, and approve.py,
+    `_tool_leaf`, splits a name at the last separator it holds. Every memvara tool name has
+    an underscore of its own, so a name joined with one underscore, or the bare tool name,
+    splits to its last word, which no read-only tool is."""
+    result = hooks(host).run("approve", tool_name=name)
+    leaf = _approve_module()._tool_leaf(name, host_record(host).approve.separators)
+    if (result.exit_code, result.reply, support.crashes(result), leaf) == (0, None, [], "search"):
+        raise known_bugs.Reproduced(
+            f"B58: approve on {host} splits {name!r} to {leaf!r} and says nothing")
+    assert support.decision_of(host, result.reply) == "allow"
 
 
 @pytest.mark.parametrize("host", support.HOSTS)
