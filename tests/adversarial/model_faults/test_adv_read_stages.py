@@ -19,15 +19,16 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, TypeVar
 
 import pytest
 
 from harness import known_bugs
 from memvara import EpisodeResult, Memvara
+from memvara.select.base import StageOutcome
 from memvara.server import MemvaraMCPServer
 from memvara.store import SQLiteStore, Store
-from memvara.types import utcnow
+from memvara.types import SearchResults, utcnow
 
 from .handles import USER, rendered, tool_text, with_model, without_model
 from .scripted import (
@@ -37,6 +38,7 @@ from .scripted import (
 
 Make = Callable[..., ScriptedModel]
 Pair = Callable[[ScriptedModel], tuple[Memvara, Memvara]]
+Stage = TypeVar("Stage", bound=StageOutcome)
 
 QUERY = "Lisbon trip"
 
@@ -115,8 +117,24 @@ REWRITE_FAILURES = [
 ]
 
 
-def outcome(stage: Any) -> tuple[Any, ...]:
+def recorded(stage: Stage | None) -> Stage:
+    """`stage` itself. The test fails, saying so, if the read recorded no outcome for it."""
+    assert stage is not None, "the read recorded no outcome for this stage"
+    return stage
+
+
+def outcome(stage: StageOutcome | None) -> tuple[Any, ...]:
+    """A stage's outcome, reason and status."""
+    stage = recorded(stage)
     return (stage.outcome, stage.reason, stage.status)
+
+
+def searched(results: list[Any]) -> SearchResults:
+    """`results` as the `SearchResults` that `search()` returns, which also carries the
+    rewrite and selection records. The test fails, naming the type, if it is not one."""
+    assert isinstance(results, SearchResults), (
+        f"search() returned a {type(results).__name__}, not SearchResults")
+    return results
 
 
 # -- query rewrite -----------------------------------------------------------------------
@@ -140,7 +158,7 @@ def test_a_failed_rewrite_serves_the_search_a_store_with_no_model_serves(
     model = scripted(chat=[failure])
     plain, mem = pair(model)
     now = utcnow()
-    got = mem.search(QUERY, include_episodes=True, known_at=now)
+    got = searched(mem.search(QUERY, include_episodes=True, known_at=now))
     assert rendered(got) == rendered(plain.search(QUERY, include_episodes=True,
                                                   known_at=now))
     assert {type(r).__name__ for r in got} == {"Result", "EpisodeResult"}
@@ -182,8 +200,8 @@ def test_a_rewrite_that_asks_for_too_much_costs_one_call_and_four_retrievals(
         return once(query, **options)
 
     monkeypatch.setattr(mem.reader, "_search_once", counted)
-    got = mem.search(QUERY, include_episodes=True)
-    assert got.rewrite.outcome == "applied" and got.rewrite.queries == ("a", "b", "c")
+    rewrite = recorded(searched(mem.search(QUERY, include_episodes=True)).rewrite)
+    assert rewrite.outcome == "applied" and rewrite.queries == ("a", "b", "c")
     assert sorted(retrievals) == sorted([QUERY, "a", "b", "c"])
     assert model.count("chat") == 1
 
@@ -219,9 +237,10 @@ def test_a_failed_synthesis_names_itself_and_keeps_every_note(
         scripted: Make, pair: Pair, failure: object, why: str) -> None:
     model = scripted(chat=[failure])
     plain, mem = pair(model)
-    asked = dict(include_episodes=True, synthesize=True, query_rewrite=False)
-    got = mem.recall(QUERY, **asked).splitlines()
-    no_model = plain.recall(QUERY, **asked).splitlines()
+    got = mem.recall(QUERY, include_episodes=True, synthesize=True,
+                     query_rewrite=False).splitlines()
+    no_model = plain.recall(QUERY, include_episodes=True, synthesize=True,
+                            query_rewrite=False).splitlines()
     notes = plain.recall(QUERY, include_episodes=True, query_rewrite=False).splitlines()
     assert got[0] == f"(summary not written — {why}.)"
     assert no_model[0] == "(summary not written — unconfigured.)"
@@ -266,7 +285,8 @@ def test_a_failed_ranking_selects_nothing_and_says_so_in_the_last_line(
     _, mem = pair(model)
     got = mem.recall(QUERY, include_episodes=True, ranked=True, query_rewrite=False,
                      with_ids=True)
-    assert (got.selection.outcome, got.selection.reason) == expected
+    selection = recorded(got.selection)
+    assert (selection.outcome, selection.reason) == expected
     assert got.text.splitlines()[-1] == (
         f"(model ranking not applied, showing the default order — {expected[0]}.)")
     results = mem.search(QUERY, include_episodes=True, ranked=True, query_rewrite=False)
@@ -285,8 +305,9 @@ def test_a_partly_readable_selector_reply_keeps_only_what_it_can_read(
             {"i": 3}]
     model = scripted(chat=[Text(json.dumps({"kept": kept}))])
     _, mem = pair(model)
-    results = mem.search(QUERY, include_episodes=True, ranked=True, query_rewrite=False)
-    assert results.selection.outcome == "applied"
+    results = searched(mem.search(QUERY, include_episodes=True, ranked=True,
+                                  query_rewrite=False))
+    assert recorded(results.selection).outcome == "applied"
     turns = [r for r in results if isinstance(r, EpisodeResult)]
     assert [r.explain.selected for r in turns] == [True] + [False] * (len(turns) - 1)
     numbered = re.search(r"^\[2\] \(\d{4}-\d{2}-\d{2} \d{2}:\d{2}\) (.*)$",
@@ -317,12 +338,15 @@ def test_a_failed_ranking_serves_the_plain_read(
     plain read shows. Only the last line, which names the outcome, may differ."""
     model = scripted(chat=[failure, failure])
     plain, mem = pair(model)
-    asked = dict(include_episodes=True, ranked=True, query_rewrite=False)
-    got = mem.recall(QUERY, **asked).splitlines()[:-1]
-    want = plain.recall(QUERY, **asked).splitlines()[:-1]
+    got = mem.recall(QUERY, include_episodes=True, ranked=True,
+                     query_rewrite=False).splitlines()[:-1]
+    want = plain.recall(QUERY, include_episodes=True, ranked=True,
+                        query_rewrite=False).splitlines()[:-1]
     now = utcnow()
-    got_read = kinds(mem.search(QUERY, known_at=now, **asked))
-    want_read = kinds(plain.search(QUERY, known_at=now, **asked))
+    got_read = kinds(mem.search(QUERY, include_episodes=True, ranked=True,
+                                query_rewrite=False, known_at=now))
+    want_read = kinds(plain.search(QUERY, include_episodes=True, ranked=True,
+                                   query_rewrite=False, known_at=now))
     turns_got = sum(kind.startswith("EpisodeResult") for kind in got_read)
     turns_want = sum(kind.startswith("EpisodeResult") for kind in want_read)
     # A fact line starts "- ", and a turn's line starts "- [" with the day it was said.

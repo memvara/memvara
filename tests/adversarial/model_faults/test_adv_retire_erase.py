@@ -19,9 +19,11 @@ import pytest
 
 from harness import known_bugs
 from memvara.store import SQLiteStore
-from memvara.types import RefusedProposal, closure_reasons
+from memvara.types import ForgetPreview, RefusedProposal, closure_reasons
 
-from .handles import agentic, claim, fates, ledger, seed, with_model, without_model
+from .handles import (
+    agentic, claim, fates, ledger, seed, stored_claim, with_model, without_model,
+)
 from .scripted import Answer, Forever, ScriptedModel, Text
 
 Make = Callable[..., ScriptedModel]
@@ -114,7 +116,7 @@ def test_an_end_the_model_proposes_after_reading_the_claim_ends_it_with_its_reas
     receipt = mem.add(LEAVING_BERLIN)
     assert fates(before, mem) == {ids["berlin"]: "ended", ids["tea"]: "unchanged",
                                   ids["acme"]: "unchanged"}
-    assert closure_reasons(mem.store.get_claim(ids["berlin"])) == [
+    assert closure_reasons(stored_claim(mem, ids["berlin"])) == [
         ("ended", "moved to Lisbon")]
     assert receipt.proposals_refused == []
     assert receipt.llm_calls == model.count() == 3
@@ -250,6 +252,8 @@ def test_a_forget_preview_asks_no_model_so_a_model_cannot_widen_what_is_retired(
     ids = seed(mem)
     before = ledger(mem)
     preview = mem.forget_matching("green tea", close="retired", k=1)
+    assert isinstance(preview, ForgetPreview), (
+        f"forget_matching with no token returned {type(preview).__name__}, not a preview")
     assert list(preview.matches) == [ids["tea"]]
     mem.forget_matching("green tea", close="retired", k=1, confirm=preview.confirm)
     # The caller asked for this retirement; nothing else moved.

@@ -15,7 +15,7 @@ from typing import Callable
 from harness import known_bugs
 from memvara.schema import DEFAULT_LEARNED_CAP
 
-from ..handles import NEW_MANY, claim, fates, ledger, seed, with_model
+from ..handles import NEW_MANY, claim, fates, ledger, seed, stored_claim, with_model
 from ..scripted import Forever, ScriptedModel, Text
 
 Make = Callable[..., ScriptedModel]
@@ -60,7 +60,7 @@ def test_a_model_that_restates_one_fact_ten_thousand_times_stores_it_once(
     receipt = mem.add(SNACK_TURN)
     assert (len(receipt.added), len(receipt.reinforced)) == (1, MANY - 1)
     [stored] = [c for c in mem.get_all() if c.object == "snack list"]
-    assert mem.store.get_claim(stored.id).observation_count == MANY
+    assert stored_claim(mem, stored.id).observation_count == MANY
     assert receipt.llm_calls == model.count() == 1
 
 

@@ -26,17 +26,17 @@ from .handles import (
 )
 from .scripted import (
     APIConnectionError, APIError, APIStatusError, APITimeoutError, Answer,
-    AuthenticationError, Call, Forever, Late, RateLimitError, ScriptedModel, Text,
-    Truncated, Unscripted, check_scripts,
+    AuthenticationError, Forever, Late, RateLimitError, ScriptedModel, Text, Truncated,
+    Unscripted, check_scripts,
 )
 
 Make = Callable[..., ScriptedModel]
 
-CHAT = {"json_object": True, "max_completion_tokens": 300, "timeout": 10.0}
-
 
 def chat(model: ScriptedModel) -> Any:
-    return model.chat("system", "prompt", **CHAT)
+    """One chat call, with the options a read stage passes."""
+    return model.chat("system", "prompt", json_object=True, max_completion_tokens=300,
+                      timeout=10.0)
 
 
 def tool(seen: list[Any]) -> ToolSpec:

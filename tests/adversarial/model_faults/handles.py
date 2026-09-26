@@ -24,7 +24,7 @@ from memvara.embed import HashingEmbedder
 from memvara.select.model import ModelSelector
 from memvara.select.stages import QueryRewriter, Synthesizer
 from memvara.store import Store
-from memvara.types import WriteReceipt
+from memvara.types import Claim, WriteReceipt
 
 from harness import stores
 
@@ -103,6 +103,14 @@ class Row:
     state: str
     valid_to: datetime | None
     invalidated_at: datetime | None
+
+
+def stored_claim(mem: Memvara, claim_id: str) -> Claim:
+    """The claim `claim_id` as the store holds it, in any state. The test fails with the
+    id if the store has no claim by that id."""
+    claim = mem.store.get_claim(claim_id)
+    assert claim is not None, f"the store has no claim {claim_id}"
+    return claim
 
 
 def ledger(mem: Memvara) -> dict[str, Row]:

@@ -27,7 +27,7 @@ from memvara.write import pipeline, pollution
 
 from .handles import (
     FAST_TURN, MODEL_TURN, NEW_MANY, PORTO, claim, fates, ledger, model_claims, raised_in,
-    seed, turns, with_model,
+    seed, stored_claim, turns, with_model,
 )
 from .scripted import Forever, ScriptedModel, Text, Truncated
 
@@ -281,7 +281,7 @@ def test_a_model_that_restates_one_fact_five_hundred_times_stores_it_once(
     receipt = mem.add(SNACK_TURN)
     assert (len(receipt.added), len(receipt.reinforced)) == (1, 499)
     [stored] = [c for c in mem.get_all() if c.object == "snack list"]
-    assert mem.store.get_claim(stored.id).observation_count == 500
+    assert stored_claim(mem, stored.id).observation_count == 500
     assert receipt.llm_calls == model.count() == 1
 
 
