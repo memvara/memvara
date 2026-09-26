@@ -33,8 +33,8 @@ from .protocol import (
 from .config import FEATURES_OFF_BY_DEFAULT, unknown_features
 from .memory_api import MemoryAPI
 from .tools import (FEATURE_ARGUMENTS, TOOLS, Tool, ToolContext, ToolError,
-                    anchoring_by_default, safe_detail, without_arguments,
-                    without_expiry, without_filters)
+                    anchoring_by_default, for_a_hosted_deployment, safe_detail,
+                    without_arguments, without_expiry, without_filters)
 
 if TYPE_CHECKING:
     # For the annotation alone. `memvara.remote.api` reaches back into
@@ -259,6 +259,10 @@ class MemvaraMCPServer:
         #: made about this deployment and a token that happens to allow writes does not
         #: revoke it. The credential can only narrow.
         self.read_only = read_only or credential_is_read_only
+        #: Anything that is not this library's engine is a deployment running its own
+        #: release, so the tools promise only what every release does; see
+        #: `tools._SLOT_REACH`.
+        hosted = not isinstance(memory, Memvara)
         self._ctx = ToolContext(
             memory=_bind(memory, tenant=tenant, user=user, agent=agent, session=session,
                          project=project),
@@ -266,6 +270,7 @@ class MemvaraMCPServer:
             read_only=self.read_only,
             features_off=self.features_off,
             storage=_storage_fact(memory),
+            hosted=hosted,
         )
         #: Fixed at startup, because that is when the deployment's answer is known — and
         #: `self.read_only` rather than the `read_only` argument, so a read-only credential
@@ -286,6 +291,8 @@ class MemvaraMCPServer:
         #: tool, so switching one off rewrites schemas, the same way
         #: `anchoring_by_default` does. `FEATURE_ARGUMENTS` names the arguments.
         tools = anchoring_by_default(TOOLS) if anchored else TOOLS
+        if hosted:
+            tools = for_a_hosted_deployment(tools)
         for feature, arguments in FEATURE_ARGUMENTS.items():
             if feature in self.features_off:
                 tools = without_arguments(tools, arguments)

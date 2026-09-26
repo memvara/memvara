@@ -2310,6 +2310,24 @@ def test_forget_an_unknown_slot_says_so_without_pretending(server):
                                        {"predicate": "favourite_colour"})
 
 
+@pytest.mark.parametrize("name", ["memory_forget", "memory_end"])
+def test_the_slot_form_names_a_value_stored_to_begin_later_in_one_term(server, name):
+    """Given a predicate, both tools also close a value stored to begin later (#282).
+    The description, the argument error and the reply when nothing was closed all say
+    so, and `.claude/rules/tool-descriptions.md` asks for one term per concept: the
+    replies had said "scheduled" where the other two said "stored to begin later"."""
+    description = BY_NAME[name].description
+    error, is_error = call(server, name, {})
+    reply = text(server, name, {"predicate": "favourite_colour"})
+
+    assert ("every current value of that fact and any value stored to begin later"
+            in description)
+    assert is_error and "any value stored to begin later" in error
+    assert "has no current value and no value stored to begin later" in reply
+    for said in (description, error, reply):
+        assert "scheduled" not in said
+
+
 # -- ending a fact -----------------------------------------------------------
 #
 # The half of the closure split the agent-facing surface used to be missing. `Closure`

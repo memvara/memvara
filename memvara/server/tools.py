@@ -95,8 +95,8 @@ from .memory_api import MemoryAPI
 from .validate import ToolError, validate
 
 __all__ = ["FEATURE_ARGUMENTS", "TOOLS", "Tool", "ToolContext", "ToolError",
-           "anchoring_by_default", "safe_detail", "safe_line", "without_arguments",
-           "without_expiry", "without_reasons"]
+           "anchoring_by_default", "for_a_hosted_deployment", "safe_detail", "safe_line",
+           "without_arguments", "without_expiry", "without_reasons"]
 
 #: Framing for any block of stored claims. `Memvara.recall` applies its own; this is for
 #: the tools that render results themselves. It names the text below it as data, which
@@ -235,6 +235,11 @@ class ToolContext:
     #: Whether the local store is encrypted on disk, in one sentence for `memory_stats`,
     #: or `None` when this server has no local store to describe (a hosted deployment).
     storage: str | None = None
+    #: True when `memory` is a hosted deployment reached over its API (`RemoteMemvara`,
+    #: `MEMVARA_MODE=cloud`) rather than this library's engine. That deployment runs its
+    #: own release, so a handler whose words depend on what the engine does reads this;
+    #: see `_SLOT_REACH`.
+    hosted: bool = False
 
 
 Handler = Callable[[ToolContext, dict[str, Any]], str]
@@ -329,6 +334,21 @@ def without_arguments(tools: "tuple[Tool, ...]",
                                   if k not in names})
         if set(names) & set(tool.properties) else tool
         for tool in tools)
+
+
+def for_a_hosted_deployment(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
+    """The same tools, described for a server whose memory is a hosted deployment.
+
+    Only `memory_forget` and `memory_end` change, and only in what their slot form
+    promises to close: the current values, which every release of a deployment closes,
+    and not a value stored to begin later, which a release from before #282 leaves
+    alone. `_SLOT_REACH` has the reasoning. Their argument errors and replies read
+    `ToolContext.hosted` instead, which the server sets from the same fact.
+    """
+    hosted = {"memory_forget": _forget_description(hosted=True),
+              "memory_end": _end_description(hosted=True)}
+    return tuple(replace(tool, description=hosted[tool.name]) if tool.name in hosted
+                 else tool for tool in tools)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1878,6 +1898,27 @@ def _reason(args: Mapping[str, Any], field: str, tool: str) -> str | None:
         raise ToolError(f"{tool}.{field}: {exc}") from None
 
 
+#: What `memory_forget` and `memory_end` close when given a predicate, in the words a
+#: server can promise, keyed by `ToolContext.hosted`. One tool table serves two engines.
+#: This library's `Memvara.forget` closes every value in the slot that the store believes
+#: and that has not ended, which takes in a value stored to begin later (#282). A hosted
+#: deployment runs its own `forget`, and one on a release from before that fix closes
+#: only the current values. A server cannot tell which release it speaks to, so a hosted
+#: one promises only what every release closes. The descriptions, the argument errors and
+#: the replies when nothing was closed all read these, so they say it in one set of words;
+#: `for_a_hosted_deployment` swaps the descriptions.
+_SLOT_REACH = {
+    False: "every current value of that fact and any value stored to begin later",
+    True: "every current value of that fact",
+}
+
+#: The reply when the slot form closed nothing, keyed and worded as `_SLOT_REACH` is.
+_SLOT_EMPTY = {
+    False: "has no current value and no value stored to begin later",
+    True: "has no current value",
+}
+
+
 def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
     claim_id, predicate = args.get("claim_id"), args.get("predicate")
     # Two addressing modes in one tool, because the model reaches for whichever the
@@ -1886,8 +1927,8 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
     if (claim_id is None) == (predicate is None):
         raise ToolError(
             "memory_forget needs exactly one of: 'predicate' (with optional 'subject'), "
-            "to retire every current value of that fact and any value stored to begin "
-            "later, or 'claim_id', to retire one specific claim from memory_search.")
+            f"to retire {_SLOT_REACH[ctx.hosted]}, or 'claim_id', to retire one "
+            "specific claim from memory_search.")
     reason = _reason(args, "reason", "memory_forget")
 
     if claim_id is not None:
@@ -1905,8 +1946,8 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
     retired = ctx.memory.forget(args["subject"], predicate,  # type: ignore[arg-type]
                                 reason=reason)
     if not retired:
-        return (f"Nothing to forget: no current or scheduled value for "
-                f"{args['subject']}/{predicate}. Check the predicate spelling with "
+        return (f"Nothing to forget: {args['subject']}/{predicate} "
+                f"{_SLOT_EMPTY[ctx.hosted]}. Check the predicate spelling with "
                 "memory_search.")
     lines = [f"Retired {len(retired)} value(s) of {args['subject']}/{predicate}. They no "
              "longer answer questions; memory_history still shows them."]
@@ -1994,10 +2035,9 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
     if (claim_id is None) == (predicate is None):
         raise ToolError(
             "memory_end needs exactly one of: 'predicate' (with optional 'subject'), to "
-            "end every current value of that fact and any value stored to begin later, or "
-            "'claim_id', to end one specific claim from memory_search. Use the id when a "
-            "newer value is already stored — ending the slot ends everything in it, the "
-            "current value included.")
+            f"end {_SLOT_REACH[ctx.hosted]}, or 'claim_id', to end one specific claim "
+            "from memory_search. Use the id when a newer value is already stored — "
+            "ending the slot ends everything in it, the current value included.")
 
     at_raw = args.get("at")
     # Parsed before anything is written, so a malformed instant costs a retry rather than
@@ -2047,8 +2087,8 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
     ended = ctx.memory.forget(args["subject"], predicate,  # type: ignore[arg-type]
                               at=at, close="ended", reason=reason)
     if not ended:
-        return (f"Nothing to end: no current or scheduled value for "
-                f"{args['subject']}/{predicate}. Check the predicate spelling with "
+        return (f"Nothing to end: {args['subject']}/{predicate} "
+                f"{_SLOT_EMPTY[ctx.hosted]}. Check the predicate spelling with "
                 "memory_search; if the value you meant is already closed, memory_history "
                 "says whether it ended or was retired.")
     # Only the values that had begun still answer about a period before their ending.
@@ -2064,6 +2104,60 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
     return "\n".join(filter(None, lines + [_fold_note(predicate,  # type: ignore[arg-type]
                                                       ended),
                                            _pending(ended), _never_began(ended)]))
+
+
+def _forget_description(*, hosted: bool) -> str:
+    """`memory_forget`'s description. `hosted` picks what its slot form promises; see
+    `_SLOT_REACH`."""
+    return (
+        "Retire a stored fact, because the record was wrong. Call it when the user says "
+        "something you remember was never right — you misheard it, you inferred it "
+        "badly, it was about someone else — or asks you to forget it. If instead the fact "
+        "was true and has since stopped being true, this is the wrong tool: call "
+        "memory_end, which closes it at the instant it stopped and leaves the past "
+        "readable. Retiring asserts the value was always an error, so using it for a "
+        "change that really happened writes a false reason into an audit trail nothing "
+        "downstream can correct. Give 'predicate' (with 'subject', default 'user') to "
+        f"retire {_SLOT_REACH[hosted]}, or 'claim_id' from memory_search to retire one "
+        "specific claim. Retired values stop answering questions immediately and remain "
+        "visible to memory_history, so this is auditable — it is not erasure. It is not "
+        "reversible, though, and that is the asymmetry to weigh when the choice is "
+        "close: a mistaken memory_end can be reopened, while nothing in this server or in "
+        "the library un-retires a claim, so putting one back means an operator rewriting "
+        "the stored row by hand. If the user is asking for their data to be deleted "
+        "outright, say that erasure is an operator action and is not available through "
+        "this tool. Storing a replacement does not do this for you: a new value ends the "
+        "old one, which is right for a change and wrong for a mistake, so a real "
+        "correction still needs this call."
+    )
+
+
+def _end_description(*, hosted: bool) -> str:
+    """`memory_end`'s description. `hosted` picks what its slot form promises; see
+    `_SLOT_REACH`. The sentence about a value that has not begun holds on both: the
+    `claim_id` form reaches such a value everywhere, and so does an `at` before a current
+    value's start."""
+    return (
+        "Close out a fact that has stopped being true. Call it when the world moved on "
+        "and the stored value was never wrong: the gate got installed, the trip ended, "
+        "the contract ran out, they left the job. Ending closes the fact at an instant — "
+        "it answers nothing after that instant and still answers about the period before "
+        "it, so the timeline stays true rather than merely quiet. One question decides "
+        "between this and memory_forget: back when it was written, was the value correct? "
+        "Yes, and something has changed since — end it here. No, it was never right — "
+        "retire it with memory_forget. Getting that backwards records a false reason for "
+        "the change, and nothing downstream can tell, because both leave a closed claim. "
+        f"Give 'predicate' (with 'subject', default 'user') to end {_SLOT_REACH[hosted]}, "
+        "or 'claim_id' from memory_search to end exactly one — use the id when a newer "
+        "value is already stored, since ending the slot ends everything in it, including "
+        "the value that is still true. A value that has not begun by 'at' is ended at its "
+        "own start, so it never answers. Ended claims stay visible to memory_history and "
+        "to memory_search with as_of, so this is auditable and reversible by an operator; "
+        "it is not erasure. You often do not need it after storing a replacement, which "
+        "already ends the old value when the fact is single-valued — this is the tool for "
+        "when nothing replaced it, or when the old value is still answering alongside the "
+        "new one."
+    )
 
 
 #: What differs between `memory_end_matching` and `memory_forget_matching`, and nothing
@@ -3282,30 +3376,7 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="memory_forget",
-        description=(
-            "Retire a stored fact, because the record was wrong. Call it when the user "
-            "says something you remember was never right — you misheard it, you inferred "
-            "it badly, it was about someone else — or asks you to forget it. If instead "
-            "the fact was true and has since stopped being true, this is the wrong tool: "
-            "call memory_end, which closes it at the instant it stopped and leaves the "
-            "past readable. Retiring asserts the value was always an error, so using it "
-            "for a change that really happened writes a false reason into an audit trail "
-            "nothing downstream can correct. Give 'predicate' (with 'subject', default "
-            "'user') to retire every current value of that fact and any value stored to "
-            "begin later, or 'claim_id' from memory_search to retire one specific claim. "
-            "Retired values stop answering "
-            "questions immediately and remain visible to memory_history, so this is "
-            "auditable — it is not erasure. It is not reversible, though, and that is the "
-            "asymmetry to weigh when the choice is close: a mistaken memory_end can be "
-            "reopened, while nothing in this server or in the library un-retires a claim, "
-            "so putting one back means an operator rewriting the stored row by hand. If "
-            "the user is "
-            "asking for their data to be deleted outright, say that erasure is an "
-            "operator action and is not available through this tool. Storing a "
-            "replacement does not do this for you: a new value ends the old one, which "
-            "is right for a change and wrong for a mistake, so a real correction still "
-            "needs this call."
-        ),
+        description=_forget_description(hosted=False),
         properties={
             "subject": _SUBJECT,
             "predicate": dict(_PREDICATE, description=(
@@ -3320,29 +3391,7 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="memory_end",
-        description=(
-            "Close out a fact that has stopped being true. Call it when the world moved "
-            "on and the stored value was never wrong: the gate got installed, the trip "
-            "ended, the contract ran out, they left the job. Ending closes the fact at an "
-            "instant — it answers nothing after that instant and still answers about the "
-            "period before it, so the timeline stays true rather than merely quiet. One "
-            "question decides between this and memory_forget: back when it was written, "
-            "was the value correct? Yes, and something has changed since — end it here. "
-            "No, it was never right — retire it with memory_forget. Getting that "
-            "backwards records a false reason for the change, and nothing downstream can "
-            "tell, because both leave a closed claim. Give 'predicate' (with 'subject', "
-            "default 'user') to end every current value of that fact and any value stored "
-            "to begin later, or 'claim_id' from memory_search to end exactly one — use "
-            "the id when a newer value is already stored, since ending the slot ends "
-            "everything in it, including the value that is still true. A value that has "
-            "not begun by 'at' is ended at its own start, so it never answers. Ended "
-            "claims stay visible to memory_history and to "
-            "memory_search with as_of, so this is auditable and reversible by an "
-            "operator; it is not erasure. You often do not need it after storing a "
-            "replacement, which already ends the old value when the fact is "
-            "single-valued — this is the tool for when nothing replaced it, or when the "
-            "old value is still answering alongside the new one."
-        ),
+        description=_end_description(hosted=False),
         properties={
             "subject": _SUBJECT,
             "predicate": dict(_PREDICATE, description=(

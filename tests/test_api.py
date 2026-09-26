@@ -2695,7 +2695,7 @@ def test_forget_can_close_out_a_slot_that_genuinely_finished(mem):
 
 
 def test_forget_retires_a_value_scheduled_to_begin_later_as_well_as_the_live_one(mem):
-    """`forget` retires everything the store believes in the slot, and a value written to
+    """`forget` retires everything the store believes in the slot, and a value stored to
     begin later is believed from the moment it is recorded. Retiring only the live values
     left it believed, so the forgotten slot answered again when it began (#282). A value
     that has already ended is history and is left as it is."""

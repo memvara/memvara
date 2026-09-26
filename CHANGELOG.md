@@ -152,13 +152,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     reinforces that claim, and its earlier date is lost. #318 tracks this.
 - **`forget()` retires a value written to begin later, as well as the values in force.**
   It retired only the values in force at the time of the call, so a value written with a
+- **`forget()` retires a value stored to begin later, as well as the values in force.**
+  It retired only the values in force at the time of the call, so a value stored with a
   future `valid_from` stayed believed, and the forgotten slot answered again when that
   value began. `forget()` now retires every value in the slot that the store believes and
-  that has not ended, scheduled values included, and returns them with the others. A
-  value that has already ended is left as it is. `forget(close="ended")` closes the same
-  values, and a value that has not begun by `at` is ended at its own start, so it is true
-  at no instant. `memory_forget` and `memory_end` given a `predicate` call `forget()`, so
-  they do the same, and their descriptions now say so. #282.
+  that has not ended, values stored to begin later included, and returns them with the
+  others. A value that has already ended is left as it is. `forget(close="ended")` closes
+  the same values, and a value that has not begun by `at` is ended at its own start, so
+  it is true at no instant. `memory_forget` and `memory_end` given a `predicate` call
+  `forget()`, so they do the same, and their descriptions, argument errors and replies now
+  say so in one term, "a value stored to begin later". A server started with
+  `MEMVARA_MODE=cloud` does not say it: the hosted deployment runs its own `forget`, which
+  does this only once the deployment runs a release with this fix, so there the two tools
+  promise every current value and nothing more. #282.
 - **`memory_end` no longer says a value it ended before it began is true until then.**
   Ending a value that has not begun yet, by its `claim_id` or as part of its slot, ends
   it at its own start, so it is true at no instant. The reply counted its ending as one

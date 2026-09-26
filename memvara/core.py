@@ -2166,7 +2166,7 @@ class Memvara:
 
         "Everything currently believed" is every value in the slot that the store
         believes and that has not ended. That is the values in force now and any value
-        written to begin later, which is believed from the moment it is recorded; leaving
+        stored to begin later, which is believed from the moment it is recorded; leaving
         that one out would let the forgotten slot answer again when it began. A value that
         has already ended is history and is left as it is. Under `close="ended"` the
         ending is clamped to each value's own start, as every ending is, so a value that
@@ -2225,7 +2225,7 @@ class Memvara:
         # repository still has to reach it.
         #
         # Every value the store believes at the clock and that has not ended by then, which
-        # is more than the live ones: a value written to begin later is believed from the
+        # is more than the live ones: a value stored to begin later is believed from the
         # moment it is recorded. A lookup of live values left it believed, so the
         # forgotten slot answered again when that value began. A value that has already
         # ended is history and is left as it is. `slot_history` returns every row of the

@@ -387,6 +387,41 @@ def test_a_local_engine_asks_nothing_and_reports_its_own_extractor(tmp_path):
         server.close()
 
 
+# -- what the slot form of memory_forget and memory_end promises ------------------------
+
+
+class _ClosingNothing(_Answering):
+    """A deployment whose slot closures close nothing, for the reply that says so."""
+
+    def forget(self, subject, predicate, *, at=None, close="retired", reason=None):
+        return []
+
+
+@pytest.mark.parametrize("name, verb", [("memory_forget", "forget"), ("memory_end", "end")])
+def test_a_hosted_server_promises_only_what_every_deployment_closes(name, verb):
+    """Given a predicate, a local engine's `forget()` also closes a value stored to begin
+    later (#282). A hosted deployment runs its own `forget`, and one on a release from
+    before that fix closes only the current values. This server cannot tell which release
+    it speaks to, so its description, its argument error and its reply when nothing was
+    closed promise only the current values, which every release closes."""
+    from memvara.server.tools import BY_NAME, ToolError
+    from memvara.types import Scope
+
+    server = MemvaraMCPServer(_ClosingNothing(_ENVELOPE, Scope("acme", "alice", None, None)),
+                              user="alice")
+    tool = server._tools[name]
+    with pytest.raises(ToolError) as refused:
+        tool.run(server._ctx, {})
+    reply = tool.run(server._ctx, {"predicate": "lives_in"})
+
+    assert "stored to begin later" in BY_NAME[name].description, "a local server says it"
+    for said in (tool.description, str(refused.value), reply):
+        assert "stored to begin later" not in said
+    assert "every current value of that fact" in tool.description
+    assert "every current value of that fact" in str(refused.value)
+    assert f"Nothing to {verb}: user/lives_in has no current value." in reply
+
+
 # -- the fold note, with no registry anywhere -------------------------------------------
 
 
