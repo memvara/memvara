@@ -698,7 +698,7 @@ This section covers workstream A1 of the design: more scripted scenarios, and te
 - `confirm_secret` sets `MEMVARA_CONFIRM_SECRET`, the key that signs the confirmation tokens of `memory_end_matching` and `memory_forget_matching`. Servers that share it accept each other's tokens, so a preview from one session can be confirmed in the next. It also lets a scenario hold a token that was signed correctly and has expired; the only other way to get one is to wait ten minutes.
 - `predicates` sets `MEMVARA_PREDICATES`, the predicate vocabularies the server loads. The graph tools walk only relations a vocabulary declares as graph edges, and no built-in predicate is one, so without a vocabulary `memory_neighborhood` and `memory_paths` can only answer that nothing is connected. Loading a vocabulary needs Python 3.11, where `tomllib` arrives. So every test that plays such a scenario carries `skips.needs_toml` and skips on Python 3.10. The negative control plays nothing, so it carries no mark.
 
-The runner passes both to each session's server, and writes them into the client config the hooks read, like the other env fields. A field that is missing or None sets nothing. An empty string is refused by name, because the schema already refuses one in a file, and one in an env built by hand would otherwise vanish.
+The runner passes both to each session's server, and writes them into the client config the hooks read, like the other env fields. A field that is missing or None sets nothing. An empty string gets an error that names the field. A scenario file cannot hold one, because the schema refuses it, but an env built by hand can, and its value must not vanish unnoticed.
 
 ### The tool surface
 
