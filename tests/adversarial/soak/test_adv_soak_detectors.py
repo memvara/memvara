@@ -46,7 +46,8 @@ def healthy(**changes: Any) -> soak.Observations:
         predicates=set(soak.VOCABULARY), crowded=[], panel_correlations=[0.5, 0.4, -0.1],
         probes=100, probe_hits=100, gate={"latin": [50, 50], "han": [5, 5]},
         planted=[(0, True), (1, True)], unplanted_changed=0, store_bytes=None,
-        elapsed_s=1.0)
+        elapsed_s=1.0, stated={"lives_in": "Wenquinul", "works_at": "Vastaul"},
+        current={"lives_in": ["Wenquinul"], "works_at": ["Vastaul"]})
     return dataclasses.replace(observed, **changes)
 
 
@@ -55,8 +56,14 @@ def test_every_detector_is_quiet_on_healthy_observations() -> None:
     assert [f.detector for f in findings] == [
         "predicate explosion", "recency refresh", "flip-flop row growth",
         "salience over relevance", "script bias in the gate",
-        "retraction that retires nothing", "redaction drift", "store growth"]
+        "retraction that retires nothing", "redaction drift",
+        "current facts match what was last said", "store growth"]
     assert {f.status for f in findings} <= {"ok", "tracked"}
+
+
+def test_bytes_per_turn_is_the_store_over_the_turns_and_nothing_for_a_store_in_memory() -> None:
+    assert soak.bytes_per_turn(healthy()) is None
+    assert soak.bytes_per_turn(healthy(store_bytes=300_000)) == 1_500.0
 
 
 # --- predicate explosion ------------------------------------------------------------------
@@ -136,6 +143,44 @@ def test_a_script_far_below_the_latin_rate_is_named_but_does_not_fail() -> None:
 def test_no_latin_fact_at_the_gate_means_script_bias_was_not_measured() -> None:
     finding = soak.script_bias(healthy(gate={"han": [5, 5]}))
     assert finding.status == "tracked" and "not measured" in finding.detail
+
+
+def test_latin_facts_that_reached_the_gate_and_were_all_dropped_are_reported() -> None:
+    # The worst gate failure there is, and not a gap in the evidence.
+    finding = soak.script_bias(healthy(gate={"latin": [10, 0], "han": [5, 5]}))
+    assert (finding.status, finding.value, finding.flagged) == ("tracked", 0.0, ("latin",))
+    assert "not measured" not in finding.detail and "none of the 10" in finding.detail
+
+
+# --- current facts ------------------------------------------------------------------------
+
+
+def test_current_facts_that_match_what_was_last_said_pass() -> None:
+    assert soak.current_facts(healthy()).status == "ok"
+
+
+def test_a_current_fact_that_differs_from_what_was_last_said_fails() -> None:
+    finding = soak.current_facts(healthy(current={"lives_in": ["Galrenkan"],
+                                                  "works_at": ["Vastaul"]}))
+    assert (finding.status, finding.value, finding.flagged) == ("fail", 1.0, ("lives_in",))
+    assert "Galrenkan" in finding.detail and "Wenquinul" in finding.detail
+
+
+def test_a_slot_holding_two_values_is_not_the_value_last_said() -> None:
+    finding = soak.current_facts(healthy(current={"lives_in": ["Galrenkan", "Wenquinul"],
+                                                  "works_at": ["Vastaul"]}))
+    assert (finding.status, finding.flagged) == ("fail", ("lives_in",))
+
+
+def test_a_value_the_store_does_not_hold_at_all_fails() -> None:
+    finding = soak.current_facts(healthy(current={"lives_in": ["Wenquinul"],
+                                                  "works_at": []}))
+    assert (finding.status, finding.flagged) == ("fail", ("works_at",))
+
+
+def test_a_run_in_which_the_workload_stated_nothing_did_not_measure_current_facts() -> None:
+    finding = soak.current_facts(healthy(stated={}, current={}))
+    assert finding.status == "fail" and "not measured" in finding.detail
 
 
 # --- a retraction that retires nothing ----------------------------------------------------

@@ -4,37 +4,36 @@ The same run as the nightly soak at ten times the turns, over the same 21 simula
 so its slots, merges and store are ten times as busy. The record is written before
 anything is asserted.
 
-It is pinned to B51 (#333): over 100,000 turns the most-restated facts reach the salience
-cap and outrank the facts the probes ask about, so the salience detector fails. That
-failure, and only that one, counts as the known bug. A failure of any other detector still
-fails the run, and when B51 is fixed the run passes and the strict marker says so.
+It carries two known bugs, and is registered under the first:
+
+* B50 (#332): the user repeats an earlier sentence about their city or employer word for
+  word after that fact has changed, `add()` drops the turn, and the current-facts detector
+  fails.
+* B51 (#333): the most-restated facts reach the salience cap and outrank the facts the
+  probes ask about, and the salience detector fails.
+
+Those two detectors failing, and no others, count as the known bugs. A failure of any
+other detector still fails the run. When either bug is fixed, the set of failing detectors
+changes, the run fails, and the fix updates this pin.
 """
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
-from pathlib import Path
+from typing import Any, Callable
 
-import pytest
-
-import soak
 from harness import known_bugs
 
 TURNS = 100_000
+CURRENT_FACTS = "current facts match what was last said"
+SALIENCE = "salience over relevance"
 
 
-@known_bugs.xfail("B51")
-def test_a_hundred_thousand_turns_trip_no_detector(records_dir: Path,
-                                                   capsys: pytest.CaptureFixture[str]) -> None:
-    folder = records_dir / "soak"
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out = folder / f"soak-{TURNS}-0-{stamp}.json"
-    code = soak.main(["--turns", str(TURNS), "--seed", "0", "--history", str(folder),
-                      "--out", str(out)])
-    printed = capsys.readouterr().out
-    findings = json.loads(out.read_text(encoding="utf-8"))["findings"]
-    failing = {finding["detector"] for finding in findings if finding["status"] == "fail"}
-    if failing == {"salience over relevance"}:
-        raise known_bugs.Reproduced("B51: the salience detector failed, and no other")
-    assert code == 0, printed
+@known_bugs.xfail("B50")
+def test_a_hundred_thousand_turns_trip_no_detector(long_soak: Callable[[int], Any]) -> None:
+    run = long_soak(TURNS)
+    if run.failing == {CURRENT_FACTS, SALIENCE}:
+        raise known_bugs.Reproduced(
+            "B50 and B51: the store's current facts differ from what the workload last "
+            "said, and a fact at the salience cap outranked the fact a probe asked about; "
+            "no other detector failed")
+    assert run.code == 0, run.printed

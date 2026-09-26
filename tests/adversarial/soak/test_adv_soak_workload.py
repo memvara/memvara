@@ -70,6 +70,25 @@ def test_every_predicate_the_workload_writes_is_in_its_vocabulary(
     assert used == set(soak.VOCABULARY)
 
 
+def test_each_turn_names_the_user_fact_it_states_as_the_fast_path_reads_it(
+        turns: list[soak.Turn]) -> None:
+    # The soak compares the store's current city and employer with the last ones stated,
+    # so what a turn says it states must be exactly what the fast path extracts from it.
+    fast = FastExtractor(PredicateRegistry())
+    stated = 0
+    for turn in turns:
+        expected = None
+        if turn.kind == "say" and turn.script == "latin":
+            episode = Episode(content=turn.text, role="user", scope=Scope(),
+                              ts=datetime.now(timezone.utc))
+            facts = [(claim.predicate, claim.object) for claim in fast.extract(episode)
+                     if claim.predicate in ("lives_in", "works_at") and claim.polarity > 0]
+            expected = facts[0] if facts else None
+        assert turn.states == expected, turn
+        stated += expected is not None
+    assert stated > 0
+
+
 def test_the_workload_spells_predicates_with_their_aliases(turns: list[soak.Turn]) -> None:
     spellings = {turn.predicate for turn in turns if turn.kind == "remember"}
     assert spellings - set(soak.VOCABULARY), "a vocabulary with no aliases cannot explode"

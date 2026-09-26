@@ -53,6 +53,7 @@ from memvara.telemetry import (  # noqa: E402
     WRITE_TURNS,
     MemoryRecorder,
 )
+from memvara.types import SELF_SUBJECT  # noqa: E402
 
 # --- the workload -------------------------------------------------------------------------
 
@@ -177,6 +178,8 @@ class Turn:
     search whose right first answer is `gold`), `panel` (a search over the panel) or
     `recall`. `fact` marks a user turn that states something, `planted` one that carries
     personal data the redactor must remove, and `script` the script it is written in.
+    `states` is the user's city or employer a turn states, as `(predicate, value)`: the
+    last of each is what the store must hold when the run ends.
     """
 
     index: int
@@ -190,6 +193,7 @@ class Turn:
     fact: bool = False
     planted: bool = False
     gold: tuple[str, str, str] | None = None
+    states: tuple[str, str] | None = None
 
 
 class _Words:
@@ -278,8 +282,9 @@ class _World:
         return turn
 
     def _say(self, text: str, *, fact: bool = True, planted: bool = False,
-             script: str = "latin") -> Turn:
-        return self._turn("say", text=text, fact=fact, planted=planted, script=script)
+             script: str = "latin", states: tuple[str, str] | None = None) -> Turn:
+        return self._turn("say", text=text, fact=fact, planted=planted, script=script,
+                          states=states)
 
     def _remember(self, subject: str, predicate: str, obj: str,
                   polarity: int = 1) -> Turn:
@@ -292,8 +297,10 @@ class _World:
         for subject in self.panel:
             yield self._remember(subject, "working_on", self.working_on[subject])
         yield self._say(f"My name is {self.name}.")
-        yield self._say(f"I live in {self.rng.choice(self.cities)}.")
-        yield self._say(f"I work at {self.rng.choice(self.companies)}.")
+        city = self.rng.choice(self.cities)
+        yield self._say(f"I live in {city}.", states=("lives_in", city))
+        company = self.rng.choice(self.companies)
+        yield self._say(f"I work at {company}.", states=("works_at", company))
         for favourite in self.favourites:
             yield self._say(f"I like {favourite}.")
         once = self.words.new()
@@ -308,9 +315,11 @@ class _World:
         if kind == "move":
             city = self.rng.choice(self.cities)
             return self._say(self.rng.choice((f"I moved to {city}.", f"I live in {city}.",
-                                              f"I just moved to {city}.")))
+                                              f"I just moved to {city}.")),
+                             states=("lives_in", city))
         if kind == "job":
-            return self._say(f"I work at {self.rng.choice(self.companies)}.")
+            company = self.rng.choice(self.companies)
+            return self._say(f"I work at {company}.", states=("works_at", company))
         if kind == "one_off":
             item = self.words.new()
             self.one_offs.append(item)
@@ -425,7 +434,9 @@ class Observations:
     check, each with the most it held. `gate` maps a script to `[reached, passed]` over
     the fact-carrying turns that reached the gate. `planted` holds, for each turn carrying
     planted personal data, its simulated day and whether the redactor changed it.
-    `store_bytes` is None for a store kept in memory.
+    `store_bytes` is None for a store kept in memory. `stated` holds the last value the
+    workload stated for the user's city and employer, and `current` the values the store
+    holds for them when the run ends.
     """
 
     config: SoakConfig
@@ -442,6 +453,8 @@ class Observations:
     elapsed_s: float
     #: When the run started, in ISO 8601 and UTC; the order history is read in.
     started: str = ""
+    stated: dict[str, str] = dataclasses.field(default_factory=dict)
+    current: dict[str, list[str]] = dataclasses.field(default_factory=dict)
 
 
 def run(config: SoakConfig, path: Path | None, *,
@@ -484,7 +497,16 @@ def run(config: SoakConfig, path: Path | None, *,
             if (turn.index + 1) % config.per_day == 0:
                 mem.consolidate()
                 _count_slots(mem, crowded)
-        _count_slots(mem, crowded)
+        if config.turns % config.per_day:
+            # The last day is partial. It is consolidated like every other day before its
+            # slots are counted, or a near-duplicate written in it would count as crowding.
+            mem.consolidate()
+            _count_slots(mem, crowded)
+        live = mem.get_all()
+        observed.current = {predicate: [claim.object for claim in live
+                                        if claim.subject == SELF_SUBJECT
+                                        and claim.predicate == predicate]
+                            for predicate in observed.stated}
         observed.predicates = {claim.predicate for claim in
                                mem.get_all(states=("live", "ended", "retired"))}
     finally:
@@ -506,6 +528,9 @@ def _execute(mem: Memvara, rec: SoakRecorder, turn: Turn, at: datetime,
              observed: Observations) -> None:
     """Perform one turn at simulated time `at`, and note what the detectors need."""
     if turn.kind == "say":
+        if turn.states is not None:
+            predicate, value = turn.states
+            observed.stated[predicate] = value
         before = _counts(rec)
         mem.add(turn.text, ts=at)
         passed, dropped, changed = (a - b for a, b in zip(_counts(rec), before))
@@ -552,10 +577,14 @@ def _count_slots(mem: Memvara, crowded: dict[str, tuple[str, str, int]]) -> None
 
 
 def store_bytes(path: Path) -> int:
-    """The size on disk of the store at `path`: the database and every file beside it
-    whose name starts with the database's, such as its write-ahead log and vector file."""
-    return sum(p.stat().st_size for p in path.parent.iterdir()
-               if p.name.startswith(path.name) and p.is_file())
+    """The size on disk of the store at `path`, over the files `perf_budget.store_files`
+    counts as the store."""
+    return sum(file.stat().st_size for file in perf_budget.store_files(path))
+
+
+def bytes_per_turn(obs: Observations) -> float | None:
+    """The store's size on disk divided by the turns, or None for a store in memory."""
+    return None if obs.store_bytes is None else obs.store_bytes / obs.config.turns
 
 
 # --- the detectors ------------------------------------------------------------------------
@@ -658,9 +687,16 @@ def script_bias(obs: Observations) -> Finding:
     rates = {script: passed / reached for script, (reached, passed) in obs.gate.items()
              if reached}
     latin = rates.get("latin")
-    if not latin:
+    if latin is None:
         return Finding(name, TRACKED, None, SCRIPT_RATIO, "not measured: no Latin fact "
                        "reached the gate, so there is no rate to compare with")
+    if latin == 0.0:
+        # Every Latin fact that reached the gate was dropped. That is the worst failure the
+        # gate can have, and no other script can be compared with a rate of zero.
+        return Finding(name, TRACKED, 0.0, SCRIPT_RATIO,
+                       f"the gate passed none of the {obs.gate['latin'][0]} Latin "
+                       "fact-carrying turns that reached it, so it dropped every Latin "
+                       "fact and no script can be compared with it", ("latin",))
     ratios = {script: rate / latin for script, rate in rates.items() if script != "latin"}
     flagged = tuple(sorted(s for s, ratio in ratios.items() if ratio < SCRIPT_RATIO))
     detail = "gate pass rate of fact-carrying turns: " + ", ".join(
@@ -709,6 +745,32 @@ def redaction_drift(obs: Observations) -> Finding:
                    REDACTION_RATIO, detail)
 
 
+def current_facts(obs: Observations) -> Finding:
+    """The user's current city and employer against the last ones the workload stated.
+
+    This is not one of the design's failure modes. It is here because a soak that knows
+    what it last said can check that the store says the same, and the others cannot see a
+    store that holds a stale value: in the nightly soak, #332 (B50) keeps an old city and
+    an old employer current and trips none of them. A slot holding two values, or none,
+    fails as well as one holding a stale one.
+    """
+    name = "current facts match what was last said"
+    if not obs.stated:
+        return Finding(name, FAIL, None, 0.0, "not measured: the workload stated no city "
+                       "or employer, so there was nothing to compare")
+    wrong = {predicate: obs.current.get(predicate, [])
+             for predicate, value in sorted(obs.stated.items())
+             if obs.current.get(predicate, []) != [value]}
+    if not wrong:
+        return Finding(name, OK, 0.0, 0.0, "the store's current " + " and ".join(
+            f"{predicate} is {value}" for predicate, value in sorted(obs.stated.items()))
+            + ", which is what the workload last said")
+    detail = "; ".join(f"the store's current {predicate} is "
+                       f"{', '.join(found) if found else 'nothing'}, and the workload last "
+                       f"said {obs.stated[predicate]}" for predicate, found in wrong.items())
+    return Finding(name, FAIL, float(len(wrong)), 0.0, detail, tuple(wrong))
+
+
 def store_growth(obs: Observations, history: Sequence[float],
                  remeasure: Callable[[], float]) -> Finding:
     """Bytes on disk per turn, judged against earlier soaks by the regression rule.
@@ -718,12 +780,12 @@ def store_growth(obs: Observations, history: Sequence[float],
     called only when the first two conditions of the rule hold.
     """
     name = "store growth"
-    if obs.store_bytes is None:
+    per_turn = bytes_per_turn(obs)
+    if per_turn is None:
         return Finding(name, TRACKED, None, None, "not measured: the store was in memory, "
                        "so there are no files to measure")
-    turns = obs.config.turns
-    per_turn = obs.store_bytes / turns
-    verdict = perf_budget.judge(per_turn, history, remeasure, floor=PAGE_BYTES / turns)
+    verdict = perf_budget.judge(per_turn, history, remeasure,
+                                floor=PAGE_BYTES / obs.config.turns)
     if verdict.outcome == "no history":
         return Finding(name, TRACKED, per_turn, None,
                        f"{per_turn:,.0f} bytes a turn; not judged yet: {verdict.detail}")
@@ -732,10 +794,11 @@ def store_growth(obs: Observations, history: Sequence[float],
                    f"{per_turn:,.0f} bytes a turn; {verdict.outcome}: {verdict.detail}")
 
 
-#: Every detector that reads only the run itself, in the order the design lists them.
+#: Every detector that reads only the run itself: the design's, in the order it lists
+#: them, and then the check of current facts, which the design does not list.
 DETECTORS: tuple[Callable[[Observations], Finding], ...] = (
     predicate_explosion, recency_refresh, flip_flop, salience_over_relevance, script_bias,
-    retraction_noop, redaction_drift,
+    retraction_noop, redaction_drift, current_facts,
 )
 
 
@@ -772,8 +835,7 @@ def record(obs: Observations, findings: Sequence[Finding]) -> dict[str, Any]:
         "kind": RECORD_KIND, "version": RECORD_VERSION, "started": obs.started,
         "turns": obs.config.turns, "seed": obs.config.seed,
         "fingerprint": perf_budget.machine_fingerprint(),
-        "bytes_per_turn": (None if obs.store_bytes is None
-                           else obs.store_bytes / obs.config.turns),
+        "bytes_per_turn": bytes_per_turn(obs),
         "elapsed_s": round(obs.elapsed_s, 3),
         "counts": {
             "reconcile": {action: rec.total(WRITE_RECONCILE, action=action)
@@ -795,19 +857,10 @@ def load_history(directory: Path, *, turns: int, seed: int) -> list[float]:
     can be compared. Files that are not soak records, and soaks kept in memory, are
     skipped. A folder that does not exist yet is an empty history.
     """
-    if not directory.is_dir():
-        return []
-    found: list[tuple[str, float]] = []
-    for path in sorted(directory.glob("*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if (isinstance(data, dict) and data.get("kind") == RECORD_KIND
-                and data.get("turns") == turns and data.get("seed") == seed
-                and isinstance(data.get("bytes_per_turn"), (int, float))):
-            found.append((str(data.get("started", "")), float(data["bytes_per_turn"])))
-    return [value for _, value in sorted(found)]
+    return [float(record["bytes_per_turn"])
+            for record in perf_budget.load_records(directory, RECORD_KIND)
+            if record.get("turns") == turns and record.get("seed") == seed
+            and isinstance(record.get("bytes_per_turn"), (int, float))]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -824,20 +877,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="a folder of earlier records to judge store growth against")
     args = parser.parse_args(argv)
     config = SoakConfig(args.turns, args.seed)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     with tempfile.TemporaryDirectory(prefix="memvara-soak-") as scratch:
         folder = args.store if args.store is not None else Path(scratch)
         folder.mkdir(parents=True, exist_ok=True)
-        name = f"soak-{config.turns}-{config.seed}-{stamp}"
+        name = f"soak-{config.turns}-{config.seed}-{perf_budget.record_stamp()}"
         observed = run(config, folder / f"{name}.db")
         history = (load_history(args.history, turns=config.turns, seed=config.seed)
                    if args.history is not None else [])
         again = iter(range(1, 1_000))
 
         def remeasure() -> float:
-            repeat = run(config, folder / f"{name}-again-{next(again)}.db")
-            assert repeat.store_bytes is not None
-            return repeat.store_bytes / config.turns
+            per_turn = bytes_per_turn(run(config, folder / f"{name}-again-{next(again)}.db"))
+            assert per_turn is not None
+            return per_turn
 
         findings = judge_soak(observed, history=history,
                               remeasure=remeasure if history else None)
@@ -845,10 +897,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(json.dumps(record(observed, findings), indent=2) + "\n",
                                 encoding="utf-8")
-    per_turn = ("" if observed.store_bytes is None
-                else f", {observed.store_bytes / config.turns:,.0f} bytes a turn")
-    print(f"soak: {config.turns} turns, seed {config.seed}, "
-          f"{observed.elapsed_s:.1f} s{per_turn}")
+    per_turn = bytes_per_turn(observed)
+    size = "" if per_turn is None else f", {per_turn:,.0f} bytes a turn"
+    print(f"soak: {config.turns} turns, seed {config.seed}, {observed.elapsed_s:.1f} s{size}")
     for finding in findings:
         print(f"{finding.status:7} {finding.detector}: {finding.detail}")
     return 1 if any(finding.status == FAIL for finding in findings) else 0

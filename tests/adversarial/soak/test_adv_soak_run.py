@@ -17,6 +17,7 @@ import pytest
 import soak
 from harness.invariants import check_store_integrity
 from memvara.store import SQLiteStore
+from memvara.telemetry import CONSOLIDATE_LATENCY_MS
 
 TURNS = 200
 
@@ -41,7 +42,7 @@ def test_the_command_line_runs_a_healthy_soak_and_passes(cli_run: dict[str, Any]
 
 def test_the_command_line_prints_one_line_per_detector(cli_run: dict[str, Any]) -> None:
     names = [finding["detector"] for finding in cli_run["record"]["findings"]]
-    assert len(names) == 8
+    assert len(names) == 9
     for name in names:
         assert sum(f" {name}: " in line for line in cli_run["lines"]) == 1, name
 
@@ -122,6 +123,37 @@ def test_the_command_line_fails_when_its_store_outgrows_its_history(
     assert code == 1
     assert any(line.startswith("fail") and " store growth: " in line
                for line in out.getvalue().splitlines())
+
+
+def passes_before_each_count(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Replace `_count_slots` with one that notes how many consolidation passes had run
+    each time the slots were counted."""
+    counted: list[int] = []
+    original = soak._count_slots
+
+    def spy(mem: Any, crowded: Any) -> None:
+        counted.append(len(mem.telemetry.values(CONSOLIDATE_LATENCY_MS)))
+        original(mem, crowded)
+
+    monkeypatch.setattr(soak, "_count_slots", spy)
+    return counted
+
+
+def test_the_last_partial_day_is_consolidated_before_its_slots_are_counted(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # 205 turns at 10 a day: twenty whole days and five turns more. A near-duplicate in
+    # those five would otherwise be counted before any merge could fold it.
+    counted = passes_before_each_count(monkeypatch)
+    observed = soak.run(soak.SoakConfig(205), None)
+    assert len(observed.recorder.values(CONSOLIDATE_LATENCY_MS)) == 21
+    assert counted == list(range(1, 22))
+
+
+def test_a_run_ending_on_a_day_boundary_counts_its_slots_once_a_day(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    counted = passes_before_each_count(monkeypatch)
+    soak.run(soak.SoakConfig(200), None)
+    assert counted == list(range(1, 21))
 
 
 def test_a_soak_refuses_a_store_that_already_exists(tmp_path: pathlib.Path) -> None:
