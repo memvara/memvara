@@ -7,7 +7,7 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
-## Creating or upgrading a store needs permission to write `<db>.lock`
+## Creating, upgrading or re-embedding a store needs permission to write `<db>.lock`
 
 ### What changed
 
@@ -21,6 +21,12 @@ would create or upgrade the store raises `PermissionError`. The message names th
 for `memory.db` the file `memory.db.lock`, and says what to do. Nothing has been created or
 upgraded when it is raised.
 
+`reembed()` and `clear_embeddings()` refuse in the same case, with a `PermissionError` that
+names the same file, having changed nothing (#350). A clear takes that file exclusively to
+make sure no other process has the store open, and without permission to write it, it
+cannot. Before, the clear went ahead, and a process that had the store open could crash on
+its next search.
+
 ### Who this changes
 
 **If `<db>.lock` belongs to another account,** for example because an MCP server once ran
@@ -28,10 +34,15 @@ as another user, and the store needs an upgrade. The open that upgrades a store 
 open of it after you install a memvara version with a newer schema, or the first open of a
 store an older version wrote, so that is when you meet the refusal.
 
+**If you re-embed a store whose `<db>.lock` belongs to another account.** `reembed()` now
+refuses where it used to go ahead.
+
 ### What to do
 
 Make `<db>.lock` writable by the account that opens the store, or delete it while nothing
-has the store open; the next open creates it again. It holds no data.
+has the store open; the next open creates it again. It holds no data. For a refused
+`reembed()`, open the store again afterwards: a store keeps the access it had to the file
+when it opened.
 
 ### How to find it in your code
 

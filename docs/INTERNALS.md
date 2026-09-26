@@ -2197,7 +2197,10 @@ database does not already need, and it works between two stores in one process t
 a clear holds it, a store that is opening waits in `_hold_presence`, for up to
 `_PRESENCE_WAIT` (60 seconds), instead of mapping a file that is about to shrink. Inside
 `batch()` the clear keeps the lock until the batch ends, because a store that opened before
-the commit would map vectors the batch is about to delete.
+the commit would map vectors the batch is about to delete. A store that may not write
+`<db>.lock` cannot take it exclusively, so its clear raises `PermissionError` instead,
+naming the file, with nothing changed (#350; *Opening a store that another process is
+creating* has why the exclusive lock silently failed there).
 
 To ask for the exclusive lock, a store first lets go of its own shared one, and while it
 has let go, a clear elsewhere cannot see it. Two clears that let go at the same moment
@@ -2271,7 +2274,20 @@ store's directory, which no open needed before, and the refusal came back as the
 write read-only, and `BEGIN IMMEDIATE` on a read-only connection starts only a read
 transaction, without an error, so a second store could take the same lock at once.
 `_creating` therefore opens the file for writing itself first, and when that is refused it
-raises `PermissionError` naming the file, before anything is created or upgraded.
+raises `PermissionError` naming the file, before anything is created or upgraded. Both
+checks go through `_write_refusal`.
+
+The same silent downgrade let a clear go ahead while another process had the store open
+(#350). A clear takes `<db>.lock` exclusively through this store's presence connection
+(`_try_alone`), and on a connection SQLite had opened read-only, `BEGIN EXCLUSIVE` also
+starts only a read transaction. The clear then believed it had the store to itself,
+truncated the vector file, and the other process died with SIGBUS on its next vector
+search. `_hold_presence` now records, just before SQLite opens the presence connection,
+whether this process may write the file. The mode is fixed when the connection opens, so
+the record is taken then and not at the clear: a lock file made writable later does not
+make that connection writable. When the record says no, `_claim_alone` raises
+`PermissionError` naming the file, with nothing changed. Opening the store still needs
+only to read the file.
 
 Measured scenario by scenario against the code before this change, what an opener needs is
 the same in every case but one: an open that runs the schema step must be able to write

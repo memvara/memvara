@@ -2436,6 +2436,43 @@ def test_clearing_vectors_another_process_maps_is_refused_rather_than_fatal_to_i
         assert alone.clear_embeddings() == 300
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_clear_that_may_not_write_the_lock_file_refuses_and_changes_nothing(tmp_path):
+    """#350. SQLite opens a file this process may not write read-only, and on a read-only
+    connection `BEGIN EXCLUSIVE` starts only a read transaction, without an error. So with
+    `<db>.lock` read-only for the clearing process, the clear believed it had the store to
+    itself, cleared the vectors, and the other process died with SIGBUS on its next vector
+    search. A clear that cannot write the lock file cannot tell whether another store has
+    the store open, so it refuses, names the file, and changes nothing. The other store
+    runs in a subprocess, because a SIGBUS in this one would end the whole suite."""
+    path = str(tmp_path / "shared.db")
+    lock = tmp_path / "shared.db.lock"
+    with SQLiteStore(path) as writer:
+        for i in range(300):
+            writer.set_episode_embedding(turn(writer, content=f"turn {i}").id,
+                                         onehot(i, 16))
+    mapper = subprocess.Popen([sys.executable, "-c", _MAPPER, path], cwd=_ROOT,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    try:
+        assert mapper.stdout is not None and mapper.stdout.readline().strip() == "5"
+        os.chmod(lock, 0o444)
+        if os.access(lock, os.W_OK):
+            pytest.skip("this user may write a read-only file")
+        with SQLiteStore(path) as clearing:
+            with pytest.raises(PermissionError) as refused:
+                clearing.clear_embeddings()
+            assert len(clearing.vector_search_episodes(onehot(3, 16), [SCOPE], 5)) == 5
+        out, err = mapper.communicate("go\n", timeout=120)
+    finally:
+        os.chmod(lock, 0o644)
+        mapper.kill()
+    assert mapper.returncode == 0, f"the other process died ({mapper.returncode}): {err}"
+    assert out.strip() == "5"
+    message = str(refused.value)
+    assert str(lock) in message and "Nothing was changed" in message, message
+
+
 def test_clearing_vectors_another_store_in_this_process_maps_is_refused(tmp_path,
                                                                         monkeypatch):
     """Two stores in one process map the file separately, so each counts as another.

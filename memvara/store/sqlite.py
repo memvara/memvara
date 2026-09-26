@@ -1074,6 +1074,23 @@ def _lock_path(db_path: str) -> str | None:
     return None if db_path in (":memory:", "") else db_path + ".lock"
 
 
+def _write_refusal(path: str) -> str | None:
+    """Why this process may not open `path` for writing, or None when it may.
+
+    SQLite opens a file it may not write read-only, without an error, and on a read-only
+    connection `BEGIN IMMEDIATE` and `BEGIN EXCLUSIVE` start only a read transaction, again
+    without an error. A lock taken that way keeps nobody out, so a store asks here before
+    it relies on one. A missing file is no refusal: SQLite creates it for writing.
+    """
+    try:
+        os.close(os.open(path, os.O_RDWR))
+    except FileNotFoundError:
+        return None
+    except PermissionError as exc:
+        return exc.strerror or str(exc)
+    return None
+
+
 # How long a store that is opening waits, in `_hold_presence`, for another store's
 # `clear_embeddings` to finish before it gives up. Waiting for another store's schema
 # step is `_SCHEMA_STEP_WAIT`.
@@ -1800,6 +1817,9 @@ class SQLiteStore:
         # Before this store writes to the database or opens the vector file; see
         # `_hold_presence`.
         self._alone = False
+        #: Why this process could not open `<db>.lock` for writing when it opened its
+        #: presence connection, or None. A clear refuses while it is set; `_claim_alone`.
+        self._presence_refusal: str | None = None
         self._presence = self._hold_presence()
         try:
             with self._lock:
@@ -1881,7 +1901,14 @@ class SQLiteStore:
         works between two stores in one process too. It is taken before this store writes
         to the database or opens the vector file, so a store that opens during a clear
         waits here, not after it has mapped the file.
+
+        Reading the file is enough to hold the shared lock, so a lock file this process
+        may not write is no reason to refuse an open. But SQLite then opens it read-only,
+        and a clear could not take it exclusively (#350), so whether this process may
+        write it is recorded here, just before SQLite opens it, for `_claim_alone`.
         """
+        path = _lock_path(self.path)
+        self._presence_refusal = None if path is None else _write_refusal(path)
         return self._take_lock_file(
             self._share, _PRESENCE_WAIT, "is having its vectors cleared by another store",
             "that re-embedding has finished")
@@ -1909,16 +1936,14 @@ class SQLiteStore:
         upgraded. `_hold_presence` has already created the file if it was missing.
         """
         path = _lock_path(self.path)
-        if path is not None:
-            try:
-                os.close(os.open(path, os.O_RDWR))
-            except PermissionError as exc:
-                raise PermissionError(
-                    f"{self.path} has to be created or upgraded, and a store does that "
-                    f"only while it holds a write lock on {path}, so that one process at a "
-                    f"time does it. This process may not write that file ({exc.strerror}). "
-                    "Give this user permission to write it, or delete it while nothing has "
-                    "the store open; the next open creates it again.") from exc
+        refusal = None if path is None else _write_refusal(path)
+        if refusal is not None:
+            raise PermissionError(
+                f"{self.path} has to be created or upgraded, and a store does that only "
+                f"while it holds a write lock on {path}, so that one process at a time "
+                f"does it. This process may not write that file ({refusal}). Give this "
+                "user permission to write it, or delete it while nothing has the store "
+                "open; the next open creates it again.")
         conn = self._take_lock_file(
             lambda c: self._reserve(c, _SCHEMA_STEP_WAIT), _SCHEMA_STEP_WAIT,
             "is being created or upgraded by another store", "that has finished")
@@ -1999,10 +2024,24 @@ class SQLiteStore:
         Only possible when no other store, in any process, has the database open, because
         each holds the lock shared. Held until `_share_again`, so a store that opens in the
         meantime waits in `_hold_presence`.
+
+        A presence connection SQLite opened read-only, because this process may not write
+        the lock file, cannot take it exclusively: `BEGIN EXCLUSIVE` there starts only a
+        read transaction, without an error, and the clear would go ahead while another
+        store had the database open (#350). So such a store raises `PermissionError`
+        instead, naming the file, with nothing changed.
         """
         conn = self._presence
         if conn is None or self._alone:
             return
+        if self._presence_refusal is not None:
+            raise PermissionError(
+                f"The vectors of {self.path} were not cleared. A store clears them only "
+                f"while it holds a write lock on {_lock_path(self.path)}, which shows that "
+                "no other store has the database open, and this process may not write "
+                f"that file ({self._presence_refusal}). Give this user permission to write "
+                "it and open the store again, or delete it while nothing has the store "
+                "open; the next open creates it again. Nothing was changed.")
         if not self._try_alone(conn):
             # A store that nothing refers to any more holds its lock until Python frees
             # it, and a store sits in a reference cycle, so that waits for the cycle
@@ -4640,7 +4679,9 @@ class SQLiteStore:
         vector search. Inside `batch()` the store stays its own until the batch ends,
         because a store that opened before the commit would map vectors the batch is
         about to delete. A store that nothing refers to any more does not count: the
-        clear collects garbage once before it refuses.
+        clear collects garbage once before it refuses. When this process may not write
+        `<db>.lock`, the clear cannot tell whether another store has the database open,
+        so it raises `PermissionError` naming that file, again having changed nothing.
         """
         with self._lock:
             self._claim_alone()

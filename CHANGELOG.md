@@ -232,6 +232,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   only to read the file, as before, and neither kind needs permission to add a file to the
   store's directory. The switch to WAL mode is also tried again for up to five seconds, for
   a connection from outside memvara that holds the write lock. #281.
+- **`clear_embeddings()`, and so `reembed()`, refuse when this process may not write
+  `<db>.lock`.** A clear takes that file exclusively to make sure no other store has the
+  database open, because clearing truncates the vector file they map, and a process that
+  still maps it crashes on its next vector search. SQLite opens a file this process may not
+  write read-only, and there the exclusive lock silently became a shared one. So with a
+  read-only lock file, such as one another account created, the clear went ahead while
+  another process had the store open, and that process then died with SIGBUS. The clear
+  now raises `PermissionError`, naming the lock file, and changes nothing. #350.
 
 ## [0.16.0] — 2026-09-25
 
