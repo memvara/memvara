@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import itertools
 import pathlib
+import shutil
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from harness import stores
 from harness.env import child_env
-from harness.stdio import ToolResult
+from harness.stdio import McpProcess, ToolResult
 from memvara import Memvara
 from memvara.server import tools as server_tools
 from memvara.server.config import FEATURE_DEFAULTS, ServerConfig
@@ -488,3 +489,76 @@ def interaction_counts(runs: Sequence[Combination],
     """For each group of `strength` settings, how many runs move each subset of them."""
     return {group: Counter(tuple(s in run.moved for s in group) for run in runs)
             for group in itertools.combinations(SWITCHES, strength)}
+
+
+# -- real servers ----------------------------------------------------------------------
+
+Rows = list[tuple[str, str]]
+
+
+def read_rows(path: pathlib.Path) -> Rows:
+    """Every claim the user has, in every state, and every document, as stored on disk.
+    Read with expiry off, so the read changes nothing."""
+    with stores.file(path, expiry_erasure=False, sweep_expired=False) as memory:
+        scoped = memory.scope(user=USER)
+        claims = sorted((c.text, c.state)
+                        for c in scoped.get_all(states=("live", "ended", "retired")))
+        documents = sorted(("document", str(d.custom_id))
+                           for d in scoped.list_documents(limit=100).items)
+    return claims + documents
+
+
+@dataclass(frozen=True)
+class Template:
+    """A seeded store in `directory`, copied for each server so that every run starts from
+    the same memory, and the rows it holds."""
+
+    directory: pathlib.Path
+    ids: Ids
+    rows: Rows
+
+    @classmethod
+    def build(cls, directory: pathlib.Path) -> Template:
+        """Store four facts and a document for the minimal calls to name."""
+        directory.mkdir(parents=True, exist_ok=True)
+        with stores.file(directory / STORE) as memory:
+            scoped = memory.scope(user=USER)
+            home = scoped.remember("user", "lives_in", "Oslo").added[0]
+            work = scoped.remember("user", "works_at", "Contoso").added[0]
+            hobby = scoped.remember("user", "likes", "chess").added[0]
+            language = scoped.remember("user", "speaks", "Norwegian").added[0]
+            document = scoped.add_document("Notes about the office move to Oslo.",
+                                           custom_id="notes/office.md")
+        ids = Ids(linked_from=work.id, linked_to=home.id, forgettable=hobby.id,
+                  endable=language.id, document=str(document.custom_id))
+        return cls(directory, ids, read_rows(directory / STORE))
+
+    def copy(self, target: pathlib.Path) -> pathlib.Path:
+        """The store copied into `target`, with every file beside it whose name starts
+        with the store's."""
+        target.mkdir(parents=True, exist_ok=True)
+        for source in sorted(self.directory.glob(STORE + "*")):
+            shutil.copy2(source, target / source.name)
+        return target / STORE
+
+
+def over_the_pipe(start: Callable[..., McpProcess], combination: Combination,
+                  template: Template, workdir: pathlib.Path) -> list[str]:
+    """Start a real server this way on a copy of the template store, and check it end to
+    end: the list it gives, how it refuses what it does not offer, every listed tool
+    called once with its minimal call, a clean exit, and, on a read-only server, a store
+    left exactly as it was. `start` is the `mcp` fixture's function."""
+    db = template.copy(workdir)
+    server = start(db, user=USER, env=combination.env())
+    server.initialize()
+    calls = minimal_calls(template.ids)
+    problems = (listing_problems(server, combination)
+                + refusal_problems(server, combination, calls)
+                + call_problems(server, combination, calls))
+    code = server.close()
+    if code != 0:
+        problems.append(f"the server exited with code {code}; its stderr ends: "
+                        f"{server.stderr_text()[-300:]!r}")
+    if combination.read_only and read_rows(db) != template.rows:
+        problems.append("a read-only server changed the store")
+    return problems
