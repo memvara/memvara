@@ -27,6 +27,20 @@ RUN = HOOKS_DIR / "run.py"
 #: home directory a run is given.
 HOOKS_HOME = pathlib.Path(".memvara") / ".hooks"
 
+#: The longest unix socket path macOS accepts. Its `sun_path` field holds 104 bytes, and
+#: the path must end with a NUL byte inside them.
+MAX_SOCKET_PATH = 103
+
+
+def daemon_socket_path(home: pathlib.Path) -> pathlib.Path:
+    """The path of a recall daemon's socket under `home`, which is as long as it gets.
+
+    The hooks put the socket in `run/` under their home and name it `recall-` and 16 hex
+    digits (plugin/hooks/lib/ipc.py, `RUNTIME_DIR` and `socket_path`).
+    """
+    return home / HOOKS_HOME / "run" / f"recall-{'0' * 16}.sock"
+
+
 #: Why the recall daemon cannot run here. HookRunner refuses `daemon=True` with these
 #: words, and a test that skips for the same reason uses them too, so that the skip
 #: matches its rule in tests/harness/skips.py.
@@ -223,15 +237,22 @@ def short_dir(prefix: str) -> pathlib.Path:
     """A new private directory with a short path, which the caller removes.
 
     A runner that allows the recall daemon needs a home like this. The daemon's socket
-    lives under the home, and macOS refuses a unix socket path longer than 104 bytes. A
-    pytest temporary directory under a long TMPDIR can pass that length before the hooks
-    add their part, so this uses the system's temporary directory when its path is short,
-    and /tmp when it is not.
+    lives under the home, and macOS refuses a unix socket path longer than
+    `MAX_SOCKET_PATH`. A pytest temporary directory under a long TMPDIR can pass that
+    length before the hooks add their part, so this makes the home in the system's
+    temporary directory, and makes it again in /tmp when the daemon's socket would not fit
+    under it.
+
+    The length measured is that of the resolved path, because `child_env` resolves a home
+    before it hands it to the hooks, and a temporary directory is often reached through a
+    symbolic link: on macOS, /tmp is /private/tmp.
     """
-    base = tempfile.gettempdir()
-    if len(base) > 40 and os.path.isdir("/tmp"):
-        base = "/tmp"
-    return pathlib.Path(tempfile.mkdtemp(prefix=f"mv-{prefix}-", dir=base))
+    home = pathlib.Path(tempfile.mkdtemp(prefix=f"mv-{prefix}-"))
+    fits = len(os.fsencode(daemon_socket_path(home.resolve()))) <= MAX_SOCKET_PATH
+    if fits or not os.path.isdir("/tmp"):
+        return home
+    home.rmdir()
+    return pathlib.Path(tempfile.mkdtemp(prefix=f"mv-{prefix}-", dir="/tmp"))
 
 
 def parse_reply(stdout: str, *, what: str, stderr: str = "") -> dict[str, Any] | None:
@@ -508,7 +529,7 @@ class HookRunner:
     `daemon=True` lets the recall hook start its background daemon, which `child_env`
     otherwise forbids. The daemon outlives the hook and idles for 30 minutes, so a test
     that allows it calls `close()` when it ends. Its socket lives under `home`, and macOS
-    refuses a unix socket path longer than 104 bytes, so such a home needs a short path,
+    refuses a unix socket path of 104 bytes or more, so such a home needs a short path,
     which `short_dir` makes.
 
     `patches` sets module attributes in the hook process before the hook runs, such as
