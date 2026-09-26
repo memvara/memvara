@@ -374,6 +374,29 @@ These two checks keep the baseline equal to today's gaps, in both directions. Th
 **Adding a line to the baseline excuses a gap instead of closing it.** The tests check only that the baseline and today's gaps hold the same items. So a pull request could add a tool with no test and, in the same diff, a baseline line for it, and the fast tier would pass. A pull request that adds a line to the baseline must therefore give the reason in its body, and the code review checks the baseline's diff for added lines.
 
 **Exempt items.** Four invariant bullets are rules for people rather than behaviour of memvara, so no test can check them: `TB1` ("verify" means comparing an output), `TB2` (a number is reported with its caveat), `RC5` (this repository does not implement the hosted server) and `RP1` (a published version is final; the release process is outside the suite's scope). `EXEMPT` in `tests/harness/checklist.py` lists each with its reason. An exempt item stays on the checklist, so a reworded rule is still noticed, but it is never a gap. The fast tier fails if an exemption names an item that no longer exists, or an item that a test covers. Add an exemption only for a rule that no test could ever check, and give the reason.
+## The nightly run
+
+The nightly run turns what the slow tiers find into a report and, for each new break, one issue. The plan is `docs/superpowers/plans/2026-09-26-adversarial-nightly.md`.
+
+### Findings
+
+A finding is the record of one break. `tests/harness/report.py` defines it as `Finding`, and a file of findings holds one JSON line per finding. A finding has these fields:
+
+| Field | What it holds |
+|---|---|
+| `layer` | The part of the suite that found the break, such as `model` or `concurrency`. |
+| `surface` | What the break was seen through, such as `library` or `server`. |
+| `invariant` | The property that failed: an invariant's name, or the node id of a failed test. |
+| `severity` | Where the break may be filed; see below. |
+| `ops` | The operations that replay the break, as JSON values. |
+| `seed` | What reproduces a random search, such as the `@reproduce_failure(...)` call Hypothesis prints. |
+| `artifacts` | Files kept with the finding, by name, as paths inside the night's folder. |
+| `commit` | The commit that was tested. |
+| `title`, `detail` | A one-line summary and the failure's text, for a person to read. |
+
+**The fingerprint.** `Finding.signature()` is a SHA-256 hash of the layer, the surface, the invariant and the operations. The nightly run uses it to recognise a break it has seen before, so a break that fails on two nights becomes one issue. The seed, the commit, the artifacts, the title and the failure text are left out because they change from night to night, and the severity is left out because triage can change it. So a producer must give the operations in a minimal, deterministic form: a temporary path or a wall-clock time in them would give the same break a new fingerprint every night. A test pins the exact text the hash is taken over, because changing it would make every known break look new and be filed again.
+
+**The severity decides where a break may go.** `unclassified` means nobody has checked the break against the "In scope" section of `SECURITY.md` yet, and the nightly run never files an unclassified break in public. `security` means it is in scope, so it goes to a private draft advisory. `data-loss`, `wrong-result` and `crash` mean someone checked and found it out of scope, so it can be filed as a public issue.
 
 ## A model that misbehaves
 
