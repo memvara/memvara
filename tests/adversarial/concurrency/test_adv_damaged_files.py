@@ -76,6 +76,7 @@ def test_an_embedder_change_is_noticed_while_the_record_is_intact(
         Memvara(str(db), embedder=other_embedder(), llm=NullLLM()).close()
 
 
+@pytest.mark.covers("inv:RT10")
 def test_an_embedder_change_is_noticed_after_the_record_is_damaged(
         tmp_path: pathlib.Path) -> None:
     """A torn record reads as no record, and the width alone cannot tell two embedders

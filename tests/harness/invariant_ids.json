@@ -67,7 +67,8 @@
       "RT6": "A document's passages are episodes.",
       "RT7": "A store can only be opened by the embedder that wrote it.",
       "RT8": "A cosine threshold belongs to an embedding space.",
-      "RT9": "A leg on another thread sees exactly what the calling thread would."
+      "RT9": "A leg on another thread sees exactly what the calling thread would.",
+      "RT10": "A store whose record is lost says so, and records the embedder again."
     },
     "docs/claude/telemetry-and-benchmarks.md": {
       "TB1": "\"Verify\" means comparing an output, never that a command exited 0.",
