@@ -27,7 +27,7 @@ from harness.report import write as write_findings
 
 if str(REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO / "scripts"))
-from nightly import filing, flakes, night, run, steps, watchdog  # noqa: E402 - see above
+from nightly import filing, flakes, night, render, run, steps, watchdog  # noqa: E402
 
 ZONE = timezone(timedelta(hours=2))
 NODEID = "tests/adversarial/model/test_adv_model_machine.py::test_random_operations"
@@ -329,6 +329,69 @@ def test_a_crash_of_the_run_itself_leaves_a_report_and_a_heartbeat_with_no_finis
     assert (heartbeat["status"], heartbeat["finished_at"]) == ("crashed", None)
     assert _history(repo)[-1]["status"] == "crashed"
     assert "crashed" in (folder / "report.md").read_text()
+
+
+def _step(name: str, status: str) -> dict[str, Any]:
+    return {"name": name, "status": status, "seconds": 1.0, "cap": 60.0, "summary": ""}
+
+
+def test_the_reports_first_line_never_calls_a_night_with_a_failed_step_quiet() -> None:
+    """A night whose preflight failed ran no tests, so it found no break. Its report must
+    lead with the failed step, or it reads exactly like a night where everything passed."""
+    report = {"night": "2026-09-27", "status": "finished", "commit": "",
+              "steps": [_step("preflight", "failed"), _step("regressions", "not run"),
+                        _step("agents", "not built yet")], "failures": []}
+    lead = render.markdown(report).splitlines()[2]
+    assert "Nothing broke" not in lead
+    assert "preflight failed" in lead and "regressions not run" in lead
+    assert "agents" not in lead
+    quiet = dict(report, steps=[_step("preflight", "passed"), _step("regressions", "passed"),
+                                _step("agents", "not built yet")])
+    assert "Nothing broke" in render.markdown(quiet).splitlines()[2]
+
+
+def test_a_test_run_that_dies_before_writing_a_result_is_a_failure_for_a_person(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """pytest can die before it records anything, for example on an import error in a
+    conftest file. That night has no failed test to report, and must not look quiet."""
+    def dies(python: str, results: pathlib.Path) -> list[str]:
+        return [python, "-c", "raise SystemExit(3)"]
+
+    table = tuple(steps.Step("regressions", 600.0, run.regressions_step(command=dies))
+                  if step.name == "regressions" else step for step in run.STEPS)
+    _night(repo, "2026-09-27", table, notify=Notifications())
+    report = _report(repo, "2026-09-27")
+    assert [(entry["kind"], entry["finding"]["invariant"]) for entry in report["failures"]] == [
+        ("session", "exit status 3")]
+    assert {step["name"]: step["status"] for step in report["steps"]}["regressions"] == "failed"
+
+
+def test_a_breach_during_a_night_that_crashed_is_still_recorded(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """The canary outranks everything else in the report, so a crash of the run's own code
+    after the steps must not skip comparing it."""
+    canary = tmp_path / "db.key"
+    canary.write_text("before")
+
+    def meddles(context: Any, deadline: float) -> steps.Outcome:
+        canary.write_text("after")
+        return steps.Outcome(steps.PASSED)
+
+    def gh(command: filing.Command) -> filing.Completed:
+        if command.argv[:3] == ("gh", "auth", "status"):
+            return filing.Completed(0)
+        raise RuntimeError("the network went away")
+
+    table = _table(tmp_path, [PASSED], 0, agents=steps.Step("agents", 60.0, meddles))
+    started = datetime(2026, 9, 27, 1, 30, tzinfo=ZONE)
+    code = run.main(["--checkout", str(repo), "--date", "2026-09-27", "--python",
+                     sys.executable, "--file", "--canary", str(canary)],
+                    steps=table, notify=Notifications(), gh=gh, clock=lambda: started)
+    assert code == 1
+    report = _report(repo, "2026-09-27")
+    assert report["status"] == "crashed"
+    assert report["canary"]["changed"] == [str(canary)]
+    assert _history(repo)[-1]["canary"] == "changed"
 
 
 def test_every_command_the_nightly_session_is_told_to_run_is_one_the_scripts_accept() -> None:

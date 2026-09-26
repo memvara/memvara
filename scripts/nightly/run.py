@@ -239,6 +239,11 @@ def regressions_step(*, command: Callable[[str, pathlib.Path], list[str]] = regr
                                 log=log, deadline=deadline - reserve)
         results = (regressions.read_results(results_file) if results_file.exists()
                    else regressions.Results([], None))
+        if results.exitstatus is None and not ran.timed_out:
+            # pytest died before it recorded its own exit status, for example on an import
+            # error in a conftest file. The process's status is the next best thing, and
+            # without it the night would have no failure to show.
+            results = regressions.Results(results.tests, ran.returncode)
 
         def rerun(nodeid: str) -> tuple[str, ...] | None:
             if time.monotonic() >= deadline:
@@ -338,6 +343,17 @@ def snapshot(paths: Sequence[pathlib.Path]) -> dict[str, str | None]:
         except OSError as exc:
             hashes[str(path)] = f"unreadable: {type(exc).__name__}"
     return hashes
+
+
+def _canary(context: Night) -> dict[str, Any] | None:
+    """The canary's verdict: how many files it watched and which of them changed since
+    preflight hashed them. None when preflight never took the snapshot."""
+    before = context.canary_before
+    if before is None:
+        return None
+    after = snapshot(context.canary_paths)
+    return {"files": len(before),
+            "changed": [path for path, value in before.items() if after.get(path) != value]}
 
 
 def step_findings(context: Night, results: Sequence[steps.StepResult]
@@ -545,7 +561,9 @@ def main(argv: Sequence[str] | None = None, *, steps: Sequence[steps.Step] = STE
     status, error = "crashed", None
     try:
         results = run_steps(steps, context, worktree=lambda: context.worktree)
+        report["steps"] = [result.to_dict() for result in results]
         failures = context.failures + step_findings(context, results)
+        report["failures"] = [failure.to_record() for failure in failures]
         remote = _remote(context)
         novelty = triage(failures, history, remote)
         done = _filed(history, remote)
@@ -556,13 +574,8 @@ def main(argv: Sequence[str] | None = None, *, steps: Sequence[steps.Step] = STE
                 entry["novelty"] = novelty[failure.fingerprint]
                 entry["plan"] = plan(failure, context, done.get(failure.fingerprint, {}))
             entries.append(entry)
-        after = snapshot(context.canary_paths)
-        before = context.canary_before
-        report.update(_facts(context), steps=[result.to_dict() for result in results],
-                      failures=entries,
-                      canary={"files": len(before) if before is not None else 0,
-                              "changed": [] if before is None else
-                              [path for path, value in before.items() if after[path] != value]},
+        report.update(_facts(context), failures=entries,
+                      canary=_canary(context) or {"files": 0, "changed": []},
                       flake_rates={layer: rate.to_dict() for layer, rate in flakes.rates(
                           [*history, {"kind": "night", "date": context.date,
                                       "layers": context.layers}]).items()})
@@ -575,6 +588,9 @@ def main(argv: Sequence[str] | None = None, *, steps: Sequence[steps.Step] = STE
     except Exception:  # noqa: BLE001 - the report must be written whatever went wrong
         error = traceback.format_exc()
         report.update(_facts(context))
+        if report.get("canary") is None:
+            # The canary outranks everything else, so a crash must not skip comparing it.
+            report["canary"] = _canary(context)
     finally:
         finished = clock()
         report.update(status=status, error=error, finished_at=finished.isoformat())

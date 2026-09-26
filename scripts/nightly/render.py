@@ -123,7 +123,13 @@ def _lead(report: Mapping[str, Any], fresh: list[Any], known: list[Any], flakes:
         counts += [f"{len(known)} known"] if known else []
         counts += [f"{len(person)} for a person to look at"] if person else []
         counts += [f"{len(flakes)} {'flake' if len(flakes) == 1 else 'flakes'}"] if flakes else []
-        headline = f"**{', '.join(counts)}.**" if counts else "**Nothing broke.**"
+        # A step that did not pass found nothing because it did not finish its work, so a
+        # night with one must never read as quiet.
+        stalled = [f"{step['name']} {step['status']}" for step in report.get("steps", [])
+                   if step["status"] not in ("passed", "not built yet")]
+        if stalled:
+            counts.append(f"steps that did not pass: {', '.join(stalled)}")
+        headline = f"**{'; '.join(counts)}.**" if counts else "**Nothing broke.**"
     commit = report.get("commit") or ""
     tested = (f" The run tested `{commit[:12]}`" if commit else " The run tested nothing")
     tested += (", a checkout it was given rather than a fresh worktree of origin/main."
