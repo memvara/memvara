@@ -248,4 +248,12 @@ The tasks above are the plan as it was committed. These interfaces and rules cha
 - **The rerun reserve is a fifth of the regressions step's remaining time, at most 15 minutes**, which is exactly 15 of the real 75. A fixed 15 minutes would leave a short cap no time for the test run.
 - **A crash of the run's own code leaves the heartbeat without a finish**, so the watchdog reports the night, and the report still compares the canary. The first line of report.md names every step that did not pass, so a night whose preflight failed never reads as quiet.
 - **The canary watches `~/.memvara/credentials.json` and `~/.memvara/db.key` by default.** Other files are added with `--canary`.
+- **After the code review of the pull request**, these changed too:
+  - `filing.reopen_issue(finding, fp, *, number, night, gh, dry_run=True, repo)` reopens the closed issue of a break that came back, with a comment carrying the marker, and `plan(failure, context, done, novelty)` plans that for a recurred break instead of "nothing". `filing.filed_state(history)` is the one fold of the filing records that the run and the filing command share; a reopening clears the old pull request from it.
+  - `open_pr` calls nothing in a dry run, git included, and the `pr` command's preview uses the break's own severity.
+  - `regressions.Results` has `bad`, the line numbers of `results.jsonl` it could not read, which the report names in its warnings. `regressions.TIER` is the one place the tier lives, and `flakes.rerun()` takes the command builder as `command=`, so the step reruns through it.
+  - The drift warning compares every file under `scripts/nightly` and `tests/harness` with the tested worktree's copy.
+  - `night.night_date(text)` refuses a night's name that is not a real `YYYY-MM-DD` date, and `Layout.night` uses it.
+  - The watchdog writes its `.md` report, then its `.json` record with `"notified": false`, then notifies, then sets `"notified"` to true, and only the record says whether a night was reported (`_write_record`).
+  - The report's first line counts the steps that ran and the steps not built yet.
 - **The regressions cap stands.** A full `pytest --tier nightly` run took 16 minutes 37 seconds on origin/main, and the real run through the regressions step in Task 9 took 17 minutes 6 seconds, both with other suites running, so a normal night uses well under half of the 75 minutes.
