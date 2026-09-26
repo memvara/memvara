@@ -18,7 +18,7 @@ point of the project and it is also the development setup:
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install -e ".[dev,cloud,ingest,encrypt]"
 
-python3 -m pytest -q                                              # 8,851 passing, 12 skipped, 116 expected failures
+python3 -m pytest -q                                              # 8,867 passing, 12 skipped, 116 expected failures
 python3 -m coverage run -m pytest && python3 -m coverage report    # gated at 100%
 python3 -m mypy -p memvara                                         # must be clean
 ```
@@ -58,6 +58,14 @@ never read your OS keychain or `~/.memvara`: `tests/conftest.py` replaces the ke
 lookup and points `HOME` at a temporary directory for every test. The suite runs
 entirely offline against `HashingEmbedder` and `NullLLM`; a test that needs a model uses a
 fake that counts its own calls. **If a test you add reaches the network, it is wrong.**
+
+**An autouse fixture, which runs for every test, must not call `tmp_path_factory.mktemp()`.**
+To number the directory it makes, `mktemp()` lists every directory the session has made so
+far, so a call for every test makes the suite's run time grow with the square of its size.
+Make the directory with `tempfile.mkdtemp(dir=...)` inside one directory the session makes
+once, as the `_homes` fixture in `tests/conftest.py` does. A fixture that only the tests
+asking for it run, such as `mcp` in `tests/adversarial/conftest.py`, adds one listing per
+such test, which is fine.
 
 **Slow tests go in a tier folder.** A test under a folder named `nightly/`, `weekly/`, `local/` or `quarantine/` is left out of a plain `python3 -m pytest -q`, which is what CI runs. `--tier nightly`, `--tier weekly`, `--tier local` and `--tier quarantine` collect them, and every run prints which tier folders it left out. `docs/claude/testing.md` has the details.
 
