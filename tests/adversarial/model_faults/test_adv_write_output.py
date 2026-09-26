@@ -13,16 +13,20 @@ no acquisition call, and its subject is `team`, so its slot is not the user's.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 from typing import Any, Callable
 
 import pytest
 
+from harness import known_bugs
+from memvara.llm import _shape
 from memvara.schema import DEFAULT_LEARNED_CAP
 from memvara.types import Dispute, MemoryType
+from memvara.write import pipeline, pollution
 
 from .handles import (
-    FAST_TURN, MODEL_TURN, fates, ledger, seed, turns, with_model,
+    FAST_TURN, MODEL_TURN, fates, ledger, raised_in, seed, turns, with_model,
 )
 from .scripted import Forever, ScriptedModel, Text, Truncated
 
@@ -299,3 +303,163 @@ def test_a_model_that_restates_one_fact_five_hundred_times_stores_it_once(
     [stored] = [c for c in mem.get_all() if c.object == "snack list"]
     assert mem.store.get_claim(stored.id).observation_count == 500
     assert receipt.llm_calls == model.count() == 1
+
+
+# -- bugs these tests found, each pinned until its fix lands --------------------------------
+#
+# Each test states what the fixed code must do, and raises `known_bugs.Reproduced` only when
+# it has seen its bug's own symptom. Any other failure fails the run.
+
+#: What an acquisition call answers when it reads a spelling as a new predicate that holds
+#: one value.
+NEW_ONE = Text('{"canonical": null, "cardinality": "one", "volatility": "fast", '
+               '"memory_type": "semantic"}')
+
+
+def place(module: Any, function: str) -> tuple[str, str]:
+    """A function of a memvara module, in the form `handles.raised_in` answers."""
+    return os.path.realpath(module.__file__), function
+
+
+#: Each item a backend with no validation of its own might return, with the exception
+#: `add()` raises for it today, the place in memvara that raises it, and part of its message.
+MALFORMED_ITEMS = [
+    pytest.param([porto(source_index=[0])], TypeError, (pollution, "guard"),
+                 "unhashable type: 'list'", id="source-index-a-list"),
+    pytest.param([porto(source_index={"i": 0})], TypeError, (pollution, "guard"),
+                 "unhashable type: 'dict'", id="source-index-an-object"),
+    pytest.param([porto(polarity=float("inf"))], OverflowError,
+                 (pipeline, "_claim_from_dict"), "cannot convert float infinity to integer",
+                 id="polarity-infinite"),
+    pytest.param([porto(polarity=float("-inf"))], OverflowError,
+                 (pipeline, "_claim_from_dict"), "cannot convert float infinity to integer",
+                 id="polarity-minus-infinite"),
+    pytest.param([porto(confidence=10 ** 400)], OverflowError,
+                 (pipeline, "_claim_from_dict"), "int too large to convert to float",
+                 id="confidence-a-huge-integer"),
+    pytest.param([claim("team", "zqx_office", "Porto", confidence=10 ** 400)], OverflowError,
+                 (pollution, "guard"), "int too large to convert to float",
+                 id="confidence-a-huge-integer-under-a-new-predicate"),
+    pytest.param(["team based_in Porto"], AttributeError, (pollution, "guard"),
+                 "'str' object has no attribute 'get'", id="an-item-that-is-text"),
+    pytest.param([None], AttributeError, (pollution, "guard"),
+                 "'NoneType' object has no attribute 'get'", id="an-item-that-is-null"),
+    pytest.param({"claims": [PORTO]}, AttributeError, (pollution, "guard"),
+                 "'str' object has no attribute 'get'", id="an-object-instead-of-a-list"),
+    pytest.param(None, TypeError, (pollution, "guard"), "'NoneType' object is not iterable",
+                 id="nothing-at-all"),
+]
+
+
+@pytest.mark.parametrize("reply, kind, where, words", MALFORMED_ITEMS)
+@known_bugs.xfail("B26")
+def test_a_malformed_item_is_dropped_and_the_write_returns_a_receipt(
+        scripted: Make, reply: object, kind: type[Exception], where: tuple[Any, str],
+        words: str) -> None:
+    """#303. `WritePipeline._claim_from_dict` is the trust boundary for a backend that
+    does not validate its own output, and it says anything malformed is dropped. These
+    items reach code before it that assumes a well-formed item, so `add()` raises. The
+    turns are stored by then, and the fast path's fact from the same batch is lost."""
+    model = scripted(extract=[reply], resolve=[Forever(NEW_MANY)])
+    mem = with_model(model)
+    seed(mem)
+    try:
+        receipt = mem.add([FAST_TURN, MODEL_TURN])
+    except kind as error:
+        if raised_in(error) == place(*where) and words in str(error):
+            raise known_bugs.Reproduced(
+                f"B26: add() raised {kind.__name__} from {where[1]}: {error}") from error
+        raise
+    assert turns(mem, receipt) == [FAST_TURN, MODEL_TURN]
+    assert objects(mem, predicate="name") == ["Ada"]
+    assert receipt.llm_calls == model.count()
+
+
+@known_bugs.xfail("B27")
+def test_an_overflowing_confidence_costs_only_its_own_claim(scripted: Make) -> None:
+    """#304. One claim's confidence is an integer of 401 digits in the provider's JSON.
+    The backends' shaping raises on it, which the write path catches around the whole call,
+    so every claim of the batch is lost and the batch is deferred. `finite_amount` in
+    `llm/_shape.py` was hardened against this for `amount` and describes the failure."""
+    huge = "1" + "0" * 400
+    moved = json.dumps(claim("team", "moved_in", "summer", confidence=0.5)).replace(
+        '"confidence": 0.5', f'"confidence": {huge}')
+    reply = Text('{"claims": [' + json.dumps(PORTO) + ", " + moved + "]}")
+    model = scripted(extract=[reply], resolve=[Forever(NEW_MANY)])
+    mem = with_model(model)
+    receipt = mem.add(MODEL_TURN)
+    if receipt.deferred and model_claims(mem) == [] and len(model.failures) == 1:
+        [(method, error)] = model.failures
+        if (method, type(error)) == ("extract", OverflowError) and (
+                raised_in(error) == place(_shape, "clamp_confidence")):
+            raise known_bugs.Reproduced(
+                f"B27: shaping raised OverflowError in clamp_confidence ({error}), and the "
+                "whole batch was deferred")
+    assert not receipt.deferred
+    assert "Porto" in model_claims(mem)
+
+
+@pytest.mark.parametrize("item", [
+    pytest.param(claim("team", "zqx_office_hub", "Porto", source_index=5),
+                 id="no-provenance"),
+    pytest.param(claim("team", "zqx_office_hub", "Reykjavik harbour"), id="ungrounded"),
+    pytest.param(claim("team", "zqx_office_hub", ""), id="empty-object"),
+])
+@known_bugs.xfail("B28")
+def test_a_dropped_claim_costs_no_acquisition_and_teaches_nothing(
+        scripted: Make, tmp_path: pathlib.Path, item: dict[str, Any]) -> None:
+    """#305. The pollution guard and the closed vocabulary run before acquisition, so that
+    a refused claim's spelling is never paid for or learned. A claim the trust boundary
+    drops afterwards, for having no source turn, no grounding or no object, has its
+    predicate acquired first: one model call, and a learned predicate kept in the store."""
+    path = tmp_path / "s.db"
+    model = scripted(extract=[[item]], resolve=[Forever(NEW_ONE)])
+    mem = with_model(model, path)
+    mem.add(MODEL_TURN)
+    stored = [c.object for c in mem.get_all() if c.predicate == "zqx_office_hub"]
+    mem.close()
+    reopened = with_model(scripted(), path)
+    kept = reopened.registry.known("zqx_office_hub")
+    reopened.close()
+    assert stored == []  # the claim itself is dropped, as it should be
+    asked = [call.args["surface"] for call in model.calls
+             if call.method == "resolve_predicate"]
+    if asked == ["zqx_office_hub"] and kept:
+        raise known_bugs.Reproduced(
+            "B28: the dropped claim's predicate cost an acquisition call and is learned in "
+            "the store")
+    assert asked == []
+    assert not kept
+
+
+@known_bugs.xfail("B29")
+def test_a_claim_with_no_subject_is_dropped_not_filed_under_the_user(scripted: Make) -> None:
+    """#306. The backends' shaping drops a claim with no subject. The pipeline files one
+    from a backend with no validation under the user, where it ends the user's own value."""
+    item = {"predicate": "lives_in", "object": "Lisbon", "source_index": 0,
+            "confidence": 0.9}
+    model = scripted(extract=[[item]])
+    mem = with_model(model)
+    ids = seed(mem)
+    before = ledger(mem)
+    mem.add("These days home is Lisbon, and it has been for a while.")
+    filed = [(c.subject, c.object) for c in mem.get_all() if c.predicate == "lives_in"]
+    berlin = fates(before, mem)[ids["berlin"]]
+    if filed == [("user", "Lisbon")] and berlin == "ended":
+        raise known_bugs.Reproduced(
+            "B29: a claim with no subject was filed under the user and ended the user's "
+            "Berlin")
+    assert berlin == "unchanged"
+    assert ("user", "Lisbon") not in filed
+
+
+@known_bugs.xfail("B29")
+def test_an_object_that_is_not_text_is_dropped_not_stored_as_python_text(
+        scripted: Make) -> None:
+    """#306. An object that is a list is stored as the text of the list."""
+    model = scripted(extract=[[porto(object=["Porto"])]])
+    mem = with_model(model)
+    mem.add(MODEL_TURN)
+    if model_claims(mem) == ["['Porto']"]:
+        raise known_bugs.Reproduced("B29: the list object was stored as the text ['Porto']")
+    assert model_claims(mem) == []

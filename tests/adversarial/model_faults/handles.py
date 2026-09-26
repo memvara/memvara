@@ -10,11 +10,14 @@ write did to each one.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, Sequence
 
+import memvara
 from memvara import Memvara
 from memvara.embed import HashingEmbedder
 from memvara.select.model import ModelSelector
@@ -146,3 +149,27 @@ def tool_text(server: Any, name: str, arguments: Mapping[str, Any]) -> tuple[str
         "params": {"name": name, "arguments": dict(arguments)}}))
     result = json.loads(line)["result"]
     return result["content"][0]["text"], bool(result["isError"])
+
+
+#: The frames Python 3.10 and 3.11 give a comprehension of its own. From 3.12 a list
+#: comprehension runs inside its function's frame, so `raised_in` skips these to give one
+#: answer on every version.
+_COMPREHENSIONS = frozenset({"<listcomp>", "<dictcomp>", "<setcomp>", "<genexpr>"})
+
+
+def raised_in(error: BaseException) -> tuple[str, str]:
+    """The file and the function inside the memvara package where `error` was raised.
+
+    The file is a real path, to compare with `os.path.realpath(module.__file__)`. The
+    answer is `("", "")` when no frame of the error's traceback is inside memvara. A test
+    that pins a bug compares this with the place the bug raises, so the same exception
+    type raised from anywhere else counts as a different failure.
+    """
+    package = os.path.join(os.path.dirname(os.path.realpath(memvara.__file__)), "")
+    frames = [frame for frame in traceback.extract_tb(error.__traceback__)
+              if os.path.realpath(frame.filename).startswith(package)]
+    while frames and frames[-1].name in _COMPREHENSIONS:
+        frames.pop()
+    if not frames:
+        return "", ""
+    return os.path.realpath(frames[-1].filename), frames[-1].name

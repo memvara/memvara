@@ -66,6 +66,21 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B38", 315, "a lone surrogate in an object argument's key is stored"),
     KnownBug("B39", 316, "memory_recall reports ranked without include_episodes as a "
              "ValueError"),
+
+    KnownBug("B26", 303, "malformed model output makes add() raise instead of dropping the "
+             "item"),
+    KnownBug("B27", 304, "one claim with an overflowing confidence makes add() drop the "
+             "whole batch"),
+    KnownBug("B28", 305, "a claim the trust boundary drops still costs a model call and "
+             "leaves a learned predicate"),
+    KnownBug("B29", 306, "a claim with no subject is filed under the user, and a list "
+             "object is stored as Python text"),
+    KnownBug("B30", 307, "a model retraction at low confidence ends a fact the user "
+             "asserted"),
+    KnownBug("B31", 308, "a ranked read whose selector fails does not serve the plain "
+             "read"),
+    KnownBug("B32", 309, "invented predicates past the learned cap make one write take "
+             "quadratic time"),
 )}
 
 

@@ -11,7 +11,9 @@ Each method answers with the next reply scripted for it, in order, and every cal
 answers is recorded in `calls`. A call that arrives after its method's script has run out
 raises `Unscripted` and is recorded in `unscripted` instead. Memvara catches most model
 failures and carries on, so that exception alone would go unnoticed. `check_scripts` turns
-it into a test failure, and the `scripted` fixture calls it when a test ends.
+it into a test failure, and the `scripted` fixture calls it when a test ends. For the same
+reason every exception the model raises, scripted or from shaping a reply, is kept in
+`failures` with the method that raised it, so a test can name what failed and where.
 
 The model stands in for the provider and nothing more. What a shipped backend does with
 the provider's answer is done here by memvara's own code, so a malformed answer meets the
@@ -216,6 +218,9 @@ class ScriptedModel:
         self.runs: list[dict[str, Any]] = []
         #: The text each tool answered, in order: what a real model would read back.
         self.tool_results: list[str] = []
+        #: Every exception the model raised, with the method that raised it, in order.
+        #: Memvara catches most of them, so this is where a test finds them.
+        self.failures: list[tuple[str, BaseException]] = []
         self._now = 0.0
         for method, replies in zip(METHODS, (extract, resolve, classify, chat, tools,
                                              judge)):
@@ -250,24 +255,25 @@ class ScriptedModel:
                 usage: Usage | None = None, guidance: Guidance | None = None) -> Any:
         reply = self._next("extract", turns=[ep.content for ep in episodes],
                            known_predicates=list(known_predicates), guidance=guidance)
-        return self._shaped(reply, lambda parsed: _shape.shape_claims(parsed,
-                                                                      len(episodes)))
+        return self._shaped("extract", reply,
+                            lambda parsed: _shape.shape_claims(parsed, len(episodes)))
 
     def resolve_predicate(self, surface: str, candidates: Sequence[str], *,
                           usage: Usage | None = None) -> Any:
         offered = _shape.bounded(candidates, _shape.MAX_CANDIDATES)
         reply = self._next("resolve_predicate", surface=surface, candidates=offered)
-        return self._shaped(reply, lambda parsed: _shape.shape_resolution(parsed, offered))
+        return self._shaped("resolve_predicate", reply,
+                            lambda parsed: _shape.shape_resolution(parsed, offered))
 
     def classify_predicate(self, predicate: str, example: str, *,
                            usage: Usage | None = None) -> Any:
         reply = self._next("classify_predicate", predicate=predicate, example=example)
-        return self._shaped(reply, _shape.spec_fields)
+        return self._shaped("classify_predicate", reply, _shape.spec_fields)
 
     def judge_replacement(self, new_text: str, old_text: str, *,
                           usage: Usage | None = None) -> Any:
         reply = self._next("judge_replacement", new=new_text, old=old_text)
-        return self._shaped(reply, _shape.shape_verdict)
+        return self._shaped("judge_replacement", reply, _shape.shape_verdict)
 
     def chat(self, system: str, prompt: str, *, json_object: bool,
              max_completion_tokens: int, timeout: float,
@@ -289,7 +295,9 @@ class ScriptedModel:
             reply = self._next("run_tools", remaining=remaining)
             if isinstance(reply, Truncated):
                 # What both backends raise for an answer cut off at its token limit.
-                raise MalformedToolOutput(f"{self.name} stopped at its token limit")
+                unusable = MalformedToolOutput(f"{self.name} stopped at its token limit")
+                self.failures.append(("run_tools", unusable))
+                raise unusable
             if isinstance(reply, Text):
                 return _tools.Step(reply.text)
             assert isinstance(reply, Answer)  # `queue` refused anything else
@@ -321,17 +329,24 @@ class ScriptedModel:
             self._now += reply.seconds
             reply = reply.reply
         if isinstance(reply, BaseException):
+            self.failures.append((method, reply))
             raise reply
         return reply
 
-    def _shaped(self, reply: object, shape: Callable[[dict[str, Any]], Any]) -> Any:
+    def _shaped(self, method: str, reply: object,
+                shape: Callable[[dict[str, Any]], Any]) -> Any:
         """A schema-constrained method's return value for `reply`, made the way a
-        shipped backend makes it."""
-        if isinstance(reply, Truncated):
-            # Anthropic's word for the event. `refuse_if_truncated` raises for any
-            # backend's own word, so which one is used here changes nothing.
-            _shape.refuse_if_truncated("max_tokens", "max_tokens", model=self.name,
-                                       budget=BUDGET)
-        if isinstance(reply, Text):
-            return shape(_shape.parse_json_object(reply.text))
+        shipped backend makes it. An exception from memvara's shaping is kept in
+        `failures` before it is raised, because the write path will not show it."""
+        try:
+            if isinstance(reply, Truncated):
+                # Anthropic's word for the event. `refuse_if_truncated` raises for any
+                # backend's own word, so which one is used here changes nothing.
+                _shape.refuse_if_truncated("max_tokens", "max_tokens", model=self.name,
+                                           budget=BUDGET)
+            if isinstance(reply, Text):
+                return shape(_shape.parse_json_object(reply.text))
+        except Exception as error:
+            self.failures.append((method, error))
+            raise
         return reply

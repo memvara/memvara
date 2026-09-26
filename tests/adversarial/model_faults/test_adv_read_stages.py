@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 import pytest
 
+from harness import known_bugs
 from memvara import EpisodeResult, Memvara
 from memvara.server import MemvaraMCPServer
 from memvara.store import SQLiteStore
@@ -261,3 +262,43 @@ def test_a_partly_readable_selector_reply_keeps_only_what_it_can_read(
                          model.calls[0].args["prompt"], re.MULTILINE)
     assert numbered is not None
     assert (turns[0].episode.content, turns[0].explain.span) == (numbered.group(1), "tram")
+
+
+# -- a bug these tests found, pinned until its fix lands -------------------------------------
+
+
+def kinds(results: Any) -> list[str]:
+    """Each result's kind and id, in order."""
+    return [f"{type(r).__name__} {(r.episode if isinstance(r, EpisodeResult) else r.claim).id}"
+            for r in results]
+
+
+@pytest.mark.parametrize("failure", [
+    pytest.param(RateLimitError(), id="rate-limit-429"),
+    pytest.param(Text("I would keep the second excerpt."), id="prose"),
+])
+@known_bugs.xfail("B31")
+def test_a_failed_ranking_serves_the_plain_read(scripted: Make, failure: object) -> None:
+    """#308. INTERNALS invariant 1 says a failed stage serves the plain read. A ranked read
+    gathers its turns at the reranker's depth whatever its outcome, so when the selector
+    fails it interleaves more turns than a plain read takes, and they push out facts the
+    plain read shows. Only the last line, which names the outcome, may differ."""
+    model = scripted(chat=[failure, failure])
+    plain, mem = pair(model)
+    asked = dict(include_episodes=True, ranked=True, query_rewrite=False)
+    got = mem.recall(QUERY, **asked).splitlines()[:-1]
+    want = plain.recall(QUERY, **asked).splitlines()[:-1]
+    now = utcnow()
+    got_read = kinds(mem.search(QUERY, known_at=now, **asked))
+    want_read = kinds(plain.search(QUERY, known_at=now, **asked))
+    turns_got = sum(kind.startswith("EpisodeResult") for kind in got_read)
+    turns_want = sum(kind.startswith("EpisodeResult") for kind in want_read)
+    # A fact line starts "- ", and a turn's line starts "- [" with the day it was said.
+    lost = [line for line in want
+            if line.startswith("- ") and not line.startswith("- [") and line not in got]
+    if turns_got > turns_want and lost:
+        raise known_bugs.Reproduced(
+            f"B31: the failed ranked read returned {turns_got} turns where the plain read "
+            f"returns {turns_want}, and its block dropped {lost}")
+    assert got == want
+    assert got_read == want_read

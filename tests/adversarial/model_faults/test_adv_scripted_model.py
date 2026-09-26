@@ -7,18 +7,20 @@ being ended, retired or erased. Both are checked here before anything relies on 
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable
 
 import pytest
 
 from memvara.llm import LLM, Chat, ReplacementJudge, ToolChat
-from memvara.llm import _tools
+from memvara.llm import _shape, _tools
 from memvara.llm.base import (
     MalformedToolOutput, Message, ToolRun, ToolRunTimeout, ToolSpec, TruncatedResponse,
 )
+from memvara.select import stages
 from memvara.store import SQLiteStore
 
-from .handles import fates, ledger, seed, with_model, without_model
+from .handles import fates, ledger, raised_in, seed, with_model, without_model
 from .scripted import (
     APIConnectionError, APIError, APIStatusError, APITimeoutError, Answer,
     AuthenticationError, Call, Forever, Late, RateLimitError, ScriptedModel, Text,
@@ -184,6 +186,34 @@ def test_the_provider_errors_carry_what_memvara_reads_from_the_sdk_ones() -> Non
                   APIStatusError("unavailable", status_code=503)):
         assert isinstance(error, APIError)
     assert str(timeout) == "Request timed out."
+
+
+def test_every_exception_the_model_raises_is_kept_for_the_test(
+        scripted: Make, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Memvara catches most exceptions a model raises, so the model keeps each one, with
+    the method that raised it, for a test that must name what failed and where. That
+    includes an exception from memvara's own shaping of a text reply."""
+    model = scripted(chat=[RateLimitError()], extract=[Text('{"claims": []}')])
+    with pytest.raises(RateLimitError):
+        chat(model)
+
+    def broken(parsed: Any, turns: int) -> Any:
+        raise ValueError("shaping failed")
+
+    monkeypatch.setattr(_shape, "shape_claims", broken)
+    with pytest.raises(ValueError, match="shaping failed"):
+        model.extract([], [])
+    assert [(method, type(error).__name__) for method, error in model.failures] == [
+        ("chat", "RateLimitError"), ("extract", "ValueError")]
+
+
+def test_raised_in_names_the_memvara_file_and_function_an_exception_came_from() -> None:
+    with pytest.raises(ValueError) as inside:
+        stages.parse_day("not a day")
+    assert raised_in(inside.value) == (os.path.realpath(stages.__file__), "parse_day")
+    with pytest.raises(ZeroDivisionError) as outside:
+        1 / 0  # noqa: B018 - raised outside memvara on purpose
+    assert raised_in(outside.value) == ("", "")
 
 
 def test_a_late_reply_moves_the_models_clock_and_nothing_else_does(scripted: Make) -> None:
