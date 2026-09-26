@@ -34,6 +34,10 @@ OTHER_KEY = "c" * 64
 SENTINEL = "zzsentinelvalue"
 
 
+def _mode(path: pathlib.Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
 def _encrypted(path: pathlib.Path, key: str = KEY):
     return stores.file(path, encryption=True, key_env={"MEMVARA_DB_KEY": key})
 
@@ -87,6 +91,7 @@ def test_a_truncated_vector_file_is_detected_not_served(tmp_path: pathlib.Path) 
 
 
 @needs_extra
+@pytest.mark.covers("switch:encryption")
 def test_neither_the_text_nor_its_vector_is_on_disk_in_the_clear(
         tmp_path: pathlib.Path) -> None:
     """The stored value's text is absent from both files, and its embedding is absent from
@@ -138,20 +143,21 @@ def test_an_older_record_for_the_same_row_and_owner_still_authenticates() -> Non
 
 @pytest.mark.skipif(os.name != "posix", reason="no POSIX permission bits to check")
 @needs_extra
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o604])
 def test_a_key_file_other_users_can_read_is_named_in_a_warning(
-        tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, mode: int) -> None:
     """A key kept in `~/.memvara/db.key` that other users can read draws an
-    `EncryptionWarning` naming its mode, so a store whose key sits world-readable beside it
-    says so rather than staying quiet."""
+    `EncryptionWarning` naming its mode, so a store whose key sits readable beside it —
+    to its group, to everyone, or both — says so rather than staying quiet."""
     home = tmp_path / "home"
     (home / ".memvara").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     path = key_file()
     path.write_text(KEY + "\n", encoding="utf-8")
-    path.chmod(0o644)
+    path.chmod(mode)
     db = tmp_path / "e.db"
-    with pytest.warns(EncryptionWarning, match="644"):
+    with pytest.warns(EncryptionWarning, match=f"{_mode(path):o}"):
         # No key in the environment, so the store reads the loose key file.
         with stores.file(db, encryption=True):
             pass
-    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+    assert _mode(path) == mode
