@@ -343,6 +343,7 @@ def test_a_restatement_with_an_earlier_start_is_kept_for_the_period_before_the_c
 
     assert res.action == "add" and res.invalidated == []
     assert (res.claim.valid_from, res.claim.valid_to) == (january, april)
+    assert res.restated is not None and res.restated.id == first.id
     kept = store.get_claim(first.id)
     assert (kept.valid_from, kept.valid_to, kept.observation_count) == (april, None, 1)
     february = january + timedelta(days=30)
@@ -379,6 +380,8 @@ def test_restating_an_earlier_period_the_store_holds_is_a_repeat_of_it(
     res = rec.apply(again)
 
     assert res.action == "reinforce" and res.claim.id == earlier.id
+    assert res.restated is not None and res.restated.valid_to is None, (
+        "the live claim on record, which a link proposed for this write attaches to")
     assert res.claim.observation_count == 2 and res.claim.sources == ["ep_2", "ep_3"]
     assert (res.claim.valid_from, res.claim.valid_to) == (earlier.valid_from,
                                                           earlier.valid_to)

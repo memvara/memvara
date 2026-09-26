@@ -554,7 +554,7 @@ class WritePipeline:
             reason = plan.reason_for(claim) if plan is not None else None
             res = self.reconciler.apply(claim, now=now, reason=reason)
             if plan is not None:
-                plan.observe(claim, res.action, res.claim, res.invalidated)
+                plan.observe(claim, res.action, res.claim, res.invalidated, res.restated)
             self._absorb(claim, res, receipt, to_embed)
         if plan is not None:
             self._apply_proposals(plan, receipt, now, to_embed)

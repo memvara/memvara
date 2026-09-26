@@ -894,7 +894,13 @@ suggestion must not turn it into an exception the caller retries.
   reported as `not_applied` with the named memory left live. A proposed end becomes a
   retraction of exactly the named value through `Reconciler.apply(close="ended",
   reason=…)`, filed in the named memory's own scope and citing the turn the model named.
-  A proposed link becomes a `claim_links` row when both sides name a stored claim. The
+  A proposed link becomes a `claim_links` row when both sides name a stored claim. A side
+  named by a proposal's ref names the claim that proposal was stored as, or the claim it
+  repeated, with one exception: a proposal that restates a live value with an earlier
+  start is stored as a claim for the earlier period, or repeats one, and that claim is
+  over and answers only about that period. Its ref names the live claim on record instead
+  (`ReconcileResult.restated`), the claim a plain repeat's ref names, so the link is on
+  the claim `recall()` returns and `why()` shows it there. The
   batch falls back to the single call, and says why on `receipt.agentic_fallback`, when
   the backend is not a `ToolChat` (`unsupported`), the run times out (`timeout`), an answer
   cannot be used twice in a row (`malformed`), the model is still calling tools after 12

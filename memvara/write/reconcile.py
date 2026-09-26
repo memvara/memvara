@@ -187,6 +187,13 @@ class ReconcileResult:
     #: record, or a `procedural` claim about a subject other than the user, which is
     #: filed as `semantic` whatever sent it — see `Retype`. `None` otherwise.
     retyped: "Retype | None" = None
+    #: Set when the candidate restated a value that is live on record, with an earlier
+    #: start: the live claim on record, which this write did not change and which a plain
+    #: repeat would have reinforced. `claim` is then the claim for the earlier period,
+    #: added (`add`) or already stored and reinforced (`reinforce`). A link proposed for
+    #: the candidate in the same batch attaches here, because the claim for the earlier
+    #: period is over and answers only about that period (`agentic.ProposalPlan`).
+    restated: Claim | None = None
 
 
 #: What each precision covers, as a lower bound and an exclusive upper bound. `instant`
@@ -343,6 +350,7 @@ class Reconciler:
             # writer cannot read says nothing about when the fact began in its own scope.
             seen = [c for c in live_same if claim.scope.sees(c.scope)]
             keep: Claim | None = None
+            restated: Claim | None = None
             if (seen and claim.expires_at is None
                     and all(_is_after(c, claim) for c in seen)):
                 # The same value, stated as true from before any claim on record for it
@@ -357,10 +365,13 @@ class Reconciler:
                 # the live claim, so the expiry still lands on the claim on record, which
                 # is the fact the caller asked to have erased.
                 end, keep = self._earlier_period(claim, found, seen, t, owner)
+                # The claim a plain repeat reinforces, among those the writer can see.
+                restated = self._canonical_of(seen)
                 if keep is None:
                     claim.valid_to = end
                     self.store.put_claim(claim)
-                    return ReconcileResult("add", claim, [], retyped=refiled)
+                    return ReconcileResult("add", claim, [], retyped=refiled,
+                                           restated=restated)
             elif live_same:
                 keep = self._canonical_of(live_same)
             if keep is not None:
@@ -385,7 +396,7 @@ class Reconciler:
                 return ReconcileResult(
                     "reinforce",
                     self.reinforce(keep, claim.sources, self._observed_at(claim, t)),
-                    [], retyped=retyped)
+                    [], retyped=retyped, restated=restated)
 
         # 2. Retraction: the user is taking something back.
         if claim.polarity < 0:
