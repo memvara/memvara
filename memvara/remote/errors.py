@@ -4,6 +4,12 @@ The envelope already carries the classification — a `code` naming what went wr
 where the server can tell, whether retrying could help. This module turns that into types
 a caller can branch on and adds nothing of its own.
 
+**The envelope is the one memvara-cloud sends:** `{"error": {"code", "message", "detail"}}`
+(`memvara_cloud/rest/errors.py`, `error_payload`). Where the server states `retryable`, it
+does so inside `detail`, as the Idempotency-Key conflict does; `retryable` beside `code` is
+read too, and wins when both are present. The server's code for a missing or unknown key is
+`unauthenticated`, and `unauthorized` is kept for a facade that sends the older word.
+
 **A response with no envelope is classified from its status, for the two statuses that
 say enough on their own.** Not every failure comes from the facade: an edge proxy answers
 429 with an HTML page, and a gateway answers 401 the same way. `_BY_STATUS` below is
@@ -115,16 +121,25 @@ _BY_STATUS: dict[int, str] = {
 #:
 #: **503 is deliberately absent.** It is the one an application sends about itself, and it
 #: is used for a maintenance window and for an exhausted quota alike — the second of which
-#: retrying makes worse. A facade that means it is retryable can say so in the envelope,
-#: and this module does not guess where the status genuinely carries more than one meaning.
+#: retrying makes worse. A facade that means it is retryable says so, in the envelope or by
+#: the code below, and this module does not guess where the status genuinely carries more
+#: than one meaning.
 #:
 #: An explicit `retryable` in the envelope always wins, in either direction: a server that
 #: says a 502 is not worth retrying is answering about itself, and knows.
 _RETRYABLE_WHEN_UNSTATED: frozenset[int] = frozenset({502, 504})
 
+#: Codes the facade documents as retryable, for an envelope that does not state it.
+#: memvara-cloud sends `unavailable` (503) for a store that is unreachable, overloaded or
+#: lost a concurrency race, documents it as "retryable, and carries `Retry-After`", and
+#: puts no `retryable` field on it. This is the server's classification of its own code,
+#: not a guess from the status: a bare 503 with no envelope is still not retried.
+_RETRYABLE_CODES: frozenset[str] = frozenset({"unavailable"})
+
 #: code -> class. Codes absent here raise `RemoteError`, deliberately.
 _BY_CODE: dict[str, type[RemoteError]] = {
     "unauthorized": AuthError,
+    "unauthenticated": AuthError,
     "bad_scope": ScopeError,
     "forbidden_scope": ScopeError,
     "forbidden_privilege": ScopeError,
@@ -138,6 +153,7 @@ _BY_CODE: dict[str, type[RemoteError]] = {
     "bad_request": InvalidRequest,
     "method_not_allowed": InvalidRequest,
     "internal": ServerError,
+    "unavailable": ServerError,
 }
 
 
@@ -177,13 +193,17 @@ def error_from_response(status_code: int, body: Any,
     code = str(envelope.get("code") or default)
     message = str(envelope.get("message") or "no message")
     stated = envelope.get("retryable")
+    detail = envelope.get("detail")
+    if stated is None and isinstance(detail, dict):
+        stated = detail.get("retryable")
     cls = _BY_CODE.get(code, RemoteError)
     if cls is RateLimited:
         return RateLimited(status_code, code, message,
                            bool(stated) if stated is not None else True,
                            _retry_after(retry_after))
     retryable = (bool(stated) if stated is not None
-                 else status_code in _RETRYABLE_WHEN_UNSTATED)
+                 else code in _RETRYABLE_CODES
+                 or status_code in _RETRYABLE_WHEN_UNSTATED)
     return cls(status_code, code, message, retryable)
 
 
