@@ -468,4 +468,18 @@ python3 scripts/nightly/filing.py advisory --night <date> --fingerprint <fingerp
 
 Every filing with `--file` is recorded in `local/nightly/history.jsonl`, so a later night knows the break is filed. Before anything goes to GitHub, the operator's paths are removed from the failure's text: the checkout, the home folder, the temporary folder, and the user name in pytest's temporary folders. The label has to exist before the first real filing; create it once with `gh label create nightly-break --repo memvara/memvara --description "Found by the nightly run"`.
 
+### The watchdog
+
+A night that did not run leaves no report, so nothing would say it was missed. `scripts/nightly/watchdog.py` says so. The nightly run writes `heartbeat.json` in the night's folder before it does anything else, and writes it again with a finish time when it ends. launchd runs the watchdog once a day at a deadline, and the watchdog checks the latest night whose deadline has passed:
+
+- With no heartbeat, the night did not run. It writes `DID-NOT-RUN.md` and `DID-NOT-RUN.json` in the night's folder and sends one macOS notification.
+- With a heartbeat that has no finish, the run started and was stopped partway, or is still running past every step's cap. It writes `DID-NOT-FINISH.md` and `DID-NOT-FINISH.json` and sends one notification.
+- With a finished heartbeat, it does nothing.
+
+A night is named by the day its run starts, so a run scheduled for 23:30 is checked the next morning. A report already in the folder means the night was reported, so a second check sends no second notification. The watchdog uses no model, does nothing else, and imports nothing from the nightly package, so launchd can run it with any Python 3.10 or later. It sends the notification through `osascript`, passing the title and the message as arguments to a fixed script, so no text is ever read as AppleScript. `scripts/nightly/com.memvara.nightly-watchdog.plist.template` is its launchd job; nothing installs it, and its comment says how to fill it in and load it. To check a night by hand:
+
+```bash
+python3 scripts/nightly/watchdog.py --checkout <main checkout> --start 01:30 --deadline 06:30 --no-notify
+```
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

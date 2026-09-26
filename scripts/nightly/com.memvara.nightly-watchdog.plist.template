@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The launchd job for the memvara nightly watchdog. This file is a template, and nothing
+  installs it: the maintainer installs it by hand, once, after approving it.
+
+  It runs scripts/nightly/watchdog.py once a day at the deadline. The watchdog writes a
+  DID NOT RUN report and sends a notification when the night's run left no heartbeat, or
+  a heartbeat with no finish. If the Mac is asleep at the deadline, launchd runs the job
+  when it wakes.
+
+  To install it, replace the placeholders:
+    __PYTHON__    a Python 3.10 or later, such as /opt/homebrew/bin/python3
+    __CHECKOUT__  the main checkout, such as /Users/you/code/memvara
+    __START__     when the nightly run is scheduled to start, as HH:MM
+    __DEADLINE__  when the run must have finished, as HH:MM
+    __HOUR__ and __MINUTE__  the deadline's hour and minute, as numbers without a
+                  leading zero
+  then save it as ~/Library/LaunchAgents/com.memvara.nightly-watchdog.plist, create the
+  folder __CHECKOUT__/local/nightly, and load it with
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.memvara.nightly-watchdog.plist
+  To remove it:
+    launchctl bootout gui/$(id -u)/com.memvara.nightly-watchdog
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.memvara.nightly-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>__CHECKOUT__/scripts/nightly/watchdog.py</string>
+    <string>--checkout</string>
+    <string>__CHECKOUT__</string>
+    <string>--start</string>
+    <string>__START__</string>
+    <string>--deadline</string>
+    <string>__DEADLINE__</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>__HOUR__</integer>
+    <key>Minute</key>
+    <integer>__MINUTE__</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>__CHECKOUT__/local/nightly/watchdog.log</string>
+  <key>StandardErrorPath</key>
+  <string>__CHECKOUT__/local/nightly/watchdog.log</string>
+</dict>
+</plist>
