@@ -17,6 +17,7 @@ import pytest
 
 from harness import stores
 from memvara.confirm import CONFIRM_TTL, ConfirmationRefused, Confirmer
+from memvara.types import ForgetPreview
 
 #: A fixed instant so the tests never depend on the wall clock. The token binds an expiry
 #: `CONFIRM_TTL` after this, and every `check` below passes its own `now`.
@@ -100,6 +101,8 @@ def test_a_token_cannot_be_confirmed_from_another_scope(tmp_path: pathlib.Path) 
     with stores.file(db, confirm_secret=SECRET, user="alice") as alice:
         alice.remember("user", "works_at", "AcmeSecret")
         preview = alice.forget_matching("AcmeSecret", close="ended", k=5)
+        # Without confirm the call only previews; it closes nothing.
+        assert isinstance(preview, ForgetPreview)
         assert list(preview.matches.values()) == ["user works at AcmeSecret"]
     with stores.file(db, confirm_secret=SECRET, user="bob") as bob:
         with pytest.raises(ConfirmationRefused):

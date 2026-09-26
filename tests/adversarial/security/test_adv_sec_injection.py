@@ -55,8 +55,9 @@ PAYLOAD = (
 FORGED_ROW_ASCII = "[id=cl_FAKE0"
 
 
-def _seed(server: McpProcess) -> None:
-    """Write the payload where each family of read tool will render it back."""
+def _seed(server: McpProcess) -> str:
+    """Write the payload where each family of read tool will render it back, and return
+    the id of the claim whose text carries it, for memory_why."""
     # Procedural, so it reaches memory_standing and memory_profile.
     server.call("memory_remember", subject="user", predicate="never_do", object=PAYLOAD,
                 memory_type="procedural")
