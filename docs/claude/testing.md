@@ -100,7 +100,7 @@ Failures are loud and quick:
 
 `harness.hooks.HookRunner` runs `plugin/hooks/run.py <hook> --host <host>` in a child process, with the stdin payload that host sends.
 
-- **In a test,** use the `hook_runner` fixture: `hook_runner("claude").run("approve", tool_name="mcp__memvara__memory_search")`.
+- **In a test,** use the `hook_runner` fixture: `hook_runner("claude").run("approve", tool_name="mcp__memvara__memory_search")`. It closes every runner it made when the test ends, which stops any daemon or capture child a runner left running.
 - **Giving the hooks a store.** Pass `server_env={"MEMVARA_DB": ..., "MEMVARA_USER": ...}` and the runner writes the host's client config, which is where the hooks look for the store. Without it, the hooks report "not configured". The runner writes the config in the host's own format: JSON with an `mcpServers` object, or for Codex, TOML with an `[mcp_servers.memvara]` table in `~/.codex/config.toml`. `env={"MEMVARA_DB": ...}` names a store another way, through the hook process's own environment, which wins over any client config.
 - **What a run returns:** the exit code, the parsed reply, the elapsed time, and the lines the run added to each log in `~/.memvara/.hooks/`, without their timestamps: `result.log("recall")` gives the new lines of `recall.log`. A hook that runs past its host's time limit raises `HookTimeout`, with what it had printed so far.
 - **`capture` needs stub agent CLIs.** It starts an agent CLI to extract facts, which would reach the network and spend money, so `run("capture")` raises `NotImplementedError` unless the runner was given `stubs=`, such as `FakeClis` (see "Fakes" below), which go first on `PATH`.

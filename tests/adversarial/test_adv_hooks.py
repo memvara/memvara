@@ -7,17 +7,19 @@ import os
 import pathlib
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
-from typing import Callable
+from typing import Callable, Iterator
 
 import pytest
 
 from harness import stores
 from harness.fakes.cli import FakeClis
 from harness.hooks import (HookOutputError, HookRunner, HookTimeout, agent_clis, host_ids,
-                           host_record, parse_reply, socket_peer_pid)
+                           host_record, parse_reply, process_alive, socket_peer_pid)
 from memvara import MemoryType
 
 Make = Callable[..., HookRunner]
@@ -239,8 +241,7 @@ def test_close_stops_the_daemon_a_recall_started(tmp_path: pathlib.Path) -> None
         shutil.rmtree(home, ignore_errors=True)
     assert socket_peer_pid(sock) is None
     assert not sock.exists()
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert not process_alive(pid)
 
 
 def test_close_stops_a_daemon_that_no_socket_path_leads_to(tmp_path: pathlib.Path) -> None:
@@ -258,8 +259,61 @@ def test_close_stops_a_daemon_that_no_socket_path_leads_to(tmp_path: pathlib.Pat
     finally:
         runner.close()
         shutil.rmtree(home, ignore_errors=True)
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert not process_alive(pid)
+
+
+@pytest.fixture
+def stopped_by_teardown() -> Iterator[list[int]]:
+    """Pids that must have stopped once the other fixtures are torn down. Requested before
+    them, this fixture is set up first and so torn down last, after them."""
+    pids: list[int] = []
+    yield pids
+    assert [pid for pid in pids if process_alive(pid)] == []
+
+
+def test_the_hook_runner_fixture_closes_the_runners_it_made(
+        stopped_by_teardown: list[int], hook_runner: Make, tmp_path: pathlib.Path) -> None:
+    """A capture handed to a child and not waited for keeps running after its hook
+    returns, here with a codex that never answers. The fixture closes its runners when
+    the test ends, and closing kills the child and the stub it started."""
+    if sys.platform == "win32":
+        pytest.skip("the fake agent CLIs are POSIX shell scripts")
+    hanging = tmp_path / "hanging"
+    hanging.mkdir()
+    (hanging / "codex").write_text("#!/bin/sh\nexec sleep 120\n")
+    (hanging / "codex").chmod(0o755)
+    stubs = SimpleNamespace(path=lambda rest=None: os.pathsep.join([str(hanging), rest or ""]))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"type": "response_item", "payload": {
+        "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "Please remember that I live in Lisbon."}]}})
+        + "\n")
+    db = tmp_path / "memory.db"
+    stores.file(db).close()
+    runner = hook_runner("codex", stubs=stubs,
+                         env={"MEMVARA_DB": str(db), "MEMVARA_USER": "tester"})
+    result = runner.run("capture", transcript_path=str(transcript), wait_detached=False)
+    assert result.detached_pid is not None and process_alive(result.detached_pid)
+    stopped_by_teardown.append(result.detached_pid)
+
+
+def test_a_process_that_has_ended_but_is_not_reaped_counts_as_ended() -> None:
+    """A killed daemon or capture child is reaped by whatever adopted it, which can be
+    slow, or never happen when the test runs as process 1 in a container. Until then it
+    is a zombie, which still answers signal 0, so the harness reads its state instead."""
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 10
+        while "Z" not in subprocess.run(["ps", "-o", "stat=", "-p", str(child.pid)],
+                                        capture_output=True, text=True).stdout:
+            assert time.monotonic() < deadline, "the child never became a zombie"
+            time.sleep(0.02)
+        assert not process_alive(child.pid)
+        assert process_alive(os.getpid())
+    finally:
+        child.wait()
 
 
 def test_a_patch_reaches_the_hook_process(hook_runner: Make) -> None:

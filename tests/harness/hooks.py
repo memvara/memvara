@@ -299,11 +299,13 @@ def socket_peer_pid(path: pathlib.Path) -> int | None:
         probe.close()
 
 
-def _alive(pid: int) -> bool:
+def process_alive(pid: int) -> bool:
     """Whether process `pid` is still running. POSIX only.
 
-    A process that has ended but not yet been reaped, a zombie, counts as ended: a
-    capture child's parent has exited, and on Linux nothing may reap the child promptly.
+    A process that has ended but not yet been reaped, a zombie, counts as ended. It still
+    answers signal 0, and whatever adopted it may reap it late, or never, as when the
+    tests run as process 1 in a container. So the process's state is read: from /proc on
+    Linux, and from `ps` elsewhere.
     """
     if sys.platform == "win32":
         # os.kill with signal 0 terminates the process on Windows rather than probing it.
@@ -320,7 +322,12 @@ def _alive(pid: int) -> bool:
         except OSError:
             return False
         return stat.rsplit(b")", 1)[-1].split()[:1] != [b"Z"]
-    return True
+    try:
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,
+                               text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return bool(state) and not state.startswith("Z")
 
 
 def _runs_the_daemon(pid: int) -> bool:
@@ -345,7 +352,7 @@ def _runs_the_daemon(pid: int) -> bool:
 def _wait_for_exit(pid: int, timeout: float) -> bool:
     """Wait until process `pid` has ended. False when it still runs after `timeout`."""
     deadline = time.monotonic() + timeout
-    while _alive(pid):
+    while process_alive(pid):
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.02)

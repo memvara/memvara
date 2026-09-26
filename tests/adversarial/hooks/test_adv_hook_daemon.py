@@ -34,8 +34,20 @@ TRACE = {"PYTHONPROFILEIMPORTTIME": "1"}
 
 
 def imports_memvara(stderr: str) -> bool:
-    """Whether a hook's import trace shows it importing the memvara package."""
-    return any(line.rstrip().endswith("| memvara") for line in stderr.splitlines())
+    """Whether a hook's import trace shows it importing the memvara package, at any
+    depth: the trace indents a module imported from inside another one."""
+    return any(line.startswith("import time:") and line.rsplit("|", 1)[-1].strip() == "memvara"
+               for line in stderr.splitlines())
+
+
+def test_the_import_trace_check_sees_the_package_imported_at_any_depth() -> None:
+    """The trace indents a module imported from inside another one. If the hooks ever
+    imported memvara that way, a check that saw only top-level imports would pass a hook
+    that read the store itself."""
+    trace = "import time: self [us] | cumulative | imported package\n{}\n"
+    assert imports_memvara(trace.format("import time:       168 |     140683 | memvara"))
+    assert imports_memvara(trace.format("import time:       168 |     140683 |   memvara"))
+    assert not imports_memvara(trace.format("import time:        15 |       6418 | memvara_x"))
 
 
 def test_one_daemon_on_a_private_socket_answers_the_recalls_after_the_first(
