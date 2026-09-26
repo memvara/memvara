@@ -87,6 +87,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     alone, a read stage that fails must serve the read a store with no model serves, and
     each operation must make the number of model calls `docs/INTERNALS.md` states.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
+- **`Store.unended_claims`, `store.unended_predicate()` and `Claim.is_unended()`.**
+  `forget()` closes every value in a slot that the store believes and that has not ended
+  (#282), and it now asks the store for those values instead of reading every value the
+  slot has ever held and choosing in Python. `unended_predicate()` is the SQL for that
+  population, with the clock behind each marker, built from the same clauses as
+  `state_predicate()`. `Store.unended_claims` runs it inside the slot lookup, in
+  `slot_history`'s order, and `Claim.is_unended()` is the same test in Python, which
+  `Claim.is_live()` now calls after its own valid-time check. On an in-memory store with
+  one slot of 501 values, the lookup took 102 µs where reading the slot whole and
+  filtering took 7.3 ms (best of 200 runs on a laptop). The method is optional and listed
+  in `OMITTABLE`: a store without it keeps working and closes the same values, reading the
+  slot whole. `docs/UPGRADING.md` says what the new member does to `isinstance(x, Store)`.
 
 ### Fixed
 

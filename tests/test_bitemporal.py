@@ -1340,6 +1340,32 @@ def test_is_live_mirrors_the_store_clause_on_both_axes(mem, four):
         assert by_hand == by_store, kw
 
 
+def test_is_unended_mirrors_the_store_clause_on_both_axes(mem, four):
+    """`Claim.is_unended` and `Store.unended_claims` must agree row for row, as `is_live`
+    and the live clause do. `forget()` closes what the store selects, and falls back to
+    the Python test on a store that cannot run the SQL one, so two definitions of
+    "believed and not ended" would close different values on two kinds of store. A value
+    stored to begin later is added to the four rows, because it is the one row the two
+    tests exist to include and `is_live` excludes."""
+    put(mem, "Madrid", valid_from=datetime(2100, 1, 1, tzinfo=TZ), recorded_at=AUG)
+    everything = mem.history("user", "lives_in")
+    key = everything[0].fact_key
+    for kw in ({}, {"valid_at": JUNE}, {"known_at": JULY_MID},
+               {"valid_at": JUNE, "known_at": AUG}, {"as_of": JUNE}):
+        valid_at, known_at = time_axes(kw.get("as_of"), kw.get("valid_at"),
+                                       kw.get("known_at"))
+        by_hand = {c.object for c in everything if c.is_unended(**kw)}
+        by_store = {c.object for c in mem.store.unended_claims(
+            "acme", key, valid_at=valid_at, known_at=known_at)}
+        assert by_hand == by_store, kw
+    # …and the answers differ by instant, or the agreement above proves nothing. The
+    # last instant was `as_of=JUNE`, when only Berlin was believed and not over.
+    assert by_hand == {"Berlin"}
+    assert {c.object for c in everything if c.is_unended()} == {"Lisbon", "Madrid"}
+    assert {c.object for c in everything if c.is_unended(valid_at=JUNE)} == {
+        "Rome", "Lisbon", "Madrid"}, "a value that has not begun by then is included"
+
+
 def test_a_bare_is_live_reads_one_clock_for_both_axes():
     """Two clock reads would put the axes microseconds apart on the commonest call
     there is. Nothing could observe the difference reliably, which is exactly what makes

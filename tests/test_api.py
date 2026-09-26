@@ -2730,6 +2730,51 @@ def test_ending_a_slot_ends_a_scheduled_value_at_its_own_start(mem):
     assert mem.get_all(valid_at=later + timedelta(days=1)) == []
 
 
+def test_forget_asks_the_store_for_the_open_values_instead_of_reading_the_whole_slot(
+        mem, monkeypatch):
+    """A slot restated hundreds of times holds a few values that have not ended and
+    many that have. `forget()` read every row the slot had ever held with `slot_history`
+    and picked the open ones in Python, so each call paid for the whole history. The
+    store selects them now, with `unended_predicate` in its own query."""
+    now = utcnow()
+    for days, city in ((90, "Rome"), (60, "Oslo"), (30, "Berlin")):
+        mem.remember("user", "lives_in", city, valid_from=now - timedelta(days=days))
+    mem.remember("user", "lives_in", "Paris", valid_from=now + timedelta(days=30))
+    monkeypatch.setattr(mem.store, "slot_history",
+                        lambda *a, **kw: pytest.fail("forget() read the whole slot"))
+
+    forgotten = mem.forget("user", "lives_in")
+
+    assert [c.object for c in forgotten] == ["Berlin", "Paris"], "in recorded order"
+
+
+def test_forget_on_a_store_without_unended_claims_reads_the_clock_once(monkeypatch):
+    """A store written before `unended_claims` still has every value `forget()` closes
+    picked for it: the slot's history, filtered with `Claim.is_unended`. That filter also
+    leaves out an expired claim, and it read the wall clock again for every claim it
+    tested. One `forget()` is one instant, so it now reads the clock once and tests every
+    claim at that instant."""
+    class OldStore(SQLiteStore):
+        unended_claims = None
+
+    mem = Memvara(store=OldStore(":memory:"), embedder=HashingEmbedder(dim=64),
+                  llm=NullLLM(), user="alice")
+    now = utcnow()
+    mem.remember("user", "lives_in", "Rome", valid_from=now - timedelta(days=60),
+                 valid_to=now - timedelta(days=30))
+    mem.remember("user", "lives_in", "Berlin", valid_from=now - timedelta(days=10))
+    mem.remember("user", "lives_in", "Paris", valid_from=now + timedelta(days=30))
+    reads = []
+    monkeypatch.setattr(core_module, "utcnow",
+                        lambda: reads.append(1) or utcnow())
+
+    forgotten = mem.forget("user", "lives_in")
+
+    assert [c.object for c in forgotten] == ["Berlin", "Paris"]
+    assert len(reads) == 1, f"forget() read the clock {len(reads)} times"
+    mem.close()
+
+
 @pytest.mark.parametrize("key, value", [
     ("salience_base", 5.0),
     ("last_observed_at", 4102444800.0),

@@ -166,6 +166,29 @@ def test_competing_claims_respects_the_belief_clock(store):
     assert store.competing_claims("acme", a.fact_key, valid_at=T2, known_at=T2) == []
 
 
+def test_unended_claims_returns_the_values_in_force_and_those_stored_to_begin_later(store):
+    """What `Memvara.forget` closes, selected by the store: every claim in the slot that
+    is believed at `known_at` and has not ended by `valid_at`. A value stored to begin
+    later is among them. An ended, a retired and an expired value are not, and neither is
+    another slot's. They come back oldest first, as `slot_history` returns them."""
+    live = put(store, object="Berlin")
+    later = put(store, object="Paris", valid_from=T2, recorded_at=T1)
+    ended = put(store, object="Porto")
+    store.set_valid_to(ended.id, TMID)
+    retired = put(store, object="Rome")
+    store.invalidate(retired.id, TMID, live.id)
+    put(store, object="Oslo", expires_at=TMID)
+    put(store, predicate="works_at", object="Acme")
+
+    assert [c.id for c in store.unended_claims(
+        "acme", live.fact_key, valid_at=T1, known_at=T1)] == [live.id, later.id]
+    # Each clock on its own. In the world at T0 the ended value had not ended yet, so it
+    # counts. As believed at TMID the retired value was already retired, and `later` had
+    # not been recorded, so neither counts.
+    assert {c.id for c in store.unended_claims(
+        "acme", live.fact_key, valid_at=T0, known_at=TMID)} == {live.id, ended.id}
+
+
 def test_count_competing_answers_exactly_what_competing_claims_would(store):
     """One number, one query, and it must not become a second definition of "live".
 
@@ -3506,8 +3529,9 @@ def test_the_clause_builders_match_the_signature_the_protocol_declares(name):
 
 
 @pytest.mark.parametrize("name", [
-    "competing_claims", "adjacent", "candidate_ids", "lexical_search", "vector_search",
-    "episode_candidate_ids", "lexical_search_episodes", "vector_search_episodes",
+    "competing_claims", "unended_claims", "adjacent", "candidate_ids", "lexical_search",
+    "vector_search", "episode_candidate_ids", "lexical_search_episodes",
+    "vector_search_episodes",
 ])
 def test_every_time_travelling_protocol_method_takes_both_axes_and_no_as_of(name):
     """`as_of` survives on the public facade and nowhere below it. A store method that

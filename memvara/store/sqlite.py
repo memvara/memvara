@@ -91,7 +91,7 @@ from ..types import (
     utcnow,
 )
 from .base import (BELIEVED, resolve_states, state_predicate, stored_state_predicate,
-                   unexpired_predicate)
+                   unended_predicate, unexpired_predicate)
 from .encryption import (EncryptionError, EncryptionWarning, VectorSealer, file_kind,
                          require_sqlcipher, resolve_key)
 
@@ -2899,20 +2899,32 @@ class SQLiteStore:
                       alias: str = "") -> tuple[str, list]:
         """SQL and binds for "in one of `states` at these two instants".
 
-        The general filter every read here routes through, and the only place in this
-        repository that binds the state predicate's markers. `_live_clause` below is this
+        The general filter every read here routes through. `_live_clause` below is this
         with the two-valued alias applied; `base.state_predicate` is the SQL, which is
-        deliberately not written out again here.
+        deliberately not written out again here, and `_bind_axes` binds its markers.
 
         The binding is the half with a silent failure mode — a belief instant bound onto
         a world column answers identically to a correct one on every `as_of` call, since
         those pass the two axes equal. So it is no longer remembered: `state_predicate`
-        returns the axis behind each marker, and this reads that list. Transposing the
-        pair is not a mistake this method can express any more, whatever subset of the
+        returns the axis behind each marker, and `_bind_axes` reads that list. Transposing
+        the pair is not a mistake this method can express any more, whatever subset of the
         states is asked for and however many markers that subset happens to need.
         """
+        return self._bind_axes(state_predicate("?", states=states, alias=alias),
+                               valid_at, known_at, alias)
+
+    def _bind_axes(self, predicate: tuple[str, tuple[str, ...]],
+                   valid_at: datetime | None, known_at: datetime | None,
+                   alias: str = "") -> tuple[str, list]:
+        """Bind a predicate's markers from its axis list, and add the expiry clause.
+
+        `predicate` is the pair `state_predicate` and `unended_predicate` return: the SQL
+        with a `?` at every marker, and the clock behind each marker in order. This is the
+        one place in this repository those markers are bound, for `_state_clause` and for
+        `unended_claims` alike, so both read the axis list rather than knowing it.
+        """
         v, k = _clock(valid_at, known_at)
-        clause, axes = state_predicate("?", states=states, alias=alias)
+        clause, axes = predicate
         params = [k if axis == "known" else v for axis in axes]
         if not self.hide_expired:
             return clause, params
@@ -4223,6 +4235,25 @@ class SQLiteStore:
                 "SELECT * FROM claims WHERE tenant=? AND fact_key=? "
                 "ORDER BY recorded_at ASC, id ASC",
                 (tenant, fact_key),
+            ).fetchall()
+        return [self._row_to_claim(r) for r in rows]
+
+    def unended_claims(self, tenant: str, fact_key: str, *,
+                       valid_at: datetime | None = None,
+                       known_at: datetime | None = None) -> list[Claim]:
+        """Claims in one slot believed at `known_at` and not ended by `valid_at`.
+
+        `slot_history`'s lookup and order, narrowed by `base.unended_predicate` in the
+        same query, so the rows of a slot that have ended are never read. Bound by
+        `_bind_axes`, which also leaves an expired claim out, as `competing_claims` does.
+        See `Store.unended_claims`.
+        """
+        unended, params = self._bind_axes(unended_predicate("?"), valid_at, known_at)
+        with self._read() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM claims WHERE tenant=? AND fact_key=? AND {unended} "
+                "ORDER BY recorded_at ASC, id ASC",
+                [tenant, fact_key] + params,
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
 

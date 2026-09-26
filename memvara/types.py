@@ -1090,12 +1090,38 @@ class Claim:
         now = utcnow()
         v = valid_at if valid_at is not None else now
         k = known_at if known_at is not None else now
+        if self.valid_from > v:
+            return False                                  # not true yet
+        # The other three clauses are `is_unended`'s, as `base.unended_predicate` is the
+        # live clause without its valid-time floor.
+        return self.is_unended(valid_at=v, known_at=k)
+
+    def is_unended(self, as_of: datetime | None = None, *,
+                   valid_at: datetime | None = None,
+                   known_at: datetime | None = None) -> bool:
+        """Was this claim believed at `known_at`, and not ended by `valid_at`?
+
+        `is_live` without the valid-time floor, and the Python mirror of
+        `store.base.unended_predicate`: the two must agree clause for clause. It is true
+        of a claim in force, and of one stored to begin later, which is recorded and
+        believed but not true yet. It is false of a claim that has ended or been retired.
+        Those are the claims `Memvara.forget` closes. The axes read as `is_live`'s do.
+
+        >>> june = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        >>> moving = Claim(subject="user", predicate="lives_in", object="Paris",
+        ...                valid_from=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        ...                recorded_at=june)
+        >>> moving.is_live(as_of=june), moving.is_unended(as_of=june)
+        (False, True)
+        """
+        valid_at, known_at = time_axes(as_of, valid_at, known_at)
+        now = utcnow()
+        v = valid_at if valid_at is not None else now
+        k = known_at if known_at is not None else now
         if self.recorded_at > k:
             return False                                  # we didn't know it yet
         if self.invalidated_at is not None and self.invalidated_at <= k:
             return False                                  # we'd already retracted it
-        if self.valid_from > v:
-            return False                                  # not true yet
         if self.valid_to is not None and self.valid_to <= v:
             return False                                  # no longer true
         return True

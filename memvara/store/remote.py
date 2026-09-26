@@ -380,6 +380,14 @@ class RemoteStore:
                 "caller that already has (subject, predicate) rather than fact_key "
                 "should call GET /v1/history directly instead of going through Store."))
 
+    def unended_claims(self, tenant: str, fact_key: str, *,
+                       valid_at: datetime | None = None,
+                       known_at: datetime | None = None) -> list[Claim]:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="unended_claims",
+            why="See competing_claims: the same missing lookup by fact_key. POST "
+                "/v1/forget runs the deployment's own selection of what to close."))
+
     def adjacent(self, tenant: str, keys: Sequence[str], *,
                  outgoing: bool = True, incoming: bool = True,
                  predicates: Sequence[str] | None = None,

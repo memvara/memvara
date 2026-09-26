@@ -13,7 +13,7 @@ importable from the foundation modules:
 - `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`
 - `memvara/store/` — `Store` and `SQLStore` protocols, `SQLiteStore`, `STATES`,
   `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,
-  `live_predicate()`, `unexpired_predicate()`
+  `live_predicate()`, `unended_predicate()`, `unexpired_predicate()`
 - `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`,
   `encode_queries()`, which embeds a search query in the form its model expects, and
   `calibration_of()`, the cosine thresholds measured for each embedding space
@@ -1503,6 +1503,7 @@ a wrong answer with no error, which is the failure the split exists to remove.
 
 ```python
 competing_claims(tenant, fact_key, *, valid_at=None, known_at=None)
+unended_claims(tenant, fact_key, *, valid_at=None, known_at=None)
 adjacent(tenant, keys, *, outgoing=True, incoming=True, predicates=None,
          valid_at=None, known_at=None, scopes=None, limit=1000)
 candidate_ids(scopes, *, valid_at=None, known_at=None, states=None,
@@ -1581,6 +1582,7 @@ resolve_states(states=None, include_invalidated=None, *, default=("live",))
 state_predicate(at="?", *, states=None, alias="")   -> (sql, axes)
 stored_state_predicate(states=None, *, prefix="")   -> sql
 live_predicate(at="?", *, include_invalidated=False, alias="") -> sql
+unended_predicate(at="?", *, alias="")              -> (sql, axes)
 ```
 
 `resolve_states` is **the one place either spelling is interpreted**, so no surface can
@@ -1596,8 +1598,9 @@ failure at every existing call site.
 apart. It is `("live",)` on the read path and `("live", "ended")` on `iter_claims`.
 
 `_state_clause` is the parameterised form of `state_predicate` and the method every read
-filter in a SQL backend routes through. **It is the binding site** — the only place in
-this repository that binds the state predicate's markers. `state_predicate` returns the
+filter in a SQL backend routes through. Its markers are bound in `SQLiteStore._bind_axes`,
+**the binding site** — the only place in this repository that binds a predicate's
+markers, for `_state_clause` and for `unended_claims` alike. `state_predicate` returns the
 SQL *and* an axis list naming the clock behind each marker in order (`("known", "known",
 "valid", "valid")` for the live-only case), so binding is a comprehension over that list
 rather than a remembered order. That is what makes the one silent error unwritable: a
@@ -1640,6 +1643,18 @@ which readmits that row and leaves `valid_at` with nothing to constrain. That is
 and deliberately, the semantics `include_invalidated=True` has always had, and
 `tests/test_bitemporal.py::test_asking_for_all_three_states_is_the_audit_view_valid_at_cannot_narrow`
 pins it so it cannot drift into a surprise.
+
+One caller needs that row together with the live ones: `forget()`, which closes every
+value in a slot that the store believes and that has not ended, a value stored to begin
+later included. That population has its own predicate, `unended_predicate`: the live
+clause without its valid-time floor, built from the same three clause helpers as
+`state_predicate`, with the axes `("known", "known", "valid")`. `Store.unended_claims`
+runs it inside the slot lookup, ordered as `slot_history` is, and `Claim.is_unended` is
+the same test in Python, which `is_live` now calls after its own valid-time floor.
+`unended_claims` is optional: without it, `forget()` reads `slot_history` and filters
+with `Claim.is_unended`.
+`tests/test_bitemporal.py::test_is_unended_mirrors_the_store_clause_on_both_axes` holds
+the SQL and the Python test to the same answer.
 
 ### The clauses themselves
 

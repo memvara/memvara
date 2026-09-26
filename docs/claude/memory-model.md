@@ -24,7 +24,8 @@ landing beside them unnoticed.
 - Primary: `memvara/core.py` — `Memvara`, the whole public API, plus `ScopedMemvara` for a
   view narrowed to one tenant, user, agent or session.
 - Storage: `memvara/store/base.py` — the `Store` protocol, `resolve_states()`,
-  `state_predicate()`, `stored_state_predicate()`, `live_predicate()`.
+  `state_predicate()`, `stored_state_predicate()`, `live_predicate()`, and
+  `unended_predicate()`, which selects what `forget()` closes.
 - Storage backends: `memvara/store/sqlite.py` — `SQLiteStore`, the default;
   `memvara/store/remote.py` — `RemoteStore`, the same protocol against a hosted deployment.
 - Encryption at rest for `SQLiteStore`: `memvara/store/encryption.py` — `resolve_key()`,

@@ -42,6 +42,18 @@ later, in recorded order.
 server started with `MEMVARA_MODE=cloud` therefore describes `memory_forget` and
 `memory_end` as closing every current value and does not promise the rest.
 
+**If you implement your own `Store`,** it gains an optional member, `unended_claims`.
+`forget()` asks the store for the values to close with it, so a slot that has held many
+values is not read whole. A backend without the method keeps working and closes the same
+values: `forget()` reads the slot with `slot_history` and filters it with
+`Claim.is_unended`, which costs a read of every value the slot has held. It is listed in
+`store.base.OMITTABLE`. As with `connectivity` below, `isinstance(your_store, Store)`
+turns `False` for a backend that implemented every other member, because `isinstance` on
+a Protocol asks for all of them; check the capability with `getattr` instead. To
+implement it, select with `store.unended_predicate()`, which returns the SQL and the clock
+behind each marker, and order by `recorded_at` and then `id`, as `slot_history` does.
+`SQLiteStore.unended_claims` is the reference.
+
 ### How to find it in your code
 
 Search for `forget(` and for `memory_forget` and `memory_end` calls that pass a
