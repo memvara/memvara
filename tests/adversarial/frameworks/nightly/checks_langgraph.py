@@ -94,16 +94,19 @@ def check_a_replaced_field_ends_and_a_dropped_field_is_retired(ctx: Context) -> 
     """A put that changes one field ends that field's old value: its world clock closes,
     its belief clock stays open, and the row stays. A field the new value leaves out is
     retired: its belief clock closes and its world clock stays open. Each end moves
-    exactly one clock."""
+    exactly one clock. The ended value points at the value that replaced it, and the
+    retired one points at nothing, because nothing replaced it."""
     store = _store(ctx)
     store.put(NS, "profile", {"city": "Berlin", "food": "pizza", "pet": "cat"})
     store.put(NS, "profile", {"city": "Lisbon", "food": "pizza"})
     city = store.history(NS, "profile", "city")
     assert [(c.object, c.state) for c in city] == [("Berlin", "ended"), ("Lisbon", "live")]
     assert city[0].valid_to is not None and city[0].invalidated_at is None
+    assert city[0].invalidated_by == city[1].id, city
     pet = store.history(NS, "profile", "pet")
     assert [(c.object, c.state) for c in pet] == [("cat", "retired")]
     assert pet[0].invalidated_at is not None and pet[0].valid_to is None
+    assert pet[0].invalidated_by is None, pet
     assert store.get(NS, "profile").value == {"city": "Lisbon", "food": "pizza"}
 
 

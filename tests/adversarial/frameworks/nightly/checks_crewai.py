@@ -9,20 +9,23 @@ to list the checks and has no crewai installed.
 CrewAI's `Memory` builds its analysis model the first time it saves anything, even when
 every field of the memory is given and no analysis is needed, and its default model needs
 an OpenAI key. The probe runs with no key, so each check that uses `Memory` hands it a
-model that fails the check if anything calls it. That also proves the adapter's own
-writes cost no model call.
+model that records every call and then raises. CrewAI catches that error and carries on
+without the model, so the raise alone would not fail the check. Instead, each check that
+uses `Memory` fails afterwards if the model was called at all. That also proves the
+adapter's own writes cost no model call.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import inspect
 import json
 import re
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 
 from memvara.compat import NOTE_PREDICATE
 from memvara.integrations import crewai as adapter
@@ -40,12 +43,16 @@ def _ca(module: str) -> Any:
     return importlib.import_module(f"crewai{module}")
 
 
-def _no_model() -> Any:
-    """A CrewAI model that fails the check if anything calls it."""
+def _no_model(calls: list[str]) -> Any:
+    """A CrewAI model that appends what it was asked to `calls`, then raises."""
 
     class NoModel(_ca(".llms.base_llm").BaseLLM):  # type: ignore[misc]
-        def call(self, *args: Any, **kwargs: Any) -> Any:
+        def call(self, messages: Any, *args: Any, **kwargs: Any) -> Any:
+            calls.append(str(messages)[-300:])
             raise AssertionError("CrewAI called its model")
+
+        async def acall(self, messages: Any, *args: Any, **kwargs: Any) -> Any:
+            return self.call(messages)
 
     return NoModel(model="no-model")
 
@@ -67,17 +74,24 @@ def _consolidator(asked: list[str]) -> Any:
     return Consolidator(model="scripted")
 
 
-def _memory(storage: Any, llm: Any = None) -> Any:
-    """The documented wiring, `Memory(storage=storage, embedder=storage.embedder)`, with a
-    model that must not be called unless the check hands it another."""
-    return _ca(".memory").Memory(storage=storage, embedder=storage.embedder,
-                                 llm=llm if llm is not None else _no_model())
+@contextlib.contextmanager
+def _memory(storage: Any, llm: Any = None) -> Iterator[Any]:
+    """CrewAI's `Memory` with the documented wiring,
+    `Memory(storage=storage, embedder=storage.embedder)`, closed when the block ends.
 
-
-def _close(memory: Any) -> None:
-    close = getattr(memory, "close", None)
-    if close is not None:
-        close()
+    Unless the check hands it another model, it gets one that must not be called, and the
+    block fails when it ends if anything called that model."""
+    calls: list[str] = []
+    memory = _ca(".memory").Memory(storage=storage, embedder=storage.embedder,
+                                   llm=llm if llm is not None else _no_model(calls))
+    try:
+        yield memory
+    finally:
+        close = getattr(memory, "close", None)
+        if close is not None:
+            close()
+    assert calls == [], (f"CrewAI called its model, which no check here allows. Calls: "
+                         f"{len(calls)}. The last one ended with: {calls[-1]}")
 
 
 def _record(content: str, **fields: Any) -> Any:
@@ -107,14 +121,11 @@ def check_the_storage_satisfies_the_storagebackend_protocol(ctx: Context) -> Non
 def check_crewais_memory_remembers_and_recalls_through_the_storage(ctx: Context) -> None:
     """The documented wiring saves a memory and recalls it, with no model call."""
     storage = adapter.MemvaraStorage(ctx.memvara(), user="alice")
-    memory = _memory(storage)
-    try:
+    with _memory(storage) as memory:
         saved = memory.remember("Alice lives in Berlin", **FIELDS)
         memory.remember("Alice drinks green tea", scope="/crew/alice",
                         categories=["taste"], importance=0.4)
         matches = memory.recall("where does Alice live", depth="shallow")
-    finally:
-        _close(memory)
     assert saved is not None and saved.content == "Alice lives in Berlin"
     assert matches and matches[0].record.content == "Alice lives in Berlin", matches
 
@@ -174,14 +185,13 @@ def check_update_ends_the_old_text_and_delete_retires_it(ctx: Context) -> None:
     """CrewAI's Memory.update() supersedes the record: the old text is ended, with its
     world clock closed and its belief clock open, and its row stays. Memory.forget()
     retires the record: its belief clock closes and its world clock stays open. Each end
-    moves exactly one clock."""
+    moves exactly one clock, and the ended text points at the text that replaced it."""
     mem = ctx.memvara()
     storage = adapter.MemvaraStorage(mem, user="alice", on_delete="retire")
     record = _record("Alice lives in Berlin")
     storage.save([record])
     subject = f"{adapter.SUBJECT_PREFIX}{record.id}"
-    memory = _memory(storage)
-    try:
+    with _memory(storage) as memory:
         memory.update(record.id, content="Alice lives in Lisbon")
         current = storage.get_record(record.id)
         assert current is not None and current.content == "Alice lives in Lisbon"
@@ -189,9 +199,10 @@ def check_update_ends_the_old_text_and_delete_retires_it(ctx: Context) -> None:
         assert [(c.object, c.state) for c in versions] == [
             ("Alice lives in Berlin", "ended"), ("Alice lives in Lisbon", "live")]
         assert versions[0].valid_to is not None and versions[0].invalidated_at is None
+        # The adapter's docstring: the old value is ended "with `invalidated_by`
+        # pointing at its replacement".
+        assert versions[0].invalidated_by == versions[1].id, versions
         assert memory.forget(record_ids=[record.id]) == 1
-    finally:
-        _close(memory)
     gone = mem.history(subject, NOTE_PREDICATE)[-1]
     assert gone.state == "retired", gone
     assert gone.invalidated_at is not None and gone.valid_to is None
@@ -204,14 +215,10 @@ def check_forget_warns_once_that_it_retired(ctx: Context) -> None:
     storage = adapter.MemvaraStorage(ctx.memvara(), user="alice")
     records = [_record("Alice lives in Berlin"), _record("Alice drinks tea")]
     storage.save(records)
-    memory = _memory(storage)
-    try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            for record in records:
-                memory.forget(record_ids=[record.id])
-    finally:
-        _close(memory)
+    with _memory(storage) as memory, warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for record in records:
+            memory.forget(record_ids=[record.id])
     ours = [w for w in caught if w.category is adapter.CrewAIDeletionWarning]
     assert len(ours) == 1 and "on_delete='erase'" in str(ours[0].message), ours
 
@@ -223,11 +230,8 @@ def check_reset_leaves_nothing_behind(ctx: Context) -> None:
     storage = adapter.MemvaraStorage(mem, user="alice")
     storage.save([_record("Alice lives in Berlin"), _record("Alice drinks tea")])
     ids = [claim.id for claim in mem.get_all()]
-    memory = _memory(storage)
-    try:
+    with _memory(storage) as memory:
         memory.reset()
-    finally:
-        _close(memory)
     assert storage.count() == 0 and mem.get_all() == []
     for claim_id in ids:
         proof = mem.prove_erased(claim_id)
@@ -250,11 +254,8 @@ def check_listing_and_scope_info_come_back_as_crewais_types(ctx: Context) -> Non
     assert storage.list_categories() == {"profile": 1, "taste": 1}
     info = storage.get_scope_info("/crew")
     assert isinstance(info, types.ScopeInfo) and info.record_count == 2
-    memory = _memory(storage)
-    try:
+    with _memory(storage) as memory:
         assert memory.info("/crew").record_count == 2
-    finally:
-        _close(memory)
 
 
 def check_a_metadata_filter_is_refused(ctx: Context) -> None:
@@ -309,13 +310,10 @@ def check_a_repeated_memory_reaches_crewais_consolidation(ctx: Context) -> None:
     record."""
     storage = adapter.MemvaraStorage(ctx.memvara(), user="alice", on_delete="retire")
     asked: list[str] = []
-    memory = _memory(storage, llm=_consolidator(asked))
-    try:
+    with _memory(storage, llm=_consolidator(asked)) as memory:
         memory.remember("Alice lives in Berlin", **FIELDS)
         memory.remember("Alice lives in Berlin", **FIELDS)
         live = [r.content for r in memory.list_records()]
-    finally:
-        _close(memory)
     top = storage.search(storage.embedder(["Alice lives in Berlin"])[0])[0][1]
     assert len(asked) == 1 and live == ["Alice lives in Berlin"], (
         f"CrewAI asked its model to consolidate {len(asked)} times: the stored copy "

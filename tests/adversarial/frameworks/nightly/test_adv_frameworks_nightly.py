@@ -81,7 +81,9 @@ PINNED: dict[tuple[str, str, str], tuple[pytest.MarkDecorator, Symptom]] = {
         Symptom("AttributeError", "object has no attribute 'write_lock'")),
     ("crewai", "latest", "a_repeated_memory_reaches_crewais_consolidation"): (
         known_bugs.xfail("B85"),
-        Symptom("AssertionError", "CrewAI asked its model to consolidate 0 times")),
+        Symptom("AssertionError", "CrewAI asked its model to consolidate 0 times: the "
+                "stored copy scored 0.50 against CrewAI's threshold of 0.85, and 2 live "
+                "copies remain", whole=True)),
     # mem0 2.x's add() requires one of the entity ids and its delete_all() takes them,
     # and its search() and get_all() refuse them with ValueError, not TypeError.
     ("mem0", "floor", "add_and_delete_all_take_the_entity_ids_mem0_takes"): (
@@ -206,6 +208,20 @@ def test_every_framework_has_its_checks() -> None:
         assert probe.checks(module), f"{name} has no checks"
 
 
+def test_every_pin_names_a_check_its_framework_defines() -> None:
+    """Every entry in PINNED, ONE_CLOCK and FRAMED names a check that its framework's
+    checks file defines, and every pin in PINNED is one of the two pins. An entry for a
+    check that was renamed or removed would apply to nothing: the known bug's expected
+    failure would quietly stop being checked, and nothing else would say so."""
+    defined = {(name, check.removeprefix("check_")) for name, module in CHECKS.items()
+               for check, _ in probe.checks(module)}
+    stale: list[tuple[str, ...]] = [
+        key for key in PINNED
+        if key[1] not in environments.PINS or (key[0], key[2]) not in defined]
+    stale += [pair for pair in (*ONE_CLOCK, *FRAMED) if pair not in defined]
+    assert stale == [], stale
+
+
 @pytest.mark.parametrize("name, pin", ENVIRONMENTS)
 def test_the_environment_holds_the_release_it_pins(
         frameworks: environments.Session, name: str, pin: str) -> None:
@@ -239,7 +255,8 @@ def test_nothing_in_the_environment_reached_the_network(
         frameworks: environments.Session, name: str, pin: str) -> None:
     """No check may reach the network, and neither may anything else in the probe's
     process, including a framework's background thread or exit handler. The probe must
-    have finished, or it did not see every phase of the run.
+    have finished, or it did not see every phase of the run, and it must have exited
+    cleanly, or the interpreter's shutdown, where telemetry often sends, did not finish.
 
     The probe runs with no credential in its environment, so this is invariant 5 of
     docs/INTERNALS.md, "the library must run with no API key and no network", for every
@@ -247,6 +264,8 @@ def test_nothing_in_the_environment_reached_the_network(
     probed = frameworks.probe(name, pin)
     assert probed.run.finished, (f"the probe stopped early, so it did not see every "
                                  f"phase:\n{probed.output}")
+    assert probed.exit_code == 0, (f"the probe exited with status {probed.exit_code}, so "
+                                   f"its shutdown did not finish cleanly:\n{probed.output}")
     accesses = [f"{record['access']} during {record['phase']}, in thread "
                 f"{record['thread']}:\n{''.join(record['stack'][-4:])}"
                 for record in probed.run.network]

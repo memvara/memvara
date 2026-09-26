@@ -145,7 +145,8 @@ def check_the_transcript_holds_only_its_own_session(ctx: Context) -> None:
 
 def check_clear_refuses_and_each_opt_in_does_what_it_names(ctx: Context) -> None:
     """clear() refuses by default, through langchain-core's aclear() too, and names both
-    options; on_clear="ignore" keeps every turn; on_clear="purge" erases the session."""
+    options; on_clear="ignore" keeps every turn; on_clear="purge" erases the session:
+    its turns, the claims taken from them, and their embeddings."""
     m = _lc("messages")
     refusing = _history(ctx)
     refusing.add_messages([m.HumanMessage(content="I live in Berlin")])
@@ -162,9 +163,12 @@ def check_clear_refuses_and_each_opt_in_does_what_it_names(ctx: Context) -> None
     assert [x.content for x in ignoring.messages] == ["I live in Berlin"]
     purging = _history(ctx, on_clear="purge")
     purging.add_messages([m.HumanMessage(content="I live in Berlin")])
+    before = purging.memory.stats()
+    assert before["episodes"] and before["claims"] and before["embeddings"], before
     purging.clear()
     assert purging.messages == []
-    assert purging.memory.stats()["episodes"] == 0
+    after = purging.memory.stats()
+    assert (after["episodes"], after["claims"], after["embeddings"]) == (0, 0, 0), after
 
 
 def check_runnable_with_message_history_reads_and_writes_the_history(ctx: Context) -> None:
