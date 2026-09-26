@@ -51,6 +51,12 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B20", 296, "two tool descriptions state a default that the schema does not "
              "declare"),
     KnownBug("B21", 297, "the command-line help does not name --version"),
+
+    KnownBug("B22", 299, "the MCP server exits with a traceback on a store from a newer "
+             "version"),
+    KnownBug("B23", 300, "a store refused for its embedder has already been migrated"),
+    KnownBug("B24", 301, "a store refused as too new leaves its SQLite connection open"),
+    KnownBug("B47", 327, "search() does not return its results in order of score"),
 )}
 
 
