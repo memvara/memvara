@@ -124,18 +124,17 @@ def fate(was: Row, now: Row | None, *, erased: bool = False) -> str:
     """What happened to one claim between two readings of its row.
 
     - `unchanged`: the row is the same.
-    - `ended`: the world clock closed, or an end it already had moved earlier. Either way
-      the fact stopped being true, and no sooner than the store said before.
-    - `extended`: an end it already had moved later.
-    - `reopened`: an end it already had was cleared.
+    - `ended`: the world clock closed, or an end the claim already had moved earlier.
+    - `extended`: an end the claim already had moved later.
+    - `reopened`: an end the claim already had was cleared.
     - `retired`: the belief clock closed, which says the claim was wrong.
     - `erased`: the row is gone and an erasure record names it (`erased=True`).
     - `missing`: the row is gone and no erasure record names it.
     - `changed`: anything else, such as a retirement that moved or was cleared.
 
     `extended` and `reopened` break the rule that a closed clock never moves later, so
-    they are named before a retirement in the same change: a claim that was retired and
-    reopened at once reports `reopened`.
+    they take precedence over a retirement made in the same change: a claim that was
+    retired and reopened at once reports `reopened`.
     """
     if now is None:
         return "erased" if erased else "missing"
@@ -159,7 +158,7 @@ def fates(before: Mapping[str, Row], mem: Memvara) -> dict[str, str]:
     out: dict[str, str] = {}
     for claim_id, was in before.items():
         now = after.get(claim_id)
-        erased = now is None and mem.store.erasure_record(claim_id) is not None  # type: ignore[attr-defined]
+        erased = now is None and mem.store.erasure_record(claim_id) is not None
         out[claim_id] = fate(was, now, erased=erased)
     return out
 
