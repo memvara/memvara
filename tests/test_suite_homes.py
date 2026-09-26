@@ -43,24 +43,23 @@ def ipc() -> Iterator[ModuleType]:
     yield module
 
 
+def assert_made_apart(directory: pathlib.Path, base: pathlib.Path) -> None:
+    """`directory` exists inside pytest's base temporary directory `base`, but not directly
+    in it, where every new numbered directory costs a listing of all the others."""
+    assert directory.is_dir()
+    assert base in directory.parents, (directory, base)
+    assert directory.parent != base, (
+        f"{directory} was made directly in pytest's base temporary directory, where every "
+        "new numbered directory costs a listing of all the others")
+
+
 def test_a_tests_home_is_not_one_of_pytests_numbered_directories(
         tmp_path_factory: pytest.TempPathFactory) -> None:
-    home = pathlib.Path(os.environ["HOME"])
-    base = tmp_path_factory.getbasetemp()
-    assert home.is_dir()
-    assert base in home.parents, (home, base)
-    assert home.parent != base, (
-        f"{home} was made directly in pytest's base temporary directory, where every new "
-        "numbered directory costs a listing of all the others")
+    assert_made_apart(pathlib.Path(os.environ["HOME"]), tmp_path_factory.getbasetemp())
 
 
 def test_the_hooks_home_is_not_one_of_pytests_numbered_directories(
         ipc: ModuleType, tmp_path_factory: pytest.TempPathFactory) -> None:
     hooks_home = pathlib.Path(ipc._HOME)
-    base = tmp_path_factory.getbasetemp()
-    assert hooks_home.is_dir()
-    assert base in hooks_home.parents, (hooks_home, base)
-    assert hooks_home.parent != base, (
-        f"{hooks_home} was made directly in pytest's base temporary directory, where every "
-        "new numbered directory costs a listing of all the others")
+    assert_made_apart(hooks_home, tmp_path_factory.getbasetemp())
     assert hooks_home != pathlib.Path(os.environ["HOME"])

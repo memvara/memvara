@@ -239,15 +239,20 @@ def short_dir(prefix: str) -> pathlib.Path:
     A runner that allows the recall daemon needs a home like this. The daemon's socket
     lives under the home, and macOS refuses a unix socket path longer than
     `MAX_SOCKET_PATH`. A pytest temporary directory under a long TMPDIR can pass that
-    length before the hooks add their part, so this uses the system's temporary directory
-    when the daemon's socket would fit under a home made there, and /tmp when it would not.
+    length before the hooks add their part, so this makes the home in the system's
+    temporary directory, and makes it again in /tmp when the daemon's socket would not fit
+    under it.
+
+    The length measured is that of the resolved path, because `child_env` resolves a home
+    before it hands it to the hooks, and a temporary directory is often reached through a
+    symbolic link: on macOS, /tmp is /private/tmp.
     """
-    base = tempfile.gettempdir()
-    # `mkdtemp` names the directory `mv-<prefix>-` followed by eight random characters.
-    longest = daemon_socket_path(pathlib.Path(base) / f"mv-{prefix}-{'x' * 8}")
-    if len(str(longest)) > MAX_SOCKET_PATH and os.path.isdir("/tmp"):
-        base = "/tmp"
-    return pathlib.Path(tempfile.mkdtemp(prefix=f"mv-{prefix}-", dir=base))
+    home = pathlib.Path(tempfile.mkdtemp(prefix=f"mv-{prefix}-"))
+    fits = len(os.fsencode(daemon_socket_path(home.resolve()))) <= MAX_SOCKET_PATH
+    if fits or not os.path.isdir("/tmp"):
+        return home
+    home.rmdir()
+    return pathlib.Path(tempfile.mkdtemp(prefix=f"mv-{prefix}-", dir="/tmp"))
 
 
 def parse_reply(stdout: str, *, what: str, stderr: str = "") -> dict[str, Any] | None:

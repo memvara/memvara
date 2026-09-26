@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
 import subprocess
@@ -18,11 +19,11 @@ import pytest
 
 from harness import hooks as hooks_module
 from harness import skips, stores
+from harness.env import child_env
 from harness.fakes.cli import NO_FAKES, FakeClis, HangingClis
-from harness.hooks import (MAX_SOCKET_PATH, NO_UNIX_SOCKETS, HookOutputError, HookRunner,
-                           HookTimeout, agent_clis, daemon_socket_path, host_ids,
-                           host_record, parse_reply, process_alive, short_dir,
-                           socket_peer_pid)
+from harness.hooks import (NO_UNIX_SOCKETS, HookOutputError, HookRunner, HookTimeout,
+                           agent_clis, daemon_socket_path, host_ids, host_record,
+                           parse_reply, process_alive, short_dir, socket_peer_pid)
 from memvara import MemoryType
 
 Make = Callable[..., HookRunner]
@@ -209,30 +210,88 @@ def test_the_peer_pid_of_a_socket_is_the_process_listening_on_it() -> None:
     assert socket_peer_pid(path) is None
 
 
+def _socket_fits_on_macos(home: pathlib.Path) -> bool:
+    """Whether macOS accepts the daemon's socket path under `home`, as the hooks see it.
+
+    macOS's `sockaddr_un.sun_path` holds 104 bytes, and the path must end with a NUL byte
+    inside them. The hooks get the home through `child_env`, which resolves it.
+    """
+    return len(os.fsencode(daemon_socket_path(home.resolve()))) < 104
+
+
 @pytest.mark.parametrize("prefix", ["home", "hooks"])
 @pytest.mark.parametrize("length", [30, 36, 37, 38, 40, 41])
 def test_a_short_dir_leaves_room_for_the_daemon_socket_under_any_temporary_directory(
         prefix: str, length: int, monkeypatch: pytest.MonkeyPatch) -> None:
     """A daemon test's home comes from short_dir, and the recall daemon's socket goes under
-    it. macOS refuses a socket path of 104 bytes or more, so short_dir must fall back to
-    /tmp whenever a home in the system's temporary directory would be too long for the
-    socket. It used to fall back only for a temporary directory longer than 40 characters,
-    so a TMPDIR of 38 to 40 characters made every daemon test time out."""
+    it. short_dir must fall back to /tmp whenever a home in the system's temporary directory
+    would be too long for the socket, and only then. It used to fall back only for a
+    temporary directory longer than 40 characters, so a TMPDIR of 38 to 40 characters made
+    every daemon test time out."""
     if sys.platform == "win32":
         pytest.skip(NO_UNIX_SOCKETS)
-    root = pathlib.Path(tempfile.mkdtemp(prefix="b", dir="/tmp"))
-    base = root / ("p" * (length - len(str(root)) - 1))
-    base.mkdir()
-    assert len(str(base)) == length
-    monkeypatch.setattr(tempfile, "tempdir", str(base))
-    home = short_dir(prefix)
+    root = pathlib.Path(tempfile.mkdtemp(prefix="b", dir="/tmp")).resolve()
+    home = None
     try:
-        assert len(str(daemon_socket_path(home))) <= MAX_SOCKET_PATH, (base, home)
-        if len(str(daemon_socket_path(base / f"mv-{prefix}-{'x' * 8}"))) <= MAX_SOCKET_PATH:
-            assert home.parent == base, "a temporary directory short enough was not used"
+        base = root / ("p" * (length - len(str(root)) - 1))
+        base.mkdir()
+        assert len(str(base)) == length
+        monkeypatch.setattr(tempfile, "tempdir", str(base))
+        home = short_dir(prefix)
+        assert _socket_fits_on_macos(home), (base, home)
+        if home.parent.resolve() != base:
+            assert not _socket_fits_on_macos(base / home.name), (
+                f"{base} was short enough for the socket, and short_dir did not use it")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        if home is not None and root not in home.resolve().parents:
+            shutil.rmtree(home, ignore_errors=True)
+
+
+def test_a_short_dir_measures_the_directory_a_symbolic_link_leads_to(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A short TMPDIR can be a symbolic link to a long directory, as /tmp is a link to
+    /private/tmp on macOS. child_env resolves a home before the hooks see it, so the
+    socket's path is as long as the resolved home, and short_dir must measure that."""
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    root = pathlib.Path(tempfile.mkdtemp(prefix="b", dir="/tmp")).resolve()
+    home = None
+    try:
+        target = root / ("t" * 50)
+        target.mkdir()
+        link = root / "l"
+        link.symlink_to(target, target_is_directory=True)
+        monkeypatch.setattr(tempfile, "tempdir", str(link))
+        home = short_dir("home")
+        assert _socket_fits_on_macos(home), (home, home.resolve())
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        if home is not None and root not in home.resolve().parents:
+            shutil.rmtree(home, ignore_errors=True)
+
+
+def test_daemon_socket_path_is_where_the_hooks_put_the_daemons_socket() -> None:
+    """daemon_socket_path copies how plugin/hooks/lib/ipc.py names the recall daemon's
+    socket. This asks the hooks' own `socket_path` for the path, in a child process started
+    the way the hooks are, and compares the two: the same directory, and a name of the same
+    length."""
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    home = short_dir("hooks")
+    try:
+        ask = ("import sys; sys.path.insert(0, sys.argv[1]); from lib import ipc; "
+               "print(ipc.socket_path('a store'))")
+        done = subprocess.run([sys.executable, "-c", ask, str(hooks_module.HOOKS_DIR)],
+                              env=child_env(home), capture_output=True, text=True,
+                              timeout=60, check=True)
+        real = pathlib.Path(done.stdout.strip())
+        copy = daemon_socket_path(home.resolve())
+        assert real.parent == copy.parent
+        assert re.fullmatch(r"recall-[0-9a-f]{16}\.sock", real.name), real.name
+        assert len(real.name) == len(copy.name)
     finally:
         shutil.rmtree(home, ignore_errors=True)
-        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_the_daemon_option_lets_the_recall_hook_start_its_daemon(hook_runner: Make) -> None:
