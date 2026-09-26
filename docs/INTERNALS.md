@@ -2236,11 +2236,15 @@ the new store together, and when two agent sessions start at once. Two changes s
 migrations and `_LATE_INDEXES` inside `_creating`, which holds SQLite's reserved lock on
 `<db>.lock` through a second connection. One connection in any process holds that lock at a
 time, so a store that opens while another is creating or upgrading the file waits, for up
-to `_PRESENCE_WAIT` (60 seconds), and then finds the file finished, so its own schema step
-changes nothing. The reserved lock leaves every open store's shared lock alone, so a store
-that is merely open delays nobody. `_creating` lets go by closing its connection, which
-rolls back: on the empty lock file, `BEGIN IMMEDIATE` starts a first page in memory, and a
-commit would have to write it, which needs every shared lock gone.
+to `_SCHEMA_STEP_WAIT` (ten minutes), and then finds the file finished, so its own schema
+step changes nothing. The wait is its own and not the 60 seconds a store waits for a clear,
+because an upgrade can take far longer: one that re-derived every claim's keys took 26.6
+seconds for 300,000 claims on a loaded laptop, 88.5 microseconds a claim, so ten minutes
+covers about 6.8 million claims. A holder that dies lets go at once, so the wait runs long
+only while the holder is alive. The reserved lock leaves every open store's shared lock
+alone, so a store that is merely open delays nobody. `_creating` lets go by closing its
+connection, which rolls back: on the empty lock file, `BEGIN IMMEDIATE` starts a first page
+in memory, and a commit would have to write it, which needs every shared lock gone.
 
 **An established store skips the step.** `_needs_schema_step` reads three things before the
 step: the version stamp, the journal mode, and the names of the indexes. A file whose stamp

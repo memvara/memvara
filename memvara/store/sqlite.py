@@ -1074,9 +1074,17 @@ def _lock_path(db_path: str) -> str | None:
     return None if db_path in (":memory:", "") else db_path + ".lock"
 
 
-# How long a store that is opening waits for another store's `clear_embeddings` to finish
-# before it gives up.
+# How long a store that is opening waits, in `_hold_presence`, for another store's
+# `clear_embeddings` to finish before it gives up. Waiting for another store's schema
+# step is `_SCHEMA_STEP_WAIT`.
 _PRESENCE_WAIT = 60.0
+
+# How long a store that is opening waits, in `_creating`, for another store to finish
+# creating or upgrading the same file before it gives up. An upgrade that re-derives
+# every claim's keys took 26.6 seconds for 300,000 claims on a loaded laptop, 88.5 us a
+# claim, so ten minutes covers about 6.8 million claims at that rate. A process that dies
+# lets go of the lock at once, so the wait runs this long only while the holder is alive.
+_SCHEMA_STEP_WAIT = 600.0
 
 # How long a statement waits for another connection's lock before SQLite gives up with
 # "database is locked". It is `sqlite3.connect`'s own default, named here so that
@@ -1868,7 +1876,7 @@ class SQLiteStore:
         waits here, not after it has mapped the file.
         """
         return self._take_lock_file(
-            self._share, "is having its vectors cleared by another store",
+            self._share, _PRESENCE_WAIT, "is having its vectors cleared by another store",
             "that re-embedding has finished")
 
     @contextmanager
@@ -1880,11 +1888,12 @@ class SQLiteStore:
         (`_run_schema`), one could still fail inside a migration with "vtable constructor
         failed" when it opened a text index while the other was still creating tables and
         indexes. So one store at a time runs this step, and a store that opens while
-        another is creating or upgrading the file waits here, for up to `_PRESENCE_WAIT`
-        seconds, and then finds the file finished. The lock is SQLite's reserved lock: one
-        connection holds it at a time, and it leaves every open store's shared lock alone,
-        so a store that is merely open holds nobody up. It is taken on a second
-        connection, so that this store's own shared lock is held throughout.
+        another is creating or upgrading the file waits here, for up to
+        `_SCHEMA_STEP_WAIT` seconds, and then finds the file finished. The lock is
+        SQLite's reserved lock: one connection holds it at a time, and it leaves every
+        open store's shared lock alone, so a store that is merely open holds nobody up. It
+        is taken on a second connection, so that this store's own shared lock is held
+        throughout.
 
         The reserved lock needs a lock file this process may write. SQLite opens a file
         it may not write read-only, and `BEGIN IMMEDIATE` on a read-only connection takes
@@ -1904,8 +1913,8 @@ class SQLiteStore:
                     "Give this user permission to write it, or delete it while nothing has "
                     "the store open; the next open creates it again.") from exc
         conn = self._take_lock_file(
-            self._reserve, "is being created or upgraded by another store",
-            "that has finished")
+            self._reserve, _SCHEMA_STEP_WAIT,
+            "is being created or upgraded by another store", "that has finished")
         try:
             yield
         finally:
@@ -1927,15 +1936,15 @@ class SQLiteStore:
         conn.execute("PRAGMA journal_mode=MEMORY").fetchone()
         conn.execute("BEGIN IMMEDIATE")
 
-    def _take_lock_file(self, take: Callable[[sqlite3.Connection], Any], doing: str,
-                        done: str) -> sqlite3.Connection | None:
+    def _take_lock_file(self, take: Callable[[sqlite3.Connection], Any], wait: float,
+                        doing: str, done: str) -> sqlite3.Connection | None:
         """A new connection to `<db>.lock` that holds the lock `take` asks for, or None
-        when the store has no file. SQLite waits up to `_PRESENCE_WAIT` seconds for it,
-        and a store still in the way after that is named by `doing` and `done`."""
+        when the store has no file. SQLite waits up to `wait` seconds for it, and a store
+        still in the way after that is named by `doing` and `done`."""
         path = _lock_path(self.path)
         if path is None:
             return None
-        conn = sqlite3.connect(path, timeout=_PRESENCE_WAIT, isolation_level=None,
+        conn = sqlite3.connect(path, timeout=wait, isolation_level=None,
                                check_same_thread=False)
         try:
             take(conn)
@@ -1947,8 +1956,8 @@ class SQLiteStore:
                     "no data: delete it while nothing has the store open, and open the "
                     "store again.") from exc
             raise StoreInUseError(
-                f"{self.path} {doing}, and it has not finished in "
-                f"{_PRESENCE_WAIT:.0f} seconds. Open it again when {done}.") from None
+                f"{self.path} {doing}, and it has not finished in {wait:g} seconds. "
+                f"Open it again when {done}.") from None
         except BaseException:
             # Anything else, an interrupt included: the connection may already hold its
             # lock, and left open it would keep it until Python freed the connection.

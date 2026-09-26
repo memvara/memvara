@@ -2023,26 +2023,58 @@ def test_a_store_opening_while_another_creates_the_file_waits_for_it(tmp_path):
 
 def test_a_store_gives_up_on_another_that_does_not_finish_creating_the_file(
         tmp_path, monkeypatch):
-    monkeypatch.setattr(sqlite_store, "_PRESENCE_WAIT", 0.05)
+    """The wait for another store's schema step is its own, `_SCHEMA_STEP_WAIT`, shortened
+    here, and the refusal names it."""
+    monkeypatch.setattr(sqlite_store, "_SCHEMA_STEP_WAIT", 0.05)
     path = tmp_path / "c.db"
     other = _creating_elsewhere(path)
     try:
         with pytest.raises(StoreInUseError,
-                           match="being created or upgraded by another store"):
+                           match=r"being created or upgraded by another store, and it has "
+                                 r"not finished in 0\.05 seconds"):
             SQLiteStore(str(path))
     finally:
         other.close()
 
 
+def test_the_wait_for_a_schema_step_is_not_the_wait_for_a_clear(tmp_path, monkeypatch):
+    """An upgrade of a large store takes longer than a clear: 26.6 s for 300,000 claims,
+    measured. The schema step's wait is therefore its own, and the clear's wait, cut here
+    to 0.05 s, does not bound it: the open waits out a creation lock held for 0.3 s."""
+    monkeypatch.setattr(sqlite_store, "_PRESENCE_WAIT", 0.05)
+    path = tmp_path / "c.db"
+    other = _creating_elsewhere(path)
+    started = time.monotonic()
+    release = threading.Timer(0.3, lambda: other.execute("ROLLBACK"))
+    release.start()
+    try:
+        SQLiteStore(str(path)).close()
+        took = time.monotonic() - started
+    finally:
+        release.join()
+        other.close()
+    assert took >= 0.3, f"the open took {took:.3f} s, so it did not wait for the lock"
+
+
 def test_a_store_that_is_open_does_not_hold_up_the_next_open(tmp_path, monkeypatch):
-    """A store holds the write lock only while its schema step runs, and afterwards only
-    the shared lock every open store holds, so opening never waits for a store that is
-    merely open. With the wait this short, a lock held for as long as the store is open
-    would make the third open fail."""
-    monkeypatch.setattr(sqlite_store, "_PRESENCE_WAIT", 0.5)
-    path = str(tmp_path / "c.db")
-    with SQLiteStore(path), SQLiteStore(path):
-        SQLiteStore(path).close()
+    """A store holds the creation lock only while its schema step runs, never for as long
+    as it is open. Each open here needs the step, because the version stamp is wound back
+    after every open, and the wait is too short to outlast a lock held by a store that is
+    still open, so any such lock would make the next open fail."""
+    monkeypatch.setattr(sqlite_store, "_SCHEMA_STEP_WAIT", 0.5)
+    path = tmp_path / "c.db"
+
+    def wind_back() -> None:
+        raw = sqlite3.connect(path)
+        raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+        raw.commit()
+        raw.close()
+
+    with SQLiteStore(str(path)):
+        wind_back()
+        with SQLiteStore(str(path)):
+            wind_back()
+            SQLiteStore(str(path)).close()
 
 
 def test_an_established_store_opens_without_the_creation_lock(tmp_path, monkeypatch):
@@ -2052,7 +2084,7 @@ def test_an_established_store_opens_without_the_creation_lock(tmp_path, monkeypa
     an open that asked for the lock would fail. The writer connection still gets the two
     settings that belong to a connection rather than to the file: SQLite's defaults are
     secure_delete 0 and synchronous 2 (FULL), and the store sets 1 and 1 (NORMAL)."""
-    monkeypatch.setattr(sqlite_store, "_PRESENCE_WAIT", 0.05)
+    monkeypatch.setattr(sqlite_store, "_SCHEMA_STEP_WAIT", 0.05)
     path = tmp_path / "c.db"
     SQLiteStore(str(path)).close()
     other = _creating_elsewhere(path)
