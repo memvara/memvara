@@ -168,13 +168,12 @@ def test_a_session_inside_a_project_reads_the_global_facts_it_writes() -> None:
     assert session.why(claim.id) is not None
 
 
-# -- B9: a future-dated retraction's tombstone ends before it begins ---------------------
+# -- B9, fixed: a future-dated retraction's tombstone no longer ends before it begins ---
 
-@known_bugs.xfail("B9")
 def test_a_future_retraction_leaves_a_tombstone_that_does_not_end_before_it_begins(
         ) -> None:
-    """Every closure goes through `close_out`, which never ends a row before its own
-    start, except the tombstone a retraction writes (#275)."""
+    """The tombstone's world clock gets the clamp `close_out` gives every other closure,
+    so it never ends before its own start (#275)."""
     from harness.clock import FAR_FUTURE
 
     m = stores.memory()
@@ -183,9 +182,46 @@ def test_a_future_retraction_leaves_a_tombstone_that_does_not_end_before_it_begi
     user.remember("user", "likes", "tea", polarity=-1, valid_from=FAR_FUTURE)
     [tombstone] = [c for c in m.store.iter_claims(None, True) if c.polarity < 0]
     assert tombstone.valid_from == FAR_FUTURE and tombstone.valid_to is not None
-    if tombstone.valid_to < tombstone.valid_from:
-        raise known_bugs.Reproduced("B9: the tombstone ends before it begins")
     assert tombstone.valid_to == tombstone.valid_from
+
+
+# -- B45: a backdated retraction's tombstone is live in reads of the past ----------------
+
+@known_bugs.xfail("B45")
+def test_a_backdated_retraction_leaves_a_tombstone_that_no_read_returns() -> None:
+    """A tombstone is closed on both clocks at the instant its write is recorded, so it
+    can never be live (docs/INTERNALS.md). A retraction backdated with `recorded_at` must
+    close it at that instant too, not at the wall clock's (#317)."""
+    from datetime import datetime, timezone
+
+    jan, feb, mar = (datetime(2026, month, 1, tzinfo=timezone.utc) for month in (1, 2, 3))
+    user = stores.memory().scope(user="u")
+    user.remember("user", "likes", "tea", valid_from=jan, recorded_at=jan)
+    user.remember("user", "likes", "tea", polarity=-1, valid_from=feb, recorded_at=feb)
+    seen = [(c.object, c.polarity) for c in user.get_all(as_of=mar)]
+    if seen == [("tea", -1)]:
+        raise known_bugs.Reproduced(f"a read at March returned the tombstone: {seen}")
+    assert seen == [], seen
+
+
+# -- B69: a repeated future-dated retraction writes a new tombstone each time ------------
+
+@known_bugs.xfail("B69")
+def test_a_future_dated_retraction_sent_again_is_a_repeat() -> None:
+    """A repeat of a retraction dated now reinforces its tombstone and reports nothing.
+    A repeat of one dated in the future must do the same (#349)."""
+    from harness.clock import FAR_FUTURE
+
+    mem = stores.memory()
+    user = mem.scope(user="u")
+    user.remember("user", "likes", "tea")
+    receipts = [user.remember("user", "likes", "tea", polarity=-1, valid_from=FAR_FUTURE)
+                for _ in range(3)]
+    tombstones = [c for c in mem.store.iter_claims(None, True) if c.polarity < 0]
+    reported = [len(r.invalidated) for r in receipts]
+    if len(tombstones) == 3 and reported == [1, 1, 1]:
+        raise known_bugs.Reproduced(f"{len(tombstones)} tombstones; ended reported {reported}")
+    assert len(tombstones) == 1 and reported == [1, 0, 0], (len(tombstones), reported)
 
 
 # -- B16: forget leaves a scheduled value believed ---------------------------------------

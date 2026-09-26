@@ -189,9 +189,14 @@ class Pair:
             setattr(row, stamp.name, got)
         new = expect.new
         if new is not None and self.model.rows[new].polarity < 0:
+            # A tombstone closes both clocks at the write, except that its world clock
+            # never closes before its own start.
             row = self.model.rows[new]
-            assert row.valid_to == row.invalidated_at, (
-                f"the tombstone {new} closed its clocks at two instants")
+            assert row.invalidated_at is not None, f"the tombstone {new} is not retired"
+            assert row.valid_to == max(row.invalidated_at, row.valid_from), (
+                f"the tombstone {new} ends at {row.valid_to}; it should end where it was "
+                f"written, {row.invalidated_at}, or at its own start, {row.valid_from}, "
+                "if that is later")
 
     def _check_undeclared(self, op: Op, clocks: Clocks, clocks_after: Clocks) -> None:
         """I11: a positive write under a predicate nobody declared closes no row."""

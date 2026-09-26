@@ -37,8 +37,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B3", 267, "auto-approve misses two read-only document tools"),
     KnownBug("B7", 273, "a session bound inside a project cannot read the global facts it "
              "writes"),
-    KnownBug("B9", 275, "a retraction dated in the future stores a tombstone that ends "
-             "before it begins"),
     KnownBug("B13", 280, "a damaged embedder record lets a same-width embedder change go "
              "unnoticed"),
     KnownBug("B14", 281, "two processes opening a new store at once: one can fail at "
@@ -81,6 +79,9 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "read"),
     KnownBug("B32", 309, "invented predicates past the learned cap make one write take "
              "quadratic time"),
+    KnownBug("B45", 317, "a backdated retraction's tombstone is live in reads of the past"),
+    KnownBug("B69", 349, "a repeated future-dated retraction writes a new tombstone each "
+             "time"),
 )}
 
 

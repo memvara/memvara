@@ -717,6 +717,39 @@ def test_the_retraction_tombstone_is_unreachable_from_either_clock(rec, store):
         assert not res.claim.is_live(**kw), kw
 
 
+def test_a_retraction_dated_in_the_future_leaves_a_tombstone_that_does_not_end_first(
+        rec, store):
+    """Like every other closure, the tombstone's world clock never ends before the
+    row's own start. When it was closed at the write instead, a retraction dated next
+    year stored a row that ended before it began, and `history()` and `why()` showed that
+    inverted interval (#275). The belief clock still closes at the write."""
+    now = utcnow()
+    later = now + timedelta(days=365)
+    tea = rec.apply(claim("likes", "tea", valid_from=now), now=now).claim
+    res = rec.apply(claim("likes", "tea", polarity=-1, valid_from=later,
+                          sources=["ep_2"]), now=now)
+
+    tombstone = store.get_claim(res.claim.id)
+    assert tombstone.valid_from == later
+    assert tombstone.valid_to == later, "an empty interval, not an inverted one"
+    assert tombstone.invalidated_at == now
+    assert store.get_claim(tea.id).valid_to == later, "tea stays true until then"
+
+
+def test_a_retraction_given_a_naive_instant_treats_it_as_utc(rec, store):
+    """`as_utc` documents that callers build naive instants by hand, and every other
+    closure reads them as UTC. The tombstone's clamp compares the write instant with the
+    row's own start, so it must do the same rather than raise."""
+    aware = utcnow().replace(microsecond=0)
+    naive = aware.replace(tzinfo=None)
+    rec.apply(claim("likes", "tea", valid_from=aware - timedelta(days=1)), now=aware)
+    res = rec.apply(claim("likes", "tea", polarity=-1, valid_from=aware), now=naive)
+
+    tombstone = store.get_claim(res.claim.id)
+    assert tombstone.invalidated_at == aware
+    assert tombstone.valid_to == aware
+
+
 def test_retraction_only_retires_the_value_it_names(rec, store):
     globex = rec.apply(claim("works_at", "Globex")).claim
     res = rec.apply(claim("works_at", "Acme", polarity=-1))
