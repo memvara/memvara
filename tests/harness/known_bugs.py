@@ -106,6 +106,8 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "stated has changed"),
     KnownBug("B51", 333, "a fact restated often enough to reach the salience cap outranks "
              "the fact a query asks about"),
+    KnownBug("B73", 353, "memory_add says a turn was not stored when only no fact was "
+             "extracted from it"),
 )}
 
 
