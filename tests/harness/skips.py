@@ -53,6 +53,11 @@ RULES: tuple[SkipRule, ...] = (
              "These need Node. CI's npm-bridge job runs the bridge's own tests."),
     SkipRule(r"^the renderer is the authority for this test$",
              "Needs memvara-cloud installed, which is a separate repository."),
+    SkipRule(r"^Windows's resolver does not read a host written as one number$",
+             "Windows's getaddrinfo does not read a host written as a single decimal, octal "
+             "or hex number as an IPv4 address, so such a spelling names no private "
+             "address there for the URL fetcher to refuse.",
+             platforms=("win32",)),
     SkipRule(r"^no sub-second headroom exists at this platform's ceiling$",
              "Windows' C runtime stops at the year 3001, so there is no headroom to test.",
              platforms=("win32",)),

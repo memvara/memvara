@@ -8,8 +8,6 @@ env:MEMVARA_ADVISE_REPLACEMENTS
 env:MEMVARA_AGENT
 env:MEMVARA_ANCHORED
 env:MEMVARA_CLOSED_VOCABULARY
-env:MEMVARA_CONFIRM_SECRET
-env:MEMVARA_DB_KEY
 env:MEMVARA_EMBEDDER
 env:MEMVARA_EXTRACT_GUIDANCE
 env:MEMVARA_LLM
@@ -94,7 +92,6 @@ switch:agentic_capture
 switch:agentic_extraction
 switch:anchored
 switch:documents
-switch:encryption
 switch:end_reason
 switch:expiry_erasure
 switch:extraction_chunks
@@ -144,7 +141,4 @@ tool-switch:memory_search/anchored
 tool-switch:memory_search/metadata_filters
 tool-switch:memory_search/query_rewrite
 tool:memory_ask
-tool:memory_link
-tool:memory_neighborhood
 tool:memory_paths
-tool:memory_since

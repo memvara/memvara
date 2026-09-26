@@ -51,6 +51,20 @@ class ToolResult:
     raw: dict[str, Any] = field(repr=False)
 
 
+def claim_id_of(result: ToolResult) -> str:
+    """The id a `memory_remember` reply names, read from its `+ [cl_...]` line.
+
+    The scope and injection security tests both parsed this out by hand the same way;
+    this is that one parse, shared, so it cannot drift into two spellings of the same
+    rule.
+
+    >>> claim_id_of(ToolResult(text="added 1, ended 0\\n+ [cl_x] user lives_in Lisbon",
+    ...              is_error=False, raw={}))
+    'cl_x'
+    """
+    return result.text.split("+ [")[1].split("]")[0]
+
+
 class McpProcess:
     """`python -m memvara.server` in a child process, spoken to one JSON line at a time.
 
