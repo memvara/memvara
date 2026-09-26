@@ -15,8 +15,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
   scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
   covers the suite's foundation, its reference model, its crash tests, its scripted
-  agent sessions, its fakes, its documentation checks and its stores from old
-  releases. None of it changes the library.
+  agent sessions, its fakes, its documentation checks, its stores from old releases
+  and its protocol fuzzing. None of it changes the library.
   - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
     which includes the doctests in `memvara/`, and the new `--tier nightly`,
     `--tier weekly`, `--tier local` and `--tier quarantine` options select the others.
@@ -65,6 +65,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     embedder must be refused. The nightly tier rebuilds the stores from their tags and
     kills a process in the middle of an upgrade. Three bugs they found are pinned as
     strict expected failures: #299, #300 and #301.
+  - **Protocol and validator fuzzing.** `tests/adversarial/fuzz/` sends the MCP server
+    input a correct client never sends: 500 pipelined requests with shuffled ids, ids of
+    every JSON type, batches, deep nesting, huge integers, NaN and infinities, the string
+    "false" for a boolean, lone surrogates, and calls that Hypothesis generates from each
+    tool's own input schema. Every request must get exactly one reply, a refused call must
+    change nothing in the store, and the server must still answer a ping afterwards. The
+    nightly tier adds lines of 20 MB and servers configured other ways.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed
