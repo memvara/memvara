@@ -13,8 +13,10 @@ The truth is read from the code with `ast`, never from a list kept by hand.
 - **The words a console script accepts** are every string its dispatch compares its
   arguments with, and the keys of a table it looks them up in.
 - **The options a subcommand accepts** are the string constants that are exactly an option
-  (`-x` or `--name`) in its own function, in the functions it passes `argv` to, and in the
-  module-level tuples those functions read.
+  (`-x` or `--name`) in its own function, in every function it hands its argument list to,
+  in whatever module that function lives, and in the module-level tuples those functions
+  read. A hand-over the reader cannot follow is refused rather than skipped, because the
+  code on the other side may accept options nobody can list.
 - **The variables the configuration reads** are the `MEMVARA_*` names
   `memvara/server/config.py` passes to `env.get`, with a module-level name such as
   `KEY_ENV` resolved to its value, plus one variable per feature for each prefix it scans
@@ -27,6 +29,7 @@ The truth is read from the code with `ast`, never from a list kept by hand.
 from __future__ import annotations
 
 import ast
+import builtins
 import functools
 import importlib
 import inspect
@@ -149,7 +152,7 @@ def subcommands(function: Callable[..., Any]) -> dict[str, Callable[..., Any]]:
             operator, right = test.ops[0], test.comparators[0]
             if (isinstance(operator, ast.Eq) and isinstance(right, ast.Constant)
                     and isinstance(right.value, str)):
-                callee = next((_resolve(statement.value, function, node)
+                callee = next((_lookup(statement.value.func, function, node)
                                for statement in ast.walk(node)
                                if isinstance(statement, ast.Return)
                                and isinstance(statement.value, ast.Call)), None)
@@ -337,47 +340,91 @@ def _delegate(function: Callable[..., Any]) -> Callable[..., Any] | None:
     tree = _tree(function)
     for node in ast.walk(tree):
         if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
-            callee = _resolve(node.value, function, tree)
-            if callable(callee):
+            callee = _lookup(node.value.func, function, tree)
+            if inspect.isfunction(callee):
                 return callee
     return None
 
 
 def _options(function: Callable[..., Any], seen: set[Any]) -> set[str]:
-    """The option tokens `function` uses, and those of each function in its module that it
-    passes `argv` to."""
+    """The option tokens `function` uses, and those of every function it hands its
+    argument list to, in whatever module that function lives.
+
+    A hand-over that cannot be followed raises `LookupError`, because the code on the other
+    side may accept options nobody can list, and reporting none would pass on nothing. A
+    built-in such as `list(argv)` parses no options and is skipped.
+    """
     if function in seen:
         return set()
     seen.add(function)
     tree = _tree(function)
     found = {text for text in _strings(tree, function.__globals__) if _OPTION.match(text)}
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and any(isinstance(argument, ast.Name) and argument.id in _ARGV
-                        for argument in node.args)):
-            callee = function.__globals__.get(node.func.id)
-            if inspect.isfunction(callee) and callee.__module__ == function.__module__:
-                found |= _options(callee, seen)
+        if not (isinstance(node, ast.Call) and _hands_over_argv(node)):
+            continue
+        callee = _lookup(node.func, function, tree)
+        if _is_builtin(callee):
+            continue
+        if not inspect.isfunction(callee):
+            raise LookupError(
+                f"{function.__qualname__} hands its arguments to {ast.unparse(node.func)}, "
+                "which cannot be read, so the options it accepts are unknown")
+        found |= _options(callee, seen)
     return found
 
 
-def _resolve(call: ast.Call, function: Callable[..., Any],
-             scope: ast.AST) -> Callable[..., Any] | None:
-    """The function a call names, looking first at imports inside `scope`."""
-    if not isinstance(call.func, ast.Name):
+def _hands_over_argv(call: ast.Call) -> bool:
+    """Whether a call is given the whole argument list or a slice of it, rather than one
+    element of it such as `args[0]`."""
+    return any(_is_argv(value)
+               for value in [*call.args, *(keyword.value for keyword in call.keywords)])
+
+
+def _is_argv(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in _ARGV
+    return (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice)
+            and _is_argv(node.value))
+
+
+def _is_builtin(value: object) -> bool:
+    """Whether `value` is a built-in function or type, such as `len` or `list`."""
+    return inspect.isbuiltin(value) or (inspect.isclass(value)
+                                        and value.__module__ == "builtins")
+
+
+def _lookup(node: ast.AST, function: Callable[..., Any], scope: ast.AST) -> object:
+    """What a name or a dotted name used in `function` refers to, or None.
+
+    An import inside `scope` is looked at first, then the module's globals, then the
+    built-ins. A dotted name is followed only through modules.
+    """
+    if isinstance(node, ast.Attribute):
+        owner = _lookup(node.value, function, scope)
+        return getattr(owner, node.attr, None) if inspect.ismodule(owner) else None
+    if not isinstance(node, ast.Name):
         return None
-    name = call.func.id
-    for node in ast.walk(scope):
-        if isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                if (alias.asname or alias.name) == name:
-                    package = function.__module__.rpartition(".")[0]
-                    module = importlib.import_module("." * node.level + (node.module or ""),
-                                                     package if node.level else None)
-                    found = getattr(module, alias.name)
-                    return found if callable(found) else None
-    found = function.__globals__.get(name)
-    return found if callable(found) else None
+    for statement in ast.walk(scope):
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            for alias in statement.names:
+                if (alias.asname or alias.name.partition(".")[0]) == node.id:
+                    return _imported(statement, alias, function)
+    if node.id in function.__globals__:
+        return function.__globals__[node.id]
+    return getattr(builtins, node.id, None)
+
+
+def _imported(statement: ast.Import | ast.ImportFrom, alias: ast.alias,
+              function: Callable[..., Any]) -> object:
+    """What an import statement inside `function` binds `alias` to."""
+    if isinstance(statement, ast.Import):
+        # `import a.b` binds `a`, and `import a.b as c` binds `c` to `a.b`.
+        return importlib.import_module(alias.name if alias.asname
+                                       else alias.name.partition(".")[0])
+    package = function.__module__.rpartition(".")[0]
+    module = importlib.import_module("." * statement.level + (statement.module or ""),
+                                     package if statement.level else None)
+    return getattr(module, alias.name, None)
 
 
 def _value(node: ast.AST, namespace: Mapping[str, Any]) -> object:

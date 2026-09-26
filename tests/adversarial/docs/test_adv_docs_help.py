@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import pytest
 
@@ -22,6 +22,7 @@ from .commandline import (CommandLine, command_lines, config_reads, console_scri
                           default_off, false_claims, features, hides, nonexistent_features,
                           read_script, read_subcommand, reads_in, removes, subcommands,
                           undocumented, unread_variables, variable_defaults, variables)
+from .planted import parse as parse_elsewhere
 from .surface import configurations, served
 
 
@@ -75,6 +76,32 @@ def planted_main(argv: list[str] | None = None, *, stdout: Any = None) -> int:
     return 2
 
 
+PLANTED_ELSEWHERE_USAGE = """\
+planted-elsewhere — a command whose options are parsed in another module.
+
+  --city NAME   where to look.
+"""
+
+
+def planted_elsewhere(argv: list[str], *, stdout: Any = None) -> int:
+    if "--help" in argv or "-h" in argv:
+        print(PLANTED_ELSEWHERE_USAGE, file=stdout)
+        return 0
+    return 0 if parse_elsewhere(argv) else 2
+
+
+#: Where the next planted command looks its handler up when it runs. No reader of the
+#: source can follow a call through it.
+_HANDLERS: dict[str, Callable[[list[str]], int]] = {}
+
+
+def planted_opaque(argv: list[str], *, stdout: Any = None) -> int:
+    if "--help" in argv or "-h" in argv:
+        print(PLANTED_USAGE, file=stdout)
+        return 0
+    return _HANDLERS["run"](argv)
+
+
 PLANTED_KEY = "MEMVARA_PLANTED_KEY"
 _PLANTED_PREFIX = "MEMVARA_PLANTED_SWITCH_"
 
@@ -116,6 +143,22 @@ def test_a_wrapper_is_followed_to_the_help_it_hands_over_to() -> None:
     assert command.function is planted
     assert command.help == PLANTED_USAGE
     assert undocumented(command) == ["--loud"]
+
+
+def test_options_parsed_in_another_module_are_read() -> None:
+    """A command that hands its arguments to a parser in another module accepts that
+    parser's options. Reading only the command's own module would find none of them, and
+    the check would pass on nothing."""
+    command = read_subcommand("planted-elsewhere", planted_elsewhere)
+    assert command.accepted == {"--help", "-h", "--city", "--quiet"}
+    assert undocumented(command) == ["--quiet"]
+
+
+def test_arguments_handed_to_code_that_cannot_be_read_are_refused() -> None:
+    """A command that hands its arguments to something the reader cannot follow may accept
+    options nobody can list, so the reader refuses instead of reporting none."""
+    with pytest.raises(LookupError, match="planted_opaque"):
+        read_subcommand("planted-opaque", planted_opaque)
 
 
 def test_a_script_is_read_from_its_dispatch() -> None:
