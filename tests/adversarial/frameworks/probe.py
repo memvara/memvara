@@ -8,6 +8,8 @@ The nightly tests start this file with the environment's own interpreter:
 sees only what the environment installed. `-B` stops it writing bytecode into this
 checkout. A checks file holds functions named `check_*`. The probe runs each one once, in
 the order the file defines them, and appends its outcome to the report as one JSON line.
+A checks file that raises while it loads runs no check: the probe records that failure
+once, and every check reports it as the reason it never ran.
 
 Before it loads the checks, the probe installs an audit hook that blocks every attempt to
 reach the network and records it in the report: a connection or a datagram to anything
@@ -43,9 +45,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
 
-#: How long loading the checks file may take, and each check, and the interpreter's shutdown
-#: after the last check. Past it, `faulthandler` writes every thread's stack to stderr and
-#: ends the process with a failure, so the report shows which step never finished.
+#: How long each step of a run may take: the start, where the probe imports memvara and
+#: lists what is installed; loading the checks file; each check; and the interpreter's
+#: shutdown after the last one. Past it, `faulthandler` writes every thread's stack to
+#: stderr and ends the process with a failure, so the report shows which step never
+#: finished.
 CHECK_SECONDS = 120.0
 
 #: Host names that are answered without asking a name server.
@@ -216,7 +220,18 @@ def distributions() -> dict[str, str]:
 
 def run(checks_file: Path, report_file: Path, *,
         check_seconds: float = CHECK_SECONDS) -> int:
-    """Run every check in `checks_file`, appending each outcome to `report_file`."""
+    """Run every check in `checks_file`, appending each outcome to `report_file`.
+
+    One watchdog covers the whole run, from the first line here to the end of the
+    process. It is restarted at the start of each step, so each step gets the whole
+    limit and a hang prints the stacks of the step that hung. It is never stopped, so no
+    step runs without it. The steps are the start (importing memvara and listing what is
+    installed), loading the checks file, each check with its records, and the shutdown.
+
+    A checks file that raises while it loads runs no check. Its failure is recorded once,
+    and the probe exits with status 1.
+    """
+    _watch(check_seconds)
     report = Report(report_file)
     phase = ["start"]
     install_guard(report, lambda: phase[0])
@@ -228,36 +243,51 @@ def run(checks_file: Path, report_file: Path, *,
     report.emit({"kind": "start", "python": sys.version, "executable": sys.executable,
                  "memvara": location, "distributions": distributions()})
     phase[0] = "load"
-    faulthandler.dump_traceback_later(check_seconds, exit=True)
-    module = load(checks_file)
-    faulthandler.cancel_dump_traceback_later()
+    _watch(check_seconds)
+    try:
+        module = load(checks_file)
+    except Exception as exc:  # a file that cannot load runs nothing; each check says why
+        report.emit({"kind": "load_error", "checks": str(checks_file), **_failure(exc)})
+        phase[0] = "exit"
+        _watch(check_seconds)
+        return 1
     for name, function in checks(module):
         phase[0] = name
+        _watch(check_seconds)
         report.emit({"kind": "begin", "check": name})
         started = time.monotonic()
         record: dict[str, Any] = {"kind": "result", "check": name, "passed": True}
-        faulthandler.dump_traceback_later(check_seconds, exit=True)
         with tempfile.TemporaryDirectory(prefix="check-") as folder:
             context = Context(Path(folder))
             try:
                 function(context)
             except Exception as exc:  # every failure is a result, and the next check runs
-                record.update(passed=False, error_type=type(exc).__name__,
-                              message=str(exc)[:4000],
-                              traceback="".join(traceback.format_exception(exc))[-12000:])
+                record.update(passed=False, **_failure(exc))
             finally:
                 context.close()
-                faulthandler.cancel_dump_traceback_later()
         record["seconds"] = round(time.monotonic() - started, 3)
         report.emit(record)
     phase[0] = "exit"
+    # The interpreter still has to shut down after this: it waits for every thread that
+    # is not a daemon, then runs the exit handlers, where telemetry often sends. A
+    # framework that left a thread running would keep the handlers from ever running, so
+    # the shutdown is a step of its own, with the whole limit.
+    _watch(check_seconds)
     report.emit({"kind": "end"})
-    # The interpreter still has to shut down: it waits for every thread that is not a
-    # daemon, then runs the exit handlers, where telemetry often sends. A framework that
-    # left a thread running would keep the handlers from ever running, so the same limit
-    # applies here, and ends the process with a failure and every thread's stack.
-    faulthandler.dump_traceback_later(check_seconds, exit=True)
     return 0
+
+
+def _watch(seconds: float) -> None:
+    """Restart the watchdog. If the current step is still running after `seconds`,
+    `faulthandler` writes every thread's stack to stderr and ends the process with
+    status 1. There is only one watchdog, so restarting it ends the previous step's."""
+    faulthandler.dump_traceback_later(seconds, exit=True)
+
+
+def _failure(exc: BaseException) -> dict[str, Any]:
+    """An exception as a report records it."""
+    return {"error_type": type(exc).__name__, "message": str(exc)[:4000],
+            "traceback": "".join(traceback.format_exception(exc))[-12000:]}
 
 
 # -- reading a report back, in the suite ------------------------------------------------
@@ -290,12 +320,21 @@ class Run:
     begun: list[str] = field(default_factory=list)
     network: list[dict[str, Any]] = field(default_factory=list)
     finished: bool = False
+    #: The failure that stopped the checks file from loading, if one did. Its `check` is
+    #: the checks file's path.
+    load_error: Result | None = None
 
     def result(self, check: str) -> Result:
         """The check's outcome, or a failure that says why the check has none."""
         found = self.results.get(check)
         if found is not None:
             return found
+        if self.load_error is not None:
+            failed = self.load_error
+            return Result(check, False, error_type="ChecksNotLoaded",
+                          message=(f"it never ran: loading the checks file {failed.check} "
+                                   f"failed with {failed.error_type}: {failed.message}"),
+                          traceback=failed.traceback)
         if self.finished:
             reason = ("it never ran: the probe finished without it, so the checks file "
                       "defines no check of that name")
@@ -331,6 +370,10 @@ def read(path: Path) -> Run:
                 record.get("traceback", ""))
         elif kind == "network":
             found.network.append(record)
+        elif kind == "load_error":
+            found.load_error = Result(
+                record["checks"], False, 0.0, record.get("error_type", ""),
+                record.get("message", ""), record.get("traceback", ""))
         elif kind == "end":
             found.finished = True
     return found

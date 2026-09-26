@@ -85,6 +85,38 @@ HANGS_WHILE_LOADING = """
         pass
 """
 
+#: A checks file whose own import fails, the way one that imports its framework at the
+#: top would fail in the suite's interpreter.
+FAILS_WHILE_LOADING = """
+    raise ImportError("planted: no module named crewai")
+
+
+    def check_never_reached(ctx):
+        pass
+"""
+
+#: Runs the probe in-process with an import finder that makes `import memvara` hang.
+#: That import is the first thing `run()` does, before any check is loaded. Formatted
+#: with the probe's folder, the checks file and the report.
+HANGS_IMPORTING_MEMVARA = """
+import sys
+import time
+
+
+class Hang:
+    def find_spec(self, name, path=None, target=None):
+        if name == "memvara":
+            time.sleep(30)
+        return None
+
+
+sys.meta_path.insert(0, Hang())
+sys.path.insert(0, {folder!r})
+import probe
+
+sys.exit(probe.main([{checks!r}, {report!r}, "--check-seconds", "0.5"]))
+"""
+
 Probed = tuple[probe.Run, "subprocess.CompletedProcess[str]"]
 
 
@@ -181,6 +213,45 @@ def test_a_checks_file_that_hangs_while_loading_is_stopped(tmp_path: Path) -> No
     assert run.start is not None and run.begun == [] and not run.finished
     assert done.returncode != 0 and "Timeout" in done.stderr, done.stderr
     assert "before its first check" in run.result("check_never_reached").message
+
+
+def test_a_probe_that_hangs_before_it_loads_its_checks_is_stopped(tmp_path: Path) -> None:
+    """The watchdog runs from the first line of `run()`. Here `import memvara`, which the
+    probe does before it writes its first record, never finishes. The probe must stop
+    itself and print the stack that shows where it hung, rather than wait for the suite's
+    own time limit, which ends it without a stack."""
+    checks = tmp_path / "checks_planted.py"
+    checks.write_text("def check_never_reached(ctx):\n    pass\n", encoding="utf-8")
+    report = tmp_path / "report.jsonl"
+    home = tmp_path / "home"
+    home.mkdir()
+    code = HANGS_IMPORTING_MEMVARA.format(folder=str(PROBE.parent), checks=str(checks),
+                                          report=str(report))
+    done = subprocess.run([sys.executable, "-I", "-B", "-c", code],
+                          env=environments.probe_env(home), cwd=tmp_path,
+                          capture_output=True, text=True, timeout=20)
+    assert done.returncode != 0 and "Timeout" in done.stderr, done.stderr
+    assert "find_spec" in done.stderr, done.stderr
+    run = probe.read(report)
+    assert run.start is None and not run.finished
+
+
+def test_a_checks_file_that_fails_to_load_gives_every_check_the_cause(tmp_path: Path) -> None:
+    """A checks file that raises while it loads runs no check. The probe records the
+    failure once, naming the file and the exception, and every check reports that cause
+    instead of only saying that it never ran."""
+    run, done = _probe(tmp_path, FAILS_WHILE_LOADING)
+    assert done.returncode == 1, done.stderr
+    assert run.start is not None and run.begun == [] and not run.finished
+    assert run.load_error is not None
+    assert Path(run.load_error.check).name == "checks_planted.py"
+    assert (run.load_error.error_type, run.load_error.message) == (
+        "ImportError", "planted: no module named crewai")
+    result = run.result("check_never_reached")
+    assert (result.passed, result.error_type) == (False, "ChecksNotLoaded")
+    assert "checks_planted.py" in result.message, result.message
+    assert "ImportError: planted: no module named crewai" in result.message, result.message
+    assert "planted: no module named crewai" in result.traceback
 
 
 def test_network_access_is_recognised_in_each_form() -> None:
