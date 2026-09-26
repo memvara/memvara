@@ -14,9 +14,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 - **An adversarial test suite that tries to break memvara the way agents use it.** It
   lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
   scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
-  covers the suite's foundation, its reference model, its crash tests, its scripted
-  agent sessions, its fakes, its documentation checks, its stores from old releases,
-  its protocol fuzzing and its coverage checklist. None of it changes the library.
+  covers the suite's foundation and every part of it listed below. None of it changes
+  the library.
   - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
     which includes the doctests in `memvara/`, and the new `--tier nightly`,
     `--tier weekly`, `--tier local` and `--tier quarantine` options select the others.
@@ -80,6 +79,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     and the fast tier fails whenever the baseline and today's gaps differ, for example
     when a tool is added with no test. A change can still add a line to the baseline, so
     review, not a test, keeps the baseline from growing.
+  - **A model that misbehaves.** `tests/adversarial/model_faults/` drives the write and
+    read paths with a scripted model that answers badly: malformed or cut-off output,
+    invented predicates, thousands of claims in one reply, timeouts, rate limits, a
+    proposal to retire or erase a stored claim, and a tool loop that never stops. Every
+    turn must still be stored, nothing may be retired or erased on the model's word
+    alone, a read stage that fails must serve the read a store with no model serves, and
+    each operation must make the number of model calls `docs/INTERNALS.md` states.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed
