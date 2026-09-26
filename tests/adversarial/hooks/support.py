@@ -21,6 +21,7 @@ import pytest
 
 from harness import stores
 from harness.fakes.cli import FakeClis
+from harness.fakes.hosted_mcp import FakeHostedMcp
 from harness.hooks import HookResult, HookRunner
 
 #: The hosts the plugin has a record for, in plugin/hooks/hosts.
@@ -33,6 +34,9 @@ USER = "tester"
 #: hashing embedder matches with it above the recall hook's score floor.
 MEMORY = "user lives in Lisbon"
 PROMPT = "user lives in Lisbon"
+
+#: A prompt that matches nothing in such a store.
+UNRELATED = "which database does the billing service use"
 
 #: One turn of a conversation that states a fact, for a capture to mine. "remember" is
 #: one of the words that make capture mine a turn however short it is.
@@ -369,6 +373,83 @@ def status_of(host: str, reply: Mapping[str, Any] | None) -> str | None:
 def crashes(result: HookResult) -> list[str]:
     """The lines in which run.py says the hook's body raised."""
     return [line for line in result.log("hooks") if _CRASH.match(line)]
+
+
+def observed(result: HookResult) -> tuple[str, tuple[tuple[str, tuple[str, ...]], ...]]:
+    """What a person or a log reader can see of one hook run: its reply, and the lines it
+    added to each log, without their timestamps."""
+    return json.dumps(result.reply, sort_keys=True), tuple(sorted(result.logs.items()))
+
+
+# -- the four outcomes -------------------------------------------------------------------
+
+#: The ways session start and recall can end. For session start, "nothing matches" is a
+#: store that holds nothing.
+OUTCOMES = ("not configured", "store cannot open", "store unreachable", "nothing matches",
+            "memories injected")
+
+#: The hooks that read the store.
+READING_HOOKS = ("session_start", "recall")
+
+
+def recall_hosts(hosts: Sequence[str]) -> list[str]:
+    """The hosts among `hosts` that fire an event for recall."""
+    return [host for host in hosts if "recall" in EVENTS[host]]
+
+
+def outcome_cases(hosts: Sequence[str], outcomes: Sequence[str]) -> list[tuple[str, str, str]]:
+    """Every (host, hook, outcome) to check: each outcome, for each reading hook each host
+    fires."""
+    return [(host, hook, outcome) for host in hosts for hook in READING_HOOKS
+            if hook in EVENTS[host] for outcome in outcomes]
+
+
+def outcome_matrix(base: pathlib.Path, hosts: Sequence[str]) -> Runs:
+    """Run session start and recall on each host once for every outcome, keyed by
+    (host, hook, outcome), each run with a home of its own.
+
+    A store that cannot open is a file that is not a SQLite database. A store that cannot
+    be reached is the hosted endpoint, `FakeHostedMcp`, refusing every handshake with a
+    503; the hooks use it because no local store is named and the variables name a key
+    and the endpoint.
+    """
+    work = base / "work"
+    work.mkdir()
+    full = make_store(base / "memory.db")
+    empty = make_store(base / "empty.db", memory=False)
+    broken = base / "broken.db"
+    broken.write_bytes(b"this file is not a SQLite database " * 64)
+    jobs: Jobs = {}
+    with FakeHostedMcp() as fake, runner_factory(work) as make:
+        fake.fail("initialize", 503)
+        url = fake.serve()
+
+        def store(path: pathlib.Path) -> dict[str, str]:
+            return {"MEMVARA_DB": str(path), "MEMVARA_USER": USER}
+
+        for host, hook, outcome in outcome_cases(hosts, OUTCOMES):
+            env, prompt = {
+                "not configured": ({}, PROMPT),
+                "store cannot open": (store(broken), PROMPT),
+                "store unreachable": ({"MEMVARA_API_KEY": fake.api_key,
+                                       "MEMVARA_SERVER_URL": url}, PROMPT),
+                "nothing matches": (store(empty if hook == "session_start" else full),
+                                    UNRELATED),
+                "memories injected": (store(full), PROMPT),
+            }[outcome]
+            fields = {"prompt": prompt} if hook == "recall" else {}
+            jobs[host, hook, outcome] = job(
+                make(host, env=env), hook,
+                stdin=host_json(host, hook, session="outcomes", cwd=work, **fields))
+        results = run_all(jobs)
+    return Runs(results)
+
+
+def check_told_apart(runs: Runs, host: str, hook: str, one: str, other: str) -> None:
+    """A person or a log reader can tell outcome `one` from outcome `other`."""
+    first, second = runs[host, hook, one], runs[host, hook, other]
+    assert observed(first) != observed(second), (
+        f"{hook} on {host} looks the same for {one!r} and {other!r}: {observed(first)}")
 
 
 # -- hostile payloads --------------------------------------------------------------------
