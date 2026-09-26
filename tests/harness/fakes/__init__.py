@@ -12,7 +12,8 @@ therefore fails its own tests before it can mislead any other test.
   the npm bridge call, answered by the real MCP server code.
 * `openai_compat.FakeOpenAI` is an OpenAI-compatible chat-completions endpoint that
   returns scripted replies.
-* `cli.FakeClis` writes executables named `claude` and `codex` for the capture hook.
+* `cli.FakeClis` writes executables named `claude` and `codex` for the capture hook, and
+  `cli.HangingClis` writes a `claude` and a `codex` that never answer.
 
 `_http` holds what the three HTTP fakes share. Every server here listens on 127.0.0.1
 only, so nothing reaches the network. docs/claude/testing.md explains how to use them.

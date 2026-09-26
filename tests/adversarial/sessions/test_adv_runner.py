@@ -370,6 +370,43 @@ def test_a_capture_that_finds_nothing_stops_the_run_and_its_server(
     assert killed == [tmp_path / "memory.db"]
 
 
+@pytest.fixture
+def closed_runners(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The host of each hook runner a session closes, in order. A runner stops a recall
+    daemon or a capture child its hooks left running only when it is closed."""
+    closed: list[str] = []
+
+    class Recording(runner.HookRunner):
+        def close(self) -> None:
+            closed.append(self.host.id)
+            super().close()
+
+    monkeypatch.setattr(runner, "HookRunner", Recording)
+    return closed
+
+
+def one_hook_step(**step: Any) -> dict[str, Any]:
+    """The sample scenario cut to one session whose only step runs the session-start hook."""
+    scenario = sample(surfaces=["stdio", "hooks"], requires=["tools", "hooks.session_start"])
+    del scenario["sessions"][1]
+    script(scenario)[:] = [{"hook": "session_start", **step}]
+    return scenario
+
+
+def test_a_session_closes_its_hook_runners_when_it_ends_on_a_real_server(
+        tmp_path: pathlib.Path, closed_runners: list[str]) -> None:
+    assert runner.run(one_hook_step(), tmp_path).problems == []
+    assert closed_runners == ["claude"]
+
+
+def test_a_session_closes_its_hook_runners_when_a_step_fails_on_a_real_server(
+        tmp_path: pathlib.Path, closed_runners: list[str]) -> None:
+    scenario = one_hook_step(capture={"nothing": "no such text"})
+    with pytest.raises(runner.RunError, match="the capture 'nothing' found nothing"):
+        runner.run(scenario, tmp_path)
+    assert closed_runners == ["claude"]
+
+
 def test_a_hook_step_reads_the_store_the_session_wrote_on_a_real_server(
         tmp_path: pathlib.Path) -> None:
     scenario = sample(surfaces=["stdio", "hooks"], requires=["tools", "hooks.session_start"])

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import pathlib
+import sys
 from typing import Any, Callable, Iterator
 
 import pytest
 
+from harness.fakes.cli import NO_FAKES, FakeClis
 from harness.hooks import HookRunner
 from harness.stdio import McpProcess, kill_all
 
@@ -64,3 +66,12 @@ def hook_runner(tmp_path: pathlib.Path,
     yield make
     for runner in made:
         runner.close()
+
+
+@pytest.fixture
+def clis(tmp_path: pathlib.Path) -> FakeClis:
+    """Fake `claude` and `codex` executables with nothing scripted yet. They are shell
+    scripts, so a test that asks for them skips on Windows."""
+    if sys.platform == "win32":
+        pytest.skip(NO_FAKES)
+    return FakeClis(tmp_path / "clis")

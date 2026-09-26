@@ -12,11 +12,11 @@ from typing import Callable
 
 import pytest
 
-from harness.hooks import HookRunner, socket_peer_pid
+from harness.hooks import NO_UNIX_SOCKETS, HookRunner, socket_peer_pid
 
 from .. import support
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason=support.NO_UNIX_SOCKETS)
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason=NO_UNIX_SOCKETS)
 
 
 def test_the_next_daemon_takes_over_the_socket_a_killed_one_left(

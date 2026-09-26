@@ -18,13 +18,17 @@ from __future__ import annotations
 import importlib
 import os
 import pathlib
+import subprocess
 import sys
-from types import ModuleType
-from typing import Callable
+import time
+from types import ModuleType, SimpleNamespace
+from typing import Callable, cast
 
 import pytest
 
-from harness.hooks import HOOKS_DIR, HookRunner, host_record
+from harness.env import child_env
+from harness.fakes.cli import NO_FAKES, HangingClis
+from harness.hooks import HOOKS_DIR, HookResult, HookRunner, host_record, process_alive
 
 from . import support
 
@@ -80,10 +84,9 @@ def test_capture_gives_up_on_an_extractor_that_never_answers_and_says_so(
     costs capture about two seconds. It logs both timeouts, and the next prompt's status
     line carries the capture alert, which is how a person learns capture is failing."""
     if sys.platform == "win32":
-        pytest.skip(support.NO_FAKES)
-    env = {"MEMVARA_DB": str(support.make_store(tmp_path / "capture.db", memory=False)),
-           "MEMVARA_USER": support.USER}
-    runner = hooks("claude", env=env, stubs=support.HangingClis(tmp_path / "hanging"),
+        pytest.skip(NO_FAKES)
+    env = support.store_env(support.make_store(tmp_path / "capture.db", memory=False))
+    runner = hooks("claude", env=env, stubs=HangingClis(tmp_path / "hanging"),
                    patches={"lib.agentic.TIMEOUT_SEC": 1.0, "lib.extract.TIMEOUT_SEC": 1.0})
     transcript = support.write_transcript("claude", tmp_path / "t.jsonl",
                                           [(support.USER_TURN, support.ASSISTANT_TURN)])
@@ -101,3 +104,27 @@ def test_capture_gives_up_on_an_extractor_that_never_answers_and_says_so(
 def test_capture_on_codex_frees_the_turn_while_its_extractor_hangs(
         hooks: Make, tmp_path: pathlib.Path) -> None:
     support.check_capture_frees_the_turn(hooks, tmp_path, "codex")
+
+
+def test_the_check_that_capture_frees_the_turn_fails_when_the_child_has_ended(
+        tmp_path: pathlib.Path) -> None:
+    """support.check_capture_frees_the_turn must see that the child it was handed still
+    runs. A child that has ended, but that nothing has reaped yet, still answers signal 0,
+    so here the capture hands the turn to such a child, and the check must fail."""
+    if sys.platform == "win32":
+        pytest.skip(NO_FAKES)
+    child = subprocess.Popen([sys.executable, "-c", "pass"], env=child_env(tmp_path))
+    try:
+        deadline = time.monotonic() + 10
+        while process_alive(child.pid):
+            assert time.monotonic() < deadline, "the child did not end"
+            time.sleep(0.02)
+        os.kill(child.pid, 0)  # it has ended, and it still answers signal 0
+        ended = HookResult(exit_code=0, stdout="", stderr="", reply=None, elapsed=0.1,
+                           detached_pid=child.pid)
+        runner = cast(HookRunner, SimpleNamespace(run=lambda hook, **options: ended))
+        with pytest.raises(AssertionError, match="had already ended"):
+            support.check_capture_frees_the_turn(lambda host, **options: runner, tmp_path,
+                                                 "codex")
+    finally:
+        child.wait()

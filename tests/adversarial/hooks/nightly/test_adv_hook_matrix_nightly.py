@@ -5,6 +5,10 @@ sends them, and three more JSON values that are not objects, to every hook on al
 It also checks the reading hooks' outcomes on all five (test_adv_hook_outcomes.py checks
 two), and pins on all five the known bugs those two modules pin on two: B55, B56, B57
 and B64.
+
+Each test body here is one call to a check or pin function in support.py, which the two
+fast modules call too, so the tiers check the same things and differ only in the hosts
+and payloads they are parametrised with.
 """
 
 from __future__ import annotations
@@ -64,8 +68,7 @@ def test_a_store_that_could_not_be_reached_is_told_apart_from_one_that_answered(
 @pytest.mark.parametrize("host", support.recall_hosts(support.HOSTS))
 def test_recall_that_could_not_ask_the_store_says_so_in_its_log(
         outcomes: support.Runs, host: str) -> None:
-    result = outcomes[host, "recall", "store unreachable"]
-    assert "failed reason=unknown" in result.log("recall"), result.logs
+    support.check_recall_says_it_could_not_ask(outcomes, host)
 
 
 # -- known bugs, on all five hosts -------------------------------------------------------

@@ -12,11 +12,11 @@ from typing import Any
 import pytest
 
 from harness.env import REPO, child_env
-from harness.fakes.cli import EXHAUSTED, USAGE, CliCall, CliReply, FakeClis
+from harness.fakes.cli import (EXHAUSTED, NAMES, NO_FAKES, USAGE, CliCall, CliReply,
+                                FakeClis, HangingClis)
 from harness.hooks import host_record
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32",
-                                reason="the fake agent CLIs are POSIX shell scripts")
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason=NO_FAKES)
 
 HOOKS = REPO / "plugin" / "hooks"
 
@@ -163,3 +163,15 @@ def test_windows_is_refused_with_the_reason(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(sys, "platform", "win32")
     with pytest.raises(NotImplementedError, match="only as an .exe"):
         FakeClis(tmp_path / "bin")
+    with pytest.raises(NotImplementedError, match="only as an .exe"):
+        HangingClis(tmp_path / "hanging")
+
+
+def test_a_hanging_cli_never_answers(tmp_path: pathlib.Path, home: pathlib.Path) -> None:
+    """HangingClis stand in for an agent CLI that never answers: each program runs until it
+    is killed. test_adv_hook_timeouts.py drives the capture hook against them."""
+    hanging = HangingClis(tmp_path / "hanging")
+    for name in NAMES:
+        with pytest.raises(subprocess.TimeoutExpired):
+            subprocess.run([str(hanging.bin / name), "-p", "a prompt"], capture_output=True,
+                           timeout=0.5, env=child_env(home), stdin=subprocess.DEVNULL)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import importlib
 import json
 import os
@@ -12,6 +13,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, Sequence
@@ -24,6 +26,11 @@ RUN = HOOKS_DIR / "run.py"
 #: Where the hooks keep their logs, their state and the recall daemon's socket, under the
 #: home directory a run is given.
 HOOKS_HOME = pathlib.Path(".memvara") / ".hooks"
+
+#: Why the recall daemon cannot run here. HookRunner refuses `daemon=True` with these
+#: words, and a test that skips for the same reason uses them too, so that the skip
+#: matches its rule in tests/harness/skips.py.
+NO_UNIX_SOCKETS = "the recall daemon listens on a unix socket, which Windows lacks"
 
 #: The moment a hook log line was written, which starts every line. `HookResult.logs`
 #: leaves it out, so a test can compare lines from two runs.
@@ -84,6 +91,14 @@ _BAD_PATCH = 97
 #: first, as run.py does, because some hook modules read the host when they are imported,
 #: then sets each patched module attribute, then calls run.py's own `main`. It is passed
 #: with `python -c`, so it is never a file that pytest's doctest collection would import.
+#:
+#: A patch replaces the attribute on the one module it names, so it reaches only code that
+#: reads that attribute when it runs. A module that imported the value by name keeps its
+#: own copy, and so does a default argument, which Python fixes when it defines the
+#: function. `lib.fast.REWRITE_WAIT_SEC` is such a value: recall.py imports it by name
+#: (`from lib.fast import REWRITE_WAIT_SEC`) and passes its own copy, and lib/fast.py reads
+#: it only as a default argument, so a patch of it changes nothing. Patch the copy the code
+#: reads instead, here `recall.REWRITE_WAIT_SEC`. No test patches a value like that today.
 _LAUNCHER = f"""\
 import importlib, json, os, sys
 sys.path.insert(0, sys.argv[1])
@@ -163,16 +178,20 @@ def host_record(host: str) -> Any:
     return importlib.import_module(f"hosts.{host}").HOST
 
 
+@functools.cache
 def host_ids() -> tuple[str, ...]:
-    """Every host the plugin has a record for: the modules in plugin/hooks/hosts."""
+    """Every host the plugin has a record for: the modules in plugin/hooks/hosts. Read once
+    per run, because the records do not change while the tests run."""
     return tuple(sorted(path.stem for path in (HOOKS_DIR / "hosts").glob("*.py")
                         if path.stem != "__init__"))
 
 
+@functools.cache
 def agent_clis() -> frozenset[str]:
     """The program name of every agent CLI a capture can start: each host's own
     extractor, and the `claude` CLI that every host falls back to
-    (`CLAUDE_CLI` in plugin/hooks/core/host.py)."""
+    (`CLAUDE_CLI` in plugin/hooks/core/host.py). Worked out once per run, like
+    `host_ids`."""
     records = [host_record(host) for host in host_ids()]
     fallback = importlib.import_module("core.host").CLAUDE_CLI
     specs = [record.extractor for record in records] + [fallback]
@@ -198,6 +217,21 @@ def path_without_agent_clis(path: str) -> str:
 
     return os.pathsep.join(part for part in path.split(os.pathsep)
                            if part and not holds_one(part))
+
+
+def short_dir(prefix: str) -> pathlib.Path:
+    """A new private directory with a short path, which the caller removes.
+
+    A runner that allows the recall daemon needs a home like this. The daemon's socket
+    lives under the home, and macOS refuses a unix socket path longer than 104 bytes. A
+    pytest temporary directory under a long TMPDIR can pass that length before the hooks
+    add their part, so this uses the system's temporary directory when its path is short,
+    and /tmp when it is not.
+    """
+    base = tempfile.gettempdir()
+    if len(base) > 40 and os.path.isdir("/tmp"):
+        base = "/tmp"
+    return pathlib.Path(tempfile.mkdtemp(prefix=f"mv-{prefix}-", dir=base))
 
 
 def parse_reply(stdout: str, *, what: str, stderr: str = "") -> dict[str, Any] | None:
@@ -291,15 +325,32 @@ def _detached_pid(lines: Sequence[str]) -> int | None:
     return None
 
 
+def _lines_since(path: pathlib.Path, start: int) -> tuple[str, ...]:
+    """The lines of the log at `path` past byte `start`, without their timestamps, or none
+    when there is no such log. A log now shorter than `start` was truncated by the hooks,
+    which they do past 64 KB, so it is read whole."""
+    try:
+        with open(path, "rb") as log:
+            if os.fstat(log.fileno()).st_size < start:
+                start = 0
+            log.seek(start)
+            data = log.read()
+    except FileNotFoundError:
+        return ()
+    return tuple(_STAMP.sub("", line, count=1)
+                 for line in data.decode("utf-8", "replace").splitlines())
+
+
 def socket_peer_pid(path: pathlib.Path) -> int | None:
     """The pid of the process listening on the unix socket at `path`, or None when
     nothing accepts a connection there.
 
     The kernel reports it (`LOCAL_PEERPID` on macOS, `SO_PEERCRED` on Linux), so it names
     the listener itself, whatever its command line says. Every recall daemon runs the same
-    command, so a command line could not tell this test's daemon from another's.
+    command, so a command line could not tell this test's daemon from another's. When no
+    file is at `path`, it answers None without opening a socket.
     """
-    if sys.platform == "win32":
+    if sys.platform == "win32" or not os.path.exists(path):
         return None
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     probe.settimeout(1.0)
@@ -328,27 +379,50 @@ def process_alive(pid: int) -> bool:
     tests run as process 1 in a container. So the process's state is read: from /proc on
     Linux, and from `ps` elsewhere.
     """
-    if sys.platform == "win32":
-        # os.kill with signal 0 terminates the process on Windows rather than probing it.
-        raise NotImplementedError("process probing is POSIX only")
+    _refuse_windows()
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    return not _state_says_ended(pid)
+
+
+def _refuse_windows() -> None:
+    if sys.platform == "win32":
+        # os.kill with signal 0 terminates the process on Windows rather than probing it.
+        raise NotImplementedError("process probing is POSIX only")
+
+
+def _answers_signal_0(pid: int) -> bool:
+    """Whether process `pid` exists, counting one that has ended and has not been reaped.
+    It costs one system call."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _state_says_ended(pid: int) -> bool:
+    """Whether the process table says process `pid` has ended: it is gone, or it is a
+    zombie. This is the check that sees a process nothing has reaped yet. It reads /proc on
+    Linux and starts `ps` elsewhere, which takes a few milliseconds."""
     if sys.platform.startswith("linux"):
         try:
             stat = pathlib.Path(f"/proc/{pid}/stat").read_bytes()
         except OSError:
-            return False
-        return stat.rsplit(b")", 1)[-1].split()[:1] != [b"Z"]
+            return True
+        return stat.rsplit(b")", 1)[-1].split()[:1] == [b"Z"]
     try:
         state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,
                                text=True, timeout=10).stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        return True
-    return bool(state) and not state.startswith("Z")
+        return False
+    return not state or state.startswith("Z")
 
 
 def _runs_the_daemon(pid: int) -> bool:
@@ -370,11 +444,30 @@ def _runs_the_daemon(pid: int) -> bool:
     return daemon in done.stdout
 
 
+#: How often `_wait_for_exit` reads a process's state where that starts `ps`, in seconds.
+#: Signal 0, sent on every poll, sees a process once it has been reaped; only the state
+#: sees one that has ended and not been reaped, so it is still read, only less often.
+_STATE_EVERY = 0.25
+
+
 def _wait_for_exit(pid: int, timeout: float) -> bool:
-    """Wait until process `pid` has ended. False when it still runs after `timeout`."""
+    """Wait until process `pid` has ended. False when it still runs after `timeout`.
+
+    It polls every 20 ms with signal 0. The state, which also sees a process that has
+    ended and not been reaped, is read on the first poll and then every `_STATE_EVERY`
+    seconds where reading it starts `ps`, and on every poll on Linux.
+    """
+    _refuse_windows()
+    every = 0.0 if sys.platform.startswith("linux") else _STATE_EVERY
     deadline = time.monotonic() + timeout
-    while process_alive(pid):
-        if time.monotonic() >= deadline:
+    read_state_at = time.monotonic()
+    while _answers_signal_0(pid):
+        now = time.monotonic()
+        if now >= read_state_at:
+            if _state_says_ended(pid):
+                return True
+            read_state_at = now + every
+        if now >= deadline:
             return False
         time.sleep(0.02)
     return True
@@ -415,13 +508,15 @@ class HookRunner:
     `daemon=True` lets the recall hook start its background daemon, which `child_env`
     otherwise forbids. The daemon outlives the hook and idles for 30 minutes, so a test
     that allows it calls `close()` when it ends. Its socket lives under `home`, and macOS
-    refuses a unix socket path longer than 104 bytes, so such a home needs a short path.
+    refuses a unix socket path longer than 104 bytes, so such a home needs a short path,
+    which `short_dir` makes.
 
     `patches` sets module attributes in the hook process before the hook runs, such as
     `{"lib.hosted.TIMEOUT_SEC": 0.25}`, so a test can shrink one of a hook's time limits
     instead of waiting it out. A patch that names an attribute the hooks do not have is
     refused with `ValueError`, because a limit that was renamed would otherwise leave the
-    test waiting out the real one.
+    test waiting out the real one. A patch reaches only code that reads the attribute from
+    that module when it runs; the note above `_LAUNCHER` names a value it cannot reach.
     """
 
     def __init__(self, host: str, *, home: pathlib.Path, cwd: pathlib.Path,
@@ -430,8 +525,7 @@ class HookRunner:
                  stubs: Stubs | None = None, daemon: bool = False,
                  patches: Mapping[str, float] | None = None) -> None:
         if daemon and not hasattr(socket, "AF_UNIX"):
-            raise NotImplementedError(
-                "the recall daemon listens on a unix socket, which this platform lacks")
+            raise NotImplementedError(NO_UNIX_SOCKETS)
         self.host = host_record(host)
         self.home = pathlib.Path(home)
         self.cwd = pathlib.Path(cwd)
@@ -568,19 +662,22 @@ class HookRunner:
             raise HookOutputError(f"{hook} on {self.host.id} printed bytes that are not "
                                   f"UTF-8: {done.stdout[:300]!r}") from None
         reply = parse_reply(stdout, what=f"{hook} on {self.host.id}", stderr=stderr)
-        logs = self._new_lines(before)
-        pid = _detached_pid(logs.get("hooks", ())) if detaches else None
+        pid = None
+        if detaches:
+            # run.py names the child in hooks.log, so only that log is read here. Every log
+            # is read once below, after the child has ended, so the logs hold what it did.
+            pid = _detached_pid(_lines_since(self.home / HOOKS_HOME / "hooks.log",
+                                             before.get("hooks", 0)))
         if pid is not None:
             if not wait_detached:
                 self._detached.append(pid)
-            elif _wait_for_exit(pid, limit):
-                logs = self._new_lines(before)
-            else:
+            elif not _wait_for_exit(pid, limit):
                 _kill_group(pid)
                 raise HookTimeout(f"the capture {self.host.id} handed to pid {pid} ran past "
                                   f"{limit}s")
         return HookResult(exit_code=done.returncode, stdout=stdout, stderr=stderr,
-                          reply=reply, elapsed=elapsed, logs=logs, detached_pid=pid)
+                          reply=reply, elapsed=elapsed, logs=self._new_lines(before),
+                          detached_pid=pid)
 
     def daemon_sockets(self) -> list[pathlib.Path]:
         """The recall daemons' socket files under this runner's home."""
@@ -631,22 +728,26 @@ class HookRunner:
         self._detached.clear()
 
     def _log_sizes(self) -> dict[str, int]:
-        return {path.stem: path.stat().st_size
-                for path in (self.home / HOOKS_HOME).glob("*.log")}
+        """The size of each hook log, keyed by the file's stem, from one listing of the
+        log directory."""
+        sizes: dict[str, int] = {}
+        try:
+            with os.scandir(self.home / HOOKS_HOME) as entries:
+                for entry in entries:
+                    if entry.name.endswith(".log") and entry.is_file():
+                        sizes[entry.name[:-len(".log")]] = entry.stat().st_size
+        except FileNotFoundError:
+            pass
+        return sizes
 
     def _new_lines(self, before: Mapping[str, int]) -> dict[str, tuple[str, ...]]:
-        """The lines each hook log gained since `before`, without their timestamps.
-
-        A log the hooks truncated in the meantime, which they do past 64 KB, is read
-        whole.
-        """
+        """The lines each hook log gained since `before`, without their timestamps. The
+        log directory is listed once, and a log whose size has not changed is not read."""
         new: dict[str, tuple[str, ...]] = {}
-        for path in sorted((self.home / HOOKS_HOME).glob("*.log")):
-            data = path.read_bytes()
-            start = before.get(path.stem, 0)
-            if len(data) < start:
-                start = 0
-            lines = data[start:].decode("utf-8", "replace").splitlines()
+        for stem, size in sorted(self._log_sizes().items()):
+            if size == before.get(stem, 0):
+                continue
+            lines = _lines_since(self.home / HOOKS_HOME / f"{stem}.log", before.get(stem, 0))
             if lines:
-                new[path.stem] = tuple(_STAMP.sub("", line, count=1) for line in lines)
+                new[stem] = lines
         return new

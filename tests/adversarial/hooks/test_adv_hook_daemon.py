@@ -26,11 +26,11 @@ from typing import Callable
 import pytest
 
 from harness import known_bugs
-from harness.hooks import HOOKS_HOME, HookRunner, socket_peer_pid
+from harness.hooks import HOOKS_HOME, NO_UNIX_SOCKETS, HookRunner, socket_peer_pid
 
 from . import support
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason=support.NO_UNIX_SOCKETS)
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason=NO_UNIX_SOCKETS)
 
 Make = Callable[..., HookRunner]
 
@@ -98,16 +98,25 @@ def test_a_recall_whose_first_read_finds_nothing_starts_one_daemon(
     process, and recall.py reads a second time, wider, when the first read finds nothing
     fresh. So a prompt that matches nothing, with no daemon running, starts two daemons
     for one store. This counts the starts, which does not depend on which of the two ends
-    up listening."""
+    up listening.
+
+    Each daemon records its pid as soon as its Python starts, long before either daemon
+    listens. In 40 of 40 measured runs, 20 of them with four extra processes keeping the
+    cores busy, both pids were recorded by the time `wait_for_daemon` returned. The test
+    still waits up to 5 seconds for a second pid, so that a start delayed by load cannot
+    make the strict pin pass. While the bug is present, the wait ends as soon as the second
+    pid appears and costs nothing. Once the bug is fixed, only one pid ever appears, so the
+    test waits the whole 5 seconds on every run. The fix should then shorten the wait or
+    move the test to the nightly tier."""
     db = support.make_store(tmp_path / "empty.db", memory=False)
-    runner = hooks("claude", daemon=True,
-                   env={"MEMVARA_DB": str(db), "MEMVARA_USER": support.USER})
+    runner = hooks("claude", daemon=True, env=support.store_env(db))
     result = runner.run("recall", session="one", prompt=support.UNRELATED)
     assert support.status_of("claude", result.reply) == support.status_line(
         "no matching memories")
     runner.wait_for_daemon()
-    # A second daemon, if the hook started one, records its pid as its Python starts.
-    deadline = time.monotonic() + 1.0
+    # A second daemon, if the hook started one, records its pid as its Python starts. The
+    # docstring says what this wait costs once the bug is fixed.
+    deadline = time.monotonic() + 5.0
     while len(runner.daemon_pids()) < 2 and time.monotonic() < deadline:
         time.sleep(0.05)
     pids = runner.daemon_pids()

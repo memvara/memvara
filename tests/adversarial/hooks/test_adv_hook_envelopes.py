@@ -8,6 +8,11 @@ host sends, with the extra keys its record lists (`support.host_payload`), again
 store that holds `support.MEMORY`.
 
 The runs are made once for the module, side by side, and each test reads its own.
+
+The restatement is deliberate, because a test that read the record would agree with any
+change to it. So the last tests here compare `support.HOSTS`, `support.EVENTS`,
+`support.SHAPES` and `support.DETACHES` with the records directly, and when a record
+changes, the failure names the table that has gone stale.
 """
 
 from __future__ import annotations
@@ -18,6 +23,8 @@ from typing import Any, Iterator
 import pytest
 
 from harness import stores
+from harness.fakes.cli import NO_FAKES
+from harness.hooks import host_ids, host_record
 
 from . import support
 
@@ -57,8 +64,7 @@ def runs(tmp_path_factory: pytest.TempPathFactory) -> Iterator[support.Runs]:
     base = tmp_path_factory.mktemp("envelopes")
     work = base / "work"
     work.mkdir()
-    env = {"MEMVARA_DB": str(support.make_store(base / "memory.db")),
-           "MEMVARA_USER": support.USER}
+    env = support.store_env(support.make_store(base / "memory.db"))
     jobs: support.Jobs = {}
     stores_by_host = {}
     with support.runner_factory(work) as make:
@@ -89,8 +95,7 @@ def runs(tmp_path_factory: pytest.TempPathFactory) -> Iterator[support.Runs]:
                     host, base / f"transcript-{host}.jsonl",
                     [(support.USER_TURN, support.ASSISTANT_TURN)])
                 jobs["capture", host] = support.job(
-                    make(host, env={"MEMVARA_DB": str(db), "MEMVARA_USER": support.USER},
-                         stubs=clis),
+                    make(host, env=support.store_env(db), stubs=clis),
                     "capture", stdin=payload("capture", transcript_path=str(transcript)))
         # Cursor has no recall event, so its runner is given the Claude-shaped payload
         # and a limit of its own.
@@ -161,7 +166,7 @@ def test_capture_prints_nothing_and_stores_the_fact_its_turn_states(
     (async, detached, or not awaited), so capture must print nothing at all. On Codex,
     Copilot and Cursor, run.py hands it to a child in a new session."""
     if sys.platform == "win32":
-        pytest.skip("the fake agent CLIs are POSIX shell scripts")
+        pytest.skip(NO_FAKES)
     result = runs["capture", host]
     assert (result.exit_code, result.stdout, result.stderr) == (0, "", "")
     assert (result.detached_pid is not None) is (host in support.DETACHES)
@@ -169,3 +174,32 @@ def test_capture_prints_nothing_and_stores_the_fact_its_turn_states(
     with stores.file(runs.stores[host]) as mem:
         facts = [claim.object for claim in mem.scope(user=support.USER).get_all()]
     assert facts == ["Lisbon"]
+
+
+# -- the tables in support.py, against the host records ----------------------------------
+
+def test_support_hosts_are_the_hosts_with_a_record() -> None:
+    assert support.HOSTS == host_ids(), "support.HOSTS is stale"
+
+
+@pytest.mark.parametrize("host", support.HOSTS)
+def test_support_events_are_the_ones_the_host_record_names(host: str) -> None:
+    assert support.EVENTS[host] == dict(host_record(host).events), (
+        f"support.EVENTS is stale for {host}")
+
+
+@pytest.mark.parametrize("host", support.HOSTS)
+def test_support_shapes_are_the_keys_the_host_record_names(host: str) -> None:
+    """SHAPES says whether the reply is nested, its status key (None where the host shows
+    no status line), its context key, and an approval's verdict and reason keys."""
+    record = host_record(host)
+    nested, status, context, verdict, reason = support.SHAPES[host]
+    assert (("nested" if nested else "flat"), status or "", context, verdict, reason) == (
+        record.envelope, record.status_key, record.context_key,
+        record.approve.decision_key, record.approve.reason_key), (
+        f"support.SHAPES is stale for {host}")
+
+
+def test_support_detaches_names_the_hosts_whose_record_detaches_capture() -> None:
+    detaching = frozenset(host for host in host_ids() if host_record(host).detach_capture)
+    assert support.DETACHES == detaching, "support.DETACHES is stale"

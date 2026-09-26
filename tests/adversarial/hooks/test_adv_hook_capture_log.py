@@ -52,8 +52,8 @@ def test_capture_logs_what_it_decided(hooks: Make, clis: FakeClis, tmp_path: pat
             "content": [{"type": "text", "text": "Done."}]}}) + "\n")
     else:
         support.write_transcript("claude", transcript, turns)
-    env = ({"MEMVARA_DB": str(support.make_store(tmp_path / "capture.db", memory=False)),
-            "MEMVARA_USER": support.USER} if configured else {})
+    env = (support.store_env(support.make_store(tmp_path / "capture.db", memory=False))
+           if configured else {})
     clis.script("claude", support.PROPOSALS_REPLY)
     result = hooks("claude", env=env, stubs=clis).run("capture", session="s",
                                                       transcript_path=str(transcript))
@@ -86,8 +86,7 @@ def test_capture_says_so_when_it_decides_to_do_nothing(
         fields = {}
     elif case == "a transcript path that is not a file":
         fields["transcript_path"] = str(tmp_path / "gone.jsonl")
-    env = {"MEMVARA_DB": str(support.make_store(tmp_path / "capture.db", memory=False)),
-           "MEMVARA_USER": support.USER}
+    env = support.store_env(support.make_store(tmp_path / "capture.db", memory=False))
     clis.script("claude", support.PROPOSALS_REPLY)
     runner = hooks("claude", env=env, stubs=clis)
     stop = support.host_json("claude", "capture", session="s", cwd=tmp_path, **fields)

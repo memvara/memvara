@@ -12,6 +12,8 @@ other difference between the lists fails.
 
 from __future__ import annotations
 
+import importlib
+import re
 import sys
 from types import ModuleType
 from typing import Callable
@@ -29,11 +31,11 @@ B3_MISSING = frozenset({"memory_get_document", "memory_list_documents"})
 
 
 def _approve_module() -> ModuleType:
+    """plugin/hooks/approve.py. plugin/hooks is not a package, so its folder goes on the
+    path first."""
     if str(HOOKS_DIR) not in sys.path:
         sys.path.insert(0, str(HOOKS_DIR))
-    import approve  # noqa: PLC0415 - plugin/hooks is not a package; the path is set above
-
-    return approve
+    return importlib.import_module("approve")
 
 
 def _known_gap() -> frozenset[str]:
@@ -77,6 +79,22 @@ def test_the_approve_list_is_the_servers_read_only_tools(server_tools: dict[str,
     allowed = set(_approve_module().READ_ONLY)
     assert allowed - read_only == set(), "approved, but the server does not mark it read-only"
     assert read_only - allowed <= _known_gap(), "read-only on the server, but not approved"
+
+
+@pytest.mark.parametrize("host", support.HOSTS)
+def test_support_tool_names_are_the_names_the_host_record_describes(host: str) -> None:
+    """support.TOOL_NAMES restates the records by hand. Each name it gives a tool on `host`
+    must match the record's matcher, which decides the names that reach the approve hook,
+    and must join the tool on with the first separator the record lists. When a record
+    changes, this names the table that has gone stale."""
+    approve = host_record(host).approve
+    for form in support.TOOL_NAMES[host]:
+        assert re.search(approve.matcher, form.format(tool="memory_search")), (
+            f"support.TOOL_NAMES is stale for {host}: {form!r} does not match "
+            f"{approve.matcher!r}")
+        assert form.endswith(approve.separators[0] + "{tool}"), (
+            f"support.TOOL_NAMES is stale for {host}: {form!r} does not join the tool on "
+            f"with {approve.separators[0]!r}")
 
 
 @pytest.mark.parametrize("host", ("cursor", "opencode"))

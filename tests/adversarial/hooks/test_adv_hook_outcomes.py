@@ -59,9 +59,7 @@ def test_a_store_that_could_not_be_reached_is_told_apart_from_one_that_answered(
 @pytest.mark.parametrize("host", support.recall_hosts(FAST_HOSTS))
 def test_recall_that_could_not_ask_the_store_says_so_in_its_log(
         outcomes: support.Runs, host: str) -> None:
-    """On a host that shows no status line, the log is the only account there is."""
-    result = outcomes[host, "recall", "store unreachable"]
-    assert "failed reason=unknown" in result.log("recall"), result.logs
+    support.check_recall_says_it_could_not_ask(outcomes, host)
 
 
 @pytest.mark.parametrize("hook, outcome, words", WORDS)

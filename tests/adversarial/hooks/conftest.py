@@ -1,14 +1,13 @@
-"""Fixtures for the hook conformance tests."""
+"""Fixtures for the hook conformance tests. The `clis` fixture, fresh fake agent CLIs, is
+in tests/adversarial/conftest.py, because tests/adversarial/test_adv_hooks.py uses it too."""
 
 from __future__ import annotations
 
 import pathlib
-import sys
 from typing import Callable, Iterator
 
 import pytest
 
-from harness.fakes.cli import FakeClis
 from harness.hooks import HookRunner
 
 from . import support
@@ -34,12 +33,4 @@ def store(tmp_path: pathlib.Path) -> pathlib.Path:
 @pytest.fixture
 def store_env(store: pathlib.Path) -> dict[str, str]:
     """The variables that name `store` to the hooks."""
-    return {"MEMVARA_DB": str(store), "MEMVARA_USER": support.USER}
-
-
-@pytest.fixture
-def clis(tmp_path: pathlib.Path) -> FakeClis:
-    """Fake `claude` and `codex` executables with nothing scripted yet."""
-    if sys.platform == "win32":
-        pytest.skip("the fake agent CLIs are POSIX shell scripts")
-    return FakeClis(tmp_path / "clis")
+    return support.store_env(store)

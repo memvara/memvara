@@ -43,7 +43,7 @@ def test_a_store_named_in_the_hooks_own_environment_wins_over_the_client_config(
     """Someone who exports MEMVARA_DB to point a session at another store means it."""
     empty = support.make_store(tmp_path / "empty.db", memory=False)
     runner = hooks("claude", env=store_env,
-                   server_env={"MEMVARA_DB": str(empty), "MEMVARA_USER": support.USER})
+                   server_env=support.store_env(empty))
     result = runner.run("session_start")
     assert support.MEMORY in support.context_of("claude", result.reply)
 

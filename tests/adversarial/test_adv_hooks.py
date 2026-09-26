@@ -9,7 +9,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from types import SimpleNamespace
 from typing import Callable, Iterator
@@ -17,10 +16,11 @@ from typing import Callable, Iterator
 import pytest
 
 from harness import hooks as hooks_module
-from harness import stores
-from harness.fakes.cli import FakeClis
-from harness.hooks import (HookOutputError, HookRunner, HookTimeout, agent_clis, host_ids,
-                           host_record, parse_reply, process_alive, socket_peer_pid)
+from harness import skips, stores
+from harness.fakes.cli import NO_FAKES, FakeClis, HangingClis
+from harness.hooks import (NO_UNIX_SOCKETS, HookOutputError, HookRunner, HookTimeout,
+                           agent_clis, host_ids, host_record, parse_reply, process_alive,
+                           short_dir, socket_peer_pid)
 from memvara import MemoryType
 
 Make = Callable[..., HookRunner]
@@ -167,14 +167,8 @@ def test_a_run_reports_the_log_lines_it_added_without_their_timestamps(
     assert again.log("capture") == ()
 
 
-def _clis(tmp_path: pathlib.Path) -> FakeClis:
-    if sys.platform == "win32":
-        pytest.skip("the fake agent CLIs are POSIX shell scripts")
-    return FakeClis(tmp_path / "clis")
-
-
-def test_capture_runs_against_the_stub_clis(hook_runner: Make, tmp_path: pathlib.Path) -> None:
-    clis = _clis(tmp_path)
+def test_capture_runs_against_the_stub_clis(hook_runner: Make, clis: FakeClis,
+                                            tmp_path: pathlib.Path) -> None:
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(json.dumps({"type": "user", "message": {"content": "ok"}}) + "\n")
     result = hook_runner("claude", stubs=clis).run("capture", transcript_path=str(transcript))
@@ -183,10 +177,10 @@ def test_capture_runs_against_the_stub_clis(hook_runner: Make, tmp_path: pathlib
     assert result.log("capture") == ("turn=8c skipped=continuation",)
 
 
-def test_a_detached_capture_is_waited_for(hook_runner: Make, tmp_path: pathlib.Path) -> None:
+def test_a_detached_capture_is_waited_for(hook_runner: Make, clis: FakeClis,
+                                          tmp_path: pathlib.Path) -> None:
     """Codex hands capture to a child in a new session and returns at once. The runner
     waits for that child, so the logs hold what the capture did."""
-    clis = _clis(tmp_path)
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(json.dumps({"type": "response_item", "payload": {
         "type": "message", "role": "user",
@@ -197,20 +191,10 @@ def test_a_detached_capture_is_waited_for(hook_runner: Make, tmp_path: pathlib.P
     assert result.log("capture") == ("turn=8c skipped=continuation",)
 
 
-#: Why a test of the recall daemon skips on Windows. It has a rule in harness/skips.py.
-NO_UNIX_SOCKETS = "the recall daemon listens on a unix socket, which Windows lacks"
-
-
-def _short_dir() -> pathlib.Path:
-    """A private directory with a short path. macOS refuses a unix socket path longer
-    than 104 bytes, which a directory under a long TMPDIR can pass on its own."""
-    return pathlib.Path(tempfile.mkdtemp(prefix="mv-hooks-", dir="/tmp"))
-
-
 def test_the_peer_pid_of_a_socket_is_the_process_listening_on_it() -> None:
     if sys.platform == "win32":
         pytest.skip(NO_UNIX_SOCKETS)
-    directory = _short_dir()
+    directory = short_dir("hooks")
     path = directory / "s.sock"
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -233,9 +217,12 @@ def test_the_daemon_option_lets_the_recall_hook_start_its_daemon(hook_runner: Ma
 
 def test_the_daemon_option_is_refused_where_there_are_no_unix_sockets(
         hook_runner: Make, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal uses the words of the skip ledger's rule for that reason, so a test that
+    skips with those words is explained on Windows."""
     monkeypatch.delattr(socket, "AF_UNIX", raising=False)
-    with pytest.raises(NotImplementedError, match="unix socket"):
+    with pytest.raises(NotImplementedError, match="unix socket") as refused:
         hook_runner("claude", daemon=True)
+    assert skips.explained(str(refused.value), platform="win32")
 
 
 def _daemon_runner(tmp_path: pathlib.Path, home: pathlib.Path) -> HookRunner:
@@ -251,7 +238,7 @@ def _daemon_runner(tmp_path: pathlib.Path, home: pathlib.Path) -> HookRunner:
 def test_close_stops_the_daemon_a_recall_started(tmp_path: pathlib.Path) -> None:
     if sys.platform == "win32":
         pytest.skip(NO_UNIX_SOCKETS)
-    home = _short_dir()
+    home = short_dir("hooks")
     runner = _daemon_runner(tmp_path, home)
     try:
         runner.run("recall", prompt="user lives in Lisbon")
@@ -272,7 +259,7 @@ def test_close_stops_a_daemon_that_no_socket_path_leads_to(tmp_path: pathlib.Pat
     stops that one too."""
     if sys.platform == "win32":
         pytest.skip(NO_UNIX_SOCKETS)
-    home = _short_dir()
+    home = short_dir("hooks")
     runner = _daemon_runner(tmp_path, home)
     try:
         runner.run("recall", prompt="user lives in Lisbon")
@@ -299,12 +286,8 @@ def test_the_hook_runner_fixture_closes_the_runners_it_made(
     returns, here with a codex that never answers. The fixture closes its runners when
     the test ends, and closing kills the child and the stub it started."""
     if sys.platform == "win32":
-        pytest.skip("the fake agent CLIs are POSIX shell scripts")
-    hanging = tmp_path / "hanging"
-    hanging.mkdir()
-    (hanging / "codex").write_text("#!/bin/sh\nexec sleep 120\n")
-    (hanging / "codex").chmod(0o755)
-    stubs = SimpleNamespace(path=lambda rest=None: os.pathsep.join([str(hanging), rest or ""]))
+        pytest.skip(NO_FAKES)
+    stubs = HangingClis(tmp_path / "hanging")
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(json.dumps({"type": "response_item", "payload": {
         "type": "message", "role": "user",
@@ -356,10 +339,9 @@ def test_a_patch_that_names_nothing_the_hooks_have_is_refused(hook_runner: Make)
 
 
 def test_patches_are_refused_for_a_capture_the_host_hands_to_a_child(
-        hook_runner: Make, tmp_path: pathlib.Path) -> None:
+        hook_runner: Make, clis: FakeClis, tmp_path: pathlib.Path) -> None:
     """run.py starts that child afresh, so a patch would not reach the capture."""
-    runner = hook_runner("codex", stubs=_clis(tmp_path),
-                         patches={"lib.extract.TIMEOUT_SEC": 1.0})
+    runner = hook_runner("codex", stubs=clis, patches={"lib.extract.TIMEOUT_SEC": 1.0})
     with pytest.raises(ValueError, match="child"):
         runner.run("capture", transcript_path=str(tmp_path / "t.jsonl"))
 

@@ -738,8 +738,16 @@ class _Session:
         """Play every turn, then close the server as a client does when the session ends.
 
         When a step raises, the server is killed before the error goes on, so no process
-        outlives a failed run.
+        outlives a failed run. Either way, every hook runner the session made is closed,
+        which stops any recall daemon or capture child its hooks left running.
         """
+        try:
+            self._play(turns)
+        finally:
+            for runner in self.hooks.values():
+                runner.close()
+
+    def _play(self, turns: Sequence[Mapping[str, Any]]) -> None:
         try:
             agreed = self.server.initialize(self.env["protocol"]).get("protocolVersion")
             if agreed != self.env["protocol"]:

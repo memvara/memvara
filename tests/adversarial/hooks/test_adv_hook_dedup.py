@@ -52,8 +52,7 @@ def test_capture_mines_a_turn_once_however_often_stop_fires(
         hooks: Make, clis: FakeClis, tmp_path: pathlib.Path) -> None:
     db = support.make_store(tmp_path / "capture.db", memory=False)
     clis.script("claude", support.PROPOSALS_REPLY, SECOND_REPLY)
-    runner = hooks("claude", stubs=clis,
-                   env={"MEMVARA_DB": str(db), "MEMVARA_USER": support.USER})
+    runner = hooks("claude", stubs=clis, env=support.store_env(db))
     turn = (support.USER_TURN, support.ASSISTANT_TURN)
     transcript = support.write_transcript("claude", tmp_path / "t.jsonl", [turn])
     for _ in range(2):
@@ -85,7 +84,7 @@ def test_the_standing_preferences_are_injected_once_when_a_session_opens(
     with stores.file(db) as mem:
         mem.scope(user=support.USER).remember("user", "prefers", PREFERENCE,
                                               memory_type=MemoryType.PROCEDURAL)
-    runner = hooks(host, env={"MEMVARA_DB": str(db), "MEMVARA_USER": support.USER})
+    runner = hooks(host, env=support.store_env(db))
     opened = support.context_of(host, runner.run("session_start", session="one").reply)
     assert support.STANDING_WORDS in opened and PREFERENCE in opened, opened
     first = runner.run("recall", session="one", prompt=support.UNRELATED)

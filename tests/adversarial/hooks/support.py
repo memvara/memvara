@@ -13,16 +13,15 @@ import pathlib
 import re
 import shutil
 import sys
-import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Iterator, Mapping, Sequence, TypeVar
 
 import pytest
 
 from harness import known_bugs, stores
-from harness.fakes.cli import FakeClis
+from harness.fakes.cli import NO_FAKES, FakeClis, HangingClis
 from harness.fakes.hosted_mcp import FakeHostedMcp
-from harness.hooks import HookResult, HookRunner
+from harness.hooks import HookResult, HookRunner, host_record, process_alive, short_dir
 
 #: The hosts the plugin has a record for, in plugin/hooks/hosts.
 HOSTS = ("claude", "codex", "copilot", "cursor", "opencode")
@@ -146,12 +145,6 @@ EXTRA_KEYS: Mapping[str, Mapping[str, Any]] = {
 #: The four hooks, in the order they run in a session (plugin/hooks/core/host.py).
 HOOKS = ("session_start", "recall", "capture", "approve")
 
-#: Why a capture test skips on Windows. It has a rule in tests/harness/skips.py.
-NO_FAKES = "the fake agent CLIs are POSIX shell scripts"
-
-#: Why a test of the recall daemon skips on Windows. It has a rule there too.
-NO_UNIX_SOCKETS = "the recall daemon listens on a unix socket, which Windows lacks"
-
 #: Invalid UTF-8 inside an otherwise ordinary payload.
 _INVALID_UTF8 = (b'{"session_id": "s", "prompt": "user lives in \xff\xfe Lisbon", '
                  b'"tool_name": "mcp__memvara__memory_search\xc3"}')
@@ -215,15 +208,23 @@ def tool_name(host: str, tool: str) -> str:
     return TOOL_NAMES[host][0].format(tool=tool)
 
 
+#: The stdin keys a host sends as a list, of which the hooks read the first item
+#: (plugin/hooks/core/envelope.py, `read_event`): Cursor's `workspace_roots`.
+_LIST_KEYS = frozenset({"workspace_roots"})
+
+
 def host_payload(host: str, hook: str, *, session: str, cwd: pathlib.Path,
                  **fields: Any) -> dict[str, Any]:
-    """The stdin `host` sends for `hook`. `fields` are keys every host spells alike:
-    prompt, tool_name, tool_input and transcript_path."""
+    """The stdin `host` sends for `hook`.
+
+    The working directory goes under the first key the host record lists for it, which is
+    the key the host itself sends: `workspace_roots`, a list, on Cursor, and `cwd`
+    elsewhere. `fields` are keys every host spells alike: prompt, tool_name, tool_input
+    and transcript_path.
+    """
     body: dict[str, Any] = {"hook_event_name": EVENTS[host][hook], "session_id": session}
-    if host == "cursor":
-        body["workspace_roots"] = [str(cwd)]
-    else:
-        body["cwd"] = str(cwd)
+    key = host_record(host).fields["cwd"][0]
+    body[key] = [str(cwd)] if key in _LIST_KEYS else str(cwd)
     body.update(EXTRA_KEYS[host])
     body.update(fields)
     return body
@@ -238,9 +239,10 @@ def write_transcript(host: str, path: pathlib.Path,
                      turns: Sequence[tuple[str, str]]) -> pathlib.Path:
     """Write `turns`, each a (user, assistant) pair, as the transcript `host` keeps.
 
-    Claude Code and OpenCode write JSONL with the speaker under `type`, and Cursor the
-    same with it under `role`. Codex writes a rollout of `response_item` entries, and
-    Copilot an event log. plugin/hooks/lib/transcript.py reads each one.
+    The format is the one the host record names (`transcript.format`). JSONL keeps the
+    speaker under the record's `role_key`, which is `type` on Claude Code and OpenCode and
+    `role` on Cursor. A Codex rollout is a list of `response_item` entries, and Copilot's
+    is an event log. plugin/hooks/lib/transcript.py reads each one.
     """
     entries: list[dict[str, Any]] = []
     for user, assistant in turns:
@@ -251,15 +253,20 @@ def write_transcript(host: str, path: pathlib.Path,
 
 
 def _entries(host: str, user: str, assistant: str) -> list[dict[str, Any]]:
-    if host == "codex":
+    """One turn, in the transcript format the record of `host` names."""
+    spec = host_record(host).transcript
+    if spec.format == "codex-rollout":
         return [_codex_message("user", "input_text", user),
                 _codex_message("assistant", "output_text", assistant)]
-    if host == "copilot":
+    if spec.format == "copilot-events":
         return [{"type": "user.message", "data": {"content": user}},
                 {"type": "assistant.message", "data": {"content": assistant}}]
-    speaker = "role" if host == "cursor" else "type"
-    return [{speaker: "user", "message": {"content": [{"type": "text", "text": user}]}},
-            {speaker: "assistant",
+    if spec.format != "jsonl":
+        raise ValueError(f"write_transcript cannot write the {spec.format!r} transcript "
+                         f"that {host} keeps")
+    return [{spec.role_key: "user",
+             "message": {"content": [{"type": "text", "text": user}]}},
+            {spec.role_key: "assistant",
              "message": {"content": [{"type": "text", "text": assistant}]}}]
 
 
@@ -281,34 +288,18 @@ def script_clis(directory: pathlib.Path, host: str, runs: int = 1) -> FakeClis:
     return clis
 
 
-class HangingClis:
-    """A `claude` and a `codex` that never answer: each sleeps until it is killed, or for
-    two minutes. POSIX only, like the fakes they stand in for."""
-
-    def __init__(self, directory: pathlib.Path) -> None:
-        self.bin = pathlib.Path(directory)
-        self.bin.mkdir(parents=True, exist_ok=True)
-        for name in ("claude", "codex"):
-            script = self.bin / name
-            script.write_text("#!/bin/sh\nexec sleep 120\n", encoding="utf-8")
-            script.chmod(0o755)
-
-    def path(self, rest: str | None = None) -> str:
-        """A PATH value with these first and `rest` after them."""
-        rest = os.environ.get("PATH", "") if rest is None else rest
-        return os.pathsep.join(part for part in (str(self.bin), rest) if part)
-
-
 def check_capture_frees_the_turn(make: Callable[..., HookRunner], work: pathlib.Path,
                                  host: str) -> None:
     """On a host that hands capture to a child, the hook returns at once however long the
     extraction takes: here the extractor never answers, and the hook returns within 3
     seconds with the child still running. The runner kills that child, and the stub it
-    started, when it closes."""
+    started, when it closes.
+
+    "Still running" is read with `process_alive`, because a child that has ended but that
+    nothing has reaped yet still answers signal 0."""
     if sys.platform == "win32":
         pytest.skip(NO_FAKES)
-    env = {"MEMVARA_DB": str(make_store(work / "capture.db", memory=False)),
-           "MEMVARA_USER": USER}
+    env = store_env(make_store(work / "capture.db", memory=False))
     runner = make(host, env=env, stubs=HangingClis(work / "hanging"))
     transcript = write_transcript(host, work / "t.jsonl", [(USER_TURN, ASSISTANT_TURN)])
     result = runner.run("capture", session="s", transcript_path=str(transcript),
@@ -316,7 +307,8 @@ def check_capture_frees_the_turn(make: Callable[..., HookRunner], work: pathlib.
     assert (result.exit_code, result.stdout) == (0, "")
     assert result.detached_pid is not None
     assert result.elapsed < 3, result.elapsed
-    os.kill(result.detached_pid, 0)  # raises when the child has already ended
+    assert process_alive(result.detached_pid), (
+        f"the child {result.detached_pid} the capture was handed to had already ended")
 
 
 def make_store(path: pathlib.Path, *, memory: bool = True) -> pathlib.Path:
@@ -327,18 +319,9 @@ def make_store(path: pathlib.Path, *, memory: bool = True) -> pathlib.Path:
     return path
 
 
-def short_dir(prefix: str) -> pathlib.Path:
-    """A new private directory with a short path.
-
-    The recall daemon's socket lives under the hooks' home, and macOS refuses a unix
-    socket path longer than 104 bytes. A pytest temporary directory under a long TMPDIR
-    can pass that length before the hooks add their part, so homes come from a short base
-    instead.
-    """
-    base = tempfile.gettempdir()
-    if len(base) > 40 and os.path.isdir("/tmp"):
-        base = "/tmp"
-    return pathlib.Path(tempfile.mkdtemp(prefix=f"mv-{prefix}-", dir=base))
+def store_env(path: pathlib.Path) -> dict[str, str]:
+    """The variables that name the store at `path`, which belongs to USER, to the hooks."""
+    return {"MEMVARA_DB": str(path), "MEMVARA_USER": USER}
 
 
 @contextlib.contextmanager
@@ -493,19 +476,15 @@ def outcome_matrix(base: pathlib.Path, hosts: Sequence[str]) -> Runs:
     with FakeHostedMcp() as fake, runner_factory(work) as make:
         fake.fail("initialize", 503)
         url = fake.serve()
-
-        def store(path: pathlib.Path) -> dict[str, str]:
-            return {"MEMVARA_DB": str(path), "MEMVARA_USER": USER}
-
         for host, hook, outcome in outcome_cases(hosts, OUTCOMES):
             env, prompt = {
                 "not configured": ({}, PROMPT),
-                "store cannot open": (store(broken), PROMPT),
+                "store cannot open": (store_env(broken), PROMPT),
                 "store unreachable": ({"MEMVARA_API_KEY": fake.api_key,
                                        "MEMVARA_SERVER_URL": url}, PROMPT),
-                "nothing matches": (store(empty if hook == "session_start" else full),
+                "nothing matches": (store_env(empty if hook == "session_start" else full),
                                     UNRELATED),
-                "memories injected": (store(full), PROMPT),
+                "memories injected": (store_env(full), PROMPT),
             }[outcome]
             fields = {"prompt": prompt} if hook == "recall" else {}
             jobs[host, hook, outcome] = job(
@@ -520,6 +499,13 @@ def check_told_apart(runs: Runs, host: str, hook: str, one: str, other: str) -> 
     first, second = runs[host, hook, one], runs[host, hook, other]
     assert observed(first) != observed(second), (
         f"{hook} on {host} looks the same for {one!r} and {other!r}: {observed(first)}")
+
+
+def check_recall_says_it_could_not_ask(runs: Runs, host: str) -> None:
+    """Recall that could not ask the store says so in its log. On a host that shows no
+    status line, the log is the only account there is."""
+    result = runs[host, "recall", "store unreachable"]
+    assert "failed reason=unknown" in result.log("recall"), result.logs
 
 
 def silent_hosts(hosts: Sequence[str]) -> list[str]:
@@ -601,7 +587,7 @@ def hostile_matrix(base: pathlib.Path, hosts: Sequence[str],
     payloads = {"no fields at all": (b"{}", {}), **payloads}
     work = base / "work"
     work.mkdir()
-    env = {"MEMVARA_DB": str(make_store(base / "memory.db")), "MEMVARA_USER": USER}
+    env = store_env(make_store(base / "memory.db"))
     clis = None if sys.platform == "win32" else FakeClis(base / "clis")
     jobs: Jobs = {}
     with runner_factory(work) as make:
