@@ -17,13 +17,13 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 
 import pytest
 
 from harness import stores
 from harness.env import REPO, child_env
+from harness.hooks import short_dir
 
 pytestmark = pytest.mark.skipif(os.name != "posix",
                                 reason="no POSIX permission bits to check")
@@ -35,24 +35,6 @@ needs_extra = pytest.mark.skipif(
 
 def _mode(path: pathlib.Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
-
-
-def short_dir() -> pathlib.Path:
-    """A fresh directory short enough to build a unix socket path under.
-
-    A unix socket path is capped near 104 bytes on macOS, and `runtime_dir()` in
-    plugin/hooks/lib/ipc.py adds about 49 more characters of its own after HOME
-    (`/.memvara/.hooks/run/recall-<16 hex digits>.sock`). macOS's own default TMPDIR is a
-    long per-process path — `/var/folders/<two>/<random>/T` — that leaves too little of
-    that budget even before `tempfile.mkdtemp()` adds its own suffix, which is what made
-    the daemon never bind its socket in a reviewer's environment that had not overridden
-    it. This keeps a short TMPDIR the caller already set, and falls back to /tmp — an
-    ordinary, always-short POSIX path — only when the configured one is not short enough.
-    """
-    configured = tempfile.gettempdir()
-    if len(configured) > 40 and os.path.isdir("/tmp"):
-        return pathlib.Path(tempfile.mkdtemp(dir="/tmp"))
-    return pathlib.Path(tempfile.mkdtemp())
 
 
 def test_the_vector_file_is_owner_only_and_the_database_takes_the_umask(
@@ -99,9 +81,10 @@ def test_the_daemon_socket_is_owner_only_inside_an_owner_only_directory(
     """The recall daemon's unix socket is a read interface to everything stored, so it is
     bound 0600 inside its 0700 runtime directory rather than left to the umask."""
     # A short HOME on purpose: the socket path is HOME/.memvara/.hooks/run/recall-*.sock,
-    # and a unix socket path is capped near 104 bytes on macOS, which pytest's own long
-    # tmp_path would blow past. The store file can live under the long tmp_path.
-    home = short_dir()
+    # and macOS refuses a unix socket path of 104 bytes or more, which pytest's own long
+    # tmp_path would pass. short_dir measures the path the daemon will get. The store file
+    # can live under the long tmp_path.
+    home = short_dir("home")
     db = tmp_path / "store.db"
     with stores.file(db) as mem:
         mem.remember("user", "lives_in", "Lisbon", user="u")
