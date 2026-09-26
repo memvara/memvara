@@ -107,6 +107,14 @@ failure that cites the issue:
 python3 scripts/nightly/filing.py pr --night <date> --fingerprint <fingerprint> --worktree <worktree>
 ```
 
+**A break that came back after its issue was closed** is marked recurred in the report. With
+Filing on, the run has already reopened its issue, with a comment that says why, and the
+break's next step is a new strict-xfail test. Pin it as in steps 1 to 6 above, citing the
+reopened issue. The fix that closed the issue removed the old pin and its `KnownBug`
+entry, so append a new entry. When the recurred break is security-class, its private
+advisory is closed instead: reopen the advisory on GitHub by hand, and write nothing else
+about it.
+
 ## 5. Review the pull request
 
 Every pull request gets the code review the repository's rules require before anything

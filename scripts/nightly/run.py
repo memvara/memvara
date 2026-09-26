@@ -419,15 +419,19 @@ def triage(failures: Sequence[regressions.Failure], history: Sequence[Mapping[st
 
 
 def plan(failure: regressions.Failure, context: Night,
-         done: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+         done: Mapping[str, Mapping[str, Any]], novelty: str = "new") -> dict[str, Any]:
     """What filing one confirmed break still needs, with the exact commands. `done` holds
     what is filed for it already, by kind. A break its step classified is filed here, as a
-    dry run unless filing is on; an unclassified one waits for the scheduled session."""
+    dry run unless filing is on; an unclassified one waits for the scheduled session. A
+    break that came back after its issue was closed ("recurred") is never "nothing": its
+    issue is reopened, and it needs a new strict-xfail test."""
     fingerprint = failure.fingerprint
     common = f"--night {context.date} --fingerprint {fingerprint}"
     suffix = " --file" if context.filing_on else ""
     pr = (f"{CLI} pr {common} --worktree <a worktree whose last commit adds the "
           f"strict-xfail test>{suffix}")
+    if novelty == "recurred":
+        return _reopen(failure, context, done, pr)
     if "advisory" in done or ("issue" in done and "pr" in done):
         return {"needs": "nothing", "commands": []}
     if "issue" in done:
@@ -460,14 +464,38 @@ def plan(failure: regressions.Failure, context: Night,
     return {"needs": "a strict-xfail test", "commands": commands + [pr], "filed": record}
 
 
+def _reopen(failure: regressions.Failure, context: Night,
+            done: Mapping[str, Mapping[str, Any]], pr: str) -> dict[str, Any]:
+    """The plan for a break that came back after it was closed: reopen its issue, then pin
+    it again. A closed private advisory is reopened by a person on GitHub."""
+    issue = done.get("issue")
+    if issue is None or issue.get("number") is None:
+        advisory = (done.get("advisory") or {}).get("ghsa_id", "its advisory")
+        return {"needs": "reopening", "commands": [],
+                "note": f"The private advisory {advisory} is closed, and the break is back. "
+                        "Reopen the advisory on GitHub, where its fix and test land."}
+    number = int(issue["number"])
+    try:
+        result = filing.reopen_issue(failure.finding, failure.fingerprint, number=number,
+                                     night=context.date, gh=context.gh,
+                                     dry_run=not context.filing_on)
+    except filing.FilingError as exc:
+        context.dependencies["github"] = "down"
+        return {"needs": "reopening", "commands": [], "error": str(exc)}
+    commands = [command.shown() for command in result.commands] + [pr]
+    if result.dry_run:
+        return {"needs": "reopening", "commands": commands}
+    record = result.record(night=context.date,
+                           severity=str(issue.get("severity") or failure.finding.severity))
+    night.append_jsonl(context.layout.history, record)
+    return {"needs": "a strict-xfail test", "commands": commands, "filed": record}
+
+
 def _filed(history: Sequence[Mapping[str, Any]],
            remote: Mapping[str, Mapping[str, Any]] | None) -> dict[str, dict[str, Any]]:
-    """What is filed for each fingerprint, by kind: the history's records, and what GitHub
-    holds when filing is on."""
-    done: dict[str, dict[str, Any]] = {}
-    for record in history:
-        if record.get("kind") == "filed":
-            done.setdefault(str(record.get("fingerprint")), {})[str(record.get("what"))] = record
+    """What is filed for each fingerprint, by kind: the history's records, in which a
+    reopening clears the pull request, and what GitHub holds when filing is on."""
+    done = filing.filed_state(history)
     for fingerprint, known in (remote or {}).items():
         kind = "advisory" if "ghsa_id" in known else "issue"
         done.setdefault(fingerprint, {}).setdefault(kind, dict(known))
@@ -494,11 +522,13 @@ def notifications(report: Mapping[str, Any], history: Sequence[Mapping[str, Any]
     date = report["night"]
     where = f"See local/nightly/{date}/report.md."
     messages = []
-    fresh = [entry for entry in report["failures"]
-             if entry.get("novelty") in ("new", "recurred")]
-    if fresh:
-        noun = "break" if len(fresh) == 1 else "breaks"
-        messages.append(f"{len(fresh)} new {noun} on the night of {date}. {where}")
+    counts = []
+    for novelty in ("new", "recurred"):
+        count = sum(entry.get("novelty") == novelty for entry in report["failures"])
+        if count:
+            counts.append(f"{count} {novelty} {'break' if count == 1 else 'breaks'}")
+    if counts:
+        messages.append(f"{' and '.join(counts)} on the night of {date}. {where}")
     changed = report["canary"]["changed"]
     if changed:
         messages.append(f"Isolation breach on the night of {date}: {len(changed)} of the "
@@ -593,7 +623,8 @@ def main(argv: Sequence[str] | None = None, *, steps: Sequence[steps.Step] = STE
             entry = failure.to_record()
             if failure.fileable:
                 entry["novelty"] = novelty[failure.fingerprint]
-                entry["plan"] = plan(failure, context, done.get(failure.fingerprint, {}))
+                entry["plan"] = plan(failure, context, done.get(failure.fingerprint, {}),
+                                     entry["novelty"])
             entries.append(entry)
         report.update(_facts(context), failures=entries,
                       canary=_canary(context) or {"files": 0, "changed": []},

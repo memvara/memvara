@@ -122,6 +122,22 @@ def test_a_break_that_may_not_be_public_is_never_filed_as_an_issue(
         filing.file_issue(finding, finding.signature(), night=NIGHT, gh=never, dry_run=False)
 
 
+def test_a_closed_issue_is_reopened_with_a_comment_that_carries_the_marker() -> None:
+    """A break that came back after its issue was closed keeps its one issue: the issue
+    is reopened, not duplicated, and the comment says why. A dry run calls nothing."""
+    finding = _finding()
+    fp = finding.signature()
+    planned = filing.reopen_issue(finding, fp, number=301, night=NIGHT, gh=never)
+    assert (planned.what, planned.dry_run, planned.number) == ("reopen", True, 301)
+    gh = Recorded((("gh", "issue", "reopen", "301", "--repo", "memvara/memvara",
+                    "--comment"), "issue_reopen"))
+    filed = filing.reopen_issue(finding, fp, number=301, night=NIGHT, gh=gh, dry_run=False)
+    comment = gh.calls[0].argv[-1]
+    assert NIGHT in comment and filing.marker(fp) in comment
+    assert (filed.what, filed.number, filed.state, filed.dry_run) == (
+        "reopen", 301, "OPEN", False)
+
+
 def test_a_security_class_break_goes_to_a_private_draft_advisory() -> None:
     finding = _finding(severity="security")
     fp = finding.signature()
@@ -305,6 +321,28 @@ def test_a_night_named_in_another_form_is_refused_with_the_form_to_use(
                         "--fingerprint", "f" * 64, "--severity", "crash"], gh=never, git=never)
     assert code != 0
     assert "YYYY-MM-DD" in capsys.readouterr().err
+
+
+def test_a_reopened_break_can_get_a_new_pull_request(tmp_path: pathlib.Path) -> None:
+    """The pin's first pull request landed before the fix removed it. Once the issue is
+    reopened, the break needs a new pin, so the old pull request no longer counts."""
+    failure = _confirmed()
+    fp = failure.fingerprint
+    _night_folder(tmp_path, failure)
+    history = night.Layout(tmp_path).history
+    for what, number in (("issue", 301), ("pr", 302), ("reopen", 301)):
+        night.append_jsonl(history, {"kind": "filed", "date": NIGHT, "what": what,
+                                     "fingerprint": fp, "severity": "data-loss",
+                                     "number": number, "url": f"https://x/{number}",
+                                     "state": "OPEN", "existing": False})
+    git = Recorded((("git", "-C", str(tmp_path), "status", "--porcelain"), "git_status_clean"),
+                   (("git", "-C", str(tmp_path), "push"), "git_push"))
+    gh = Recorded((("gh", "pr", "create"), "pr_create"))
+    assert filing.main(["pr", "--checkout", str(tmp_path), "--night", NIGHT, "--fingerprint",
+                        fp, "--worktree", str(tmp_path), "--file"], gh=gh, git=git) == 0
+    assert gh.script == [] and git.script == []
+    records, _ = night.read_jsonl(history)
+    assert (records[-1]["what"], records[-1]["number"]) == ("pr", 303)
 
 
 def test_a_pull_request_needs_the_issue_filed_first_when_filing_is_on(

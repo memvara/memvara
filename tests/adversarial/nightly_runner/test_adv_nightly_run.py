@@ -225,6 +225,61 @@ def test_a_break_seen_on_two_nights_is_new_once_and_planned_until_it_is_filed(
     assert len(notify.sent) == 1
 
 
+RECORDED = json.loads(pathlib.Path(__file__).with_name("gh_recorded.json").read_text())
+
+
+class GitHub:
+    """Stands in for gh with filing on: the break's issue #301 exists and is closed, no
+    advisory exists, and a reopen succeeds. Output is replayed from gh_recorded.json."""
+
+    def __init__(self, fingerprint: str) -> None:
+        self.fingerprint = fingerprint
+        self.calls: list[filing.Command] = []
+
+    def __call__(self, command: filing.Command) -> filing.Completed:
+        self.calls.append(command)
+        argv = command.argv
+        if argv[:3] == ("gh", "auth", "status"):
+            return filing.Completed(0)
+        name = ("advisory_list_empty" if argv[:2] == ("gh", "api") and len(argv) == 3 else
+                "issue_list_known" if argv[:3] == ("gh", "issue", "list") else
+                "issue_reopen" if argv[:3] == ("gh", "issue", "reopen") else None)
+        assert name is not None, f"an unexpected command: {argv}"
+        answer = RECORDED[name]
+        return filing.Completed(answer["returncode"],
+                                answer["stdout"].replace("FINGERPRINT", self.fingerprint),
+                                answer["stderr"])
+
+
+def test_a_break_back_after_its_issue_was_closed_is_reopened_not_left_as_filed(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """Its issue and its pin's pull request are in the history, but the issue is closed
+    and the break is back. Reading that as "filed, nothing to do" would bury it: the issue
+    is reopened, and the break needs a new strict-xfail test."""
+    table = _table(tmp_path, [FAILED], 1)
+    _night(repo, "2026-09-27", table, notify=Notifications())
+    fingerprint = _report(repo, "2026-09-27")["failures"][0]["fingerprint"]
+    history = night.Layout(repo).history
+    for what, number in (("issue", 301), ("pr", 302)):
+        night.append_jsonl(history, {"kind": "filed", "date": "2026-09-27", "what": what,
+                                     "fingerprint": fingerprint, "severity": "wrong-result",
+                                     "number": number, "url": f"https://x/{number}",
+                                     "state": "OPEN", "existing": False})
+    github, notify = GitHub(fingerprint), Notifications()
+    started = datetime(2026, 9, 28, 1, 30, tzinfo=ZONE)
+    assert run.main(["--checkout", str(repo), "--date", "2026-09-28", "--python",
+                     sys.executable, "--file"], steps=table, notify=notify, gh=github,
+                    clock=lambda: started) == 0
+    [entry] = _report(repo, "2026-09-28")["failures"]
+    assert entry["novelty"] == "recurred"
+    assert entry["plan"]["needs"] == "a strict-xfail test"
+    assert any(command.startswith("gh issue reopen 301") for command in entry["plan"]["commands"])
+    reopened = [record for record in _history(repo) if record.get("what") == "reopen"]
+    assert [(record["fingerprint"], record["number"]) for record in reopened] == [
+        (fingerprint, 301)]
+    assert [message for _, message in notify.sent if "recurred" in message]
+
+
 def test_a_flake_is_counted_and_never_planned(repo: pathlib.Path,
                                               tmp_path: pathlib.Path) -> None:
     notify = Notifications()

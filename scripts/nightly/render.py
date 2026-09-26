@@ -13,6 +13,9 @@ NEEDS = {
     "a strict-xfail test": "Its issue is filed. Write the strict-xfail test that cites the "
                            "issue, commit it by name, and open the draft pull request:",
     "nothing": "It is filed; nothing more is needed from the nightly run.",
+    "reopening": "Its issue was closed, and the break is back. The issue has to be "
+                 "reopened, which a run with --file does, and then the break needs a new "
+                 "strict-xfail test and draft pull request:",
 }
 
 #: A known break's next need, as the end of one sentence.
@@ -22,6 +25,7 @@ NEXT = {
     "a strict-xfail test": "its issue is filed, and it waits for its strict-xfail test and "
                            "draft pull request",
     "nothing": "it is filed, and needs nothing more from the nightly run",
+    "reopening": "its issue was closed and the break is back, so the issue must be reopened",
 }
 
 #: Why each kind of failure that is never filed is reported.
@@ -171,6 +175,8 @@ def _break(entry: Mapping[str, Any]) -> list[str]:
         lines.append(f"- Seed: `{finding['seed']}`")
     plan = entry.get("plan") or {}
     lines += ["", f"**Next:** {NEEDS.get(plan.get('needs', ''), plan.get('needs', ''))}"]
+    if plan.get("note"):
+        lines += ["", plan["note"]]
     if plan.get("error"):
         lines += ["", f"Filing failed: {plan['error']}"]
     if plan.get("commands"):

@@ -8,6 +8,7 @@
   },
   "issue_create": {"returncode": 0, "stdout": "https://github.com/memvara/memvara/issues/302\n", "stderr": ""},
   "issue_create_missing_label": {"returncode": 1, "stdout": "", "stderr": "could not add label: 'nightly-break' not found\n"},
+  "issue_reopen": {"returncode": 0, "stdout": "", "stderr": ""},
   "git_status_clean": {"returncode": 0, "stdout": "", "stderr": ""},
   "git_status_dirty": {"returncode": 0, "stdout": " M tests/harness/known_bugs.py\n?? tests/adversarial/regressions/test_adv_nightly_pin.py\n", "stderr": ""},
   "git_push": {"returncode": 0, "stdout": "", "stderr": "To github.com:memvara/memvara.git\n * [new branch]      HEAD -> test/nightly-0123456789ab\n"},

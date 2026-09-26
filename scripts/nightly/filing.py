@@ -320,6 +320,39 @@ def file_advisory(finding: Finding, fingerprint: str, *, night: str, gh: Runner,
                  ghsa_id=answer["ghsa_id"], url=answer["html_url"], state=answer["state"])
 
 
+def reopen_issue(finding: Finding, fingerprint: str, *, number: int, night: str,
+                 gh: Runner, dry_run: bool = True, repo: str = REPO) -> Filed:
+    """Reopen the closed issue of a break that came back, with a comment that says so and
+    carries the marker. The break keeps its one issue; a second issue with the same marker
+    would make the marker name two issues."""
+    comment = (f"The nightly run of {night} saw this break again, testing commit "
+               f"`{finding.commit or 'unknown'}`, so this issue is reopened. A new strict "
+               f"expected failure will pin it again.\n\n{marker(fingerprint)}")
+    reopen = Command(("gh", "issue", "reopen", str(number), "--repo", repo,
+                      "--comment", comment))
+    if dry_run:
+        return Filed("reopen", fingerprint, True, [reopen], number=number)
+    _check(gh, reopen)
+    return Filed("reopen", fingerprint, False, [reopen], number=number,
+                 url=f"https://github.com/{repo}/issues/{number}", state="OPEN")
+
+
+def filed_state(history: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """What is filed for each fingerprint, by kind ("issue", "advisory", "pr", "reopen"),
+    from the history's filing records in order. A reopening clears the pull request: the
+    break came back, so it needs a new strict-xfail test and a new pull request."""
+    state: dict[str, dict[str, Any]] = {}
+    for record in history:
+        if record.get("kind") != "filed":
+            continue
+        done = state.setdefault(str(record.get("fingerprint")), {})
+        what = str(record.get("what"))
+        done[what] = record
+        if what == "reopen":
+            done.pop("pr", None)
+    return state
+
+
 def open_pr(finding: Finding, fingerprint: str, *, issue: int | None,
             worktree: pathlib.Path, night: str, gh: Runner, git: Runner,
             dry_run: bool = True, repo: str = REPO) -> Filed:
@@ -395,8 +428,7 @@ def _file(args: argparse.Namespace, layout: night.Layout, *, gh: Runner,
           git: Runner) -> int:
     failure = _confirmed(layout, args.night, args.fingerprint)
     history, _ = night.read_jsonl(layout.history)
-    filed = {record["what"]: record for record in history
-             if record.get("kind") == "filed" and record.get("fingerprint") == args.fingerprint}
+    filed = filed_state(history).get(args.fingerprint, {})
     if args.command in filed:
         before = filed[args.command]
         print(f"This break's {args.command} was already filed: "
