@@ -235,3 +235,14 @@ git commit -m "Plan the adversarial suite's documentation checks"
 - **Three tests failed on drift and are not committed**, as Global Constraints says: `test_a_tools_own_argument_named_in_its_text_is_served`, `test_a_default_stated_in_words_is_declared_in_the_schema` and `test_every_word_a_console_script_accepts_is_in_its_help`. They went to the maintainer with a reproduction for each. The checks they call are committed and proven on planted faults.
 - **The final review found one parser bug**, and it is fixed: a default that ended a sentence, as in "at the default 0.5.", was skipped without a word. `test_a_default_that_ends_a_sentence_is_still_read` pins it.
 - **The full gate ran last,** after the review, so its result describes the final code.
+
+## What the code review changed
+
+The pull request's code review found these, and each is fixed with a test that failed first. Where one contradicts a rule earlier in this plan, this section is the current rule.
+
+- **A tie in tool text.** After "and" or a possessive, only a snake_case word ties an argument to a tool. "memory_end's predicate" is the predicate of a fact, not an argument.
+- **The options a subcommand accepts** are read in whatever module the function it hands its argument list to lives, not only its own. A hand-over that cannot be followed raises `LookupError` instead of reporting no options.
+- **A help's claim about a feature that is off by default** is checked against the server with it switched on and the default server, because no "<feature> off" server exists for it.
+- **The pins for #296 and #297** absorb only their exact symptom: the exact `(argument, words)` pairs, and only the `memvara` and `memvara-mcp` scripts.
+- **The connection instructions** are checked on every server for an argument its switches removed from every tool it lists.
+- **One shared list of served tools**, `surface.every_tool()`, feeds the description and default checks, what never changes within a run is cached, and the planted tool table lives in `tests/adversarial/docs/planted.py`.
