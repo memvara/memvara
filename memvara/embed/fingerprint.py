@@ -129,7 +129,12 @@ def _read_sidecar(path: str) -> EmbedderFingerprint | None:
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        return EmbedderFingerprint(str(data["embedder"]), int(data["dim"]))
+        dim = data["dim"]
+        # Only a JSON integer is a width. `int()` would take "128" and 128.9 as well, and
+        # a bool, which Python counts as an int.
+        if not isinstance(dim, int) or isinstance(dim, bool):
+            return None
+        return EmbedderFingerprint(str(data["embedder"]), dim)
     except (OSError, ValueError, KeyError, TypeError):
         # Unreadable, absent or corrupt: all the same answer. A damaged advisory file
         # must never be the reason a memory store refuses to open.

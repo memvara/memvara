@@ -690,7 +690,12 @@ def test_a_fingerprint_that_cannot_be_written_is_not_fatal(tmp_path, monkeypatch
     assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8))) is False
 
 
-@pytest.mark.parametrize("payload", ["not json at all", '{"embedder": "x"}', '{"dim": "wide"}'])
+@pytest.mark.parametrize("payload", [
+    "not json at all", '{"embedder": "x"}', '{"dim": "wide"}',
+    # A width that is not an int was read with `int()`, so "128" and 128.9 were believed,
+    # and so was true, which Python counts as the int 1.
+    '{"embedder": "x", "dim": "128"}', '{"embedder": "x", "dim": 128.9}',
+    '{"embedder": "x", "dim": true}'])
 def test_a_corrupt_fingerprint_file_is_ignored_rather_than_believed(tmp_path, payload):
     path = str(tmp_path / "m.db")
     (tmp_path / "m.db.embedder.json").write_text(payload)
