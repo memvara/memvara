@@ -150,6 +150,14 @@ jobs:
       # breaks tests that only the nightly run collects. Checking it here catches that on
       # the PR that introduces it.
       - run: python -m mypy tests/harness --ignore-missing-imports
+      # The soak and the timing run are scripts under `bench/` that only the nightly and
+      # weekly tiers run in full, so a wrong type in them would first show up at night.
+      # Checking them here catches it on the pull request that introduces it. mypy reads
+      # `bench/evalkit.py` for the types the two scripts import from it, but reports no
+      # errors inside it: the editable install puts the repository root on Python's path,
+      # and mypy stays silent about a file it only follows when that file is under a path
+      # entry.
+      - run: python -m mypy bench/soak.py bench/perf_budget.py --ignore-missing-imports
 
   offline:
     # The headline claim is "numpy and nothing else, runs offline with no API key". That

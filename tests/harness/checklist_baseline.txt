@@ -90,13 +90,6 @@ inv:WP6
 inv:WP7
 inv:WP8
 inv:WP9
-silent:flip-flop-row-growth-counters-reset
-silent:gate-fast-path-english-centrism
-silent:poisoning-a-retraction-that-retires-nothing
-silent:predicate-explosion
-silent:redaction-seam
-silent:reinforcement-not-refreshing-recency
-silent:salience-overriding-relevance
 switch:agentic_capture
 switch:agentic_extraction
 switch:anchored
