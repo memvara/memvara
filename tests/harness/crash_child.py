@@ -138,8 +138,8 @@ class Program:
 
     def _tear_fingerprint(self, fingerprint: Any) -> None:
         """Write the first few pieces of the sidecar's JSON, as a crash in the middle of
-        `json.dump` would, then stop. The real write is not atomic, so this is a state
-        the store can meet."""
+        `json.dump` would, then stop. The real write goes to a temporary file that is
+        renamed over the record afterwards, so the torn pieces land in that file."""
         real_json = fingerprint.json
 
         class Torn:

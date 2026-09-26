@@ -619,7 +619,7 @@ mistake. After a write to `memory.db` the directory holds:
 |---|---|---|
 | `memory.db` | claims, episodes, predicates, the FTS index, and every vector | everything |
 | `memory.db.vecs` | the vector matrix: memory-mapped in an unencrypted store, one encrypted record per row in an encrypted one | nothing that cannot be rebuilt: the next open rewrites it from the vectors in `memory.db`, which takes a while on a large store |
-| `memory.db.embedder.json` | which embedder wrote those vectors | the ability to detect a model swap, which then goes undetected |
+| `memory.db.embedder.json` | which embedder wrote those vectors | knowing which model wrote them. The next open warns that it cannot tell whether its own embedder did, and writes the file again naming that embedder, so a model swap made before that open goes undetected unless you act on the warning |
 | `memory.db.lock` | an empty file each open store holds a lock on, so that clearing the vectors can tell whether anything else has the store open | nothing once every process has closed the store: the next open recreates it. Deleted while a store is open, it stops `reembed()` from seeing that store |
 | `memory.db-wal`, `memory.db-shm` | SQLite write-ahead log, while open | recently committed writes |
 
@@ -770,7 +770,11 @@ level up.
 
 **Same width, different model.** Nothing can raise, because nothing is wrong
 dimensionally and every similarity is nonsense. You get an `EmbedderChangedWarning`,
-which is only possible because `memory.db.embedder.json` records the name.
+which is only possible because `memory.db.embedder.json` records the name. If that file
+is missing or unreadable, for example because the store was copied without it, the open
+cannot compare names. It then warns, with the same warning, that it cannot tell whether
+its embedder wrote the vectors, and writes the file again naming that embedder. If that
+embedder did not write them, the migration below rebuilds them.
 
 **Right model, text it cannot read.** The third shape, and the quietest: the embedder is
 the one you chose and it returns an all-zero vector for some of your text. With the

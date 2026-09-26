@@ -42,6 +42,7 @@ from .embed.fingerprint import (
     fingerprint_of,
     local_model,
     read_fingerprint,
+    sidecar_path,
     stored_dim,
     write_fingerprint,
 )
@@ -189,7 +190,11 @@ class ErasureIncomplete(RuntimeError):
 
 
 class EmbedderChangedWarning(UserWarning):
-    """Same vector width, different model — nothing will raise, and recall will be wrong."""
+    """Same vector width, different model — nothing will raise, and recall will be wrong.
+
+    Also raised when a store holds vectors and its record of the embedder that wrote them
+    is missing or unreadable, because then a change of embedder cannot be ruled out.
+    """
 
 
 # Set once per process, not once per instance: a server that builds an `Memvara` per
@@ -1251,6 +1256,17 @@ class Memvara:
         if actual != mine.dim:
             raise EmbedderMismatchError(self._mismatch_message(mine, recorded, actual))
 
+        if recorded is None and sidecar_path(self.store) is not None:
+            # The record is missing or unreadable, because the store was copied without it
+            # or a crash tore it. The widths match, and only the record can tell two
+            # embedders of the same width apart, so this open cannot know whether this
+            # embedder wrote the vectors. It warns, and it records this embedder so that
+            # the next open can check again.
+            written = write_fingerprint(self.store, mine)
+            warnings.warn(self._unrecorded_message(mine, actual, written),
+                          EmbedderChangedWarning, stacklevel=3)
+            return
+
         if (recorded is not None and recorded.name != mine.name
                 and local_model(recorded) is not None and _unnamed_local(self.embedder)):
             # `LocalEmbedder()` names no model, and the model it loads changed under
@@ -1278,6 +1294,21 @@ class Memvara:
             f"    LocalEmbedder({local_model(recorded)!r})\n"
             "or migrate the store once, re-encoding everything with the new default:\n"
             "    Memvara(..., embedder=LocalEmbedder(), reembed=True)"
+        )
+
+    def _unrecorded_message(self, mine: EmbedderFingerprint, actual: int,
+                            written: bool) -> str:
+        after = (f"The record now names {mine}, so the next change of embedder will be "
+                 "noticed." if written else
+                 "The record could not be written either, so this warning will come back "
+                 "on every open until it can be.")
+        return (
+            f"{self._store_label()}: the record of which embedder wrote this store's "
+            f"vectors ({sidecar_path(self.store)}) is missing or unreadable, so memvara "
+            f"cannot tell whether {mine.name} wrote the {actual}-dimensional vectors the "
+            "store holds. If it did not, every similarity between those vectors and new "
+            "ones is meaningless, and nothing will raise, because the widths match. Run "
+            "mem.reembed() to rebuild them with this embedder. " + after
         )
 
     def _store_label(self) -> str:

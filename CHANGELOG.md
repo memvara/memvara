@@ -68,6 +68,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   its value as a string, and refuses any other string with a `ValueError` that names the
   argument, before anything is written. #270.
 
+- **A store whose embedder record is missing or unreadable now says so when it opens,
+  and records the embedder again.** `<db>.embedder.json` names the embedder that wrote a
+  store's vectors, and it is the only thing that can tell two embedders of the same width
+  apart. When the record was missing or torn on a store that held vectors, opening the
+  store with a different embedder of that width raised nothing and warned nothing, and the
+  record was never written again, so every later change went unnoticed too. Such an open
+  now warns with `EmbedderChangedWarning` that memvara cannot tell whether the embedder in
+  use wrote the vectors, and that `mem.reembed()` rebuilds them if it did not. It then
+  records the embedder in use, so the next change is noticed; where the record cannot be
+  written, the warning says so and comes back on every open. The record itself is now
+  written to a temporary file and renamed into place, so a crash or a full disk during the
+  write leaves the old record or the new one, never half of one. #280.
+
 ## [0.16.0] — 2026-09-25
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store moves to schema 16 on
