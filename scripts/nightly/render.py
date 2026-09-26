@@ -15,6 +15,15 @@ NEEDS = {
     "nothing": "It is filed; nothing more is needed from the nightly run.",
 }
 
+#: A known break's next need, as the end of one sentence.
+NEXT = {
+    "classification": "it still has to be classified against SECURITY.md, and then filed",
+    "filing": "it is classified, and a run with --file will file it",
+    "a strict-xfail test": "its issue is filed, and it waits for its strict-xfail test and "
+                           "draft pull request",
+    "nothing": "it is filed, and needs nothing more from the nightly run",
+}
+
 #: Why each kind of failure that is never filed is reported.
 FOR_A_PERSON = {
     "intermittent": "It failed, then passed on one rerun and failed on the other. It counts "
@@ -51,8 +60,9 @@ def markdown(report: Mapping[str, Any]) -> str:
                   "These broke on an earlier night too, and the history has them already.", ""]
         for entry in known:
             finding = entry["finding"]
+            needs = entry["plan"]["needs"]
             lines.append(f"- {finding['title'] or finding['invariant']} (fingerprint "
-                         f"`{entry['fingerprint'][:12]}`): {entry['plan']['needs']}.")
+                         f"`{entry['fingerprint'][:12]}`): {NEXT.get(needs, needs)}.")
         lines.append("")
     if person:
         lines += ["## Failures that need a person", "",
