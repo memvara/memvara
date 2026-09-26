@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -25,7 +27,7 @@ from harness.report import write as write_findings
 
 if str(REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO / "scripts"))
-from nightly import filing, night, run, steps  # noqa: E402 - scripts/ is on the path above
+from nightly import filing, flakes, night, run, steps, watchdog  # noqa: E402 - see above
 
 ZONE = timezone(timedelta(hours=2))
 NODEID = "tests/adversarial/model/test_adv_model_machine.py::test_random_operations"
@@ -327,3 +329,25 @@ def test_a_crash_of_the_run_itself_leaves_a_report_and_a_heartbeat_with_no_finis
     assert (heartbeat["status"], heartbeat["finished_at"]) == ("crashed", None)
     assert _history(repo)[-1]["status"] == "crashed"
     assert "crashed" in (folder / "report.md").read_text()
+
+
+def test_every_command_the_nightly_session_is_told_to_run_is_one_the_scripts_accept() -> None:
+    """The scheduled session follows task.md with nobody watching. A command it names that
+    a script no longer accepts would fail in the night, so each command in the prompt is
+    parsed with its script's own parser, and all three filing commands must be there."""
+    text = (REPO / "scripts" / "nightly" / "task.md").read_text(encoding="utf-8")
+    commands = re.findall(r"python3 (?:[^\s`]*/)?scripts/nightly/(\w+)\.py([^`\n]*)", text)
+    parsers = {"run": run.parser(), "filing": filing.parser(), "flakes": flakes.parser(),
+               "watchdog": watchdog.parser()}
+    assert {name for name, _ in commands} >= {"run", "filing"}
+    filed = set()
+    for name, rest in commands:
+        rest = rest.replace("<data-loss|wrong-result|crash>", "data-loss")
+        args = shlex.split(re.sub(r"<[^<>\s]+>", "x", rest))
+        try:
+            parsers[name].parse_args(args)
+        except SystemExit:
+            pytest.fail(f"task.md runs {name}.py{rest}, which that script refuses")
+        if name == "filing":
+            filed.add(args[0])
+    assert filed == {"issue", "advisory", "pr"}

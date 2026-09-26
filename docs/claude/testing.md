@@ -524,4 +524,15 @@ A night is named by the day its run starts, so a run scheduled for 23:30 is chec
 python3 scripts/nightly/watchdog.py --checkout <main checkout> --start 01:30 --deadline 06:30 --no-notify
 ```
 
+### The scheduled session, and what the operator installs
+
+`scripts/nightly/task.md` is the prompt for the scheduled session that runs each night. The session runs `run.py`, reads the report, and classifies each new break against the "In scope" section of `SECURITY.md`, treating a break it is unsure about as security-class. A security-class break goes to a private advisory and nowhere else. Any other break gets its issue, then a strict-xfail test in a worktree of its own, then a draft pull request, which gets the code review every pull request needs. Nothing merges, nothing is pushed to `main`, and no text that reaches GitHub carries an attribution. The session writes its classifications into `local/nightly/<date>/triage.md`. A test parses every command the prompt names with its script's own parser, so the prompt cannot drift from the scripts.
+
+Nothing in this repository installs the schedule, the watchdog or anything else. The operator does it once, by hand:
+
+1. Create the scheduled task with `task.md` as its prompt, with the checkout filled in and Filing left at `dry-run`.
+2. Fill in `com.memvara.nightly-watchdog.plist.template` and load it, as its comment describes, with the watchdog's deadline a few hours after the task's start.
+3. Create the `nightly-break` label.
+4. Watch one night as a supervised dry run: the report, the DID NOT RUN path (run the watchdog by hand for a night with no heartbeat), the canary, and filing against a test label (`filing.py issue --label <a test label> --file`). Only then change Filing to `file`.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
