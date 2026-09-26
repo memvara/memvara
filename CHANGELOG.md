@@ -178,8 +178,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     extraction and so before the reconciler. A turn that embeds as a near-duplicate of a
     stored claim, or whose text is exactly that of the turn a claim came from, still
     reinforces that claim, and its earlier date is lost. #318 tracks this.
-- **`forget()` retires a value written to begin later, as well as the values in force.**
-  It retired only the values in force at the time of the call, so a value written with a
 - **`forget()` retires a value stored to begin later, as well as the values in force.**
   It retired only the values in force at the time of the call, so a value stored with a
   future `valid_from` stayed believed, and the forgotten slot answered again when that
@@ -205,7 +203,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   stored to begin later and ended after its start is true between the two, and the
   reply now says that too, where it used to say `memory_recall` kept returning it;
   `memory_remember`'s reply shares that note.
-
 - **A retraction repeated after the first one's expiry has passed keeps a record of its
   own.** A retraction that repeated an earlier one was folded into the earlier tombstone
   even when that tombstone's `expires_at` had passed. The write reported nothing, and
@@ -215,6 +212,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   when a fact is repeated, so the repeat is handled as a retraction the store has no
   record of. Where nothing else in the slot is live, it writes a tombstone of its own,
   which the sweep leaves in place. #284.
+- **Two processes opening a new store at the same moment no longer make one of them fail
+  at startup.** The first open of a store switches its file to WAL mode. While another
+  connection held the file's write lock, SQLite refused that switch at once instead of
+  waiting, so one of the processes failed within a few milliseconds with
+  `sqlite3.OperationalError: database is locked`, where every other write waits for up to
+  five seconds. This happened on the first run after the plugin was installed, when the MCP
+  server and the plugin's hooks open the new store together, and when two agent sessions
+  started at once; when the server was the one that failed, the agent had no memory tools
+  for that session. Now one store at a time runs the schema and the migrations, so a store
+  that opens while another is creating the file waits for it, for up to 60 seconds, and
+  then opens the finished store. Every process that opens a store therefore needs to be
+  able to write `<db>.lock`, which before only `reembed()` needed. The switch to WAL mode is
+  also tried again for up to five seconds, for a connection from outside memvara that holds
+  the write lock. #281.
 
 ## [0.16.0] — 2026-09-25
 

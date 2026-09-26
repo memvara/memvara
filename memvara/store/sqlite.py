@@ -60,6 +60,7 @@ import os
 import sqlite3
 import struct
 import threading
+import time
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -1064,6 +1065,13 @@ def _lock_path(db_path: str) -> str | None:
 # before it gives up.
 _PRESENCE_WAIT = 60.0
 
+# How long a statement waits for another connection's lock before SQLite gives up with
+# "database is locked". It is `sqlite3.connect`'s own default, named here so that
+# `_run_schema`, which has to wait by hand, waits exactly as long as every other write.
+_BUSY_TIMEOUT = 5.0
+# How long `_run_schema` sleeps before it tries again.
+_SCHEMA_RETRY_PAUSE = 0.01
+
 
 class StoreInUseError(RuntimeError):
     """The operation needs the store to itself, and another store has it open."""
@@ -1771,10 +1779,11 @@ class SQLiteStore:
         self._presence = self._hold_presence()
         try:
             with self._lock:
-                self._db.executescript(SCHEMA)
-                self._migrate()
-                self._db.executescript(_LATE_INDEXES)
-                self._db.commit()
+                with self._creating():
+                    self._run_schema()
+                    self._migrate()
+                    self._db.executescript(_LATE_INDEXES)
+                    self._db.commit()
                 if sealer is not None:
                     # Read after the first commit: a new database has no salt on disk
                     # until its first page is written, and this is the value every other
@@ -1793,7 +1802,7 @@ class SQLiteStore:
 
     def _connect(self) -> sqlite3.Connection:
         """A new connection to this store's file, with the key applied if it has one."""
-        conn = self._sql.connect(self.path, check_same_thread=False)
+        conn = self._sql.connect(self.path, timeout=_BUSY_TIMEOUT, check_same_thread=False)
         if self._key is not None:
             # The raw-key form, `x'<hex>'`, which skips SQLCipher's password stretching:
             # the key is already 32 random bytes, and stretching it would cost every new
@@ -1842,13 +1851,49 @@ class SQLiteStore:
         to the database or opens the vector file, so a store that opens during a clear
         waits here, not after it has mapped the file.
         """
+        return self._take_lock_file(
+            self._share, "is having its vectors cleared by another store",
+            "that re-embedding has finished")
+
+    @contextmanager
+    def _creating(self) -> Iterator[None]:
+        """Hold `<db>.lock`'s write lock while this store runs its schema and migrations.
+
+        Two stores that ran them at the same moment on one new file got in each other's
+        way. One failed at the switch to WAL mode (#281). With that switch retried
+        (`_run_schema`), one could still fail inside a migration with "vtable constructor
+        failed" when it opened a text index while the other was still creating tables and
+        indexes. So one store at a time runs this step, and a store that opens while
+        another is creating or upgrading the file waits here, for up to `_PRESENCE_WAIT`
+        seconds, and then finds the file finished. The lock is SQLite's reserved lock: one
+        connection holds it at a time, and it leaves every open store's shared lock alone,
+        so a store that is merely open holds nobody up. It is taken on a second
+        connection, so that this store's own shared lock is held throughout.
+        """
+        conn = self._take_lock_file(
+            lambda c: c.execute("BEGIN IMMEDIATE"),
+            "is being created or upgraded by another store", "that has finished")
+        try:
+            yield
+        finally:
+            if conn is not None:
+                # Closing rolls the transaction back, which lets go at once. A commit
+                # would not: on the empty lock file, BEGIN IMMEDIATE starts a first page
+                # in memory, and writing it needs every other store's shared lock gone.
+                conn.close()
+
+    def _take_lock_file(self, take: Callable[[sqlite3.Connection], Any], doing: str,
+                        done: str) -> sqlite3.Connection | None:
+        """A new connection to `<db>.lock` that holds the lock `take` asks for, or None
+        when the store has no file. SQLite waits up to `_PRESENCE_WAIT` seconds for it,
+        and a store still in the way after that is named by `doing` and `done`."""
         path = _lock_path(self.path)
         if path is None:
             return None
         conn = sqlite3.connect(path, timeout=_PRESENCE_WAIT, isolation_level=None,
                                check_same_thread=False)
         try:
-            self._share(conn)
+            take(conn)
         except sqlite3.DatabaseError as exc:
             conn.close()
             if "locked" not in str(exc):
@@ -1857,9 +1902,8 @@ class SQLiteStore:
                     "no data: delete it while nothing has the store open, and open the "
                     "store again.") from exc
             raise StoreInUseError(
-                f"{self.path} is having its vectors cleared by another store, and it "
-                f"has not finished in {_PRESENCE_WAIT:.0f} seconds. Open it again when "
-                "that re-embedding has finished.") from None
+                f"{self.path} {doing}, and it has not finished in "
+                f"{_PRESENCE_WAIT:.0f} seconds. Open it again when {done}.") from None
         return conn
 
     @staticmethod
@@ -2039,6 +2083,34 @@ class SQLiteStore:
                 self._readers.append(conn)
             self._local.db = conn
         return conn
+
+    def _run_schema(self) -> None:
+        """Run `SCHEMA`, waiting for another connection's write lock as every write does.
+
+        `SCHEMA` starts by switching the database to WAL mode. On a file that is not in
+        WAL mode yet, which is every new store, the switch needs a stronger lock than the
+        connection holds, and while another connection holds the write lock SQLite
+        refuses that lock at once instead of calling the busy handler, because waiting
+        for it there could deadlock. So the open failed within a few milliseconds with
+        "database is locked" (#281), where every other write waits for up to
+        `_BUSY_TIMEOUT` seconds. `_creating` keeps two stores from running this step at
+        once, but it cannot hold back a connection from outside memvara, such as the
+        `sqlite3` shell or a backup tool.
+
+        So a "database is locked" here is tried again until `_BUSY_TIMEOUT` has passed.
+        By then the other connection has usually let go, and a file already in WAL mode
+        needs no stronger lock. Every statement in `SCHEMA` is a pragma or an `IF NOT
+        EXISTS`, so running it again changes nothing. Any other error is raised at once.
+        """
+        deadline = time.monotonic() + _BUSY_TIMEOUT
+        while True:
+            try:
+                self._db.executescript(SCHEMA)
+                return
+            except self._sql.OperationalError as exc:
+                if "database is locked" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+            time.sleep(_SCHEMA_RETRY_PAUSE)
 
     def _migrate(self) -> None:
         """Stamp or upgrade the schema version.

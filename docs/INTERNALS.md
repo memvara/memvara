@@ -2224,6 +2224,42 @@ the other processes stopped in any case, because each embeds new writes with the
 started with. `tests/test_store.py` reproduces the crash with a second process, because a
 SIGBUS in the test process would end the suite.
 
+### Opening a store that another process is creating
+
+When two processes opened one new store at the same moment, one of them could fail at
+startup within a few milliseconds with "database is locked" (#281). That happens on the
+first run after the plugin is installed, when the MCP server and the plugin's hooks open
+the new store together, and when two agent sessions start at once. Two changes stop it.
+
+**One store at a time runs the schema step.** `SQLiteStore.__init__` runs `SCHEMA`, the
+migrations and `_LATE_INDEXES` inside `_creating`, which holds SQLite's reserved lock on
+`<db>.lock` through a second connection. One connection in any process holds that lock at a
+time, so a store that opens while another is creating or upgrading the file waits, for up
+to `_PRESENCE_WAIT` (60 seconds), and then finds the file finished, so its own schema step
+changes nothing. The reserved lock leaves every open store's shared lock alone, so a store
+that is merely open delays nobody. `_creating` lets go by closing its connection, which
+rolls back: on the empty lock file, `BEGIN IMMEDIATE` starts a first page in memory, and a
+commit would have to write it, which needs every shared lock gone. Every process that opens
+a store must now be able to write `<db>.lock`, where before only a clear needed to.
+
+The retry described next was not enough on its own. With it, a store could still fail
+inside `_migrate_to_v3` with "vtable constructor failed: episodes_fts" when it opened the
+text index while the other store was still creating tables and indexes. In a probe of three
+processes opening one new store at once, 3 of 360 opens failed that way, and the nightly
+test failed in 3 of 10 runs. With the schema step run one store at a time, none of 1,100
+opens failed, from three and from five processes at once, and 8 of 8 nightly runs passed.
+
+**The switch to WAL mode is retried.** `SCHEMA` begins with `PRAGMA journal_mode=WAL`. On a
+file that is not in WAL mode yet, the switch needs a stronger lock than the connection
+holds, and while another connection holds the write lock, SQLite refuses it at once instead
+of calling the busy handler, because waiting there could deadlock. `_creating` cannot hold
+back a connection from outside memvara, such as the `sqlite3` shell. So `_run_schema` runs
+`SCHEMA` again after "database is locked", every 10 milliseconds, until `_BUSY_TIMEOUT`
+has passed: five seconds, the busy timeout `_connect` gives every connection, so the open
+waits exactly as long as any write. On a file already in WAL mode the switch needs no
+stronger lock. `SCHEMA` holds only pragmas and `IF NOT EXISTS` statements, so running it
+again changes nothing, and any other error is raised at once.
+
 ### Encryption at rest
 
 `SQLiteStore(path, encryption=True)` creates a new store encrypted. An existing file is

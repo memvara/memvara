@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -1939,6 +1940,108 @@ def test_a_deleted_matrix_file_is_rebuilt_for_episodes_as_well(tmp_path, emb):
             emb.encode(["user lives in Berlin"])[0], [SCOPE], limit=1)[0][0] == c.id
         assert s2.vector_search_episodes(
             emb.encode(["kafka pipeline"])[0], [SCOPE], limit=1)[0][0] == ep.id
+
+
+def _writing(path: pathlib.Path) -> sqlite3.Connection:
+    """Another connection holding the write lock on a new file that is still in
+    rollback-journal mode, as a process part-way through creating the store holds it."""
+    other = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    other.execute("CREATE TABLE t (x)")
+    other.execute("BEGIN IMMEDIATE")
+    return other
+
+
+def test_opening_a_new_store_waits_for_another_connections_write_lock(tmp_path):
+    """Opening a new store switches the file to WAL mode, and while another connection
+    holds the write lock, SQLite refuses that switch at once instead of waiting. Before
+    the fix for #281 the open then failed within a millisecond with "database is locked".
+    It now tries again for as long as any write waits, and opens the store once the other
+    connection lets go."""
+    path = tmp_path / "c.db"
+    other = _writing(path)
+    started = time.monotonic()
+    release = threading.Timer(0.3, lambda: other.execute("COMMIT"))
+    release.start()
+    try:
+        with SQLiteStore(str(path)) as store:
+            took = time.monotonic() - started
+            assert store._db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        release.join()
+        other.close()
+    assert took >= 0.3, f"the store opened after {took:.3f} s, while the lock was held"
+
+
+def test_opening_a_new_store_gives_up_when_the_lock_outlasts_the_busy_timeout(
+        tmp_path, monkeypatch):
+    """The open waits as long as any write waits, and no longer, then raises the error
+    SQLite gave. The busy timeout is shortened here so the test does not wait five
+    seconds."""
+    monkeypatch.setattr(sqlite_store, "_BUSY_TIMEOUT", 0.2)
+    path = tmp_path / "c.db"
+    other = _writing(path)
+    started = time.monotonic()
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            SQLiteStore(str(path))
+        took = time.monotonic() - started
+    finally:
+        other.close()
+    assert 0.2 <= took < 3.0, f"the open gave up after {took:.3f} s"
+
+
+def _creating_elsewhere(path: pathlib.Path) -> sqlite3.Connection:
+    """Another store part-way through creating or upgrading the file at `path`: it holds
+    the write lock on `<db>.lock` that `SQLiteStore._creating` takes. It lets go with a
+    rollback, as `_creating` does; a commit would wait for every shared lock."""
+    other = sqlite3.connect(str(path) + ".lock", isolation_level=None,
+                            check_same_thread=False)
+    other.execute("BEGIN IMMEDIATE")
+    return other
+
+
+def test_a_store_opening_while_another_creates_the_file_waits_for_it(tmp_path):
+    """Two stores that ran the schema and the migrations at once on one new file got in
+    each other's way. With the switch to WAL mode retried, one could still fail inside a
+    migration with "vtable constructor failed" while the other was still creating tables
+    and indexes. So a store waits for another store's schema step to finish, and then
+    finds the file finished (#281)."""
+    path = tmp_path / "c.db"
+    other = _creating_elsewhere(path)
+    started = time.monotonic()
+    release = threading.Timer(0.3, lambda: other.execute("ROLLBACK"))
+    release.start()
+    try:
+        SQLiteStore(str(path)).close()
+        took = time.monotonic() - started
+    finally:
+        release.join()
+        other.close()
+    assert took >= 0.3, f"the schema step ran after {took:.3f} s, beside the other one"
+
+
+def test_a_store_gives_up_on_another_that_does_not_finish_creating_the_file(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(sqlite_store, "_PRESENCE_WAIT", 0.05)
+    path = tmp_path / "c.db"
+    other = _creating_elsewhere(path)
+    try:
+        with pytest.raises(StoreInUseError,
+                           match="being created or upgraded by another store"):
+            SQLiteStore(str(path))
+    finally:
+        other.close()
+
+
+def test_a_store_that_is_open_does_not_hold_up_the_next_open(tmp_path, monkeypatch):
+    """A store holds the write lock only while its schema step runs, and afterwards only
+    the shared lock every open store holds, so opening never waits for a store that is
+    merely open. With the wait this short, a lock held for as long as the store is open
+    would make the third open fail."""
+    monkeypatch.setattr(sqlite_store, "_PRESENCE_WAIT", 0.5)
+    path = str(tmp_path / "c.db")
+    with SQLiteStore(path), SQLiteStore(path):
+        SQLiteStore(path).close()
 
 
 # --- Cross-process coherence for episode vectors ----------------------------
