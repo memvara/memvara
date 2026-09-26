@@ -108,6 +108,11 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "the fact a query asks about"),
     KnownBug("B73", 353, "memory_add says a turn was not stored when only no fact was "
              "extracted from it"),
+
+    # Found by the framework tests against the real packages. The issue numbers are
+    # placeholders until the issues are filed.
+    KnownBug("B83", 9004, "the as_query_engine example in the LlamaIndex MemvaraRetriever "
+             "docstring raises TypeError"),
 )}
 
 
