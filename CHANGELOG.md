@@ -121,7 +121,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     hooks' time limits apply from the first run. The library budgets are set from 14
     valid nights by a rule fixed before any number was measured. Two bugs the soak found
     are pinned as strict expected failures: #332 and #333.
-  - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
+  - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`,
+    `bench/soak.py` and `bench/perf_budget.py`.
 - **`Store.unended_claims`, `store.unended_predicate()` and `Claim.is_unended()`.**
   `forget()` closes every value in a slot that the store believes and that has not ended
   (#282), and it now asks the store for those values instead of reading every value the
