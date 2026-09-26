@@ -329,12 +329,8 @@ class Reconciler:
         separate = False
         if claim.polarity > 0:
             found = self.store.find_by_value(tenant, claim.value_key)
-            live_same = self._live(found, t, owner)
-            if getattr(self.store, "hide_expired", True):
-                # A claim whose expiry has passed is gone to every read, and the sweep
-                # will erase it. Reinforcing it would hand this new statement to the
-                # sweep, so it does not count as the fact on record.
-                live_same = [c for c in live_same if not expired(c, t)]
+            # Reinforcing an expired claim would hand this new statement to the sweep.
+            live_same = self._unexpired(self._live(found, t, owner), t)
             if claim.expires_at is not None and live_same:
                 # A repeat that names an expiry reinforces only a claim in exactly its own
                 # scope. `value_key` covers the owner, not the project, agent or session,
@@ -677,6 +673,19 @@ class Reconciler:
             else:
                 claim.meta.pop(meta_key, None)
 
+    def _unexpired(self, claims: list[Claim], t: datetime) -> list[Claim]:
+        """`claims` without those whose expiry has passed at `t`.
+
+        An expired claim is gone to every read, and the sweep will erase it, so a write
+        must not count it as the claim or the tombstone on record. The positive path and
+        `_retract` both ask this question, and ask it here so that they cannot disagree.
+        A store whose `hide_expired` is false keeps expired claims visible, and so keeps
+        them all here too.
+        """
+        if not getattr(self.store, "hide_expired", True):
+            return claims
+        return [c for c in claims if not expired(c, t)]
+
     @staticmethod
     def _live(claims: Sequence[Claim], t: datetime, owner: str) -> list[Claim]:
         """Live claims belonging to the same person.
@@ -961,14 +970,11 @@ class Reconciler:
         matches.sort(key=lambda c: (c.recorded_at, c.id))
 
         if not matches:
-            prior = [c for c in self.store.find_by_value(tenant, claim.value_key)
-                     if owner_key(c.scope) == owner]
-            if getattr(self.store, "hide_expired", True):
-                # A tombstone whose expiry has passed is gone to every read, and the sweep
-                # will erase it. Folding this retraction into it would have the sweep erase
-                # this one too, so it does not count as the retraction on record. The
-                # positive path in `apply` leaves an expired claim out for the same reason.
-                prior = [c for c in prior if not expired(c, t)]
+            # Folding this retraction into an expired tombstone would have the sweep
+            # erase this one too.
+            prior = self._unexpired(
+                [c for c in self.store.find_by_value(tenant, claim.value_key)
+                 if owner_key(c.scope) == owner], t)
             if prior:
                 # We have already processed this exact retraction; re-running it must not
                 # accumulate tombstones. Provenance still merges.
