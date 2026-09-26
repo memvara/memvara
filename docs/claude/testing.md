@@ -428,4 +428,22 @@ A night is a list of steps, run one after another by `scripts/nightly/steps.py`,
 
 The steps run with the environment `night.step_env` builds. It is the run's own environment without the variables the harness keeps from every child process, with `HOME` pointed at `local/nightly/home/`, a private temporary folder, and the tested worktree on `PYTHONPATH`. The home folder is kept from night to night, because the nightly Hypothesis profile keeps the examples it finds under the home directory. No `MEMVARA_` variable is set, so the suite runs with the same defaults as in CI.
 
+### Flakes
+
+A test that fails during the night is run twice more by `scripts/nightly/flakes.py`, in the same tier, and the majority of the three runs decides what the failure was:
+
+| Reruns | Verdict | What happens |
+|---|---|---|
+| both pass | flake | The majority passed, so nothing is filed. |
+| both fail | confirmed | A break that may be filed, because its strict expected failure will fail every time too. |
+| one passes, one fails | intermittent | It counts as a failure, but it is not filed: a strict expected failure on a test that sometimes passes would make the suite flaky. A person looks at it. |
+| a rerun could not run the test, or it was never rerun | unconfirmed | It counts as a failure, and a person looks at it. |
+
+A test that passed after failing counts as flaky whatever its verdict. The flake rate of a layer is its flaky tests over the tests it ran in the last fourteen nights, and the design's budget is 0.5% per layer. A test's layer is the first folder under `tests/adversarial/` that is not a tier folder, so a nightly concurrency test counts as `concurrency`; the rest of `tests/` is `unit`, and the doctests are `doctest`. To see the rates, or to rerun tests by hand:
+
+```bash
+python3 scripts/nightly/flakes.py rates
+python3 scripts/nightly/flakes.py rerun --worktree <checkout> --python <interpreter> <node id>
+```
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
