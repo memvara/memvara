@@ -81,6 +81,8 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "time"),
     KnownBug("B46", 318, "tier 0 of add() reinforces a restatement dated before the claim, "
              "and the earlier period is lost"),
+    KnownBug("B70", 351, "a different value written twice for a period before the "
+             "current one is stored twice"),
 )}
 
 

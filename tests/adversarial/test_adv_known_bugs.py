@@ -346,3 +346,22 @@ def test_search_returns_its_results_best_first() -> None:
         raise known_bugs.Reproduced(f"results out of score order: {order}")
     assert sorted(r.claim.object for r in results[:3]) == ["C", "C#", "C++"], order
 
+
+# -- B70: a different value written twice for an earlier period is stored twice ---------
+
+@known_bugs.xfail("B70")
+def test_a_value_written_twice_for_an_earlier_period_is_stored_once() -> None:
+    """A different value dated before the live one is written already ended, at the live
+    value's start. Writing it again is a repeat: it must reinforce the claim on record, not
+    store a copy that every read of that period returns twice (#351)."""
+    from datetime import datetime, timezone
+
+    jan, feb, mar = (datetime(2026, month, 1, tzinfo=timezone.utc) for month in (1, 2, 3))
+    user = stores.memory().scope(user="u")
+    user.remember("user", "lives_in", "Paris", valid_from=mar)
+    user.remember("user", "lives_in", "Rome", valid_from=jan)
+    again = user.remember("user", "lives_in", "Rome", valid_from=jan)
+    seen = [c.object for c in user.get_all(valid_at=feb)]
+    if seen == ["Rome", "Rome"] and again.added and not again.reinforced:
+        raise known_bugs.Reproduced(f"the repeat stored a copy; February reads {seen}")
+    assert seen == ["Rome"] and not again.added, (seen, [c.id for c in again.added])
