@@ -312,4 +312,43 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 
   The tests for #311 set `PYTHONIOENCODING` rather than a locale, because it sets the stream encoding the same way on every platform, whatever locales a machine has installed.
 
+## Soak and performance
+
+`bench/soak.py` runs memvara for thousands of seeded turns and fails when one of the failures that raise no error appears. `bench/perf_budget.py` times the reads and writes an agent waits for. Their tests are in `tests/adversarial/soak/`, and the plan is `docs/superpowers/plans/2026-09-26-adversarial-soak-perf.md`.
+
+### The soak
+
+A soak drives a new store through a seeded workload, using the real library: a SQLite file, the hashing embedder, no model, the built-in `PatternRedactor` and a `MemoryRecorder`. The workload's cast is made up. Sixteen people move and change jobs. The user has favourite likes, which are restated often, and one-off likes, some of which are taken back. Eight "panel" subjects hold values under the fast-moving predicate `working_on`: four restate one value, and four keep changing theirs. There are also three standing preferences, each with near-duplicates. A turn is one operation: a user turn for `add()`, which may be in one of seven other scripts or carry made-up personal data; a write with `remember()`, which spells its predicate with one of the aliases memvara declares for it; or a read. The turns are spread over 21 simulated days that end when the run starts, and consolidation runs once a simulated day.
+
+Each silent failure mode that `memvara/telemetry.py` lists has a detector, and each fails as the design's table says:
+
+| Detector | What it measures | Fails when |
+|---|---|---|
+| predicate explosion | the distinct predicates in the store | there are more than 1.1 times the six the workload writes |
+| recency refresh | the median rank correlation of the panel reads | it is 0 or less |
+| flip-flop row growth | the live claims in each single-valued slot after each consolidation, and `consolidate.merged` | a slot holds more than one, or nothing is ever merged |
+| salience over relevance | how often a probe, "tell me where X lives", ranks the right claim first | it is less than 95% |
+| script bias in the gate | each script's gate pass rate against the Latin rate | never: it is tracked, and it names every script below 0.8 times the Latin rate |
+| a retraction that retires nothing | `write.retraction{outcome="noop"}` | it happens at all |
+| redaction drift | the share of turns with planted personal data that the redactor changed, for each simulated day | any day is below 0.99 |
+| store growth | bytes on disk per turn | the regression rule in the next section triggers against earlier soaks of the same length and seed |
+
+A detector whose evidence is missing fails with "not measured"; script bias and store growth say so without failing. Otherwise a telemetry series that stopped arriving would read as a healthy one.
+
+Three choices decide what the detectors see:
+
+- **Recency is read only from the panel.** The panel's claims all match the panel query equally, so only freshness and salience can order them. A search that names one entity ranks that entity's claims first, and reports a positive correlation even when reinforcement is broken: calibrating the soak measured a median of 0.29 with reinforcement disabled.
+- **The probes say "lives", as the claim renders.** Asked "where does X live?", the hashing embedder scores "X likes Y" as high as "X lives in Z", and a healthy store ranked the right claim first only 62% of the time. The detector would have measured the embedder rather than salience.
+- **The gate's rate counts only fact-carrying turns that reached the gate.** Tier 0 drops a turn that repeats an earlier one word for word before the gate sees it.
+
+**What the tests show.** `test_adv_soak_faults.py` runs a healthy 200-turn soak, on which no detector fails, and one 200-turn soak per injected fault, on which that fault's detector fires: predicate aliases that stop folding; reinforcement that counts a restatement but refreshes nothing, which is the bug `telemetry.py` describes; single-valued predicates declared as holding many values; a merge threshold nothing can reach; a ranking that puts salience before relevance; a gate that drops Han and kana turns as too short; a misspelt retraction; personal data that switches to unpunctuated phone numbers halfway; and a deployment with no redactor. `test_adv_soak_run.py` shows store growth failing when neither a repeated turn nor a restated fact is recognised any more. A gentler salience fault needs a longer run: at 10,000 turns, `read_w_salience=1.0` left only 427 of 1,361 probes right, while at 200 turns even a weight of 30 left every probe right, because a short run restates too little. `test_adv_soak_detectors.py` checks each detector's boundary on hand-built observations.
+
+To run a soak by hand:
+
+```bash
+PYTHONPATH=$PWD python bench/soak.py --turns 10000 --out local/soak.json --history local/soak-history
+```
+
+It prints one line per detector and exits with 1 when one fails. `--store <folder>` keeps the store for inspection. With `--history`, store growth is judged against the records in that folder, and a suspected regression runs the soak again to confirm it.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

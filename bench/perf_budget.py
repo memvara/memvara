@@ -190,8 +190,8 @@ def judge(current: float, history: Sequence[float], remeasure: Callable[[], floa
     recent = [float(v) for v in history][-ROLLING_NIGHTS:]
     if len(recent) < ROLLING_NIGHTS:
         return Verdict("no history", current, None, None, None,
-                       f"{len(recent)} of the {ROLLING_NIGHTS} earlier valid nights the "
-                       "rule needs")
+                       f"{len(recent)} of the {ROLLING_NIGHTS} earlier nights the rule "
+                       "needs")
     centre, spread = statistics.median(recent), mad(recent)
     if not is_regression(current, recent, floor=floor):
         return Verdict("ok", current, centre, spread, None,
