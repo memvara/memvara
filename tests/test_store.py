@@ -1,6 +1,7 @@
 """SQLite store: persistence, the indexed conflict lookup, hybrid search primitives,
 and the bitemporal SQL that makes time travel work."""
 
+import _thread
 import gc
 import os
 import pathlib
@@ -2036,6 +2037,30 @@ def test_a_store_gives_up_on_another_that_does_not_finish_creating_the_file(
             SQLiteStore(str(path))
     finally:
         other.close()
+
+
+def test_an_open_waiting_for_the_creation_lock_stops_soon_after_ctrl_c(tmp_path,
+                                                                       monkeypatch):
+    """The wait for another store's schema step can run for ten minutes, and Python acts on
+    Ctrl-C only between calls into SQLite, so one long wait inside SQLite held an interrupt
+    back until the wait ended. The lock is taken in short tries instead. Here the wait is
+    five seconds and the interrupt comes after 0.3, so the open must end long before the
+    wait would."""
+    monkeypatch.setattr(sqlite_store, "_SCHEMA_STEP_WAIT", 5.0)
+    path = tmp_path / "c.db"
+    other = _creating_elsewhere(path)
+    interrupt = threading.Timer(0.3, _thread.interrupt_main)
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            interrupt.start()
+            SQLiteStore(str(path))
+        took = time.monotonic() - started
+    finally:
+        interrupt.cancel()
+        interrupt.join()
+        other.close()
+    assert took < 2.0, f"the open went on for {took:.1f} s after an interrupt at 0.3 s"
 
 
 def test_the_wait_for_a_schema_step_is_not_the_wait_for_a_clear(tmp_path, monkeypatch):

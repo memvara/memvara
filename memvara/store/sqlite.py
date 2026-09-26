@@ -1085,6 +1085,9 @@ _PRESENCE_WAIT = 60.0
 # claim, so ten minutes covers about 6.8 million claims at that rate. A process that dies
 # lets go of the lock at once, so the wait runs this long only while the holder is alive.
 _SCHEMA_STEP_WAIT = 600.0
+# How long each try for that lock waits inside SQLite (`_reserve`). Python acts on Ctrl-C
+# only between calls into SQLite, so an interrupt ends the wait within about this long.
+_LOCK_TRY = 0.25
 
 # How long a statement waits for another connection's lock before SQLite gives up with
 # "database is locked". It is `sqlite3.connect`'s own default, named here so that
@@ -1917,7 +1920,7 @@ class SQLiteStore:
                     "Give this user permission to write it, or delete it while nothing has "
                     "the store open; the next open creates it again.") from exc
         conn = self._take_lock_file(
-            self._reserve, _SCHEMA_STEP_WAIT,
+            lambda c: self._reserve(c, _SCHEMA_STEP_WAIT), _SCHEMA_STEP_WAIT,
             "is being created or upgraded by another store", "that has finished")
         try:
             yield
@@ -1929,16 +1932,31 @@ class SQLiteStore:
                 conn.close()
 
     @staticmethod
-    def _reserve(conn: sqlite3.Connection) -> None:
-        """Take SQLite's reserved lock on `conn` without making a file beside it.
+    def _reserve(conn: sqlite3.Connection, wait: float) -> None:
+        """Take SQLite's reserved lock on `conn` without making a file beside it, waiting
+        up to `wait` seconds for another store to let go of it.
 
         On the empty lock file, `BEGIN IMMEDIATE` starts a first page, and with SQLite's
         default journal that made `<db>.lock-journal`, which a directory the account may
         not add files to refuses. Nothing is ever written through this connection, so its
         rollback journal is kept in memory, where it costs nothing.
+
+        The wait can run for `_SCHEMA_STEP_WAIT`, ten minutes, and Python acts on Ctrl-C
+        only between calls into SQLite. One long wait inside SQLite would hold an
+        interrupt back until it ended, so the lock is asked for in tries of `_LOCK_TRY`
+        seconds, and an interrupt ends the wait within one try. When `wait` has passed,
+        the last "database is locked" is raised, and `_take_lock_file` reports it.
         """
         conn.execute("PRAGMA journal_mode=MEMORY").fetchone()
-        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(f"PRAGMA busy_timeout = {int(_LOCK_TRY * 1000)}")
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                return
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc) or time.monotonic() >= deadline:
+                    raise
 
     def _take_lock_file(self, take: Callable[[sqlite3.Connection], Any], wait: float,
                         doing: str, done: str) -> sqlite3.Connection | None:
