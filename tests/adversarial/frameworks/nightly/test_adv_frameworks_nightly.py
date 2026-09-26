@@ -24,12 +24,13 @@ from packaging.utils import canonicalize_name
 from harness import known_bugs
 
 from .. import environments, probe
-from . import checks_langchain, checks_llamaindex
+from . import checks_langchain, checks_langgraph, checks_llamaindex
 
 #: Each framework's checks, which the probe runs in that framework's environments.
 CHECKS: dict[str, Any] = {
     "langchain": checks_langchain,
     "llamaindex": checks_llamaindex,
+    "langgraph": checks_langgraph,
 }
 
 ENVIRONMENTS = [pytest.param(name, pin, id=f"{name}-{pin}")
