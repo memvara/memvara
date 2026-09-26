@@ -158,7 +158,11 @@ class Answer:
 
 @dataclass(frozen=True)
 class Forever:
-    """`reply` to this call and to every later call of the same method."""
+    """`reply` to this call and to every later call of the same method.
+
+    `Forever(Late(x, s))` and `Late(Forever(x), s)` mean the same thing: `x` answers every
+    later call, and each answer arrives `s` seconds late.
+    """
 
     reply: object
 
@@ -320,14 +324,18 @@ class ScriptedModel:
             self.unscripted.append(call)
             raise Unscripted(f"{method} was called after its script ran out, with {args}")
         self.calls.append(call)
-        reply = script[0]
-        if isinstance(reply, Forever):
+        # `Forever` and `Late` may wrap a reply in either order, and both orders mean the
+        # same: the entry stays at the head of the script when any wrapper is `Forever`,
+        # and every `Late` around the reply moves the clock on each call it answers.
+        reply, forever = script[0], False
+        while isinstance(reply, (Forever, Late)):
+            if isinstance(reply, Forever):
+                forever = True
+            else:
+                self._now += reply.seconds
             reply = reply.reply
-        else:
+        if not forever:
             script.pop(0)
-        if isinstance(reply, Late):
-            self._now += reply.seconds
-            reply = reply.reply
         if isinstance(reply, BaseException):
             self.failures.append((method, reply))
             raise reply

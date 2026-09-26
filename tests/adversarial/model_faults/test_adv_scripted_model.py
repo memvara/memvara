@@ -237,6 +237,20 @@ def test_forever_answers_every_later_call(scripted: Make) -> None:
     assert model.unscripted == []
 
 
+@pytest.mark.parametrize("wrapped", [
+    pytest.param(Forever(Late(Text("slow"), 10.0)), id="forever-around-late"),
+    pytest.param(Late(Forever(Text("slow")), 10.0), id="late-around-forever"),
+])
+def test_forever_and_late_mean_the_same_in_either_order(
+        scripted: Make, wrapped: object) -> None:
+    """`queue` accepts the two wrappers in either order, and both orders mean one thing:
+    the reply answers this call and every later one, and each answer is 10 seconds late."""
+    model = scripted(chat=[wrapped])
+    assert [chat(model) for _ in range(3)] == ["slow", "slow", "slow"]
+    assert model.clock() == 30.0
+    assert model.unscripted == []
+
+
 # -- run_tools is memvara's own tool loop ------------------------------------------------
 
 
