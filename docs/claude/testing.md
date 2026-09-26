@@ -452,4 +452,20 @@ The regressions step runs `pytest --tier nightly` in the tested worktree through
 
 Each failed test becomes a finding (`scripts/nightly/regressions.py`). Its invariant is the test's node id, its layer comes from the test's folder, and its severity is `unclassified`, because nobody has checked it against `SECURITY.md` yet. When the failure's text holds a `drive.replay([...])` program, as a failure of the reference model's state machine does, the program becomes the finding's operations and the `@reproduce_failure(...)` call becomes its seed. So two different breaks that the same test finds get two fingerprints. Two kinds of failure are reported for a person and never filed: a strict expected failure that passes, which usually means its bug was fixed, and a run that exits with an error but reports no failed test, which means something outside the tests failed, such as the skip ledger or a credential guard. At most 20 failed tests are rerun; the rest are reported as unconfirmed.
 
+### Filing a break
+
+`scripts/nightly/filing.py` files a confirmed break, and it is a dry run unless `--file` is given: a dry run calls nothing, and prints the exact commands a real run would send. Nothing in the suite calls GitHub; the tests replay the output of `gh` and `git` from `tests/adversarial/nightly_runner/gh_recorded.json`.
+
+- **A public break** gets one issue with the label `nightly-break`. The issue's body ends with a hidden marker, `<!-- memvara-nightly-fingerprint: <fingerprint> -->`. Before filing, the run reads every issue with the label and compares their markers, so a break that was filed before is not filed again, even when the local history is lost. Then a branch named `test/nightly-<first 12 characters of the fingerprint>` is pushed with the strict-xfail test, by an explicit refspec that cannot reach `main`, and a draft pull request is opened. Nothing is merged.
+- **A security-class break** gets a private draft advisory whose description carries the marker, and nothing else: no issue, no branch and no pull request, because its failing test lands together with its fix.
+- **An unclassified break** is filed nowhere public. A failed test from the regressions step is always unclassified, so the scheduled session checks it against the "In scope" section of `SECURITY.md` first, and then files it with the class it chose:
+
+```bash
+python3 scripts/nightly/filing.py issue --night <date> --fingerprint <fingerprint> --severity wrong-result --file
+python3 scripts/nightly/filing.py pr --night <date> --fingerprint <fingerprint> --worktree <worktree with the pin committed> --file
+python3 scripts/nightly/filing.py advisory --night <date> --fingerprint <fingerprint> --file
+```
+
+Every filing with `--file` is recorded in `local/nightly/history.jsonl`, so a later night knows the break is filed. Before anything goes to GitHub, the operator's paths are removed from the failure's text: the checkout, the home folder, the temporary folder, and the user name in pytest's temporary folders. The label has to exist before the first real filing; create it once with `gh label create nightly-break --repo memvara/memvara --description "Found by the nightly run"`.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
