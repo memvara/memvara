@@ -23,6 +23,13 @@ python3 -m coverage run -m pytest && python3 -m coverage report    # gated at 10
 python3 -m mypy -p memvara                                         # must be clean
 ```
 
+**Run these against a code state that has not already passed them.** `CLAUDE.md` carries a
+section on reusing a validation result — it ties a pass to a fingerprint of the working tree,
+so a result stays valid across a commit, a squash, a rebase or a review that changed nothing,
+and a recorded pass is reused rather than repeated. It does not lower the bar below: every
+code state that ships still needs a passing gate and a clean `mypy` recorded against it. Read
+that section before deciding you have already run one of these.
+
 **Pass `embedder=` at every `Memvara()` you construct in a test.** `tests/conftest.py`
 fails the run otherwise, naming the file and line. `default_embedder()` returns a
 sentence-transformers model as soon as that package is importable — and it is importable
