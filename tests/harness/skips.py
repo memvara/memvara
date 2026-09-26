@@ -65,6 +65,9 @@ RULES: tuple[SkipRule, ...] = (
              "Windows has no POSIX file modes.", platforms=("win32",)),
     SkipRule(r"^Windows file modes do not express this$",
              "Windows has no POSIX file modes.", platforms=("win32",)),
+    SkipRule(r"^this user may write a read-only file$",
+             "Root, or another account that ignores file modes, cannot be refused a write "
+             "by one, so the test has no way to make the file read-only."),
     SkipRule(r"^the password database exists only on POSIX$",
              "Windows has no password database to fall back from.", platforms=("win32",)),
     SkipRule(r"^SIGSTOP exists only on POSIX$",

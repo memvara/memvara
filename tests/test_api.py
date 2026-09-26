@@ -45,6 +45,7 @@ from memvara import (
 from memvara import core as core_module
 from memvara.telemetry import WRITE_EMBEDDING_UNUSABLE, MemoryRecorder
 from memvara.core import _drop_vectors
+from memvara.store import StoreInUseError
 from memvara.embed import fingerprint as fingerprint_module
 from memvara.embed.fingerprint import (
     embedder_name,
@@ -694,6 +695,45 @@ def test_reembed_switches_every_subsystem_to_the_new_embedder(mem):
     assert mem.reader.embedder is replacement, "queries would keep the old dimension"
     assert mem.consolidator.embedder is replacement
     assert [r.claim.object for r in mem.search("lives")] == ["Lisbon"]
+
+
+@pytest.mark.parametrize("refusal", ["another store has it open", "read-only lock file"])
+def test_a_refused_reembed_leaves_every_subsystem_on_the_old_embedder(tmp_path, refusal):
+    """`reembed()` gave all four subsystems the new embedder before the clear could
+    refuse, so a refused re-embed left the object holding the new embedder beside the old
+    vectors, although it said it had changed nothing. With an embedder of the same width
+    nothing would raise, and every search would compare two unrelated vector spaces. The
+    clear now refuses before anything is rebound."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM()) as setup:
+        setup.remember("user", "lives_in", "Lisbon")
+    lock = tmp_path / "m.db.lock"
+    other = None
+    if refusal == "read-only lock file":
+        if os.name != "posix":
+            pytest.skip("Windows file modes do not express this")
+        os.chmod(lock, 0o444)
+        if os.access(lock, os.W_OK):
+            os.chmod(lock, 0o644)
+            pytest.skip("this user may write a read-only file")
+        expected: type[Exception] = PermissionError
+    else:
+        other = SQLiteStore(path)
+        expected = StoreInUseError
+    old = HashingEmbedder(dim=64)
+    mem = Memvara(path, embedder=old, llm=NullLLM())
+    try:
+        with pytest.raises(expected):
+            mem.reembed(HashingEmbedder(dim=64, ngram=(2, 4)))
+        assert mem.embedder is old
+        assert mem.writer.embedder is old
+        assert mem.reader.embedder is old
+        assert mem.consolidator.embedder is old
+    finally:
+        mem.close()
+        if other is not None:
+            other.close()
+        os.chmod(lock, 0o644)
 
 
 def test_reembed_also_repairs_claims_that_were_never_embedded():

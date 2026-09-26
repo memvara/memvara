@@ -57,9 +57,11 @@ import gc
 import json
 import math
 import os
+import re
 import sqlite3
 import struct
 import threading
+import time
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -315,8 +317,10 @@ CREATE TABLE IF NOT EXISTS predicates (
 );
 """
 
-SCHEMA = """
-PRAGMA journal_mode=WAL;
+# Settings of a connection rather than of the file. Every open applies them to its writer
+# connection: through `SCHEMA` when it runs the schema step, and on their own when it
+# skips the step (`_needs_schema_step`).
+_CONNECTION_PRAGMAS = """
 PRAGMA synchronous=NORMAL;
 -- Overwrite the content of a deleted row rather than merely marking its space free.
 -- `erase()` and `purge()` promise the text is gone, and without this it is still sitting
@@ -325,7 +329,11 @@ PRAGMA synchronous=NORMAL;
 -- run and +9% on `erase_claim`, which is the right side of that trade for the one
 -- operation in this library whose entire purpose is that the data stops existing.
 PRAGMA secure_delete=ON;
+"""
 
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+""" + _CONNECTION_PRAGMAS + """
 CREATE TABLE IF NOT EXISTS episodes (
     id       TEXT PRIMARY KEY,
     tenant   TEXT NOT NULL,
@@ -601,6 +609,12 @@ CREATE INDEX IF NOT EXISTS ep_cover ON episodes(tenant, usr, project, agent, ses
 -- for 100,000 claims. Down here because `expires_at` does not exist on a pre-v15 file
 -- until `_migrate_to_v15` adds it.
 """ + f"CREATE INDEX IF NOT EXISTS cl_last_change ON claims(tenant, {_LAST_CHANGE});\n"
+
+# The names of the indexes `_LATE_INDEXES` creates. An open skips the schema step only
+# when every one of them exists (`_needs_schema_step`), because an index added there
+# without a version bump reaches an older file only through that step.
+_LATE_INDEX_NAMES = frozenset(
+    re.findall(r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)\s+ON\s", _LATE_INDEXES))
 
 _CLAIM_FIELDS = (
     "id", "tenant", "usr", "agent", "session", "subject", "predicate", "object", "text",
@@ -1060,9 +1074,46 @@ def _lock_path(db_path: str) -> str | None:
     return None if db_path in (":memory:", "") else db_path + ".lock"
 
 
-# How long a store that is opening waits for another store's `clear_embeddings` to finish
-# before it gives up.
+def _write_refusal(path: str) -> str | None:
+    """Why this process may not open `path` for writing, or None when it may.
+
+    SQLite opens a file it may not write read-only, without an error, and on a read-only
+    connection `BEGIN IMMEDIATE` and `BEGIN EXCLUSIVE` start only a read transaction, again
+    without an error. A lock taken that way keeps nobody out, so a store asks here before
+    it relies on one. Only a refused permission counts. A missing file is no refusal,
+    because SQLite creates it for writing, and any other problem with the path is left to
+    SQLite, which reports it when it opens the file, as it always has.
+    """
+    try:
+        os.close(os.open(path, os.O_RDWR))
+    except PermissionError as exc:
+        return exc.strerror or str(exc)
+    except OSError:
+        return None
+    return None
+
+
+# How long a store that is opening waits, in `_hold_presence`, for another store's
+# `clear_embeddings` to finish before it gives up. Waiting for another store's schema
+# step is `_SCHEMA_STEP_WAIT`.
 _PRESENCE_WAIT = 60.0
+
+# How long a store that is opening waits, in `_creating`, for another store to finish
+# creating or upgrading the same file before it gives up. An upgrade that re-derives
+# every claim's keys took 26.6 seconds for 300,000 claims on a loaded laptop, 88.5 us a
+# claim, so ten minutes covers about 6.8 million claims at that rate. A process that dies
+# lets go of the lock at once, so the wait runs this long only while the holder is alive.
+_SCHEMA_STEP_WAIT = 600.0
+# How long each try for that lock waits inside SQLite (`_reserve`). Python acts on Ctrl-C
+# only between calls into SQLite, so an interrupt ends the wait within about this long.
+_LOCK_TRY = 0.25
+
+# How long a statement waits for another connection's lock before SQLite gives up with
+# "database is locked". It is `sqlite3.connect`'s own default, named here so that
+# `_run_schema`, which has to wait by hand, waits exactly as long as every other write.
+_BUSY_TIMEOUT = 5.0
+# How long `_run_schema` sleeps before it tries again.
+_SCHEMA_RETRY_PAUSE = 0.01
 
 
 class StoreInUseError(RuntimeError):
@@ -1768,13 +1819,24 @@ class SQLiteStore:
         # Before this store writes to the database or opens the vector file; see
         # `_hold_presence`.
         self._alone = False
+        #: Why this process could not open `<db>.lock` for writing when it opened its
+        #: presence connection, or None. A clear refuses while it is set; `_claim_alone`.
+        self._presence_refusal: str | None = None
         self._presence = self._hold_presence()
         try:
             with self._lock:
-                self._db.executescript(SCHEMA)
-                self._migrate()
-                self._db.executescript(_LATE_INDEXES)
-                self._db.commit()
+                if self._needs_schema_step():
+                    # Nothing may ever be written through `_creating`'s connection to the
+                    # lock file. A commit there would have to write the file's first page,
+                    # and that waits for every other open store's shared lock to go, which
+                    # happens only when they close.
+                    with self._creating():
+                        self._run_schema()
+                        self._migrate()
+                        self._db.executescript(_LATE_INDEXES)
+                        self._db.commit()
+                else:
+                    self._db.executescript(_CONNECTION_PRAGMAS)
                 if sealer is not None:
                     # Read after the first commit: a new database has no salt on disk
                     # until its first page is written, and this is the value every other
@@ -1793,7 +1855,7 @@ class SQLiteStore:
 
     def _connect(self) -> sqlite3.Connection:
         """A new connection to this store's file, with the key applied if it has one."""
-        conn = self._sql.connect(self.path, check_same_thread=False)
+        conn = self._sql.connect(self.path, timeout=_BUSY_TIMEOUT, check_same_thread=False)
         if self._key is not None:
             # The raw-key form, `x'<hex>'`, which skips SQLCipher's password stretching:
             # the key is already 32 random bytes, and stretching it would cost every new
@@ -1841,14 +1903,122 @@ class SQLiteStore:
         works between two stores in one process too. It is taken before this store writes
         to the database or opens the vector file, so a store that opens during a clear
         waits here, not after it has mapped the file.
+
+        Reading the file is enough to hold the shared lock, so a lock file this process
+        may not write is no reason to refuse an open. But SQLite then opens it read-only,
+        and a clear could not take it exclusively (#350), so `_present` records whether
+        this process may write it, for `_claim_alone`.
         """
+        return self._take_lock_file(
+            self._present, _PRESENCE_WAIT, "is having its vectors cleared by another store",
+            "that re-embedding has finished")
+
+    def _present(self, conn: sqlite3.Connection) -> None:
+        """Hold the shared lock on a new presence connection, whose journal is in memory,
+        and record whether this process may write the lock file.
+
+        The record is taken here, once SQLite has opened the file, so it describes the
+        connection SQLite opened. Taken before, it found no file when this store was the
+        first to open, and if another account created the file in that moment, SQLite
+        opened that file read-only while the record said nothing was wrong.
+
+        A clear later asks this same connection for the lock exclusively (`_try_alone`),
+        and on the empty lock file `BEGIN EXCLUSIVE` starts a first page, as
+        `BEGIN IMMEDIATE` does for the creation lock (`_reserve`). With SQLite's default
+        journal that needed a new `<db>.lock-journal`, which a directory the account may
+        not add files to refuses. Nothing is ever written through this connection either,
+        so its rollback journal is kept in memory too.
+        """
+        path = _lock_path(self.path)
+        self._presence_refusal = None if path is None else _write_refusal(path)
+        conn.execute("PRAGMA journal_mode=MEMORY").fetchone()
+        self._share(conn)
+
+    @contextmanager
+    def _creating(self) -> Iterator[None]:
+        """Hold `<db>.lock`'s write lock while this store runs its schema and migrations.
+
+        Two stores that ran them at the same moment on one new file got in each other's
+        way. One failed at the switch to WAL mode (#281). With that switch retried
+        (`_run_schema`), one could still fail inside a migration with "vtable constructor
+        failed" when it opened a text index while the other was still creating tables and
+        indexes. So one store at a time runs this step, and a store that opens while
+        another is creating or upgrading the file waits here, for up to
+        `_SCHEMA_STEP_WAIT` seconds, and then finds the file finished. The lock is
+        SQLite's reserved lock: one connection holds it at a time, and it leaves every
+        open store's shared lock alone, so a store that is merely open holds nobody up. It
+        is taken on a second connection, so that this store's own shared lock is held
+        throughout.
+
+        The reserved lock needs a lock file this process may write. SQLite opens a file
+        it may not write read-only, and `BEGIN IMMEDIATE` on a read-only connection takes
+        only a shared lock, without an error, so the lock would keep nobody out. Such a
+        file is refused here, with `PermissionError`, before anything is created or
+        upgraded. `_hold_presence` has already created the file if it was missing.
+        """
+        path = _lock_path(self.path)
+        # Asked again although `_present` asked it for the presence connection: this lock
+        # is taken on a connection of its own, and SQLite decides that connection's mode
+        # when it opens the file, which is next.
+        refusal = None if path is None else _write_refusal(path)
+        if refusal is not None:
+            raise PermissionError(
+                f"{self.path} has to be created or upgraded, and a store does that only "
+                f"while it holds a write lock on {path}, so that one process at a time "
+                f"does it. This process may not write that file ({refusal}). Give this "
+                "user permission to write it, or delete it while nothing has the store "
+                "open; the next open creates it again.")
+        conn = self._take_lock_file(
+            lambda c: self._reserve(c, _SCHEMA_STEP_WAIT), _SCHEMA_STEP_WAIT,
+            "is being created or upgraded by another store", "that has finished")
+        try:
+            yield
+        finally:
+            if conn is not None:
+                # Closing rolls the transaction back, which lets go at once. A commit
+                # would not: on the empty lock file, BEGIN IMMEDIATE starts a first page
+                # in memory, and writing it needs every other store's shared lock gone.
+                conn.close()
+
+    @staticmethod
+    def _reserve(conn: sqlite3.Connection, wait: float) -> None:
+        """Take SQLite's reserved lock on `conn` without making a file beside it, waiting
+        up to `wait` seconds for another store to let go of it.
+
+        On the empty lock file, `BEGIN IMMEDIATE` starts a first page, and with SQLite's
+        default journal that made `<db>.lock-journal`, which a directory the account may
+        not add files to refuses. Nothing is ever written through this connection, so its
+        rollback journal is kept in memory, where it costs nothing.
+
+        The wait can run for `_SCHEMA_STEP_WAIT`, ten minutes, and Python acts on Ctrl-C
+        only between calls into SQLite. One long wait inside SQLite would hold an
+        interrupt back until it ended, so the lock is asked for in tries of `_LOCK_TRY`
+        seconds, and an interrupt ends the wait within one try. When `wait` has passed,
+        the last "database is locked" is raised, and `_take_lock_file` reports it.
+        """
+        conn.execute("PRAGMA journal_mode=MEMORY").fetchone()
+        conn.execute(f"PRAGMA busy_timeout = {int(_LOCK_TRY * 1000)}")
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                return
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+
+    def _take_lock_file(self, take: Callable[[sqlite3.Connection], Any], wait: float,
+                        doing: str, done: str) -> sqlite3.Connection | None:
+        """A new connection to `<db>.lock` that holds the lock `take` asks for, or None
+        when the store has no file. SQLite waits up to `wait` seconds for it, and a store
+        still in the way after that is named by `doing` and `done`."""
         path = _lock_path(self.path)
         if path is None:
             return None
-        conn = sqlite3.connect(path, timeout=_PRESENCE_WAIT, isolation_level=None,
+        conn = sqlite3.connect(path, timeout=wait, isolation_level=None,
                                check_same_thread=False)
         try:
-            self._share(conn)
+            take(conn)
         except sqlite3.DatabaseError as exc:
             conn.close()
             if "locked" not in str(exc):
@@ -1857,9 +2027,13 @@ class SQLiteStore:
                     "no data: delete it while nothing has the store open, and open the "
                     "store again.") from exc
             raise StoreInUseError(
-                f"{self.path} is having its vectors cleared by another store, and it "
-                f"has not finished in {_PRESENCE_WAIT:.0f} seconds. Open it again when "
-                "that re-embedding has finished.") from None
+                f"{self.path} {doing}, and it has not finished in {wait:g} seconds. "
+                f"Open it again when {done}.") from None
+        except BaseException:
+            # Anything else, an interrupt included: the connection may already hold its
+            # lock, and left open it would keep it until Python freed the connection.
+            conn.close()
+            raise
         return conn
 
     @staticmethod
@@ -1874,10 +2048,24 @@ class SQLiteStore:
         Only possible when no other store, in any process, has the database open, because
         each holds the lock shared. Held until `_share_again`, so a store that opens in the
         meantime waits in `_hold_presence`.
+
+        A presence connection SQLite opened read-only, because this process may not write
+        the lock file, cannot take it exclusively: `BEGIN EXCLUSIVE` there starts only a
+        read transaction, without an error, and the clear would go ahead while another
+        store had the database open (#350). So such a store raises `PermissionError`
+        instead, naming the file, with nothing changed.
         """
         conn = self._presence
         if conn is None or self._alone:
             return
+        if self._presence_refusal is not None:
+            raise PermissionError(
+                f"The vectors of {self.path} were not cleared. A store clears them only "
+                f"while it holds a write lock on {_lock_path(self.path)}, which shows that "
+                "no other store has the database open, and this process may not write "
+                f"that file ({self._presence_refusal}). Give this user permission to write "
+                "it and open the store again, or delete it while nothing has the store "
+                "open; the next open creates it again. Nothing was changed.")
         if not self._try_alone(conn):
             # A store that nothing refers to any more holds its lock until Python frees
             # it, and a store sits in a reference cycle, so that waits for the cycle
@@ -1902,6 +2090,10 @@ class SQLiteStore:
         between the two locks at once. Without that, two clears at once could each find
         the other gone, and the one refused would go on mapping a file the other had
         truncated.
+
+        Only "database is locked" means another store holds the file. Any other error is
+        raised as itself, after this store holds the file shared again, so that a fault
+        is never reported as another process to go and stop.
         """
         began = not self._db.in_transaction
         if began:
@@ -1910,11 +2102,13 @@ class SQLiteStore:
         conn.execute("PRAGMA busy_timeout = 0")
         try:
             conn.execute("BEGIN EXCLUSIVE")
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
             conn.execute(f"PRAGMA busy_timeout = {int(_PRESENCE_WAIT * 1000)}")
             self._share(conn)
             if began:
                 self._db.rollback()
+            if "database is locked" not in str(exc):
+                raise
             return False
         conn.execute(f"PRAGMA busy_timeout = {int(_PRESENCE_WAIT * 1000)}")
         self._alone = True
@@ -2039,6 +2233,57 @@ class SQLiteStore:
                 self._readers.append(conn)
             self._local.db = conn
         return conn
+
+    def _needs_schema_step(self) -> bool:
+        """Whether this open must run the schema step, which creates or upgrades the file.
+
+        A file this version has finished with needs none: its version stamp is this
+        version's, it is in WAL mode, and every index in `_LATE_INDEXES` exists. Its open
+        skips the step and the creation lock (`_creating`), so opens of an established
+        store never wait for one another. Every other file takes the step under the lock:
+        a new file, one an older version wrote, one a tool switched out of WAL mode, and
+        one that lacks an index `_LATE_INDEXES` gained without a version bump. So does a
+        file a newer version wrote, and `_migrate` refuses it.
+        """
+        if int(self._db.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+            return True
+        if self._db.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+            return True
+        indexes = {r[0] for r in self._db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'")}
+        return not _LATE_INDEX_NAMES <= indexes
+
+    def _run_schema(self, wait: float = _BUSY_TIMEOUT) -> None:
+        """Run `SCHEMA`, waiting for another connection's write lock as every write does.
+
+        This runs inside `_creating`, so no other memvara store is running its schema
+        step at the same time. The retry here is for a connection from outside memvara
+        that holds the database's write lock, such as the `sqlite3` shell or a backup
+        tool, which `_creating` cannot hold back.
+
+        `SCHEMA` starts by switching the database to WAL mode. On a file that is not in
+        WAL mode yet, which is every new store, the switch needs a stronger lock than the
+        connection holds, and while another connection holds the write lock SQLite
+        refuses that lock at once instead of calling the busy handler, because waiting
+        for it there could deadlock. So the open used to fail within a few milliseconds
+        with "database is locked" (#281), where every other write waits for up to
+        `_BUSY_TIMEOUT` seconds.
+
+        So "database is locked", and only that error, is tried again until `wait` seconds
+        have passed, which is the busy timeout unless a test shortens it. By then the
+        other connection has usually let go, and a file already in WAL mode needs no
+        stronger lock. Every statement in `SCHEMA` is a pragma or an `IF NOT EXISTS`, so
+        running it again changes nothing. Any other error is raised at once.
+        """
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                self._db.executescript(SCHEMA)
+                return
+            except self._sql.OperationalError as exc:
+                if "database is locked" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+            time.sleep(_SCHEMA_RETRY_PAUSE)
 
     def _migrate(self) -> None:
         """Stamp or upgrade the schema version.
@@ -3640,12 +3885,13 @@ class SQLiteStore:
         where the claim was, because that is what erasure means.
 
         **The text is overwritten, not merely unlinked**, and neither half of that is
-        automatic in SQLite. `PRAGMA secure_delete=ON` (see `SCHEMA`) covers the ordinary
-        rows, whose bytes would otherwise sit in a free page; FTS5's `secure-delete` (see
-        `_migrate_to_v7`) covers the text indexes, where a delete writes a marker and
-        keeps the terms as live rows that no `VACUUM` reclaims. Without both, this method
-        returned a count of what it had deleted while the words were still greppable in
-        the file. `tests/test_erasure_residue.py` checks the file rather than the store.
+        automatic in SQLite. `PRAGMA secure_delete=ON` (see `_CONNECTION_PRAGMAS`) covers
+        the ordinary rows, whose bytes would otherwise sit in a free page; FTS5's
+        `secure-delete` (see `_migrate_to_v7`) covers the text indexes, where a delete
+        writes a marker and keeps the terms as live rows that no `VACUUM` reclaims.
+        Without both, this method returned a count of what it had deleted while the words
+        were still greppable in the file. `tests/test_erasure_residue.py` checks the file
+        rather than the store.
 
         What *is* recorded is that it happened: one row in `erasures`, written before the
         delete and in the same transaction, holding no text, subject, predicate or object.
@@ -4463,7 +4709,9 @@ class SQLiteStore:
         vector search. Inside `batch()` the store stays its own until the batch ends,
         because a store that opened before the commit would map vectors the batch is
         about to delete. A store that nothing refers to any more does not count: the
-        clear collects garbage once before it refuses.
+        clear collects garbage once before it refuses. When this process may not write
+        `<db>.lock`, the clear cannot tell whether another store has the database open,
+        so it raises `PermissionError` naming that file, again having changed nothing.
         """
         with self._lock:
             self._claim_alone()

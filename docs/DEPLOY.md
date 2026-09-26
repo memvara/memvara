@@ -620,7 +620,7 @@ mistake. After a write to `memory.db` the directory holds:
 | `memory.db` | claims, episodes, predicates, the FTS index, and every vector | everything |
 | `memory.db.vecs` | the vector matrix: memory-mapped in an unencrypted store, one encrypted record per row in an encrypted one | nothing that cannot be rebuilt: the next open rewrites it from the vectors in `memory.db`, which takes a while on a large store |
 | `memory.db.embedder.json` | which embedder wrote those vectors | the ability to detect a model swap, which then goes undetected |
-| `memory.db.lock` | an empty file each open store holds a lock on, so that clearing the vectors can tell whether anything else has the store open | nothing once every process has closed the store: the next open recreates it. Deleted while a store is open, it stops `reembed()` from seeing that store |
+| `memory.db.lock` | an empty file each open store holds a lock on, so that clearing the vectors can tell whether anything else has the store open. A store that is new or needs an upgrade also takes a write lock on it while it creates or upgrades the database, so that only one process does that at a time. That process must be able to write this file, and so must a process that re-embeds the store, which otherwise refuses with `PermissionError`; an open of an established store needs only to read it | nothing once every process has closed the store: the next open recreates it. Deleted while a store is open, it stops `reembed()` from seeing that store, and stops a store that is being created or upgraded from keeping another out |
 | `memory.db-wal`, `memory.db-shm` | SQLite write-ahead log, while open | recently committed writes |
 
 So **mount, back up and copy the directory, not the file.** A Docker bind mount of

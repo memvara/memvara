@@ -4562,8 +4562,17 @@ class Memvara:
         `StoreInUseError`, having changed nothing, while another process or another
         `SQLiteStore` in this one has the store open, because it truncates the vector
         file they map. Stop them first: each embeds new writes with the model it started
-        with, so they need restarting with the new embedder anyway.
+        with, so they need restarting with the new embedder anyway. It raises
+        `PermissionError`, also having changed nothing, when this process may not write
+        `<db>.lock`, because it then cannot tell whether another process has the store
+        open.
         """
+        # First, because this is the step that can refuse. A refusal has to leave this
+        # object as it was: rebound first, it held the new embedder beside the old
+        # vectors, and with one of the same width every search then compared two
+        # unrelated vector spaces with nothing raised.
+        _drop_vectors(self.store)
+
         if embedder is not None:
             self.embedder = embedder
             # Each subsystem holds its own reference, deliberately — they are
@@ -4571,8 +4580,6 @@ class Memvara:
             self.writer.embedder = embedder
             self.reader.embedder = embedder
             self.consolidator.embedder = embedder
-
-        _drop_vectors(self.store)
 
         with transaction(self.store):
             embedded = self._reencode(

@@ -178,8 +178,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     extraction and so before the reconciler. A turn that embeds as a near-duplicate of a
     stored claim, or whose text is exactly that of the turn a claim came from, still
     reinforces that claim, and its earlier date is lost. #318 tracks this.
-- **`forget()` retires a value written to begin later, as well as the values in force.**
-  It retired only the values in force at the time of the call, so a value written with a
 - **`forget()` retires a value stored to begin later, as well as the values in force.**
   It retired only the values in force at the time of the call, so a value stored with a
   future `valid_from` stayed believed, and the forgotten slot answered again when that
@@ -205,7 +203,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   stored to begin later and ended after its start is true between the two, and the
   reply now says that too, where it used to say `memory_recall` kept returning it;
   `memory_remember`'s reply shares that note.
-
 - **A retraction repeated after the first one's expiry has passed keeps a record of its
   own.** A retraction that repeated an earlier one was folded into the earlier tombstone
   even when that tombstone's `expires_at` had passed. The write reported nothing, and
@@ -215,6 +212,48 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   when a fact is repeated, so the repeat is handled as a retraction the store has no
   record of. Where nothing else in the slot is live, it writes a tombstone of its own,
   which the sweep leaves in place. #284.
+- **Two processes opening a new store at the same moment no longer make one of them fail
+  at startup.** The first open of a store switches its file to WAL mode. While another
+  connection held the file's write lock, SQLite refused that switch at once instead of
+  waiting, so one of the processes failed within a few milliseconds with
+  `sqlite3.OperationalError: database is locked`, where every other write waits for up to
+  five seconds. This happened on the first run after the plugin was installed, when the MCP
+  server and the plugin's hooks open the new store together, and when two agent sessions
+  started at once; when the server was the one that failed, the agent had no memory tools
+  for that session. Now one store at a time runs the schema and the migrations, so a store
+  that opens while another is creating or upgrading the file waits for it, for up to ten
+  minutes, and then opens the finished store. The wait is long because an upgrade can be:
+  one took 26.6 seconds for 300,000 claims. Ctrl-C ends it within about a quarter of a
+  second. Only an open that creates or upgrades the store takes this lock. The open of a
+  store this version has already finished with does not, so established stores never wait
+  for one another. An open that creates or upgrades a store must be able to write
+  `<db>.lock`: if the file exists and this user may not write it, the open raises
+  `PermissionError`, naming the file and the fix. An open of an established store needs
+  only to read the file, as before, and neither kind needs permission to add a file to the
+  store's directory. The switch to WAL mode is also tried again for up to five seconds, for
+  a connection from outside memvara that holds the write lock. #281.
+- **`clear_embeddings()`, and so `reembed()`, refuse when this process may not write
+  `<db>.lock`.** A clear takes that file exclusively to make sure no other store has the
+  database open, because clearing truncates the vector file they map, and a process that
+  still maps it crashes on its next vector search. SQLite opens a file this process may not
+  write read-only, and there the exclusive lock silently became a shared one. So with a
+  read-only lock file, such as one another account created, the clear went ahead while
+  another process had the store open, and that process then died with SIGBUS. The clear
+  now raises `PermissionError`, naming the lock file, and changes nothing. #350.
+- **`clear_embeddings()`, and so `reembed()`, work in a directory where the account may not
+  add files.** A clear asks for `<db>.lock` exclusively, and on that empty file SQLite
+  needed a new `<db>.lock-journal` to do so. In such a directory every clear failed, and
+  the failure was reported as `StoreInUseError`, with advice to stop other processes that
+  did not exist. The lock file's connection now keeps its journal in memory, and a clear
+  reports `StoreInUseError` only when another store really holds the file; any other error
+  is raised as itself. #324.
+- **A `reembed()` that refuses now changes nothing.** It gave the `Memvara` and its writer,
+  reader and consolidator the new embedder before the clear could refuse with
+  `StoreInUseError` or `PermissionError`. So after a refusal the object held the new
+  embedder beside the old vectors, although the refusal said nothing had changed, and with
+  an embedder of the same width every search compared two unrelated vector spaces without
+  an error. The clear now runs first, so a refusal leaves the old embedder everywhere.
+  #324.
 
 ## [0.16.0] — 2026-09-25
 

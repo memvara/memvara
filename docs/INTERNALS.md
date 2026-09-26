@@ -2140,8 +2140,9 @@ design, and a Postgres implementation that uses `LIKE` must escape `%` and `_`.
 
 Two settings, covering two different halves, and neither is SQLite's default.
 
-`PRAGMA secure_delete=ON` (in `SCHEMA`, so it applies to every writer connection) covers
-ordinary tables: without it a deleted row's bytes sit in a free page, readable in the file.
+`PRAGMA secure_delete=ON` (in `_CONNECTION_PRAGMAS`, which every open applies to its writer
+connection, whether or not it runs the schema step) covers ordinary tables: without it a
+deleted row's bytes sit in a free page, readable in the file.
 
 FTS5's own `secure-delete` option (set once in `_migrate_to_v7`, persistent in the table's
 config) covers the text indexes, and this is the half that is easy to miss.
@@ -2196,7 +2197,10 @@ database does not already need, and it works between two stores in one process t
 a clear holds it, a store that is opening waits in `_hold_presence`, for up to
 `_PRESENCE_WAIT` (60 seconds), instead of mapping a file that is about to shrink. Inside
 `batch()` the clear keeps the lock until the batch ends, because a store that opened before
-the commit would map vectors the batch is about to delete.
+the commit would map vectors the batch is about to delete. A store that may not write
+`<db>.lock` cannot take it exclusively, so its clear raises `PermissionError` instead,
+naming the file, with nothing changed (#350; *Opening a store that another process is
+creating* has why the exclusive lock silently failed there).
 
 To ask for the exclusive lock, a store first lets go of its own shared one, and while it
 has let go, a clear elsewhere cannot see it. Two clears that let go at the same moment
@@ -2223,6 +2227,121 @@ its old score, even after the store had been re-embedded at another width. A re-
 the other processes stopped in any case, because each embeds new writes with the model it
 started with. `tests/test_store.py` reproduces the crash with a second process, because a
 SIGBUS in the test process would end the suite.
+
+### Opening a store that another process is creating
+
+When two processes opened one new store at the same moment, one of them could fail at
+startup within a few milliseconds with "database is locked" (#281). That happens on the
+first run after the plugin is installed, when the MCP server and the plugin's hooks open
+the new store together, and when two agent sessions start at once. Two changes stop it.
+
+**One store at a time runs the schema step.** `SQLiteStore.__init__` runs `SCHEMA`, the
+migrations and `_LATE_INDEXES` inside `_creating`, which holds SQLite's reserved lock on
+`<db>.lock` through a second connection. One connection in any process holds that lock at a
+time, so a store that opens while another is creating or upgrading the file waits, for up
+to `_SCHEMA_STEP_WAIT` (ten minutes), and then finds the file finished, so its own schema
+step changes nothing. The wait is its own and not the 60 seconds a store waits for a clear,
+because an upgrade can take far longer: one that re-derived every claim's keys took 26.6
+seconds for 300,000 claims on a loaded laptop, 88.5 microseconds a claim, so ten minutes
+covers about 6.8 million claims. A holder that dies lets go at once, so the wait runs long
+only while the holder is alive. The lock is asked for in tries of a quarter of a second
+(`_LOCK_TRY`, in `_reserve`), because Python acts on Ctrl-C only between calls into SQLite:
+one ten-minute wait inside SQLite would have held an interrupt back until it ended. The
+60-second wait for a clear, in `_hold_presence`, is still one wait inside SQLite, as it was
+before this change. The reserved lock leaves every open store's shared lock alone, so a
+store that is merely open delays nobody. `_creating` lets go by closing its connection,
+which rolls back: on the empty lock file, `BEGIN IMMEDIATE` starts a first page in memory,
+and a commit would have to write it, which needs every shared lock gone.
+
+**An established store skips the step.** `_needs_schema_step` reads three things before the
+step: the version stamp, the journal mode, and the names of the indexes. A file whose stamp
+is this version's, which is in WAL mode, and which has every index `_LATE_INDEXES` creates,
+has nothing left to create or upgrade. Its open runs only `_CONNECTION_PRAGMAS`, the two
+settings that belong to a connection rather than to the file, and takes no creation lock,
+so the opens of an established store never wait for one another. Every other file takes the
+step under the lock: a new one, one an older version wrote, one a tool switched out of WAL
+mode, and one missing an index that `_LATE_INDEXES` gained without a version bump, which is
+how `ep_cover` reached older files. The stamp is committed before the late indexes are
+built, so a store that opens in between sees an index missing, takes the step, and waits
+for the store building it.
+
+**What the lock needs.** Taking it needs one permission: to write `<db>.lock`. Two details
+keep it to that. The lock's connection keeps its rollback journal in memory (`_reserve`),
+because nothing is ever written through it. With SQLite's default journal, `BEGIN
+IMMEDIATE` made `<db>.lock-journal`, so the step needed permission to add a file to the
+store's directory, which no open needed before, and the refusal came back as the misleading
+"cannot be used as this store's lock file". And SQLite opens a file the process may not
+write read-only, and `BEGIN IMMEDIATE` on a read-only connection starts only a read
+transaction, without an error, so a second store could take the same lock at once.
+`_creating` therefore opens the file for writing itself first, and when that is refused it
+raises `PermissionError` naming the file, before anything is created or upgraded. Both
+checks go through `_write_refusal`.
+
+The same silent downgrade let a clear go ahead while another process had the store open
+(#350). A clear takes `<db>.lock` exclusively through this store's presence connection
+(`_try_alone`), and on a connection SQLite had opened read-only, `BEGIN EXCLUSIVE` also
+starts only a read transaction. The clear then believed it had the store to itself,
+truncated the vector file, and the other process died with SIGBUS on its next vector
+search. `_present` now records, as soon as SQLite has opened the presence connection,
+whether this process may write the file. The mode is fixed when the connection opens, so
+the record is taken then and not at the clear: a lock file made writable later does not
+make that connection writable. It is taken after the open rather than before it, because
+before it a store that was the first to open found no file, and if another account created
+the file in that moment, SQLite opened it read-only while the record said nothing was
+wrong. When the record says no, `_claim_alone` raises `PermissionError` naming the file,
+with nothing changed. Opening the store still needs only to read the file. `_creating`
+asks the same question again for the creation lock, because that lock is taken on a
+connection of its own, whose mode SQLite decides when it opens the file.
+
+The same reasoning applies to both lock connections, so both keep their journal in
+memory. A clear upgrades the presence connection with `BEGIN EXCLUSIVE`, and on the empty
+lock file that starts a first page too, so with SQLite's default journal it needed a new
+`<db>.lock-journal`. In a directory that forbids new files every clear then failed with
+"attempt to write a readonly database", and `_try_alone`, which took every error for
+another store holding the file, raised `StoreInUseError` and advised stopping processes
+that did not exist. `_present` gives the presence connection the in-memory journal
+`_reserve` gives the creation lock's, and `_try_alone` now counts only "database is
+locked" as another store: any other error is raised as itself, once the store holds the
+file shared again.
+
+Measured scenario by scenario against the code before this change, what an opener needs is
+the same in every case but one: an open that runs the schema step must be able to write
+`<db>.lock`, where before it needed only to read it. In detail:
+
+- An open of an established store needs to read `<db>.lock`, or to create it when it is
+  missing, which needs the directory to allow a new file. That is as before.
+- An open that runs the step also needs to write `<db>.lock`. A lock file this user may
+  read but not write, such as one another account created, is refused with
+  `PermissionError`, for a new store and for an upgrade. Before, both opened without it.
+- Neither needs permission to add a file to the directory when `<db>.lock` exists, and an
+  upgrade then works in such a directory, as it did before.
+- A lock file this user may not read fails every open with SQLite's "unable to open
+  database file", as before, and so does a missing one in a directory that refuses new
+  files.
+- The database itself needs what it always did. A store in WAL mode needs its `-wal` and
+  `-shm` files, so in a directory that refuses new files it opens only while another
+  connection has them open.
+
+The retry described next was not enough on its own. With it, a store could still fail
+inside `_migrate_to_v3` with "vtable constructor failed: episodes_fts" when it opened the
+text index while the other store was still creating tables and indexes. In a probe of three
+processes opening one new store at once, 3 of 360 opens failed that way, and the nightly
+test failed in 3 of 10 runs. With the schema step run one store at a time, none of 1,100
+opens failed, from three and from five processes at once, and 8 of 8 nightly runs passed.
+
+**The switch to WAL mode is retried, for connections outside memvara.** With `_creating` in
+place, no other memvara store runs its schema step at the same time, so this retry exists
+for a connection from outside memvara that holds the database's write lock, such as the
+`sqlite3` shell or a backup tool, which `_creating` cannot hold back. `SCHEMA` begins with
+`PRAGMA journal_mode=WAL`. On a file that is not in WAL mode yet, the switch needs a
+stronger lock than the connection holds, and while another connection holds the write lock,
+SQLite refuses it at once instead of calling the busy handler, because waiting there could
+deadlock. So `_run_schema` runs `SCHEMA` again after "database is locked", and after no
+other error, every 10 milliseconds, until `_BUSY_TIMEOUT` has passed: five seconds, the busy
+timeout `_connect` gives every connection, so the open waits exactly as long as any write.
+On a file already in WAL mode the switch needs no stronger lock. `SCHEMA` holds only
+pragmas and `IF NOT EXISTS` statements, so running it again changes nothing. Any other error
+is raised at once.
 
 ### Encryption at rest
 

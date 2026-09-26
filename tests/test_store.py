@@ -1,13 +1,16 @@
 """SQLite store: persistence, the indexed conflict lookup, hybrid search primitives,
 and the bitemporal SQL that makes time travel work."""
 
+import _thread
 import gc
+import os
 import pathlib
 import re
 import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -1941,6 +1944,307 @@ def test_a_deleted_matrix_file_is_rebuilt_for_episodes_as_well(tmp_path, emb):
             emb.encode(["kafka pipeline"])[0], [SCOPE], limit=1)[0][0] == ep.id
 
 
+def _writing(path: pathlib.Path) -> sqlite3.Connection:
+    """Another connection holding the write lock on a new file that is still in
+    rollback-journal mode, as a process part-way through creating the store holds it."""
+    other = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    other.execute("CREATE TABLE t (x)")
+    other.execute("BEGIN IMMEDIATE")
+    return other
+
+
+def test_opening_a_new_store_waits_for_another_connections_write_lock(tmp_path):
+    """Opening a new store switches the file to WAL mode, and while another connection
+    holds the write lock, SQLite refuses that switch at once instead of waiting. Before
+    the fix for #281 the open then failed within a millisecond with "database is locked".
+    It now tries again for as long as any write waits, and opens the store once the other
+    connection lets go."""
+    path = tmp_path / "c.db"
+    other = _writing(path)
+    started = time.monotonic()
+    release = threading.Timer(0.3, lambda: other.execute("COMMIT"))
+    release.start()
+    try:
+        with SQLiteStore(str(path)) as store:
+            took = time.monotonic() - started
+            assert store._db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        release.join()
+        other.close()
+    assert took >= 0.3, f"the store opened after {took:.3f} s, while the lock was held"
+
+
+def test_opening_a_new_store_gives_up_when_the_lock_outlasts_the_busy_timeout(
+        tmp_path, monkeypatch):
+    """The open waits as long as any write waits, and no longer, then raises the error
+    SQLite gave. `_run_schema`'s own wait is shortened here so the test does not wait five
+    seconds; the busy timeout the connections are opened with is left alone."""
+    run_schema = SQLiteStore._run_schema
+    monkeypatch.setattr(SQLiteStore, "_run_schema", lambda self: run_schema(self, wait=0.2))
+    path = tmp_path / "c.db"
+    other = _writing(path)
+    started = time.monotonic()
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            SQLiteStore(str(path))
+        took = time.monotonic() - started
+    finally:
+        other.close()
+    assert 0.2 <= took < 3.0, f"the open gave up after {took:.3f} s"
+
+
+def _creating_elsewhere(path: pathlib.Path) -> sqlite3.Connection:
+    """Another store part-way through creating or upgrading the file at `path`: it holds
+    the write lock on `<db>.lock` that `SQLiteStore._creating` takes. It lets go with a
+    rollback, as `_creating` does; a commit would wait for every shared lock."""
+    other = sqlite3.connect(str(path) + ".lock", isolation_level=None,
+                            check_same_thread=False)
+    other.execute("BEGIN IMMEDIATE")
+    return other
+
+
+def test_a_store_opening_while_another_creates_the_file_waits_for_it(tmp_path):
+    """Two stores that ran the schema and the migrations at once on one new file got in
+    each other's way. With the switch to WAL mode retried, one could still fail inside a
+    migration with "vtable constructor failed" while the other was still creating tables
+    and indexes. So a store waits for another store's schema step to finish, and then
+    finds the file finished (#281)."""
+    path = tmp_path / "c.db"
+    other = _creating_elsewhere(path)
+    started = time.monotonic()
+    release = threading.Timer(0.3, lambda: other.execute("ROLLBACK"))
+    release.start()
+    try:
+        SQLiteStore(str(path)).close()
+        took = time.monotonic() - started
+    finally:
+        release.join()
+        other.close()
+    assert took >= 0.3, f"the schema step ran after {took:.3f} s, beside the other one"
+
+
+def test_a_store_gives_up_on_another_that_does_not_finish_creating_the_file(
+        tmp_path, monkeypatch):
+    """The wait for another store's schema step is its own, `_SCHEMA_STEP_WAIT`, shortened
+    here, and the refusal names it."""
+    monkeypatch.setattr(sqlite_store, "_SCHEMA_STEP_WAIT", 0.05)
+    path = tmp_path / "c.db"
+    other = _creating_elsewhere(path)
+    try:
+        with pytest.raises(StoreInUseError,
+                           match=r"being created or upgraded by another store, and it has "
+                                 r"not finished in 0\.05 seconds"):
+            SQLiteStore(str(path))
+    finally:
+        other.close()
+
+
+def test_an_open_waiting_for_the_creation_lock_stops_soon_after_ctrl_c(tmp_path,
+                                                                       monkeypatch):
+    """The wait for another store's schema step can run for ten minutes, and Python acts on
+    Ctrl-C only between calls into SQLite, so one long wait inside SQLite held an interrupt
+    back until the wait ended. The lock is taken in short tries instead. Here the wait is
+    five seconds and the interrupt comes after 0.3, so the open must end long before the
+    wait would."""
+    monkeypatch.setattr(sqlite_store, "_SCHEMA_STEP_WAIT", 5.0)
+    path = tmp_path / "c.db"
+    other = _creating_elsewhere(path)
+    interrupt = threading.Timer(0.3, _thread.interrupt_main)
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            interrupt.start()
+            SQLiteStore(str(path))
+        took = time.monotonic() - started
+    finally:
+        interrupt.cancel()
+        interrupt.join()
+        other.close()
+    assert took < 2.0, f"the open went on for {took:.1f} s after an interrupt at 0.3 s"
+
+
+def test_the_wait_for_a_schema_step_is_not_the_wait_for_a_clear(tmp_path, monkeypatch):
+    """An upgrade of a large store takes longer than a clear: 26.6 s for 300,000 claims,
+    measured. The schema step's wait is therefore its own, and the clear's wait, cut here
+    to 0.05 s, does not bound it: the open waits out a creation lock held for 0.3 s."""
+    monkeypatch.setattr(sqlite_store, "_PRESENCE_WAIT", 0.05)
+    path = tmp_path / "c.db"
+    other = _creating_elsewhere(path)
+    started = time.monotonic()
+    release = threading.Timer(0.3, lambda: other.execute("ROLLBACK"))
+    release.start()
+    try:
+        SQLiteStore(str(path)).close()
+        took = time.monotonic() - started
+    finally:
+        release.join()
+        other.close()
+    assert took >= 0.3, f"the open took {took:.3f} s, so it did not wait for the lock"
+
+
+def test_a_store_that_is_open_does_not_hold_up_the_next_open(tmp_path, monkeypatch):
+    """A store holds the creation lock only while its schema step runs, never for as long
+    as it is open. Each open here needs the step, because the version stamp is wound back
+    after every open, and the wait is too short to outlast a lock held by a store that is
+    still open, so any such lock would make the next open fail."""
+    monkeypatch.setattr(sqlite_store, "_SCHEMA_STEP_WAIT", 0.5)
+    path = tmp_path / "c.db"
+
+    def wind_back() -> None:
+        raw = sqlite3.connect(path)
+        raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+        raw.commit()
+        raw.close()
+
+    with SQLiteStore(str(path)):
+        wind_back()
+        with SQLiteStore(str(path)):
+            wind_back()
+            SQLiteStore(str(path)).close()
+
+
+def test_an_established_store_opens_without_the_creation_lock(tmp_path, monkeypatch):
+    """A file this version has finished with needs no schema step, so its open does not
+    take the creation lock, and established stores never queue behind one another. Here
+    another store holds that lock throughout, and the wait is too short to outlast it, so
+    an open that asked for the lock would fail. The writer connection still gets the two
+    settings that belong to a connection rather than to the file: SQLite's defaults are
+    secure_delete 0 and synchronous 2 (FULL), and the store sets 1 and 1 (NORMAL)."""
+    monkeypatch.setattr(sqlite_store, "_SCHEMA_STEP_WAIT", 0.05)
+    path = tmp_path / "c.db"
+    SQLiteStore(str(path)).close()
+    other = _creating_elsewhere(path)
+    try:
+        with SQLiteStore(str(path)) as store:
+            assert store._db.execute("PRAGMA secure_delete").fetchone()[0] == 1
+            assert store._db.execute("PRAGMA synchronous").fetchone()[0] == 1
+    finally:
+        other.close()
+
+
+@pytest.mark.parametrize("why", ["behind", "rollback journal", "missing late index"])
+def test_a_store_that_needs_its_schema_step_waits_for_the_creation_lock(tmp_path, why):
+    """Only a file this version has finished with skips the schema step. One an older
+    version wrote, one a tool switched out of WAL mode, and one that lacks an index
+    `_LATE_INDEXES` adds without a version bump all take the step under the lock, so each
+    waits for another store's step to finish, and each is finished afterwards."""
+    path = tmp_path / "c.db"
+    SQLiteStore(str(path)).close()
+    raw = sqlite3.connect(path)
+    if why == "behind":
+        raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+    elif why == "rollback journal":
+        raw.execute("PRAGMA journal_mode=DELETE")
+    else:
+        raw.execute("DROP INDEX cl_last_change")
+    raw.commit()
+    raw.close()
+    other = _creating_elsewhere(path)
+    started = time.monotonic()
+    release = threading.Timer(0.3, lambda: other.execute("ROLLBACK"))
+    release.start()
+    try:
+        with SQLiteStore(str(path)) as store:
+            took = time.monotonic() - started
+            version = store._db.execute("PRAGMA user_version").fetchone()[0]
+            mode = store._db.execute("PRAGMA journal_mode").fetchone()[0]
+            indexes = {r[0] for r in store._db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    finally:
+        release.join()
+        other.close()
+    assert took >= 0.3, f"the open took {took:.3f} s, so it did not wait for the lock"
+    assert (version, mode) == (SCHEMA_VERSION, "wal")
+    assert "cl_last_change" in indexes
+
+
+def test_the_fast_path_checks_every_index_the_late_indexes_create():
+    """An open skips the schema step only when every late index exists, so the list it
+    checks must be every statement in `_LATE_INDEXES`. A statement of another kind would be
+    skipped on every established store."""
+    body = "\n".join(line for line in sqlite_store._LATE_INDEXES.splitlines()
+                     if not line.lstrip().startswith("--"))
+    statements = [s.strip() for s in body.split(";") if s.strip()]
+    names = [re.match(r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)\s+ON\s", s)
+             for s in statements]
+    assert all(names), [s for s, n in zip(statements, names) if not n]
+    assert {n.group(1) for n in names if n} == sqlite_store._LATE_INDEX_NAMES
+
+
+def _behind(path: pathlib.Path) -> None:
+    """A store at `path` that the next open must upgrade, so it takes the creation lock."""
+    SQLiteStore(str(path)).close()
+    raw = sqlite3.connect(path)
+    raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+    raw.commit()
+    raw.close()
+
+
+def test_the_creation_lock_adds_no_file_beside_the_store(tmp_path, monkeypatch):
+    """Nothing is written through the creation lock's connection, so it needs no rollback
+    journal. With SQLite's default journal, `BEGIN IMMEDIATE` on the empty lock file
+    created `<db>.lock-journal`, so the schema step needed permission to add a file to the
+    store's directory, which an open never needed before."""
+    seen: list[list[str]] = []
+    run_schema = SQLiteStore._run_schema
+
+    def listing_first(self, *args, **kwargs):
+        seen.append(sorted(p.name for p in tmp_path.iterdir()))
+        return run_schema(self, *args, **kwargs)
+
+    monkeypatch.setattr(SQLiteStore, "_run_schema", listing_first)
+    SQLiteStore(str(tmp_path / "c.db")).close()
+    assert seen and not any("c.db.lock-journal" in names for names in seen), seen
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_store_opens_in_a_directory_it_may_not_add_files_to(tmp_path):
+    """The account may write the database and the lock file but may not add a file to the
+    directory. The database needs its `-wal` and `-shm` files, which exist while another
+    connection has it open, as a running server does. Such a store opened before the
+    creation lock existed, and a store that needs its schema step opens so again."""
+    path = tmp_path / "c.db"
+    _behind(path)
+    holder = sqlite3.connect(path)
+    holder.execute("SELECT count(*) FROM sqlite_master").fetchall()
+    os.chmod(tmp_path, 0o555)
+    try:
+        with SQLiteStore(str(path)) as store:
+            version = store._db.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        os.chmod(tmp_path, 0o755)
+        holder.close()
+    assert version == SCHEMA_VERSION
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_an_upgrade_refuses_a_lock_file_it_may_not_write_and_says_so(tmp_path):
+    """SQLite opens a file this process may not write read-only, and `BEGIN IMMEDIATE` on
+    a read-only connection takes only a shared lock, without an error, so the creation
+    lock would keep nobody out. An open that needs the schema step refuses instead, and
+    names the file and what it needs. An established store needs only to read the lock
+    file, as it always did, so it still opens."""
+    path = tmp_path / "c.db"
+    lock = tmp_path / "c.db.lock"
+    _behind(path)
+    os.chmod(lock, 0o444)
+    try:
+        if os.access(lock, os.W_OK):
+            pytest.skip("this user may write a read-only file")
+        with pytest.raises(PermissionError, match=r"c\.db\.lock") as refused:
+            SQLiteStore(str(path))
+        os.chmod(lock, 0o644)
+        SQLiteStore(str(path)).close()            # upgrades the store
+        os.chmod(lock, 0o444)
+        with SQLiteStore(str(path)) as store:     # an established store: no lock taken
+            assert store._db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        os.chmod(lock, 0o644)
+    message = str(refused.value)
+    assert "may not write" in message and "delete it while nothing has the store open" \
+        in message, message
+
+
 # --- Cross-process coherence for episode vectors ----------------------------
 #
 # Claim vectors get this from `PRAGMA data_version` plus a monotonic `seq`: a reader
@@ -2132,6 +2436,137 @@ def test_clearing_vectors_another_process_maps_is_refused_rather_than_fatal_to_i
         assert alone.clear_embeddings() == 300
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_clear_that_may_not_write_the_lock_file_refuses_and_changes_nothing(tmp_path):
+    """#350. SQLite opens a file this process may not write read-only, and on a read-only
+    connection `BEGIN EXCLUSIVE` starts only a read transaction, without an error. So with
+    `<db>.lock` read-only for the clearing process, the clear believed it had the store to
+    itself, cleared the vectors, and the other process died with SIGBUS on its next vector
+    search. A clear that cannot write the lock file cannot tell whether another store has
+    the store open, so it refuses, names the file, and changes nothing. The other store
+    runs in a subprocess, because a SIGBUS in this one would end the whole suite."""
+    path = str(tmp_path / "shared.db")
+    lock = tmp_path / "shared.db.lock"
+    with SQLiteStore(path) as writer:
+        for i in range(300):
+            writer.set_episode_embedding(turn(writer, content=f"turn {i}").id,
+                                         onehot(i, 16))
+    mapper = subprocess.Popen([sys.executable, "-c", _MAPPER, path], cwd=_ROOT,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    try:
+        assert mapper.stdout is not None and mapper.stdout.readline().strip() == "5"
+        os.chmod(lock, 0o444)
+        if os.access(lock, os.W_OK):
+            pytest.skip("this user may write a read-only file")
+        with SQLiteStore(path) as clearing:
+            with pytest.raises(PermissionError) as refused:
+                clearing.clear_embeddings()
+            assert len(clearing.vector_search_episodes(onehot(3, 16), [SCOPE], 5)) == 5
+        out, err = mapper.communicate("go\n", timeout=120)
+    finally:
+        os.chmod(lock, 0o644)
+        mapper.kill()
+    assert mapper.returncode == 0, f"the other process died ({mapper.returncode}): {err}"
+    assert out.strip() == "5"
+    message = str(refused.value)
+    assert str(lock) in message and "Nothing was changed" in message, message
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_lock_file_another_account_creates_as_the_store_opens_is_noticed(tmp_path,
+                                                                           monkeypatch):
+    """Whether this process may write `<db>.lock` is recorded for the connection SQLite
+    opened, so it is asked once the file exists. Asked before, it found no file when this
+    store was the first to open, and if another account created the file in that moment,
+    SQLite opened that file read-only while the record said nothing was wrong, and a
+    clear took a shared lock for an exclusive one, as in #350. The other account is
+    simulated by making the lock file, read-only, just before SQLite opens it."""
+    probe = tmp_path / "probe"
+    probe.touch()
+    probe.chmod(0o444)
+    if os.access(probe, os.W_OK):
+        pytest.skip("this user may write a read-only file")
+    path = tmp_path / "c.db"
+    with SQLiteStore(str(path)) as store:
+        store.set_episode_embedding(turn(store).id, onehot(1))
+    lock = tmp_path / "c.db.lock"
+    lock.unlink()
+    connect = sqlite3.connect
+
+    def another_account_first(target, *args, **kwargs):
+        if str(target).endswith(".lock") and not os.path.exists(target):
+            pathlib.Path(target).touch()
+            os.chmod(target, 0o444)
+        return connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", another_account_first)
+    try:
+        with SQLiteStore(str(path)) as store:
+            with pytest.raises(PermissionError, match=r"c\.db\.lock"):
+                store.clear_embeddings()
+            assert store.vector_search_episodes(onehot(1), [SCOPE], 1)
+    finally:
+        os.chmod(lock, 0o644)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_clear_works_in_a_directory_it_may_not_add_files_to(tmp_path):
+    """A clear asks for the lock file exclusively on the store's presence connection, and
+    on the empty lock file `BEGIN EXCLUSIVE` starts a first page. With SQLite's default
+    journal that needed a new `<db>.lock-journal`, so in a directory that forbids new
+    files it failed with "attempt to write a readonly database". The clear took that for
+    another store holding the file, raised `StoreInUseError` and told the operator to stop
+    processes that did not exist, every time. A plain connection keeps the database's
+    `-wal` and `-shm` files here and holds no lock file, so no other store has it open."""
+    path = tmp_path / "c.db"
+    with SQLiteStore(str(path)) as store:
+        store.set_episode_embedding(turn(store).id, onehot(1))
+    holder = sqlite3.connect(path)
+    holder.execute("SELECT count(*) FROM sqlite_master").fetchall()
+    os.chmod(tmp_path, 0o555)
+    try:
+        with SQLiteStore(str(path)) as store:
+            cleared = store.clear_embeddings()
+    finally:
+        os.chmod(tmp_path, 0o755)
+        holder.close()
+    assert cleared == 1
+
+
+def test_a_clear_that_fails_for_another_reason_raises_that_reason(tmp_path):
+    """Only "database is locked" means that another store holds the lock file. Any other
+    error from asking for it exclusively was reported as that too, with advice to stop
+    other processes. It is raised as itself now, the store keeps its shared lock, and
+    nothing is changed."""
+    path = str(tmp_path / "c.db")
+    store = SQLiteStore(path)
+    ep = turn(store)
+    store.set_episode_embedding(ep.id, onehot(1))
+    presence = store._presence
+
+    class Failing:
+        def execute(self, sql, *args):
+            if sql == "BEGIN EXCLUSIVE":
+                raise sqlite3.OperationalError("disk I/O error")
+            return presence.execute(sql, *args)
+
+    store._presence = Failing()
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            store.clear_embeddings()
+    finally:
+        store._presence = presence
+    assert store.vector_search_episodes(onehot(1), [SCOPE], 1)[0][0] == ep.id
+    alone = sqlite3.connect(path + ".lock", isolation_level=None, timeout=0)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            alone.execute("BEGIN EXCLUSIVE")     # refused while the store holds it shared
+    finally:
+        alone.close()
+        store.close()
+
+
 def test_clearing_vectors_another_store_in_this_process_maps_is_refused(tmp_path,
                                                                         monkeypatch):
     """Two stores in one process map the file separately, so each counts as another.
@@ -2263,6 +2698,53 @@ def test_a_lock_file_that_is_not_a_database_is_named(tmp_path):
     (tmp_path / "c.db.lock").write_bytes(b"not a database " * 100)
     with pytest.raises(RuntimeError, match=r"c\.db\.lock cannot be used"):
         SQLiteStore(str(tmp_path / "c.db"))
+
+
+def test_only_a_refused_permission_counts_as_a_refusal_to_write_the_lock_file(tmp_path):
+    """`_write_refusal` answers one question: may this process open the file for writing?
+    A missing file is no refusal, because SQLite creates it for writing. Both callers ask
+    once the presence connection has made the file, so a missing file means it went in
+    between, for example deleted by hand, and the open must not fail over it here."""
+    writable = tmp_path / "c.db.lock"
+    writable.touch()
+    assert sqlite_store._write_refusal(str(writable)) is None
+    assert sqlite_store._write_refusal(str(tmp_path / "gone.db.lock")) is None
+
+
+def test_a_lock_path_that_is_a_directory_fails_the_open_as_it_always_did(tmp_path):
+    """The store asks, before SQLite opens `<db>.lock`, only whether this process may write
+    it. Any other problem with the path is left to SQLite, which reports it as it always
+    has, so a caller that catches `sqlite3.OperationalError` around an open still does."""
+    (tmp_path / "c.db.lock").mkdir()
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        SQLiteStore(str(tmp_path / "c.db"))
+
+
+@pytest.mark.parametrize("error", [sqlite3.InterfaceError, KeyboardInterrupt])
+def test_a_lock_that_fails_to_be_taken_leaves_no_connection_behind(tmp_path, monkeypatch,
+                                                                   error):
+    """The connection to `<db>.lock` is closed however taking the lock fails, not only when
+    SQLite refuses the lock. Left open, it would keep its shared lock until Python freed it,
+    and a clear would count a store that never opened. `failed` keeps the traceback, and
+    with it every frame of the failed open, alive until the check has run."""
+    path = str(tmp_path / "c.db")
+    share = SQLiteStore._share
+
+    def share_then_fail(conn):
+        share(conn)
+        raise error("interrupted")
+
+    monkeypatch.setattr(SQLiteStore, "_share", staticmethod(share_then_fail))
+    with pytest.raises(error) as failed:
+        SQLiteStore(path)
+    monkeypatch.undo()
+    alone = sqlite3.connect(path + ".lock", isolation_level=None, timeout=0)
+    try:
+        alone.execute("BEGIN EXCLUSIVE")    # refused while any other connection has a lock
+        alone.execute("ROLLBACK")
+    finally:
+        alone.close()
+    del failed
 
 
 def write_v2(path: str) -> str:
