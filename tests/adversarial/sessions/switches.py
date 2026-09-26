@@ -189,18 +189,23 @@ class Expected:
     unavailable: Mapping[str, str]
     #: The arguments no tool may offer.
     removed: frozenset[str]
+    #: Whether the server's memory is a hosted deployment. Such a server describes
+    #: `memory_forget` and `memory_end` by what every hosted release closes, as
+    #: `for_a_hosted_deployment` in memvara/server/tools.py sets out.
+    hosted: bool = False
 
     @classmethod
-    def of(cls, combination: Combination) -> Expected:
+    def of(cls, combination: Combination, *, hosted: bool = False) -> Expected:
         reasons = {tool.name: unavailable(tool, combination) for tool in TOOLS}
         return cls(combination,
                    {name: reason for name, reason in reasons.items() if reason is not None},
-                   removed(combination))
+                   removed(combination), hosted)
 
     @property
     def listed(self) -> tuple[Tool, ...]:
         """The tools the server must list, in the order it must list them."""
-        return tuple(tool for tool in TOOLS if tool.name not in self.unavailable)
+        tools = server_tools.for_a_hosted_deployment(TOOLS) if self.hosted else TOOLS
+        return tuple(tool for tool in tools if tool.name not in self.unavailable)
 
     def served(self) -> list[dict[str, Any]]:
         """The `tools/list` answer the server must give."""

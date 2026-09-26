@@ -19,7 +19,7 @@ from . import switches
 
 def test_a_read_only_key_lists_only_read_tools_and_refuses_every_write_by_name(
         mcp: Callable[..., McpProcess]) -> None:
-    read_only = switches.Expected.of(switches.Combination.of("read_only"))
+    read_only = switches.Expected.of(switches.Combination.of("read_only"), hosted=True)
     with FakeV1(read_only=True) as fake:
         server = mcp(env=fake.cloud_env())
         server.initialize()
@@ -41,11 +41,13 @@ def test_a_read_only_key_lists_only_read_tools_and_refuses_every_write_by_name(
 
 def test_a_writable_key_lists_every_tool(mcp: Callable[..., McpProcess]) -> None:
     """The control for the test above: with a key that may write, the same server lists
-    the write tools, so the difference comes from the credential."""
+    the write tools, so the difference comes from the credential. A cloud-mode server
+    describes memory_forget and memory_end by what every hosted release closes (#282), so
+    the prediction is the hosted one."""
     with FakeV1() as fake:
         server = mcp(env=fake.cloud_env())
         server.initialize()
         problems = switches.listing_problems(
-            server, switches.Expected.of(switches.Combination.of()))
+            server, switches.Expected.of(switches.Combination.of(), hosted=True))
         assert server.close() == 0
     assert problems == []
