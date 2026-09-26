@@ -235,6 +235,32 @@ def test_close_stops_the_daemon_a_recall_started(tmp_path: pathlib.Path) -> None
         os.kill(pid, 0)
 
 
+def test_a_patch_reaches_the_hook_process(hook_runner: Make) -> None:
+    """With recall's budget for optional work patched to nothing, the hook skips that work
+    and says so, which shows the patch was in place before the hook ran."""
+    runner = hook_runner("claude", patches={"recall.OVERALL_BUDGET_SEC": 0.0})
+    result = runner.run("recall", prompt="where does the user live")
+    assert result.exit_code == 0
+    assert "skipped=standing refresh, budget exhausted" in result.log("recall")
+
+
+def test_a_patch_that_names_nothing_the_hooks_have_is_refused(hook_runner: Make) -> None:
+    """A limit that was renamed would otherwise leave a test waiting out the real one,
+    or passing without having shrunk anything."""
+    runner = hook_runner("claude", patches={"recall.NO_SUCH_LIMIT": 1.0})
+    with pytest.raises(ValueError, match="NO_SUCH_LIMIT"):
+        runner.run("recall", prompt="where does the user live")
+
+
+def test_patches_are_refused_for_a_capture_the_host_hands_to_a_child(
+        hook_runner: Make, tmp_path: pathlib.Path) -> None:
+    """run.py starts that child afresh, so a patch would not reach the capture."""
+    runner = hook_runner("codex", stubs=_clis(tmp_path),
+                         patches={"lib.extract.TIMEOUT_SEC": 1.0})
+    with pytest.raises(ValueError, match="child"):
+        runner.run("capture", transcript_path=str(tmp_path / "t.jsonl"))
+
+
 def test_output_that_is_not_utf8_is_reported(hook_runner: Make,
                                              monkeypatch: pytest.MonkeyPatch) -> None:
     """A client decodes a hook's stdout as UTF-8, so bytes that are not UTF-8 are a

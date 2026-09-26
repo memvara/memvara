@@ -32,6 +32,37 @@ _STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}
 #: The line run.py writes to hooks.log when it hands capture to a child in a new session.
 _DETACHED = re.compile(r"^detached hook=capture host=\S+ pid=(\d+)")
 
+#: The environment variable that carries `HookRunner.patches` to the launcher below.
+_PATCHES_VAR = "HOOK_TEST_PATCHES"
+
+#: The launcher's exit status when a patch names an attribute the hooks do not have.
+_BAD_PATCH = 97
+
+#: What a hook process runs instead of run.py when a test patches it: it binds the host
+#: first, as run.py does, because some hook modules read the host when they are imported,
+#: then sets each patched module attribute, then calls run.py's own `main`. It is passed
+#: with `python -c`, so it is never a file that pytest's doctest collection would import.
+_LAUNCHER = f"""\
+import importlib, json, os, sys
+sys.path.insert(0, sys.argv[1])
+argv = sys.argv[2:]
+from core import host as _host
+_host.use(importlib.import_module("hosts." + argv[argv.index("--host") + 1]).HOST)
+for dotted, value in json.loads(os.environ.pop("{_PATCHES_VAR}")).items():
+    module_name, _, name = dotted.rpartition(".")
+    module = importlib.import_module(module_name)
+    if not hasattr(module, name):
+        sys.stderr.write(dotted + " names nothing the hooks have\\n")
+        raise SystemExit({_BAD_PATCH})
+    setattr(module, name, value)
+import run
+try:
+    status = run.main(argv)
+except BaseException:
+    status = 0
+raise SystemExit(status)
+"""
+
 
 class HookOutputError(AssertionError):
     """A hook printed something that is not JSON. On a real client that desynchronises
@@ -316,12 +347,19 @@ class HookRunner:
     otherwise forbids. The daemon outlives the hook and idles for 30 minutes, so a test
     that allows it calls `close()` when it ends. Its socket lives under `home`, and macOS
     refuses a unix socket path longer than 104 bytes, so such a home needs a short path.
+
+    `patches` sets module attributes in the hook process before the hook runs, such as
+    `{"lib.hosted.TIMEOUT_SEC": 0.25}`, so a test can shrink one of a hook's time limits
+    instead of waiting it out. A patch that names an attribute the hooks do not have is
+    refused with `ValueError`, because a limit that was renamed would otherwise leave the
+    test waiting out the real one.
     """
 
     def __init__(self, host: str, *, home: pathlib.Path, cwd: pathlib.Path,
                  server_env: Mapping[str, str] | None = None,
                  env: Mapping[str, str] | None = None,
-                 stubs: Stubs | None = None, daemon: bool = False) -> None:
+                 stubs: Stubs | None = None, daemon: bool = False,
+                 patches: Mapping[str, float] | None = None) -> None:
         if daemon and not hasattr(socket, "AF_UNIX"):
             raise NotImplementedError(
                 "the recall daemon listens on a unix socket, which this platform lacks")
@@ -329,6 +367,7 @@ class HookRunner:
         self.home = pathlib.Path(home)
         self.cwd = pathlib.Path(cwd)
         self.stubs = stubs
+        self.patches = dict(patches or {})
         environment = child_env(self.home, env)
         rest = path_without_agent_clis(environment.get("PATH", ""))
         environment["PATH"] = stubs.path(rest) if stubs is not None else rest
@@ -410,15 +449,23 @@ class HookRunner:
                 "capture starts an agent CLI to mine the turn; give HookRunner stub CLIs "
                 "(stubs=FakeClis(...)) so that a real one is never reached")
         detaches = hook == "capture" and bool(self.host.detach_capture)
+        if detaches and self.patches:
+            raise ValueError(f"patches reach the hook process only, and on {self.host.id} "
+                             f"capture runs in a child that run.py starts afresh")
         text = json.dumps(self.payload(hook, **fields)) if stdin is None else stdin
         data = text.encode("utf-8") if isinstance(text, str) else text
         limit = float(self.host.timeouts[hook]) if timeout is None else timeout
+        command = [sys.executable, str(RUN), hook, "--host", self.host.id]
+        env = self._env
+        if self.patches:
+            command = [sys.executable, "-c", _LAUNCHER, str(HOOKS_DIR), hook,
+                       "--host", self.host.id]
+            env = {**env, _PATCHES_VAR: json.dumps(self.patches)}
         before = self._log_sizes()
         started = time.monotonic()
         try:
-            done = subprocess.run(
-                [sys.executable, str(RUN), hook, "--host", self.host.id], input=data,
-                capture_output=True, env=self._env, cwd=str(self.cwd), timeout=limit)
+            done = subprocess.run(command, input=data, capture_output=True, env=env,
+                                  cwd=str(self.cwd), timeout=limit)
         except subprocess.TimeoutExpired as exc:
             raise HookTimeout(
                 f"{hook} on {self.host.id} ran past its limit of {limit}s; "
@@ -426,6 +473,8 @@ class HookRunner:
                 f"stderr: {_text(exc.stderr)[-300:]!r}") from None
         elapsed = time.monotonic() - started
         stderr = _text(done.stderr)
+        if self.patches and done.returncode == _BAD_PATCH:
+            raise ValueError(f"a patch was refused: {stderr.strip()[-300:]}")
         try:
             stdout = done.stdout.decode("utf-8")
         except UnicodeDecodeError:
