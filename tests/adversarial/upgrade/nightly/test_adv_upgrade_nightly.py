@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import pathlib
 import re
-import subprocess
 
 import pytest
 
@@ -38,9 +37,10 @@ def released(home: pathlib.Path) -> dict[int, str]:
     env = child_env(home)
 
     def git(*args: str) -> str:
-        return subprocess.run(["git", "-C", str(build_stores.REPO), *args],
-                              capture_output=True, text=True, env=env,
-                              check=True).stdout
+        done = build_stores._git(*args, env=env)
+        assert done.returncode == 0, (
+            f"git {' '.join(args)} failed: {done.stderr.decode(errors='replace')}")
+        return done.stdout.decode()
 
     first: dict[int, str] = {}
     for tag in git("tag", "--list", "v*", "--sort=v:refname").split():
