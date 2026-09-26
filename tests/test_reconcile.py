@@ -353,6 +353,83 @@ def test_a_restatement_with_an_earlier_start_is_kept_for_the_period_before_the_c
         "what the store believed before the restatement has not changed")
 
 
+PROJECT_A = Scope("acme", "alice", project="github.com/acme/a")
+PROJECT_B = Scope("acme", "alice", project="github.com/acme/b")
+
+
+def database(scope: Scope, **kw) -> Claim:
+    """`api uses_database postgres`: a predicate nobody declared, so each project holds
+    its own slot for it."""
+    return claim("uses_database", "postgres", subject="api", scope=scope, **kw)
+
+
+def test_an_earlier_start_ends_where_the_writers_own_claim_begins(rec, store):
+    """Project B holds a value from June and restates it from January, so the period from
+    January is stored and ends where the next claim of that value begins. Project A holds
+    the same value from April, and `value_key` finds A's claim too, because it covers the
+    owner and not the project. B cannot read A's claim (`Scope.sees`), so A's start must
+    not decide where B's period ends. If it did, B's period would stop in April, and B
+    would hold nothing from April until its own claim begins in June."""
+    june = utcnow() - timedelta(days=90)
+    april, january = june - timedelta(days=60), june - timedelta(days=150)
+    own = rec.apply(database(PROJECT_B, valid_from=june, recorded_at=june), now=june).claim
+    # Put in directly, so that the test fixes the state it needs rather than depending on
+    # how a repeat written in two projects is reconciled.
+    elsewhere = database(PROJECT_A, valid_from=april, recorded_at=april)
+    store.put_claim(elsewhere)
+    assert elsewhere.value_key == own.value_key, "the lookup by value finds both claims"
+
+    res = rec.apply(database(PROJECT_B, valid_from=january, sources=["ep_2"]))
+
+    assert res.action == "add" and res.claim.scope == PROJECT_B
+    assert (res.claim.valid_from, res.claim.valid_to) == (january, june)
+    assert store.get_claim(elsewhere.id).valid_to is None
+
+
+def test_an_earlier_start_ends_where_a_user_wide_claim_the_project_reads_begins(
+        rec, store):
+    """A project reads the user-wide scope above it, so a user-wide claim of the same
+    value counts, and the earlier period ends where it begins. A sibling project's claim
+    of that value, beginning earlier, still does not count."""
+    june = utcnow() - timedelta(days=90)
+    april, january = june - timedelta(days=60), june - timedelta(days=150)
+    wide = rec.apply(database(SCOPE, valid_from=june, recorded_at=june), now=june).claim
+    store.put_claim(database(PROJECT_A, valid_from=april, recorded_at=april))
+
+    res = rec.apply(database(PROJECT_B, valid_from=january, sources=["ep_2"]))
+
+    assert res.action == "add" and res.claim.scope == PROJECT_B
+    assert (res.claim.valid_from, res.claim.valid_to) == (january, june)
+    kept = store.get_claim(wide.id)
+    assert (kept.valid_from, kept.valid_to, kept.observation_count) == (june, None, 1)
+
+
+def test_a_supersession_in_one_project_is_not_cut_off_by_another_projects_claim(store):
+    """`supersede()` writes its new claim through the same reconciler, so the same rule
+    holds there: the new value's claim ends where a claim of that value the writer can
+    see begins, never where another project's does."""
+    from memvara import Memvara, NullLLM
+    from memvara.embed import HashingEmbedder
+
+    june = utcnow() - timedelta(days=90)
+    april, january = june - timedelta(days=60), june - timedelta(days=150)
+    mem = Memvara(store=store, embedder=HashingEmbedder(dim=64), llm=NullLLM(),
+                  tenant="acme", user="alice")
+    mem.remember("api", "uses_database", "postgres", valid_from=june)
+    store.put_claim(database(PROJECT_A, valid_from=april, recorded_at=april))
+    b = mem.scope(project=PROJECT_B.project)
+    mysql = b.remember("api", "uses_database", "mysql",
+                       valid_from=january - timedelta(days=30)).added[0]
+
+    receipt = b.supersede(mysql.id, Claim(subject="api", predicate="uses_database",
+                                          object="postgres", valid_from=january))
+
+    (new,) = receipt.added
+    assert new.scope.project == PROJECT_B.project
+    assert (new.valid_from, new.valid_to) == (january, june)
+    assert [c.id for c in receipt.closed] == [mysql.id]
+
+
 def test_reinforcement_works_on_a_store_whose_decay_pass_never_ran(rec, store):
     """No `salience_base` in `meta` means salience *is* the base - the honest reading
     for a claim nothing has decayed, and the one that keeps a library used without the

@@ -45,7 +45,8 @@ mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, s
 #   Repeating a fact with a valid_from before the claim on record begins, and no
 #   expires_at, stores that earlier period as a claim of its own, ending where the
 #   claim on record begins; it is reported under added, and the claim on record is
-#   not changed.
+#   not changed. Only a claim this scope can see, in its own scope or a broader one,
+#   counts as the claim on record here.
 #   With `Memvara(advise_replacements=True)` and a backend that implements
 #   `llm.ReplacementJudge`, a write that closed nothing fills `receipt.may_replace`
 #   with the nearest live claims in other slots the model judged it to be a newer

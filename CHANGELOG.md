@@ -135,7 +135,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   of the earlier period returned nothing. The write now stores a claim for the earlier
   period, ending where the stored claim begins, and reports it under `added`. That is the
   rule a single-valued slot already applied to a different value that began before the
-  live one, and it applies to every predicate. The stored claim is not changed, so a
+  live one, and it applies to every predicate. Only stored claims the writer can see are
+  compared: those in its own scope and in the broader scopes it reads, never those of a
+  sibling project, agent or session. The stored claim is not changed, so a
   read of the past as the store believed it before the write returns what it did. A
   repeat that names `expires_at` is still a repeat, so the expiry lands on the claim on
   record. `memory_remember`'s reply no longer says such a fact stopped being true where

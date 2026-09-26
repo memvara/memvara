@@ -336,8 +336,13 @@ class Reconciler:
                 # below, so the expiry is kept and the other claim is left as it was.
                 live_same = [c for c in live_same if c.scope == claim.scope]
                 separate = not live_same
-            if (live_same and claim.expires_at is None
-                    and all(_is_after(c, claim) for c in live_same)):
+            # Where the value began is compared only with the claims the writer can see:
+            # its own scope and the broader ones it reads (`Scope.sees`). `value_key` also
+            # finds the value in a sibling project, agent or session, and a claim the
+            # writer cannot read says nothing about when the fact began in its own scope.
+            seen = [c for c in live_same if claim.scope.sees(c.scope)]
+            if (seen and claim.expires_at is None
+                    and all(_is_after(c, claim) for c in seen)):
                 # The same value, stated as true from before any claim on record for it
                 # begins. That earlier start is new, and reinforcing would drop it. Moving
                 # the claim on record back would change what reads of the past return, so
@@ -347,7 +352,7 @@ class Reconciler:
                 # claim on record is not touched. A repeat that names an expiry stays a
                 # repeat, so the expiry still lands on the claim on record, which is the
                 # fact the caller asked to have erased.
-                boundary = min(c.valid_from for c in live_same)
+                boundary = min(c.valid_from for c in seen)
                 if claim.valid_to is None or claim.valid_to > boundary:
                     claim.valid_to = boundary
                 self.store.put_claim(claim)
