@@ -446,4 +446,10 @@ python3 scripts/nightly/flakes.py rates
 python3 scripts/nightly/flakes.py rerun --worktree <checkout> --python <interpreter> <node id>
 ```
 
+### The regressions step
+
+The regressions step runs `pytest --tier nightly` in the tested worktree through `scripts/nightly/pytest_results.py`, which records one JSON line per test in `regressions/results.jsonl` and pytest's exit status on the last line. The step passes `--continue-on-collection-errors`, so one test file that fails to import is recorded as an error and cannot stop every other test from running.
+
+Each failed test becomes a finding (`scripts/nightly/regressions.py`). Its invariant is the test's node id, its layer comes from the test's folder, and its severity is `unclassified`, because nobody has checked it against `SECURITY.md` yet. When the failure's text holds a `drive.replay([...])` program, as a failure of the reference model's state machine does, the program becomes the finding's operations and the `@reproduce_failure(...)` call becomes its seed. So two different breaks that the same test finds get two fingerprints. Two kinds of failure are reported for a person and never filed: a strict expected failure that passes, which usually means its bug was fixed, and a run that exits with an error but reports no failed test, which means something outside the tests failed, such as the skip ledger or a credential guard. At most 20 failed tests are rerun; the rest are reported as unconfirmed.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
