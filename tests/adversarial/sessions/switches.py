@@ -18,6 +18,8 @@ Importing this module starts nothing and opens nothing.
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import hashlib
 import itertools
 import pathlib
@@ -27,14 +29,14 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 
 from harness import stores
 from harness.env import child_env, feature_env
 from harness.stdio import McpProcess, ToolResult
 from memvara import Memvara
 from memvara.server import tools as server_tools
-from memvara.server.config import FEATURE_DEFAULTS, ServerConfig
+from memvara.server.config import FEATURE_DEFAULTS, ServerConfig, build_memvara
 from memvara.server.mcp import MemvaraMCPServer
 from memvara.server.tools import FEATURE_ARGUMENTS, TOOLS, Tool
 from memvara.types import Claim
@@ -51,26 +53,27 @@ ARGUMENT_FEATURES: tuple[str, ...] = tuple(sorted(FEATURE_ARGUMENTS))
 @dataclass(frozen=True)
 class Redescribed:
     """A feature that, when it is switched off, keeps its arguments and changes their
-    descriptions to `description`.
-
-    Only a tool that takes the argument named `marker` has its `arguments` changed. Taking
-    that argument is what shows that the feature applies to the tool.
-    """
+    descriptions to `description`."""
 
     feature: str
     arguments: tuple[str, ...]
-    marker: str
     description: str
+
+    def governs(self, tool: Tool) -> bool:
+        """Whether this rule applies to `tool`: the tool takes every argument the rule
+        names. Taking one is not enough. memory_list_documents takes `filepath_prefix`
+        alone, to list one folder of documents, and metadata_filters leaves it alone."""
+        return set(self.arguments) <= set(tool.properties)
 
 
 #: The two features that keep their arguments when off. `metadata_filters` rewrites the
-#: filter arguments of the tools that take `filters` (config.py: it "decides whether
+#: two filter arguments of memory_search and memory_recall (config.py: it "decides whether
 #: memory_search and memory_recall accept filters and filepath_prefix"); `expiry_erasure`
 #: rewrites memory_remember's two expiry arguments. The texts are tools.py's own.
 REDESCRIBED: tuple[Redescribed, ...] = (
-    Redescribed("metadata_filters", ("filters", "filepath_prefix"), "filters",
+    Redescribed("metadata_filters", ("filters", "filepath_prefix"),
                 server_tools._FILTERS_OFF),
-    Redescribed("expiry_erasure", server_tools._EXPIRY_ARGUMENTS, "expires_at",
+    Redescribed("expiry_erasure", server_tools._EXPIRY_ARGUMENTS,
                 server_tools._EXPIRES_AT_OFF),
 )
 
@@ -88,6 +91,8 @@ FEATURE_SWITCHES: tuple[str, ...] = (
 #: The eleven settings, in the order the arrays below give them columns.
 SWITCHES: tuple[str, ...] = FEATURE_SWITCHES + ("read_only", "anchored")
 
+_SETTINGS = frozenset(SWITCHES)
+
 
 @dataclass(frozen=True)
 class Combination:
@@ -100,7 +105,7 @@ class Combination:
     moved: frozenset[str]
 
     def __post_init__(self) -> None:
-        unknown = self.moved - set(SWITCHES)
+        unknown = self.moved - _SETTINGS
         if unknown:
             raise ValueError(f"not a setting that changes the tool list: {sorted(unknown)}")
 
@@ -121,7 +126,7 @@ class Combination:
 
     def env(self) -> dict[str, str]:
         """The variables that start a server this way, one for every setting."""
-        found = feature_env({feature: self.feature_on(feature) for feature in FEATURE_SWITCHES})
+        found = feature_env({name: self.feature_on(name) for name in FEATURE_SWITCHES})
         found["MEMVARA_READ_ONLY"] = "1" if self.read_only else "0"
         found["MEMVARA_ANCHORED"] = "1" if self.anchored else "0"
         return found
@@ -160,36 +165,66 @@ def _argument(tool: Tool, name: str, schema: Mapping[str, Any],
     if name == "anchored" and combination.anchored:
         replacements = [on for off, on in ANCHORED_ON if off == schema]
         if not replacements:
-            raise LookupError(f"{tool.name} takes `anchored` with a schema that ANCHORED_ON "
-                              "does not pair with a replacement; add the pair")
-        schema = replacements[0]
+            raise LookupError(f"{tool.name} takes `anchored`, and ANCHORED_ON does not pair "
+                              "its schema with a replacement; add the pair")
+        if len(replacements) > 1:
+            raise LookupError(f"{tool.name} takes `anchored`, and ANCHORED_ON pairs its "
+                              f"schema with {len(replacements)} replacements, so which one "
+                              "the server uses cannot be told; keep one pair for each schema")
+        [schema] = replacements
     for rule in REDESCRIBED:
-        if (not combination.feature_on(rule.feature) and rule.marker in tool.properties
-                and name in rule.arguments):
+        if (not combination.feature_on(rule.feature) and name in rule.arguments
+                and rule.governs(tool)):
             schema = {**schema, "description": rule.description}
     return schema
 
 
+@dataclass(frozen=True)
+class Expected:
+    """What the oracle predicts for a server started with one combination. It is worked
+    out once for each combination, and the three checks below share it."""
+
+    combination: Combination
+    #: Each tool the server must not list, with the reason: "feature" or "read_only".
+    unavailable: Mapping[str, str]
+    #: The arguments no tool may offer.
+    removed: frozenset[str]
+
+    @classmethod
+    def of(cls, combination: Combination) -> Expected:
+        reasons = {tool.name: unavailable(tool, combination) for tool in TOOLS}
+        return cls(combination,
+                   {name: reason for name, reason in reasons.items() if reason is not None},
+                   removed(combination))
+
+    @property
+    def listed(self) -> tuple[Tool, ...]:
+        """The tools the server must list, in the order it must list them."""
+        return tuple(tool for tool in TOOLS if tool.name not in self.unavailable)
+
+    def served(self) -> list[dict[str, Any]]:
+        """The `tools/list` answer the server must give."""
+        answer = []
+        for tool in self.listed:
+            properties = {name: dict(_argument(tool, name, schema, self.combination))
+                          for name, schema in tool.properties.items()
+                          if name not in self.removed}
+            answer.append({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": {"type": "object", "properties": properties,
+                                "required": [r for r in tool.required if r in properties],
+                                "additionalProperties": False},
+                "annotations": {"readOnlyHint": not tool.writes,
+                                "destructiveHint": tool.destructive,
+                                "openWorldHint": False},
+            })
+        return answer
+
+
 def served(combination: Combination) -> list[dict[str, Any]]:
     """The `tools/list` answer a server started with `combination` must give, in order."""
-    gone = removed(combination)
-    answer = []
-    for tool in TOOLS:
-        if unavailable(tool, combination) is not None:
-            continue
-        properties = {name: dict(_argument(tool, name, schema, combination))
-                      for name, schema in tool.properties.items() if name not in gone}
-        answer.append({
-            "name": tool.name,
-            "description": tool.description,
-            "inputSchema": {"type": "object", "properties": properties,
-                            "required": [r for r in tool.required if r in properties],
-                            "additionalProperties": False},
-            "annotations": {"readOnlyHint": not tool.writes,
-                            "destructiveHint": tool.destructive,
-                            "openWorldHint": False},
-        })
-    return answer
+    return Expected.of(combination).served()
 
 
 # -- the minimal calls -----------------------------------------------------------------
@@ -251,11 +286,26 @@ def minimal_calls(ids: Ids) -> dict[str, dict[str, Any]]:
 PROBES: Mapping[str, Any] = {"reason": "a reason", "until_reason": "a reason",
                              "query_rewrite": False, "synthesize": False}
 
-#: The tools that take a metadata filter, and the value each filter argument is sent with.
-#: Each argument is sent on its own call, because metadata_filters governs both.
-FILTERING: tuple[str, ...] = tuple(tool.name for tool in TOOLS if "filters" in tool.properties)
-FILTER_PROBES: Mapping[str, Any] = {"filters": {"team": "support"},
-                                    "filepath_prefix": "policies/"}
+#: The rule for the filter arguments: metadata_filters governs every one of them.
+[FILTERS] = [rule for rule in REDESCRIBED if rule.feature == "metadata_filters"]
+
+#: What a filter argument is sent with to probe it, by its JSON type: `filters` takes an
+#: object and `filepath_prefix` a string.
+FILTER_VALUES: Mapping[str, Any] = {"object": {"team": "support"}, "string": "policies/"}
+
+
+def seed(memory: Memvara) -> Ids:
+    """Store four facts and a document for the minimal calls to name, and return their
+    ids."""
+    scoped = memory.scope(user=USER)
+    home = scoped.remember("user", "lives_in", "Oslo").added[0]
+    work = scoped.remember("user", "works_at", "Contoso").added[0]
+    hobby = scoped.remember("user", "likes", "chess").added[0]
+    language = scoped.remember("user", "speaks", "Norwegian").added[0]
+    document = scoped.add_document("Notes about the office move to Oslo.",
+                                   custom_id="notes/office.md")
+    return Ids(linked_from=work.id, linked_to=home.id, forgettable=hobby.id,
+               endable=language.id, document=str(document.custom_id))
 
 
 # -- talking to a server ---------------------------------------------------------------
@@ -309,37 +359,64 @@ def base_env(home: pathlib.Path) -> dict[str, str]:
             if name.startswith("MEMVARA_")}
 
 
+def _config(combination: Combination, base: Mapping[str, str]) -> ServerConfig:
+    """The configuration `python -m memvara.server` reads from `base` and the
+    combination's variables, for an in-memory store."""
+    return ServerConfig.from_env({**base, "MEMVARA_DB": ":memory:", "MEMVARA_USER": USER,
+                                  **combination.env()})
+
+
+def _server(memory: Memvara, config: ServerConfig) -> MemvaraMCPServer:
+    """The server over `memory`, built from `config` as `python -m memvara.server` builds
+    it."""
+    return MemvaraMCPServer(memory, read_only=config.read_only, anchored=config.anchored,
+                            features_off=config.features_off, **config.scope_kwargs)
+
+
 def in_process(memory: Memvara, combination: Combination,
                base: Mapping[str, str]) -> InProcess:
-    """A server over `memory`, configured the way `python -m memvara.server` configures
-    itself: `ServerConfig.from_env` reads `base`, then the combination's variables.
+    """A server over a shared engine, `memory`, configured the way `python -m
+    memvara.server` configures itself: `ServerConfig.from_env` reads `base`, then the
+    combination's variables.
 
     One engine is shared by every server, which keeps 2,048 of them cheap. A server with
     metadata filters off switches them off on the engine it is given, so they are
     switched back on before each server is built.
     """
-    config = ServerConfig.from_env({**base, "MEMVARA_DB": ":memory:", "MEMVARA_USER": USER,
-                                    **combination.env()})
     memory.metadata_filters = True
-    return InProcess(MemvaraMCPServer(
-        memory, read_only=config.read_only, anchored=config.anchored,
-        features_off=config.features_off, **config.scope_kwargs))
+    return InProcess(_server(memory, _config(combination, base)))
+
+
+@contextlib.contextmanager
+def seeded_in_process(combination: Combination,
+                      base: Mapping[str, str]) -> Iterator[tuple[InProcess, Ids]]:
+    """A server in this process with an engine of its own, both built the way `python -m
+    memvara.server` builds them, over a new in-memory store that `seed` fills. It is what
+    a check that runs the minimal calls needs, because those calls write."""
+    config = _config(combination, base)
+    memory = build_memvara(config)
+    assert isinstance(memory, Memvara), "a local configuration builds a local engine"
+    try:
+        ids = seed(memory)
+        yield InProcess(_server(memory, config)), ids
+    finally:
+        memory.close()
 
 
 # -- the checks ------------------------------------------------------------------------
 
-def listing_problems(client: Client, combination: Combination) -> list[str]:
-    """How the tool list a server gives differs from `served(combination)`."""
-    got, wanted = client.list_tools(), served(combination)
+def listing_problems(client: Client, expected: Expected) -> list[str]:
+    """How the tool list a server gives differs from the one the oracle predicts."""
+    got, wanted = client.list_tools(), expected.served()
     problems = []
     names, wanted_names = [t.get("name") for t in got], [t["name"] for t in wanted]
     if names != wanted_names:
         problems.append(f"lists {names}, and the oracle expects {wanted_names}")
-    expected = {tool["name"]: tool for tool in wanted}
+    by_name = {tool["name"]: tool for tool in wanted}
     for tool in got:
-        if tool.get("name") in expected and tool != expected[tool["name"]]:
+        if tool.get("name") in by_name and tool != by_name[tool["name"]]:
             problems.append(f"{tool['name']} differs in "
-                            f"{_differences(tool, expected[tool['name']])}")
+                            f"{_differences(tool, by_name[tool['name']])}")
     return problems
 
 
@@ -361,7 +438,24 @@ def _differences(got: Mapping[str, Any], wanted: Mapping[str, Any]) -> str:
     return "; ".join(parts)
 
 
-def refusal_problems(client: Client, combination: Combination,
+#: One filter probe: the tool's name, the filter argument it was sent, and the answer.
+Probe = tuple[str, str, ToolResult]
+
+
+def _filter_probes(client: Client, expected: Expected,
+                   calls: Mapping[str, Mapping[str, Any]]) -> Iterator[Probe]:
+    """Each listed tool that metadata_filters governs, called once with each filter
+    argument added to its minimal call. refusal_problems and call_problems both judge
+    these."""
+    for tool in expected.listed:
+        if FILTERS.governs(tool):
+            for argument in FILTERS.arguments:
+                value = FILTER_VALUES[tool.properties[argument]["type"]]
+                yield tool.name, argument, client.call(
+                    tool.name, **{**calls[tool.name], argument: value})
+
+
+def refusal_problems(client: Client, expected: Expected,
                      calls: Mapping[str, Mapping[str, Any]]) -> list[str]:
     """What is wrong with how a server refuses what it does not offer.
 
@@ -372,74 +466,86 @@ def refusal_problems(client: Client, combination: Combination,
     these calls reaches the store, because each is refused before anything runs.
     """
     problems = []
-    for tool in TOOLS:
-        reason = unavailable(tool, combination)
-        if reason is None:
-            continue
-        needs = (f"MEMVARA_FEATURE_{str(tool.feature).upper()}=0" if reason == "feature"
+    for name, reason in expected.unavailable.items():
+        feature = server_tools.BY_NAME[name].feature
+        needs = (f"MEMVARA_FEATURE_{str(feature).upper()}=0" if reason == "feature"
                  else "this memory server is read-only")
-        result = client.call(tool.name, **calls[tool.name])
-        if not (result.is_error and result.text.startswith(f"{tool.name} is unavailable: ")
+        result = client.call(name, **calls[name])
+        if not (result.is_error and result.text.startswith(f"{name} is unavailable: ")
                 and needs in result.text):
-            problems.append(f"{tool.name} should be refused naming {needs!r}, and the "
+            problems.append(f"{name} should be refused naming {needs!r}, and the "
                             f"server answered: {result.text[:200]!r}")
-    gone = removed(combination)
-    for tool in TOOLS:
-        if unavailable(tool, combination) is not None:
-            continue
-        for argument in sorted(gone & set(tool.properties)):
+    for tool in expected.listed:
+        for argument in sorted(expected.removed & set(tool.properties)):
             result = client.call(tool.name, **{**calls[tool.name], argument: PROBES[argument]})
             needs = f"{tool.name}: unknown argument(s) '{argument}'"
             if not (result.is_error and result.text.startswith(needs)):
                 problems.append(f"{tool.name} should refuse {argument!r} as unknown, and the "
                                 f"server answered: {result.text[:200]!r}")
-    if not combination.feature_on("metadata_filters"):
-        for name in FILTERING:
-            for argument, value in FILTER_PROBES.items():
-                result = client.call(name, **{**calls[name], argument: value})
-                if not (result.is_error
-                        and "MEMVARA_FEATURE_METADATA_FILTERS=0" in result.text):
-                    problems.append(f"{name} should refuse {argument!r}, naming the switch, "
-                                    f"and the server answered: {result.text[:200]!r}")
+    if not expected.combination.feature_on(FILTERS.feature):
+        for name, argument, result in _filter_probes(client, expected, calls):
+            if not (result.is_error and "MEMVARA_FEATURE_METADATA_FILTERS=0" in result.text):
+                problems.append(f"{name} should refuse {argument!r}, naming the switch, "
+                                f"and the server answered: {result.text[:200]!r}")
     return problems
 
 
-def call_problems(client: Client, combination: Combination,
+def call_problems(client: Client, expected: Expected,
                   calls: Mapping[str, Mapping[str, Any]]) -> list[str]:
     """Each tool a server lists must run with its minimal call, and with metadata filters
     on, a read with each filter argument must run too."""
     problems = []
-    for tool in TOOLS:
-        if unavailable(tool, combination) is not None:
-            continue
+    for tool in expected.listed:
         result = client.call(tool.name, **calls[tool.name])
         if result.is_error:
             problems.append(f"{tool.name} with {dict(calls[tool.name])} failed: "
                             f"{result.text[:300]!r}")
-    if combination.feature_on("metadata_filters"):
-        for name in FILTERING:
-            for argument, value in FILTER_PROBES.items():
-                result = client.call(name, **{**calls[name], argument: value})
-                if result.is_error:
-                    problems.append(f"{name} with {argument!r} failed: "
-                                    f"{result.text[:300]!r}")
+    if expected.combination.feature_on(FILTERS.feature):
+        for name, argument, result in _filter_probes(client, expected, calls):
+            if result.is_error:
+                problems.append(f"{name} with {argument!r} failed: {result.text[:300]!r}")
+    return problems
+
+
+def _problems(client: Client, expected: Expected, calls: Mapping[str, Mapping[str, Any]],
+              *, refusals: bool, run: bool) -> list[str]:
+    """The list check, then the refusal check if `refusals`, then the call check if
+    `run`."""
+    problems = listing_problems(client, expected)
+    if refusals:
+        problems += refusal_problems(client, expected, calls)
+    if run:
+        problems += call_problems(client, expected, calls)
     return problems
 
 
 def in_process_failures(combinations: Sequence[Combination], base: Mapping[str, str], *,
-                        refusals: bool = True) -> dict[Combination, list[str]]:
-    """Each combination whose server, built in this process, lists anything other than the
-    oracle predicts, with its problems. With `refusals`, what the server refuses is
-    checked too; none of it reaches the store, so one engine serves every server."""
-    memory = stores.memory()
-    calls = minimal_calls(NOWHERE)
+                        refusals: bool = True,
+                        calls: bool = False) -> dict[Combination, list[str]]:
+    """Each combination whose server, built in this process, differs from what the oracle
+    predicts, with its problems.
+
+    The list is always checked, and with `refusals` what the server refuses. None of that
+    reaches the store, so one engine serves every server. With `calls`, every tool a
+    server lists also runs its minimal call. Calls write, so each server then gets an
+    engine and a seeded store of its own (`seeded_in_process`).
+    """
     found: dict[Combination, list[str]] = {}
-    try:
+    if calls:
         for combination in combinations:
-            client = in_process(memory, combination, base)
-            problems = listing_problems(client, combination)
-            if refusals:
-                problems += refusal_problems(client, combination, calls)
+            with seeded_in_process(combination, base) as (client, ids):
+                problems = _problems(client, Expected.of(combination), minimal_calls(ids),
+                                     refusals=refusals, run=True)
+            if problems:
+                found[combination] = problems
+        return found
+    memory = stores.memory()
+    try:
+        nowhere = minimal_calls(NOWHERE)
+        for combination in combinations:
+            problems = _problems(in_process(memory, combination, base),
+                                 Expected.of(combination), nowhere,
+                                 refusals=refusals, run=False)
             if problems:
                 found[combination] = problems
     finally:
@@ -466,6 +572,7 @@ def _combination(moved: Sequence[bool]) -> Combination:
     return Combination(frozenset(s for s, move in zip(SWITCHES, moved) if move))
 
 
+@functools.cache
 def fast_runs() -> tuple[Combination, ...]:
     """The 12-run Plackett-Burman design, an orthogonal array of strength 2: each two
     settings are seen in each of their four combinations exactly three times. It also
@@ -480,14 +587,16 @@ def fast_runs() -> tuple[Combination, ...]:
     return tuple(_combination([sign == "+" for sign in row]) for row in rows)
 
 
+@functools.cache
 def nightly_runs() -> tuple[Combination, ...]:
     """The fold-over of `fast_runs`: each run with every setting reversed. It covers all
     eight combinations of every three settings on its own, and together with `fast_runs`
     it is an orthogonal array of strength 3, in which each combination of three settings
     appears exactly three times."""
-    return tuple(Combination(frozenset(SWITCHES) - run.moved) for run in fast_runs())
+    return tuple(Combination(_SETTINGS - run.moved) for run in fast_runs())
 
 
+@functools.cache
 def every_combination() -> tuple[Combination, ...]:
     """All 2 ** 11 = 2,048 combinations, the defaults first."""
     return tuple(_combination(moved)
@@ -560,22 +669,14 @@ class Template:
 
     @classmethod
     def build(cls, directory: pathlib.Path) -> Template:
-        """Store four facts and a document for the minimal calls to name, and a door code
-        that has expired by the time this returns."""
+        """Store what `seed` stores, and a door code that has expired by the time this
+        returns."""
         directory.mkdir(parents=True, exist_ok=True)
-        expires = datetime.now(timezone.utc) + EXPIRES_AFTER
         with stores.file(directory / STORE) as memory:
-            scoped = memory.scope(user=USER)
-            home = scoped.remember("user", "lives_in", "Oslo").added[0]
-            work = scoped.remember("user", "works_at", "Contoso").added[0]
-            hobby = scoped.remember("user", "likes", "chess").added[0]
-            language = scoped.remember("user", "speaks", "Norwegian").added[0]
-            scoped.remember("user", "door_code", "4417", expires_at=expires)
-            document = scoped.add_document("Notes about the office move to Oslo.",
-                                           custom_id="notes/office.md")
+            ids = seed(memory)
+            expires = datetime.now(timezone.utc) + EXPIRES_AFTER
+            memory.scope(user=USER).remember("user", "door_code", "4417", expires_at=expires)
         time.sleep(max(0.0, (expires - datetime.now(timezone.utc)).total_seconds()) + 0.05)
-        ids = Ids(linked_from=work.id, linked_to=home.id, forgettable=hobby.id,
-                  endable=language.id, document=str(document.custom_id))
         return cls(directory, ids, store_dump(directory / STORE))
 
     def copy(self, target: pathlib.Path) -> pathlib.Path:
@@ -597,10 +698,8 @@ def over_the_pipe(start: Callable[..., McpProcess], combination: Combination,
     db = template.copy(workdir)
     server = start(db, user=USER, env=combination.env())
     server.initialize()
-    calls = minimal_calls(template.ids)
-    problems = (listing_problems(server, combination)
-                + refusal_problems(server, combination, calls)
-                + call_problems(server, combination, calls))
+    problems = _problems(server, Expected.of(combination), minimal_calls(template.ids),
+                         refusals=True, run=True)
     code = server.close()
     if code != 0:
         problems.append(f"the server exited with code {code}; its stderr ends: "

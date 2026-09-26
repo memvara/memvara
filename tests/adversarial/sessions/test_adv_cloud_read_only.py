@@ -19,7 +19,7 @@ from . import switches
 
 def test_a_read_only_key_lists_only_read_tools_and_refuses_every_write_by_name(
         mcp: Callable[..., McpProcess]) -> None:
-    read_only = switches.Combination.of("read_only")
+    read_only = switches.Expected.of(switches.Combination.of("read_only"))
     with FakeV1(read_only=True) as fake:
         server = mcp(env=fake.cloud_env())
         server.initialize()
@@ -45,6 +45,7 @@ def test_a_writable_key_lists_every_tool(mcp: Callable[..., McpProcess]) -> None
     with FakeV1() as fake:
         server = mcp(env=fake.cloud_env())
         server.initialize()
-        problems = switches.listing_problems(server, switches.Combination.of())
+        problems = switches.listing_problems(
+            server, switches.Expected.of(switches.Combination.of()))
         assert server.close() == 0
     assert problems == []

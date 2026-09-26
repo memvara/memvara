@@ -19,9 +19,9 @@ from . import switches
 
 @pytest.mark.parametrize("combination", switches.fast_runs(), ids=lambda c: c.label)
 def test_a_real_server_serves_what_the_oracle_predicts(
-        combination: switches.Combination, mcp: Callable[..., McpProcess],
-        surface_template: switches.Template, tmp_path: pathlib.Path) -> None:
-    assert switches.over_the_pipe(mcp, combination, surface_template, tmp_path) == []
+        combination: switches.Combination,
+        check_real_server: Callable[[switches.Combination], None]) -> None:
+    check_real_server(combination)
 
 
 def test_the_check_reports_a_server_that_ignores_read_only_mode(

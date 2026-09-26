@@ -17,6 +17,7 @@ import pytest
 
 from harness import stores
 from memvara.server import mcp
+from memvara.server import tools as server_tools
 from memvara.server.config import FEATURES, FEATURES_OFF_BY_DEFAULT
 from memvara.server.mcp import MemvaraMCPServer
 from memvara.server.tools import (BY_NAME, FEATURE_ARGUMENTS, TOOLS, ToolContext, ToolError,
@@ -104,8 +105,10 @@ def _marks_a_write_tool_read_only(patch: pytest.MonkeyPatch) -> None:
                                       for tool in TOOLS))
 
 
-FAULTS: dict[str, tuple[Callable[[pytest.MonkeyPatch], None],
-                        Callable[[Combination], bool]]] = {
+#: A planted fault: how to plant it, and which combinations it affects.
+Fault = tuple[Callable[[pytest.MonkeyPatch], None], Callable[[Combination], bool]]
+
+FAULTS: dict[str, Fault] = {
     "synthesize-is-kept": (_keeps_synthesize, lambda c: not c.feature_on("synthesis")),
     "filter-descriptions-are-kept": (
         _keeps_filter_descriptions, lambda c: not c.feature_on("metadata_filters")),
@@ -162,11 +165,9 @@ def _ignores_filepath_prefix(patch: pytest.MonkeyPatch) -> None:
                                       for tool in TOOLS))
 
 
-REFUSAL_FAULTS: dict[str, tuple[Callable[[pytest.MonkeyPatch], None],
-                                Callable[[Combination], bool]]] = {
+REFUSAL_FAULTS: dict[str, Fault] = {
     "a-hidden-tool-still-runs": (
-        _runs_hidden_tools,
-        lambda c: any(switches.unavailable(tool, c) is not None for tool in TOOLS)),
+        _runs_hidden_tools, lambda c: bool(switches.Expected.of(c).unavailable)),
     "filepath-prefix-ignored-without-filters": (
         _ignores_filepath_prefix, lambda c: not c.feature_on("metadata_filters")),
 }
@@ -184,11 +185,23 @@ def test_the_refusal_check_finds_a_planted_fault_on_exactly_the_servers_it_affec
     assert found == {combination for combination in runs if affected(combination)}
 
 
+def test_the_fast_rows_run_every_listed_tool_in_process(base: dict[str, str]) -> None:
+    """Every tool each fast row's server lists runs with its minimal call. The nightly tier
+    does the same for all 2,048 combinations."""
+    runs = switches.fast_runs()
+    failures = switches.in_process_failures(runs, base, calls=True)
+    assert not failures, switches.summary(failures, len(runs))
+
+
 def test_the_call_check_finds_a_handler_that_needs_an_argument_a_switch_removed(
         base: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
     """memory_recall's handler is made to read query_rewrite with args[...]. A server that
-    removed that argument then fails the call with a KeyError. The list and the refusals
-    stay the same, so only the call check can see it."""
+    removed that argument then fails the call with a KeyError. The list stays the same, so
+    only the call check can see it, and it must see it on exactly the fast rows that
+    switch query rewriting off.
+
+    The refusal check is left out. With metadata filters off, the engine refuses a filter
+    from inside the handler, so on those rows the refusal check reaches the fault too."""
     recall = BY_NAME["memory_recall"]
 
     def strict(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -198,19 +211,26 @@ def test_the_call_check_finds_a_handler_that_needs_an_argument_a_switch_removed(
     monkeypatch.setattr(mcp, "TOOLS", tuple(dataclasses.replace(tool, handler=strict)
                                             if tool.name == "memory_recall" else tool
                                             for tool in TOOLS))
-    calls = switches.minimal_calls(switches.NOWHERE)
-    memory = stores.memory()
-    try:
-        removed = Combination.of("query_rewrite")
-        found = switches.call_problems(switches.in_process(memory, removed, base), removed,
-                                       calls)
-        default = Combination.of()
-        assert switches.call_problems(switches.in_process(memory, default, base), default,
-                                      calls) == []
-    finally:
-        memory.close()
-    assert found and all(problem.startswith("memory_recall ") for problem in found)
-    assert "KeyError" in found[0]
+    runs = switches.fast_runs()
+    assert switches.in_process_failures(runs, base, refusals=False) == {}
+    found = switches.in_process_failures(runs, base, refusals=False, calls=True)
+    assert set(found) == {run for run in runs if not run.feature_on("query_rewrite")}
+    assert all(problem.startswith("memory_recall ") and "KeyError" in problem
+               for problems in found.values() for problem in problems)
+
+
+@pytest.mark.parametrize("pairs, wanted", [
+    ((), "does not pair its schema with a replacement"),
+    (switches.ANCHORED_ON + ((server_tools._ANCHORED, {"type": "boolean"}),),
+     "pairs its schema with 2 replacements"),
+])
+def test_the_oracle_needs_exactly_one_anchored_replacement_for_each_schema(
+        pairs: tuple[Any, ...], wanted: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With none, the oracle cannot predict the anchored schema. With several, it cannot
+    tell which one the server uses, so it must not pick the first."""
+    monkeypatch.setattr(switches, "ANCHORED_ON", pairs)
+    with pytest.raises(LookupError, match=wanted):
+        switches.served(Combination.of("anchored"))
 
 
 # -- the store a real server starts on -------------------------------------------------
@@ -242,11 +262,6 @@ def test_the_template_holds_an_expired_fact_that_only_a_writable_open_erases(
         pass  # opening a store for writing erases every fact whose expiry has passed
     assert [claim for claim in switches.read_claims(copy) if claim.object == "4417"] == []
     assert switches.store_dump(copy) != surface_template.dump
-
-
-def test_the_filter_probes_are_the_arguments_metadata_filters_governs() -> None:
-    [rule] = [rule for rule in switches.REDESCRIBED if rule.feature == "metadata_filters"]
-    assert set(switches.FILTER_PROBES) == set(rule.arguments)
 
 
 # -- the minimal calls -----------------------------------------------------------------
