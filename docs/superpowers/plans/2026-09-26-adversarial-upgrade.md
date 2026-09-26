@@ -22,7 +22,7 @@
 - One committed store per distinct schema version since v0.1.0, at most 256 KB each including its side files (`.vecs`, `.embedder.json`).
 - No test changes a committed fixture: every test unpacks a copy into its temporary directory first.
 - The fast tier of this workstream takes about 5 seconds.
-- Found bugs are not pinned here. A bug in the scope of `SECURITY.md` is written in no committed file; any other bug is reported with an offline reproduction, and its failing test stays out of the commits.
+- A bug these tests find is pinned as a strict expected failure that cites its issue and accepts only its own symptom, which is the suite's rule. This PR pins three that way, B22, B23 and B24, in `tests/adversarial/upgrade/test_adv_upgrade_known_bugs.py`. A bug in the scope of `SECURITY.md` is written in no committed file.
 - A test that meets documented behaviour asserts that behaviour and cites where it is documented.
 - Test files are named `test_adv_*.py`; every folder has an `__init__.py`; nightly tests live in `tests/adversarial/upgrade/nightly/`.
 - No AI attribution and no AI or model name in any commit, code, comment or document.
@@ -1279,7 +1279,7 @@ def test_a_store_refused_for_its_embedder_is_left_at_its_old_version(
 - [ ] **Step 2: Run them**
 
 Run: `PYTHONPATH=$PWD TMPDIR=<own tmp> <python> -m pytest -q -p no:cacheprovider tests/adversarial/upgrade/test_adv_upgrade_refusals.py`
-Expected: every test passes except the last two. The first of those fails because the server exits with status 1 and a traceback; the second fails because the refused store is at version 16. Both are bugs outside `SECURITY.md`'s scope: move the two tests out of the file into `local/` (ignored by git), keep them for the report, and confirm the rest pass.
+Expected: every test passes except the last two. The first of those fails because the server exits with status 1 and a traceback; the second fails because the refused store is at version 16. Both are bugs outside `SECURITY.md`'s scope: move the two tests out of this file, report them, and confirm the rest pass. They are pinned as B22 and B23 in `tests/adversarial/upgrade/test_adv_upgrade_known_bugs.py`, beside B24, a connection a refused open leaves open, which the verification step found.
 
 - [ ] **Step 3: Commit**
 
