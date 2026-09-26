@@ -414,6 +414,12 @@ def context_of(host: str, reply: Mapping[str, Any] | None) -> str:
     return str(_body(host, reply).get(SHAPES[host][2], ""))
 
 
+def decision_of(host: str, reply: Mapping[str, Any] | None) -> str | None:
+    """The verdict an approve reply gives on `host`, or None when it gives none."""
+    verdict = _body(host, reply).get(SHAPES[host][3])
+    return verdict if isinstance(verdict, str) else None
+
+
 def status_of(host: str, reply: Mapping[str, Any] | None) -> str | None:
     """The status line a reply shows the person on `host`, or None when it shows none."""
     key = SHAPES[host][1]
