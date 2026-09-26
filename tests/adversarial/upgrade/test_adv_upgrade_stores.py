@@ -50,6 +50,10 @@ def test_a_store_from_an_old_release_upgrades_without_loss_and_only_once(
     assert golden.compare(golden.load(tag)["data"], golden.dump(db)) == []
     assert check_store_integrity(db) == []
     first = golden.snapshot(db)
+    # The rule build_stores holds every release to: a close checkpoints the log, so the
+    # database file holds every write.
+    assert not first["logs"]["-wal"], (
+        f"closing the upgraded store left a {first['logs']['-wal']}-byte write-ahead log")
     stores.file(db).close()
     assert golden.changes(first, golden.snapshot(db)) == [], (
         "a second open changed the upgraded store")

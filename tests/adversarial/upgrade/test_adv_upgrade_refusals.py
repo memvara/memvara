@@ -7,10 +7,12 @@ version of the newest committed store, as a later release's migration would.
 
 from __future__ import annotations
 
+import gc
 import pathlib
 import sqlite3
 import subprocess
 import sys
+import warnings
 
 import pytest
 
@@ -48,16 +50,31 @@ def serve(db: pathlib.Path, home: pathlib.Path,
                           timeout=60, check=False)
 
 
+def refusal(db: pathlib.Path) -> str:
+    """The message of the refusal that opening `db` raises. No reference to the half-built
+    store outlives the call."""
+    try:
+        stores.file(db)
+    except RuntimeError as exc:
+        return str(exc)
+    raise AssertionError("the store from a newer version was opened")
+
+
 def test_a_store_from_a_newer_version_is_refused_and_left_as_it_was(
         tmp_path: pathlib.Path) -> None:
     db = newer_store(tmp_path)
     before = golden.snapshot(db)
-    for attempt in ("first", "second"):
-        with pytest.raises(RuntimeError) as refused:
-            stores.file(db)
-        message = str(refused.value)
-        assert f"schema version {NEWER} was written by a newer Memvara" in message, attempt
-        assert f"this build understands {SCHEMA_VERSION}" in message, attempt
+    with warnings.catch_warnings():
+        # A refused open leaves its connection open until garbage collection, which
+        # Python 3.13 reports as a ResourceWarning. That is B24, pinned in
+        # test_adv_upgrade_known_bugs.py. The connection holds the write-ahead log and
+        # the shared-memory file, so it is collected before the file is looked at.
+        warnings.simplefilter("ignore", ResourceWarning)
+        for attempt in ("first", "second"):
+            message = refusal(db)
+            assert f"schema version {NEWER} was written by a newer Memvara" in message, attempt
+            assert f"this build understands {SCHEMA_VERSION}" in message, attempt
+        gc.collect()
     assert golden.changes(before, golden.snapshot(db)) == []
 
 

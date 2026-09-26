@@ -108,6 +108,20 @@ def test_changes_names_a_changed_row_a_changed_schema_and_a_changed_side_file(
     assert f"the schema version went from {before['user_version']} to 99" in found
 
 
+def test_a_snapshot_records_a_write_ahead_log_left_behind_and_changes_names_it(
+        tmp_path: pathlib.Path) -> None:
+    db = written(tmp_path / "s.db")
+    before = golden.snapshot(db)
+    assert before["logs"] == {"-wal": None, "-shm": None}, "a clean close left a log"
+    # Stands in for a close that never checkpointed. The snapshot must look before its
+    # own connection checkpoints the log and deletes it.
+    (tmp_path / "s.db-wal").write_bytes(b"\0" * 100)
+    after = golden.snapshot(db)
+    assert after["logs"]["-wal"] == 100
+    assert "the write-ahead log was absent and is now 100 bytes" in golden.changes(
+        before, after)
+
+
 def test_only_instants_the_writer_did_not_choose_are_masked() -> None:
     assert golden.is_scripted("2024-01-01T00:00:00+00:00")
     assert golden.is_scripted("2024-12-31T00:00:00+00:00")

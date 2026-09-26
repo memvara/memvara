@@ -280,9 +280,19 @@ def _digest(lines: Iterable[str]) -> str:
 EMPTY = _digest([])
 
 
+#: The two files SQLite keeps beside a database in write-ahead-log mode, by suffix.
+LOGS = {"-wal": "write-ahead log", "-shm": "shared-memory file"}
+
+
 def snapshot(db: pathlib.Path, *, key: bytes | None = None) -> dict[str, Any]:
     """Everything an open could change, to compare two opens: the schema version, the
-    schema, a digest of every row of every table, and a digest of each side file."""
+    schema, a digest of every row of every table, a digest of each side file, and the
+    size of the write-ahead log and the shared-memory file, or `None` when one does not
+    exist.
+
+    The two logs are looked at first. The connection this opens would checkpoint a
+    write-ahead log that a close left behind, and delete both files when it closes."""
+    logs = {suffix: _size(db.with_name(db.name + suffix)) for suffix in LOGS}
     conn = connect(db, key)
     try:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
@@ -297,7 +307,19 @@ def snapshot(db: pathlib.Path, *, key: bytes | None = None) -> dict[str, Any]:
     for suffix in (".vecs", ".embedder.json"):
         side = db.with_name(db.name + suffix)
         files[suffix] = hashlib.sha256(side.read_bytes()).hexdigest() if side.exists() else None
-    return {"user_version": version, "schema": schema, "rows": rows, "files": files}
+    return {"user_version": version, "schema": schema, "rows": rows, "files": files,
+            "logs": logs}
+
+
+def _size(path: pathlib.Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return None
+
+
+def _bytes(size: int | None) -> str:
+    return "absent" if size is None else f"{size} bytes"
 
 
 def changes(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
@@ -315,6 +337,10 @@ def changes(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
     for suffix in sorted(before["files"]):
         if before["files"][suffix] != after["files"][suffix]:
             problems.append(f"the side file {suffix} changed")
+    for suffix, name in LOGS.items():
+        was, now = before["logs"][suffix], after["logs"][suffix]
+        if was != now:
+            problems.append(f"the {name} was {_bytes(was)} and is now {_bytes(now)}")
     return problems
 
 
