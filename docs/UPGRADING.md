@@ -26,7 +26,7 @@ This applies to `remember()`, `supersede()`, `memory_remember`, and every claim 
   scope it reads, never one in a sibling project, agent or session.
 - Writing the same earlier start a second time is a repeat of the claim for the earlier
   period. The receipt names that claim under `reinforced`, and nothing is stored.
-- A write with a start earlier still stores only the part before the stored periods
+- A write that starts even earlier stores only the part before the stored periods
   begin.
 - A write that names `expires_at` is still a repeat of the stored claim, as before, so
   the expiry lands on it.

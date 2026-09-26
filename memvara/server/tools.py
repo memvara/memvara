@@ -1662,10 +1662,10 @@ def _continued(ctx: ToolContext, subject: str, predicate: str, claims: Sequence[
 def _read_failures() -> tuple[type[Exception], ...]:
     """The errors a store or a deployment raises when a read fails.
 
-    `RemoteError` covers every failure of a hosted deployment, including a transport
-    failure that outlived its retries, and `sqlite3.Error` every failure of a local
-    store. An encrypted store raises SQLCipher's classes instead, which derive from no
-    `sqlite3` class. That module is loaded only when an encrypted store opens
+    `RemoteError` is how the hosted client reports a request that failed, including a
+    transport failure that outlived its retries, and `sqlite3.Error` is how a local store
+    reports a query that failed. An encrypted store raises SQLCipher's classes instead,
+    which derive from no `sqlite3` class. That module is loaded only when an encrypted store opens
     (`store.encryption.require_sqlcipher`), so it is looked up rather than imported.
     """
     cipher = sys.modules.get("sqlcipher3.dbapi2")

@@ -140,8 +140,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   - Only stored claims the writer can see are compared: those in its own scope and in
     the broader scopes it reads, never those of a sibling project, agent or session.
   - Restating a period the store already holds, such as the same earlier start a second
-    time, reinforces the claim for that period and stores nothing. Restating from a
-    start earlier still stores only the part not yet held.
+    time, reinforces the claim for that period and stores nothing. Restating from an
+    even earlier start stores only the part not yet held.
   - A repeat that names `expires_at` is still a repeat, so the expiry lands on the claim
     on record.
   - `memory_remember`'s reply no longer says such a fact stopped being true where the

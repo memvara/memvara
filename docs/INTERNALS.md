@@ -505,7 +505,7 @@ claim:
    same `value_key` that the writer can see begins after the candidate does (`_is_after`,
    so the precision of a resolved expression counts), the candidate carries a start the
    store does not have. It is inserted for the earlier period only, and the action is
-   `add`. Nothing is reinforced and the claims on record are not touched, so a read at a
+   `add`. Nothing is reinforced and the live claims are not touched, so a read at a
    `known_at` before this write returns what it did. Moving the stored claim's
    `valid_from` back instead would change that read. A single-valued slot already treats
    a different value that began before the live one this way. A repeat that names an
@@ -525,7 +525,10 @@ claim:
    it from January or February again reinforces that claim; and restating it from
    October stores October to January only. A stored claim that ends before the next one
    begins leaves a gap and does not move the end, so a restatement from before it still
-   covers the gap, and overlaps that claim.
+   covers the gap, and overlaps that claim. None of this reaches a turn that tier 0 of
+   `add()` takes for a repeat, a near-duplicate of a stored claim or an exact repeat of
+   the turn a claim came from: tier 0 reinforces the claim before the reconciler runs,
+   so such a turn still loses its earlier date (#318).
 
    "Can see" is `Scope.sees`: the writer's own scope and the broader ones it reads, such
    as the user-wide scope above a project. `value_key` covers the owner and not the
@@ -609,6 +612,9 @@ class ReconcileResult:
     retyped: Retype | None       # a claim filed under a different memory_type than it
                                  # arrived with: an asserted type on a known claim, or
                                  # procedural refused for a subject other than the user
+    restated: Claim | None       # the live claim a restatement with an earlier start
+                                 # restated; it is not changed, and a link proposed for
+                                 # the candidate is recorded on it
 ```
 
 **Re-filing a claim's `memory_type`.** An identical triple is the same fact, so a
