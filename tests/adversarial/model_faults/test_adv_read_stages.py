@@ -73,7 +73,8 @@ def pair(notes: SQLiteStore) -> Iterator[Pair]:
     model, the second has `model` for its rewrite, its synthesis and its selector.
 
     The test fails if the store has changed by the time it ends, because every later test
-    in this module reads the same store and expects the notes `notes` wrote."""
+    in this module reads the same store and expects to find only what the `notes`
+    fixture wrote."""
     before = contents(notes)
 
     def handles(model: ScriptedModel) -> tuple[Memvara, Memvara]:
