@@ -353,6 +353,87 @@ def test_a_restatement_with_an_earlier_start_is_kept_for_the_period_before_the_c
         "what the store believed before the restatement has not changed")
 
 
+def restated(rec, store, *, days_before_january: int):
+    """Tea on record from April, then restated from January, which stores January to
+    April. Returns the claim for that period, and a restatement of the same value that
+    begins `days_before_january` days before January (a negative number is after it)."""
+    april = utcnow() - timedelta(days=150)
+    january = april - timedelta(days=90)
+    rec.apply(claim("likes", "tea", valid_from=april, recorded_at=april), now=april)
+    earlier = rec.apply(claim("likes", "tea", valid_from=january, sources=["ep_2"])).claim
+    assert (earlier.valid_from, earlier.valid_to) == (january, april)
+    return earlier, claim("likes", "tea", sources=["ep_3"],
+                          valid_from=january - timedelta(days=days_before_january))
+
+
+@pytest.mark.parametrize("days_before_january", [0, -30],
+                         ids=["the same start", "a later start inside the period"])
+def test_restating_an_earlier_period_the_store_holds_is_a_repeat_of_it(
+        rec, store, days_before_january):
+    """The claim for January to April is over, so it is not live, and the duplicate check
+    looked only at live claims: the same restatement made twice stored the earlier period
+    twice. A restatement whose period a believed claim of the value already covers says
+    nothing new, so it reinforces that claim and stores nothing."""
+    earlier, again = restated(rec, store, days_before_january=days_before_january)
+
+    res = rec.apply(again)
+
+    assert res.action == "reinforce" and res.claim.id == earlier.id
+    assert res.claim.observation_count == 2 and res.claim.sources == ["ep_2", "ep_3"]
+    assert (res.claim.valid_from, res.claim.valid_to) == (earlier.valid_from,
+                                                          earlier.valid_to)
+    assert len(store.find_by_value("acme", earlier.value_key)) == 2, (
+        "April's claim and the one for January to April, and nothing else")
+
+
+def test_restating_from_an_even_earlier_start_adds_only_the_period_not_yet_held(
+        rec, store):
+    """From October, when the store already holds January to April and April onwards: only
+    October to January is new, so only that is stored. Ending the new claim where April's
+    begins would store January to April a second time."""
+    earlier, again = restated(rec, store, days_before_january=90)
+
+    res = rec.apply(again)
+
+    assert res.action == "add"
+    assert (res.claim.valid_from, res.claim.valid_to) == (again.valid_from,
+                                                          earlier.valid_from)
+    assert store.get_claim(earlier.id).observation_count == 1
+    assert len(store.find_by_value("acme", earlier.value_key)) == 3
+
+
+def test_a_restatement_still_covers_a_gap_between_two_stored_periods(rec, store):
+    """Tea is stored for February to March and again from June, with nothing between. A
+    restatement from January says it held throughout, so its period runs to June: the
+    claim for February to March does not reach June, so it does not move the end, and
+    stopping at February would drop March to June, which the store does not hold."""
+    june = utcnow() - timedelta(days=90)
+    february, march = june - timedelta(days=120), june - timedelta(days=90)
+    january = february - timedelta(days=30)
+    rec.apply(claim("likes", "tea", valid_from=june, recorded_at=june), now=june)
+    store.put_claim(claim("likes", "tea", valid_from=february, valid_to=march,
+                          recorded_at=february))
+
+    res = rec.apply(claim("likes", "tea", valid_from=january, sources=["ep_2"]))
+
+    assert res.action == "add"
+    assert (res.claim.valid_from, res.claim.valid_to) == (january, june)
+
+
+def test_a_retired_earlier_period_does_not_make_a_restatement_a_repeat(rec, store):
+    """Only a claim the store still believes covers a period. A retired one says the
+    record was wrong, so restating that period stores it again."""
+    earlier, again = restated(rec, store, days_before_january=0)
+    close_out(earlier, utcnow(), None, "retired")
+    store.put_claim(earlier)
+
+    res = rec.apply(again)
+
+    assert res.action == "add" and res.claim.id != earlier.id
+    assert (res.claim.valid_from, res.claim.valid_to) == (earlier.valid_from,
+                                                          earlier.valid_to)
+
+
 PROJECT_A = Scope("acme", "alice", project="github.com/acme/a")
 PROJECT_B = Scope("acme", "alice", project="github.com/acme/b")
 
@@ -402,6 +483,24 @@ def test_an_earlier_start_ends_where_a_user_wide_claim_the_project_reads_begins(
     assert (res.claim.valid_from, res.claim.valid_to) == (january, june)
     kept = store.get_claim(wide.id)
     assert (kept.valid_from, kept.valid_to, kept.observation_count) == (june, None, 1)
+
+
+def test_an_earlier_period_held_in_another_project_does_not_make_a_restatement_a_repeat(
+        rec, store):
+    """The check for a period already held follows the same rule: a claim that covers the
+    restated period counts only when the writer can see it. Project A's claim for January
+    to June is not one project B can read, so B's restatement stores B's own period."""
+    june = utcnow() - timedelta(days=90)
+    january = june - timedelta(days=150)
+    rec.apply(database(PROJECT_B, valid_from=june, recorded_at=june), now=june)
+    elsewhere = database(PROJECT_A, valid_from=january, valid_to=june, recorded_at=january)
+    store.put_claim(elsewhere)
+
+    res = rec.apply(database(PROJECT_B, valid_from=january, sources=["ep_2"]))
+
+    assert res.action == "add" and res.claim.scope == PROJECT_B
+    assert (res.claim.valid_from, res.claim.valid_to) == (january, june)
+    assert store.get_claim(elsewhere.id).observation_count == 1
 
 
 def test_a_supersession_in_one_project_is_not_cut_off_by_another_projects_claim(store):

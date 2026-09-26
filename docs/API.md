@@ -46,7 +46,9 @@ mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, s
 #   expires_at, stores that earlier period as a claim of its own, ending where the
 #   claim on record begins; it is reported under added, and the claim on record is
 #   not changed. Only a claim this scope can see, in its own scope or a broader one,
-#   counts as the claim on record here.
+#   counts as the claim on record here. A period already stored this way is not stored
+#   twice: repeating it reinforces the claim that holds it, and a start earlier still
+#   stores only the part before that claim begins.
 #   With `Memvara(advise_replacements=True)` and a backend that implements
 #   `llm.ReplacementJudge`, a write that closed nothing fills `receipt.may_replace`
 #   with the nearest live claims in other slots the model judged it to be a newer

@@ -33,7 +33,9 @@ doesn't add a new claim; it *reinforces* the existing one, and the receipt looks
 `<WriteReceipt +0 ~1 -0>` instead. The exception is a second write whose `valid_from` is
 earlier than the stored fact's and that sets no `expires_at`: the store adds a claim for
 that earlier period, ending where the stored fact begins, so the receipt shows `+1` and
-the fact now answers for the earlier dates too.
+the fact now answers for the earlier dates too. Writing that same earlier date again is
+an ordinary repeat: it reinforces the claim for the earlier period, and the receipt
+shows `~1`.
 
 ## Cite where a fact came from
 

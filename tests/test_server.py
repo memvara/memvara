@@ -2862,6 +2862,39 @@ def test_restating_a_stored_fact_with_an_earlier_start_does_not_say_it_stopped(s
         valid_at=january + timedelta(days=30))] == ["tea"]
 
 
+def test_restating_from_an_even_earlier_start_does_not_say_it_stopped_either(server):
+    """Tea is stored from April, and a restatement from January stored January to April.
+    A restatement from October stores only October to January, ending where the claim
+    for January begins. That claim is over as well, but the value is not, so the note
+    must not say the fact stopped being true in January."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    for days in (150, 240):
+        text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                         "true_since": stamp(now - timedelta(days=days))})
+    body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                            "true_since": stamp(now - timedelta(days=330))})
+
+    assert body.startswith("added 1, ended 0, retired 0, already-known 0")
+    assert "already stopped being true" not in body
+    assert "the same value is already stored and still in force" in body
+
+
+def test_restating_the_same_earlier_start_twice_is_already_known(server):
+    """The second restatement from January says nothing the store does not hold, so it
+    is reported as already known and stores nothing."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    for days in (150, 240):
+        text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                         "true_since": stamp(now - timedelta(days=days))})
+    body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                            "true_since": stamp(now - timedelta(days=240))})
+
+    assert body.startswith("added 0, ended 0, retired 0, already-known 1")
+    assert len(server._ctx.memory.history("user", "likes")) == 2
+
+
 def test_a_failed_read_of_the_slot_leaves_the_write_and_the_general_note(
         server, monkeypatch):
     """Telling a restatement's earlier period from a value that stopped takes a read made

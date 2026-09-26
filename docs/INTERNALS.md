@@ -504,14 +504,28 @@ claim:
    **A repeat that begins earlier is not a duplicate.** When every live claim with the
    same `value_key` that the writer can see begins after the candidate does (`_is_after`,
    so the precision of a resolved expression counts), the candidate carries a start the
-   store does not have. It is inserted for the earlier period only, with `valid_to` set
-   where the earliest of those claims begins, and the action is `add`. Nothing is
-   reinforced and the claims on record are not touched, so a read at a `known_at` before
-   this write returns what it did. Moving the stored claim's `valid_from` back instead
-   would change that read. A single-valued slot already treats a different value that
-   began before the live one this way. A repeat that names an `expires_at` stays a
-   duplicate, so the expiry lands on the claim on record; see *A repeat with an expiry
-   stays in its own scope*.
+   store does not have. It is inserted for the earlier period only, and the action is
+   `add`. Nothing is reinforced and the claims on record are not touched, so a read at a
+   `known_at` before this write returns what it did. Moving the stored claim's
+   `valid_from` back instead would change that read. A single-valued slot already treats
+   a different value that began before the live one this way. A repeat that names an
+   `expires_at` stays a duplicate, so the expiry lands on the claim on record; see *A
+   repeat with an expiry stays in its own scope*.
+
+   The earlier period ends where the value's stored claims begin (`_earlier_period`):
+   the earliest of those live claims, or an earlier claim of the value that runs up to
+   it without a gap, such as the claim a previous restatement stored for its own earlier
+   period. A `valid_to` the caller gave that is earlier still wins. When one claim of the
+   value that the store believes and the writer can see already holds the whole period,
+   from the candidate's start to that end, the candidate says nothing new: it is a
+   duplicate of that claim, which is reinforced, and nothing is inserted. The claim for
+   an earlier period is already over, so the live duplicate check above cannot find it,
+   and without this the same restatement made twice stored its period twice. So with
+   tea stored from April, restating it from January stores January to April; restating
+   it from January or February again reinforces that claim; and restating it from
+   October stores October to January only. A stored claim that ends before the next one
+   begins leaves a gap and does not move the end, so a restatement from before it still
+   covers the gap, and overlaps that claim.
 
    "Can see" is `Scope.sees`: the writer's own scope and the broader ones it reads, such
    as the user-wide scope above a project. `value_key` covers the owner and not the

@@ -1618,11 +1618,13 @@ def _continued(ctx: ToolContext, subject: str, predicate: str,
     is already stored from where they end.
 
     Restating a stored fact with a start earlier than the claim on record stores the
-    earlier period as a claim of its own, ending where the claim on record begins
-    (`Reconciler.apply`). That claim is over, but the fact is not: the claim on record
-    holds it from the same instant. A value that began before a different, later value
-    is over because the value changed, so one read of the slot tells the two apart. The
-    read is made only when an added claim is already over.
+    earlier period as a claim of its own, ending where the value's stored claims begin
+    (`Reconciler._earlier_period`): the claim on record, or a claim for an earlier period
+    that a previous restatement stored and that runs up to it. That new claim is over,
+    but the fact is not: a believed claim of the same value holds it from the same
+    instant. A value that began before a different, later value is over because the
+    value changed, so one read of the slot tells the two apart. The read is made only
+    when an added claim is already over.
 
     A read that fails returns nothing, and the note falls back to its general wording.
     The write has already happened, and a note must not turn it into an error the model
@@ -1639,7 +1641,7 @@ def _continued(ctx: ToolContext, subject: str, predicate: str,
         return frozenset()
     return frozenset(c.id for c in over for h in slot
                      if h.value_key == c.value_key and h.valid_from == c.valid_to
-                     and h.is_live())
+                     and h.state != "retired")
 
 
 def _fold_note(raw: str, claims: Sequence[Claim]) -> str:

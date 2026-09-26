@@ -93,7 +93,8 @@ Every claim that reaches the store passes through `Reconciler.apply()`, which de
 four outcomes against the claims already in that slot: exact duplicate (do not insert,
 unless the incoming claim begins before every live claim with its value that the writer
 can see, in which case it is inserted for that earlier period only and ends where the
-earliest of them begins),
+value's stored claims begin, or reinforces a stored claim that already holds that
+period),
 conflict (the predicate holds one value, so the incoming claim supersedes the old one),
 retraction (the incoming claim has `polarity == -1`, so matching live claims are closed out),
 or accumulate (insert alongside). `Memvara.supersede()` is the explicit form of the second
