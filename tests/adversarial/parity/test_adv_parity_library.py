@@ -35,15 +35,16 @@ The hosted clients also have `end()`, which sends `POST /v1/end`. The library ha
 of its own checks that `end()` leaves a hosted store holding what those two leave a
 local one holding.
 
-**What the program does not compare yet.** Two differences were found that nothing
-documents, so they were reported to the maintainer to be filed and pinned as strict
-expected failures, rather than asserted here:
-
-* a write receipt read through a hosted client has empty `accumulated`, `disputed`,
-  `collapsed` and `retyped` lists where the local receipt reports what the write did,
-  so the program leaves out the writes that produce those four outcomes for now;
-* the hosted `end()` has no local twin, while docs/API.md says `service()` is the only
-  hosted method without one.
+**One difference is a known bug, and it is pinned where the program meets it.** A write
+receipt read through a hosted client leaves `accumulated`, `disputed`, `collapsed` and
+`retyped` empty where the local receipt reports what the write did (memvara/memvara#334,
+registered as B52). The program makes the four writes that fill those lists, and their
+step-by-step comparison on the hosted clients is a strict expected failure that raises
+`known_bugs.Reproduced` only when those emptied lists are the whole difference; anything
+else in the same receipt still fails the run. `test_adv_parity_known_bugs.py` pins #334
+on its own, and the two other bugs these tests found: #335, a hosted receipt that always
+reports 0 for `ungrounded` and `polluted`, and #336, documentation that does not list
+every method only one client has, `end()` among them.
 """
 
 from __future__ import annotations
@@ -56,17 +57,17 @@ from typing import Any, Callable, Iterator
 
 import pytest
 
-from harness import stores
+from harness import known_bugs, stores
 from harness.fakes.fake_v1 import FakeV1
 from memvara import AsyncMemvara, MemoryType
 from memvara.types import utcnow
 
-from .compare import Raised, Run, assert_same, labels, normalise
+from .compare import Raised, Run, assert_same, differences, labels, normalise
 
 UTC = timezone.utc
 
-#: Instants the program passes on purpose. Each is more than `compare.CLOCK_WINDOW` away
-#: from any run, so the comparison keeps it as it is.
+#: Instants the program passes on purpose. None is an instant a store takes from its clock
+#: during the run (`compare.CLOCK_MARKERS`), so the comparison keeps each as it is.
 BERLIN_FROM = datetime(2024, 1, 1, tzinfo=UTC)
 LISBON_FROM = datetime(2025, 1, 1, tzinfo=UTC)
 TRIP_FROM = datetime(2025, 6, 1, tzinfo=UTC)
@@ -125,6 +126,22 @@ PROGRAM: tuple[Step, ...] = (
     Step("remember.employer", lambda m, got: m.remember("user", "works_at", "Acme",
                                                         valid_from=LISBON_FROM)),
     Step("remember.taste", lambda m, got: m.remember("user", "likes", "jazz")),
+    # Four pairs of writes whose second write ends in an outcome the receipt reports in a
+    # list of its own: a value added beside a live one in a slot with no cardinality, a
+    # weaker value stored beside a stronger one, a value closed at the instant it began,
+    # and a fact re-filed under another memory type. See `RECEIPT_GAP`.
+    Step("remember.tagged", lambda m, got: m.remember("user", "tagged_with", "gardening")),
+    Step("remember.beside", lambda m, got: m.remember("user", "tagged_with", "chess")),
+    Step("remember.timezone", lambda m, got: m.remember(
+        "user", "timezone", "Europe/Lisbon", confidence=1.0)),
+    Step("remember.disputed", lambda m, got: m.remember(
+        "user", "timezone", "Europe/Berlin", confidence=0.1)),
+    Step("remember.title", lambda m, got: m.remember("user", "job_title", "engineer",
+                                                     valid_from=TRIP_FROM)),
+    Step("remember.same_start", lambda m, got: m.remember("user", "job_title", "manager",
+                                                          valid_from=TRIP_FROM)),
+    Step("remember.refiled", lambda m, got: m.remember(
+        "user", "likes", "jazz", memory_type=MemoryType.EPISODIC)),
     Step("add", lambda m, got: m.add("My name is Ada.")),
     Step("remember.cited", lambda m, got: m.remember(
         "user", "speaks", "Portuguese", sources=[got["add"].episode_ids[0]])),
@@ -299,12 +316,52 @@ def as_hosted(value: Any) -> Any:
     return value
 
 
+# -- the known difference: memvara/memvara#334 --------------------------------------------
+
+#: The lists a write receipt fills to say what the write did, and a hosted receipt leaves
+#: empty (memvara/memvara#334, registered as B52).
+RECEIPT_GAP = ("accumulated", "disputed", "collapsed", "retyped")
+
+#: The steps whose local receipt fills one of those lists.
+RECEIPT_GAP_STEPS = frozenset({"remember.beside", "remember.disputed",
+                               "remember.same_start", "remember.refiled"})
+
+
+def receipt_is_known_334(expected: Any, actual: Any) -> bool:
+    """Whether a hosted write receipt differs from the local one only by #334: one or
+    more lists in `RECEIPT_GAP` that the local receipt fills and the hosted one leaves
+    empty, and nothing else."""
+    if not (isinstance(expected, dict) and isinstance(actual, dict)
+            and expected.get("__type__") == actual.get("__type__") == "WriteReceipt"):
+        return False
+    emptied = {name for name in RECEIPT_GAP if expected.get(name) and actual.get(name) == []}
+    rest = differences({key: item for key, item in expected.items() if key not in emptied},
+                       {key: item for key, item in actual.items() if key not in emptied})
+    return bool(emptied) and rest == []
+
+
+def test_the_pin_for_334_absorbs_only_its_own_symptom() -> None:
+    """A strict expected failure absorbs whatever its test reports as the known bug. So a
+    receipt that differs in anything besides lists left empty must fail as a new bug."""
+    local = {"__type__": "WriteReceipt", "added": ["<claim>"], "accumulated": ["<one>"],
+             "disputed": [], "collapsed": [], "retyped": []}
+    assert receipt_is_known_334(local, {**local, "accumulated": []})
+    assert not receipt_is_known_334(local, local)
+    assert not receipt_is_known_334(local, {**local, "accumulated": [], "added": []})
+    assert not receipt_is_known_334(local, {**local, "accumulated": ["<another>"]})
+    assert not receipt_is_known_334({**local, "__type__": "ForgetResult"},
+                            {**local, "__type__": "ForgetResult", "accumulated": []})
+
+
 def _compared() -> Iterator[Any]:
     for step in PROGRAM:
         for client in CLIENTS[1:]:
-            if client in HOSTED and step.name in HOSTED_BY_OWN_TEST:
+            hosted = client in HOSTED
+            if hosted and step.name in HOSTED_BY_OWN_TEST:
                 continue
-            yield pytest.param(step.name, client, id=f"{step.name}-{client}")
+            known = hosted and step.name in RECEIPT_GAP_STEPS
+            yield pytest.param(step.name, client, id=f"{step.name}-{client}",
+                               marks=[known_bugs.xfail("B52")] if known else [])
 
 
 @pytest.mark.parametrize(("step", "client"), list(_compared()))
@@ -312,7 +369,11 @@ def test_every_client_answers_as_the_synchronous_library_does(
         played: dict[str, dict[str, Any]], step: str, client: str) -> None:
     local = played["Memvara"][step]
     expected = as_hosted(local) if client in HOSTED else local
-    assert_same(expected, played[client][step], f"{step} through {client}")
+    actual = played[client][step]
+    if client in HOSTED and step in RECEIPT_GAP_STEPS and receipt_is_known_334(expected, actual):
+        emptied = [name for name in RECEIPT_GAP if expected[name] and actual[name] == []]
+        raise known_bugs.Reproduced(f"B52: the hosted receipt of {step} left {emptied} empty")
+    assert_same(expected, actual, f"{step} through {client}")
 
 
 def _typed(value: Any, kind: str) -> Iterator[dict[str, Any]]:
