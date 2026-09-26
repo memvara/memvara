@@ -10,10 +10,14 @@ import functools
 import json
 import os
 import pathlib
+import re
 import shutil
+import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Iterator, Mapping, Sequence, TypeVar
+
+import pytest
 
 from harness import stores
 from harness.fakes.cli import FakeClis
@@ -112,9 +116,66 @@ EXTRA_KEYS: Mapping[str, Mapping[str, Any]] = {
     "opencode": {},
 }
 
+#: The four hooks, in the order they run in a session (plugin/hooks/core/host.py).
+HOOKS = ("session_start", "recall", "capture", "approve")
+
+#: Why a capture test skips on Windows. It has a rule in tests/harness/skips.py.
+NO_FAKES = "the fake agent CLIs are POSIX shell scripts"
+
+#: Invalid UTF-8 inside an otherwise ordinary payload.
+_INVALID_UTF8 = (b'{"session_id": "s", "prompt": "user lives in \xff\xfe Lisbon", '
+                 b'"tool_name": "mcp__memvara__memory_search\xc3"}')
+
+#: What the hostile-payload tests send to every hook, each with the variables its hook
+#: process gets. Invalid UTF-8 is sent twice, because a child's stdin decodes it one of
+#: two ways: strictly, so the read fails, or with surrogateescape, which Python uses in
+#: its UTF-8 mode and under the C locale, and which turns each bad byte into a lone
+#: surrogate. `PYTHONIOENCODING` picks one, so the result does not depend on the locale
+#: of the machine running the tests.
+HOSTILE: Mapping[str, tuple[bytes, Mapping[str, str]]] = {
+    "no fields at all": (b"{}", {}),
+    "empty stdin": (b"", {}),
+    "text that is not JSON": (b"this is not json {", {}),
+    "a JSON list": (b'[{"session_id": "s", "prompt": "user lives in Lisbon"}]', {}),
+    "invalid UTF-8, read strictly": (_INVALID_UTF8, {"PYTHONIOENCODING": "utf-8:strict"}),
+    "invalid UTF-8, read with surrogateescape": (
+        _INVALID_UTF8, {"PYTHONIOENCODING": "utf-8:surrogateescape"}),
+    "a prompt that is a lone surrogate": (json.dumps({
+        "session_id": "s", "cwd": "\ud800", "prompt": "\ud800", "tool_name": "\ud800",
+        "transcript_path": "\ud800"}).encode(), {}),
+    "fields of the wrong type": (json.dumps({
+        "session_id": 7, "cwd": {"a": 1}, "prompt": ["user lives in Lisbon"],
+        "tool_name": None, "transcript_path": 3.5, "stop_hook_active": "yes",
+        "workspace_roots": "not a list"}).encode(), {}),
+    "unknown fields": (json.dumps({
+        "session_id": "s", "prompt": "user lives in Lisbon", "hook_event_name": "NoSuchEvent",
+        "unknown": {"deep": [1, {"x": None}]}, "": ""}).encode(), {}),
+    "an 8 MB payload": (b'{"session_id": "s", "prompt": "user lives in Lisbon", "padding": "'
+                        + b"x" * 8_000_000 + b'"}', {}),
+    "nesting 100,000 levels deep": (b'{"prompt": ' + b"[" * 100_000 + b"]" * 100_000 + b"}",
+                                    {}),
+}
+
+#: JSON values that are not objects, which the nightly tier adds.
+MORE_HOSTILE: Mapping[str, tuple[bytes, Mapping[str, str]]] = {
+    "a JSON string": (b'"user lives in Lisbon"', {}),
+    "JSON null": (b"null", {}),
+    "a JSON number": (b"42", {}),
+}
+
+#: The payloads that are not a JSON object once they are read. A hook must answer each
+#: one exactly as it answers `{}`: plugin/hooks/core/envelope.py, `read_event`, says that
+#: anything unreadable becomes an empty event.
+UNREADABLE = ("empty stdin", "text that is not JSON", "a JSON list",
+              "invalid UTF-8, read strictly")
+
+#: The line run.py writes when a hook's body raised and its last guard kept the exit code
+#: at 0 (plugin/hooks/run.py, `main`). A line about handing capture to a child is not one.
+_CRASH = re.compile(r"^failed hook=\S+ host=\S+ (?!detach)")
+
 #: One hook run, waiting to be made by `run_all`.
 Job = Callable[[], HookResult]
-Jobs = dict[tuple[str, str], Job]
+Jobs = dict[tuple[str, ...], Job]
 
 K = TypeVar("K")
 
@@ -303,3 +364,76 @@ def status_of(host: str, reply: Mapping[str, Any] | None) -> str | None:
         return None
     status = reply.get(key)
     return status if isinstance(status, str) else None
+
+
+def crashes(result: HookResult) -> list[str]:
+    """The lines in which run.py says the hook's body raised."""
+    return [line for line in result.log("hooks") if _CRASH.match(line)]
+
+
+# -- hostile payloads --------------------------------------------------------------------
+
+@dataclasses.dataclass
+class Hostile:
+    """A hostile-payload matrix: its runs, keyed by (host, hook, payload), and the fake
+    agent CLIs its captures were given, or None where the fakes cannot run."""
+
+    runs: Runs
+    clis: FakeClis | None
+
+
+def hostile_cases(hosts: Sequence[str],
+                  payloads: Sequence[str] | Mapping[str, Any]) -> list[tuple[str, str, str]]:
+    """Every (host, hook, payload) to check: each payload, on every hook each host fires."""
+    return [(host, hook, name) for host in hosts for hook in HOOKS if hook in EVENTS[host]
+            for name in payloads]
+
+
+def hostile_matrix(base: pathlib.Path, hosts: Sequence[str],
+                   payloads: Mapping[str, tuple[bytes, Mapping[str, str]]]) -> Hostile:
+    """Send every payload, and `{}`, to every hook each host fires, against a store that
+    holds MEMORY. Captures get fake agent CLIs with nothing scripted, because no payload
+    here names a transcript, so none may start an extraction."""
+    payloads = {"no fields at all": (b"{}", {}), **payloads}
+    work = base / "work"
+    work.mkdir()
+    env = {"MEMVARA_DB": str(make_store(base / "memory.db")), "MEMVARA_USER": USER}
+    clis = None if sys.platform == "win32" else FakeClis(base / "clis")
+    jobs: Jobs = {}
+    with runner_factory(work) as make:
+        for host, hook, name in hostile_cases(hosts, payloads):
+            if hook == "capture" and clis is None:
+                continue
+            data, extra = payloads[name]
+            runner = make(host, env={**env, **extra},
+                          stubs=clis if hook == "capture" else None)
+            jobs[host, hook, name] = job(runner, hook, stdin=data)
+        results = run_all(jobs)
+    return Hostile(Runs(results), clis)
+
+
+def check_left_alone(hostile: Hostile, host: str, hook: str, payload: str) -> None:
+    """The hook exited 0 and wrote nothing to stderr. HookRunner has already checked that
+    it printed nothing or one JSON object, within its host's limit."""
+    if hook == "capture" and hostile.clis is None:
+        pytest.skip(NO_FAKES)
+    result = hostile.runs[host, hook, payload]
+    assert result.exit_code == 0, result
+    assert result.stderr == "", result.stderr
+
+
+def check_read_as_empty(hostile: Hostile, host: str, hook: str, payload: str) -> None:
+    """The hook answered exactly as it answers `{}`, and its body did not crash."""
+    if hook == "capture" and hostile.clis is None:
+        pytest.skip(NO_FAKES)
+    result = hostile.runs[host, hook, payload]
+    assert result.reply == hostile.runs[host, hook, "no fields at all"].reply
+    assert crashes(result) == []
+
+
+def check_no_extraction(hostile: Hostile) -> None:
+    """No capture in the matrix started an agent CLI."""
+    if hostile.clis is None:
+        pytest.skip(NO_FAKES)
+    assert hostile.clis.calls("claude") == []
+    assert hostile.clis.calls("codex") == []
