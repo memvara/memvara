@@ -40,6 +40,11 @@ class SkipRule:
         return self.python_from is None or version >= self.python_from
 
 
+#: The skip mark for a test that needs `tomllib`, which arrives in Python 3.11. Use it
+#: rather than writing a new one: its reason is the one the first rule below explains.
+needs_toml = pytest.mark.skipif(sys.version_info < (3, 11),
+                                reason="tomllib arrives in 3.11, and this test needs it to read TOML")
+
 RULES: tuple[SkipRule, ...] = (
     SkipRule(r"^tomllib arrive[sd] in 3\.11",
              "Python 3.10 has no tomllib. These tests run on 3.11 and later.",

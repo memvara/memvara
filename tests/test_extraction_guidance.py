@@ -24,9 +24,7 @@ from memvara.server.config import (FEATURE_DEFAULTS, ConfigError, ServerConfig,
 
 import test_llm
 import test_llm_openai
-
-needs_toml = pytest.mark.skipif(sys.version_info < (3, 11),
-                                reason="tomllib arrives in 3.11; load_guidance refuses below it")
+from harness.skips import needs_toml
 
 GUIDE = Guidance(context="A payments service.",
                  include=["decisions about retries"], exclude=["stack traces"])

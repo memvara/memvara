@@ -34,8 +34,9 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         scenarios = [scenario for scenario in scenarios if scenario.get("forbidden")]
     elif name == "test_the_gold_fails_without_memvara":
         scenarios = [scenario for scenario in scenarios if scenario["negative_control"]]
-    # The negative control starts no server, so it needs none of the marks playing needs.
-    plays = name != "test_the_gold_fails_without_memvara"
+    # Only a test that asks for `outcomes` plays its scenario and starts servers, so only
+    # such a test needs the marks that playing needs. The negative control does not.
+    plays = "outcomes" in metafunc.fixturenames
     metafunc.parametrize("scenario", [
         pytest.param(scenario, id=scenario["id"], marks=runner.marks(scenario) if plays else [])
         for scenario in scenarios])

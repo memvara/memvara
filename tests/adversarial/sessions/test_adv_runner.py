@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-import sys
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -654,19 +653,23 @@ def test_the_two_fields_become_server_variables() -> None:
     assert runner.variables(runner.DEFAULT_ENV) == {}
 
 
+@pytest.mark.parametrize("field", sorted(runner.VARIABLES))
+def test_an_empty_field_is_refused_rather_than_dropped(field: str) -> None:
+    """None leaves a variable unset, so the server uses its default. An empty string, which
+    only an env built by hand can hold, is refused by name instead of vanishing."""
+    with pytest.raises(ValueError, match=f"the env field '{field}' is an empty string"):
+        runner.variables({**runner.DEFAULT_ENV, field: ""})
+
+
 def test_a_scenario_that_loads_predicates_skips_below_python_3_11() -> None:
-    """A session's env counts as much as the scenario's. The reason must be one the skip
-    ledger explains below Python 3.11 and nowhere else, or the skip would fail the run."""
+    """A session's env counts as much as the scenario's. The mark is the skip ledger's own
+    `needs_toml`, whose tests check that a rule explains its reason."""
     assert runner.marks(sample()) == []
     in_a_session = sample()
     in_a_session["sessions"][1]["env"] = {"predicates": "engineering"}
     for scenario in (sample(env={"user": "tester", "predicates": "engineering"}),
                      in_a_session):
-        [mark] = runner.marks(scenario)
-        assert mark.name == "skipif" and mark.args == (sys.version_info < (3, 11),)
-        assert mark.kwargs["reason"] == runner.TOMLLIB_SKIP
-    assert skips.explained(runner.TOMLLIB_SKIP, version=(3, 10))
-    assert not skips.explained(runner.TOMLLIB_SKIP, version=(3, 11))
+        assert runner.marks(scenario) == [skips.needs_toml]
 
 
 def expired_token(secret: str) -> str:
@@ -694,7 +697,7 @@ def test_the_confirm_secret_reaches_the_server_on_a_real_server(
     assert "was not issued by this memory server" in answer({"user": "tester"}, "without")
 
 
-@pytest.mark.skipif(sys.version_info < (3, 11), reason=runner.TOMLLIB_SKIP)
+@skips.needs_toml
 def test_predicates_reach_the_server_on_a_real_server(tmp_path: pathlib.Path) -> None:
     """With the engineering vocabulary, runs_on is another spelling of current_host, and
     the receipt says so. With the built-in predicates alone, runs_on is a new predicate,

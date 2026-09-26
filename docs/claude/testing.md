@@ -62,6 +62,8 @@ The files named `test_adv_*_tier_guard.py` fail if their folder is ever collecte
 
 A rule can be bound to platforms (`platforms=("win32",)`) or to Python versions (`python_below=(3, 11)`, `python_from=(3, 11)`). Outside those, the reason counts as unexplained, so a test that starts skipping where it should run turns the run red.
 
+A test that needs `tomllib`, which Python 3.10 does not have, carries `skips.needs_toml` instead of a skip of its own. That mark's reason is the one the `tomllib` rule explains, and `test_adv_skips.py` checks that the rule explains it below Python 3.11 and nowhere else.
+
 The ledger exists because most summaries show a skip as green, so a test that stops running for a new reason looks exactly like one that passes.
 
 An expected failure (xfail) is not a skip, and the ledger ignores it.
@@ -694,9 +696,9 @@ This section covers workstream A1 of the design: more scripted scenarios, and te
 `env` can also set two server variables, because two workflows cannot be written without them:
 
 - `confirm_secret` sets `MEMVARA_CONFIRM_SECRET`, the key that signs the confirmation tokens of `memory_end_matching` and `memory_forget_matching`. Servers that share it accept each other's tokens, so a preview from one session can be confirmed in the next. It also lets a scenario hold a token that was signed correctly and has expired; the only other way to get one is to wait ten minutes.
-- `predicates` sets `MEMVARA_PREDICATES`, the predicate vocabularies the server loads. The graph tools walk only relations a vocabulary declares as graph edges, and no built-in predicate is one, so without a vocabulary `memory_neighborhood` and `memory_paths` can only answer that nothing is connected. Loading a vocabulary needs Python 3.11, where `tomllib` arrives. So every test that plays such a scenario skips on Python 3.10, with a reason the skip ledger's `tomllib` rule explains.
+- `predicates` sets `MEMVARA_PREDICATES`, the predicate vocabularies the server loads. The graph tools walk only relations a vocabulary declares as graph edges, and no built-in predicate is one, so without a vocabulary `memory_neighborhood` and `memory_paths` can only answer that nothing is connected. Loading a vocabulary needs Python 3.11, where `tomllib` arrives. So every test that plays such a scenario carries `skips.needs_toml` and skips on Python 3.10. The negative control plays nothing, so it carries no mark.
 
-The runner passes both to each session's server, and writes them into the client config the hooks read, like the other env fields.
+The runner passes both to each session's server, and writes them into the client config the hooks read, like the other env fields. A field that is missing or None sets nothing. An empty string is refused by name, because the schema already refuses one in a file, and one in an env built by hand would otherwise vanish.
 
 ### The tool surface
 

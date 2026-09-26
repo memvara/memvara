@@ -16,17 +16,16 @@ from pathlib import Path
 
 import pytest
 
-#: Declared vocabularies are read with `tomllib`, which arrives in 3.11. On 3.10 the
-#: reader refuses by design rather than pulling in a backport nobody declared, so the
-#: behaviour these pin does not exist there. `TestUnsupportedInterpreter` covers what 3.10
-#: does instead.
-needs_toml = pytest.mark.skipif(sys.version_info < (3, 11),
-                                reason="tomllib arrives in 3.11; load_specs refuses below it")
-
 from memvara.schema import (BUILTIN_PREDICATES, Cardinality, PredicatePackError,
                             PredicateRegistry, PredicateSpec, Volatility,
                             available_packs, load_all_specs, load_specs)
 from memvara.server.config import ConfigError, ServerConfig, build_memvara
+
+# Declared vocabularies are read with `tomllib`, which arrives in 3.11. On 3.10 the
+# reader refuses by design rather than pulling in a backport nobody declared, so the
+# behaviour these pin does not exist there, and `needs_toml` skips them.
+# `TestUnsupportedInterpreter` covers what 3.10 does instead.
+from harness.skips import needs_toml
 
 #: Resolved from this file rather than the working directory, because pytest
 #: is run from wherever the caller happened to be.

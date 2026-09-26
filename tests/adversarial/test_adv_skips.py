@@ -9,7 +9,7 @@ import sys
 import pytest
 
 from harness.env import REPO, child_env
-from harness.skips import RULES, explained, reason_of
+from harness.skips import RULES, explained, needs_toml, reason_of
 
 _PLUGIN = '''
 from harness.skips import SkipLedger
@@ -77,6 +77,17 @@ def test_a_version_bound_reason_is_explained_only_on_that_version() -> None:
     assert not explained("tomllib arrived in 3.11", platform="linux", version=(3, 12))
     assert explained("3.10 only", platform="linux", version=(3, 12))
     assert not explained("3.10 only", platform="linux", version=(3, 10))
+
+
+def test_the_tomllib_mark_skips_only_where_a_rule_explains_its_reason() -> None:
+    """`needs_toml` is the one skip mark for tests that need tomllib. It skips below
+    Python 3.11, and its reason must be one the ledger explains there and nowhere else, or
+    every test that carries it would fail the run on Python 3.10."""
+    assert needs_toml.name == "skipif"
+    assert needs_toml.args == (sys.version_info < (3, 11),)
+    reason = needs_toml.kwargs["reason"]
+    assert explained(reason, platform="linux", version=(3, 10))
+    assert not explained(reason, platform="linux", version=(3, 11))
 
 
 def test_the_ledger_is_registered_for_every_run(request: pytest.FixtureRequest) -> None:
