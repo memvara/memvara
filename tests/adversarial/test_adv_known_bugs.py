@@ -185,6 +185,25 @@ def test_a_future_retraction_leaves_a_tombstone_that_does_not_end_before_it_begi
     assert tombstone.valid_to == tombstone.valid_from
 
 
+# -- B45: a backdated retraction's tombstone is live in reads of the past ----------------
+
+@known_bugs.xfail("B45")
+def test_a_backdated_retraction_leaves_a_tombstone_that_no_read_returns() -> None:
+    """A tombstone is closed on both clocks at the instant its write is recorded, so it
+    can never be live (docs/INTERNALS.md). A retraction backdated with `recorded_at` must
+    close it at that instant too, not at the wall clock's (#317)."""
+    from datetime import datetime, timezone
+
+    jan, feb, mar = (datetime(2026, month, 1, tzinfo=timezone.utc) for month in (1, 2, 3))
+    user = stores.memory().scope(user="u")
+    user.remember("user", "likes", "tea", valid_from=jan, recorded_at=jan)
+    user.remember("user", "likes", "tea", polarity=-1, valid_from=feb, recorded_at=feb)
+    seen = [(c.object, c.polarity) for c in user.get_all(as_of=mar)]
+    if seen == [("tea", -1)]:
+        raise known_bugs.Reproduced(f"a read at March returned the tombstone: {seen}")
+    assert seen == [], seen
+
+
 # -- B16: forget leaves a scheduled value believed ---------------------------------------
 
 @known_bugs.xfail("B16")

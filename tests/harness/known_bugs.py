@@ -79,6 +79,7 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "read"),
     KnownBug("B32", 309, "invented predicates past the learned cap make one write take "
              "quadratic time"),
+    KnownBug("B45", 317, "a backdated retraction's tombstone is live in reads of the past"),
 )}
 
 
