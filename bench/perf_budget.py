@@ -22,9 +22,15 @@ a p95 the same way every other benchmark here does.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import os
+import platform
 import random
+import sqlite3
 import statistics
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +39,11 @@ from typing import Any, Callable, Mapping, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import evalkit  # noqa: E402
+
+import memvara  # noqa: E402
+
+#: The checkout this script belongs to. It is bench/perf_budget.py, one level below it.
+REPO = Path(__file__).resolve().parents[1]
 
 #: The percentiles reported for every series, by the name each is stored under.
 PERCENTILES: dict[str, float] = {"p50": 0.50, "p90": 0.90, "p95": 0.95, "p99": 0.99}
@@ -254,3 +265,141 @@ def check_ceilings(series: Mapping[str, Mapping[str, Any]]) -> list[dict[str, An
                             "limit_ms": ceiling.limit_ms, "value_ms": value,
                             "breached": breached})
     return entries
+
+
+# --- the machine, and whether a run is valid ------------------------------------------------
+
+
+#: A run is under load when the one-minute load average, divided by the number of logical
+#: CPUs, is above this at any check. At 0.5, half the machine is busy with something other
+#: than the measurement, which is enough to move a p95 by more than the rule's 2 ms floor.
+MAX_LOAD_PER_CPU = 0.5
+
+
+def _tool(*command: str) -> str | None:
+    """The output of a system tool that describes the machine, or None if it failed.
+
+    These tools (`sysctl`, `pmset`, `git`) run with a minimal environment rather than
+    `harness.env.child_env`: memvara never runs in them, and the fixed locale keeps
+    `pmset`'s wording the English the parser below reads.
+    """
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"}
+    try:
+        done = subprocess.run(list(command), capture_output=True, text=True, timeout=10,
+                              env=env, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def _cpu_model() -> str:
+    if platform.system() == "Darwin":
+        return _tool("sysctl", "-n", "machdep.cpu.brand_string") or platform.machine()
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.is_file():
+        for line in cpuinfo.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.lower().startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    return platform.processor() or platform.machine()
+
+
+def _memory_bytes() -> int | None:
+    if platform.system() == "Darwin":
+        text = _tool("sysctl", "-n", "hw.memsize")
+        return int(text) if text and text.isdigit() else None
+    meminfo = Path("/proc/meminfo")
+    if meminfo.is_file():
+        for line in meminfo.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) * 1024
+    return None
+
+
+def machine_fingerprint() -> dict[str, Any]:
+    """The machine a run measured, and the software it measured with.
+
+    `id` is a short hash of the hardware alone: the system, the processor, the number of
+    logical CPUs and the memory. Budgets are keyed on it, so an operating-system or Python
+    update keeps a machine's budgets while a different laptop does not inherit them. The
+    software versions and the commit are recorded beside it, so a jump in the numbers can
+    be traced to what changed.
+    """
+    hardware = {"system": platform.system(), "machine": platform.machine(),
+                "cpu": _cpu_model(), "logical_cpus": os.cpu_count(),
+                "memory_bytes": _memory_bytes()}
+    ident = hashlib.sha256(json.dumps(hardware, sort_keys=True).encode()).hexdigest()[:16]
+    return {**hardware, "release": platform.release(), "python": platform.python_version(),
+            "sqlite": sqlite3.sqlite_version, "memvara": memvara.__version__,
+            "commit": _tool("git", "-C", str(REPO), "rev-parse", "HEAD"), "id": ident}
+
+
+@dataclass(frozen=True)
+class Conditions:
+    """The state of the machine at one check during a run.
+
+    `on_battery` is None where the platform cannot say, which counts as not on battery:
+    the nightly run is on a Mac, where it can always say.
+    """
+
+    on_battery: bool | None
+    load_per_cpu: float
+
+
+def on_battery_from_pmset(text: str) -> bool | None:
+    """Read `pmset -g batt`'s first line: which power source the Mac is drawing from."""
+    if "'Battery Power'" in text:
+        return True
+    if "'AC Power'" in text:
+        return False
+    return None
+
+
+def on_battery_from_sysfs(root: Path) -> bool | None:
+    """Read Linux's power supplies: on battery when no mains supply is online and a
+    battery is present. None when there is no power supply to read, as in a container."""
+    if not root.is_dir():
+        return None
+    mains_online = battery = False
+    for supply in root.iterdir():
+        kind_file = supply / "type"
+        kind = kind_file.read_text(encoding="utf-8").strip() if kind_file.is_file() else ""
+        if kind == "Mains":
+            online = supply / "online"
+            if online.is_file() and online.read_text(encoding="utf-8").strip() == "1":
+                mains_online = True
+        elif kind == "Battery":
+            battery = True
+    if mains_online:
+        return False
+    return True if battery else None
+
+
+def read_conditions() -> Conditions:
+    """The power source and the load of this machine now."""
+    if platform.system() == "Darwin":
+        text = _tool("pmset", "-g", "batt")
+        on_battery = on_battery_from_pmset(text) if text is not None else None
+    elif platform.system() == "Linux":
+        on_battery = on_battery_from_sysfs(Path("/sys/class/power_supply"))
+    else:
+        on_battery = None
+    try:
+        load = os.getloadavg()[0]
+    except (AttributeError, OSError):
+        # Windows has no load average. The nightly tiers run only on a Mac.
+        load = 0.0
+    return Conditions(on_battery=on_battery,
+                      load_per_cpu=float(load) / (os.cpu_count() or 1))
+
+
+def invalid_reasons(checks: Sequence[Conditions]) -> list[str]:
+    """Why a run with these checks is invalid, in words; empty when it is valid."""
+    reasons: list[str] = []
+    on_battery = sum(1 for c in checks if c.on_battery)
+    if on_battery:
+        reasons.append(f"the machine ran on battery at {on_battery} of {len(checks)} checks")
+    busiest = max((c.load_per_cpu for c in checks), default=0.0)
+    if busiest > MAX_LOAD_PER_CPU:
+        reasons.append(f"the load average reached {busiest:.2f} per CPU, above the limit "
+                       f"of {MAX_LOAD_PER_CPU}")
+    return reasons
