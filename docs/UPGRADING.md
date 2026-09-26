@@ -7,6 +7,61 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A restatement with an earlier start is added, not reinforced
+
+### What changed
+
+Writing a value the store already holds live, with a `valid_from` earlier than the start
+of the stored claim, used to count as a repeat. The receipt named the stored claim under
+`reinforced`, and the earlier start was dropped. Now the write stores the earlier period
+as a claim of its own, ending where the stored claim begins, and the receipt names that
+new claim under `added` instead of naming the stored claim under `reinforced`. The store
+holds one more row than it did before. The stored claim itself is not changed, and its
+observation count and salience do not rise.
+
+This applies to `remember()`, `supersede()`, `memory_remember`, and every claim that
+`add()` extracts from a turn. A few related cases:
+
+- Only a stored claim the writer can see counts: one in its own scope or in a broader
+  scope it reads, never one in a sibling project, agent or session.
+- Writing the same earlier start a second time is a repeat of the claim for the earlier
+  period. The receipt names that claim under `reinforced`, and nothing is stored.
+- A write with a start earlier still stores only the part before the stored periods
+  begin.
+- A write that names `expires_at` is still a repeat of the stored claim, as before, so
+  the expiry lands on it.
+- `memory_remember`'s reply for such a write reads `added 1 ... already-known 0` where
+  it read `added 0 ... already-known 1`, followed by a note that the same value is
+  already stored from where the new claim ends.
+- A turn that `add()` takes for a repeat in tier 0, before extraction, is not covered
+  yet and still reinforces the stored claim (#318).
+
+### Who this changes
+
+**If you read `receipt.reinforced` to decide whether a fact was already known,** a
+restatement with an earlier start now shows up in `receipt.added` instead. The claim
+there is already over: its `valid_to` is where the stored claim begins, so it is not a
+new current value. To tell it apart from a value the store did not hold, check whether
+its `valid_to` is set and `history(subject, predicate)` holds the same object from that
+instant.
+
+**If you count stored rows**, such as `stats()["claims"]` or the length of `history()`,
+a restatement with an earlier start adds one. A plain `count()` is unchanged, because
+the added claim is already over; a `count(valid_at=...)` inside the earlier period now
+includes it.
+
+**If you import history with `remember(valid_from=...)`**, a fact restated from an older
+record now keeps the period it covers, so reads at those earlier instants return it.
+
+### How to find it in your code
+
+Search for `.reinforced` and `.added` in code that reads the receipt of `remember(`,
+`supersede(` or `add(`, and for the text `already-known` in code that parses
+`memory_remember` replies, where the write can carry a `valid_from` or `true_since` in
+the past.
+
+---
+
 ## `reembed()` needs the store to itself, and every store keeps a `<db>.lock` file
 
 ### What changed

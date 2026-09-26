@@ -135,16 +135,21 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   of the earlier period returned nothing. The write now stores a claim for the earlier
   period, ending where the stored claim begins, and reports it under `added`. That is the
   rule a single-valued slot already applied to a different value that began before the
-  live one, and it applies to every predicate. Restating a period the store already
-  holds, such as the same earlier start a second time, reinforces the claim for that
-  period and stores nothing; restating from a start earlier still stores only the part
-  not yet held. Only stored claims the writer can see are compared: those in its own
-  scope and in the broader scopes it reads, never those of a sibling project, agent or
-  session. The stored claim is not changed, so a read of the past as the store believed
-  it before the write returns what it did. A repeat that names `expires_at` is still a
-  repeat, so the expiry lands on the claim on record. `memory_remember`'s reply no longer
-  says such a fact stopped being true where the stored claim begins; it says the same
-  value is stored from there. #283.
+  live one, and it applies to every predicate. The stored claim is not changed, so a read
+  of the past as the store believed it before the write returns what it did. #283.
+  - Only stored claims the writer can see are compared: those in its own scope and in
+    the broader scopes it reads, never those of a sibling project, agent or session.
+  - Restating a period the store already holds, such as the same earlier start a second
+    time, reinforces the claim for that period and stores nothing. Restating from a
+    start earlier still stores only the part not yet held.
+  - A repeat that names `expires_at` is still a repeat, so the expiry lands on the claim
+    on record.
+  - `memory_remember`'s reply no longer says such a fact stopped being true where the
+    stored claim begins; it says the same value is stored from there.
+  - **Not covered yet: a turn that `add()` takes for a repeat in tier 0**, before
+    extraction and so before the reconciler. A turn that embeds as a near-duplicate of a
+    stored claim, or whose text is exactly that of the turn a claim came from, still
+    reinforces that claim, and its earlier date is lost. #318 tracks this.
 
 ## [0.16.0] — 2026-09-25
 
