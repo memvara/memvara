@@ -19,15 +19,35 @@ explains how the run works and how each detector is shown to fire.
 from __future__ import annotations
 
 import random
+import statistics
 import sys
+import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import evalkit  # noqa: E402
+import perf_budget  # noqa: E402
+
+from memvara import Memvara, NullLLM  # noqa: E402
+from memvara.redact import EPISODE, PatternRedactor  # noqa: E402
 from memvara.schema import BUILTIN_PREDICATES  # noqa: E402
+from memvara.select import PLAIN_READ  # noqa: E402
+from memvara.telemetry import (  # noqa: E402
+    CONSOLIDATE_MERGED,
+    GATE_DROP,
+    GATE_PASS,
+    REDACT_CHANGED,
+    REDACT_INSPECTED,
+    RETRIEVAL_OBSERVATION_RANK_CORR,
+    RETRIEVAL_QUALITY_FACTOR,
+    WRITE_RETRACTION,
+    WRITE_TURNS,
+    MemoryRecorder,
+)
 
 # --- the workload -------------------------------------------------------------------------
 
@@ -361,3 +381,369 @@ class _World:
                 yield self._turn("panel", text=PANEL_QUERY)
             else:
                 yield self._turn("recall", text=self.rng.choice(RECALL_PROMPTS))
+
+
+# --- running a soak -----------------------------------------------------------------------
+
+#: The user every write and read of a soak belongs to. One user, at the user level, keeps
+#: the soak clear of the open bugs about narrower scopes (see tests/harness/known_bugs.py).
+USER = "soak"
+
+#: Bytes in one SQLite page: the smallest growth a store file can show, and so the floor
+#: an increase in store growth must pass, as 2 ms is for a timing.
+PAGE_BYTES = 4096
+
+
+class SoakRecorder(MemoryRecorder):
+    """`MemoryRecorder`, plus the rank correlations emitted while `capture` is a list.
+
+    The soak needs the correlations of its panel reads apart from those of every other
+    search, and a recorder cannot tell which search emitted a value. The run points
+    `capture` at a list around each panel read, which costs nothing per value.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.capture: list[float] | None = None
+
+    def gauge(self, name: str, value: float, /, **tags: str) -> None:
+        super().gauge(name, value, **tags)
+        if self.capture is not None and name == RETRIEVAL_OBSERVATION_RANK_CORR:
+            self.capture.append(float(value))
+
+
+@dataclass
+class Observations:
+    """What one soak recorded, which is everything the detectors read.
+
+    `crowded` lists the single-valued slots seen holding more than one live claim at any
+    check, each with the most it held. `gate` maps a script to `[reached, passed]` over
+    the fact-carrying turns that reached the gate. `planted` holds, for each turn carrying
+    planted personal data, its simulated day and whether the redactor changed it.
+    `store_bytes` is None for a store kept in memory.
+    """
+
+    config: SoakConfig
+    recorder: SoakRecorder
+    predicates: set[str]
+    crowded: list[tuple[str, str, int]]
+    panel_correlations: list[float]
+    probes: int
+    probe_hits: int
+    gate: dict[str, list[int]]
+    planted: list[tuple[int, bool]]
+    unplanted_changed: int
+    store_bytes: int | None
+    elapsed_s: float
+
+
+def run(config: SoakConfig, path: Path | None, *,
+        options: Mapping[str, Any] | None = None) -> Observations:
+    """Drive a new store through `config.turns` turns of the workload, and observe it.
+
+    `path` is where the store is created, and must not exist yet; None keeps the store in
+    memory, which observes everything except store growth. `options` replace the keyword
+    arguments `Memvara` is built with, which is how a test gives a run a configuration
+    fault: another `registry`, a ranking weight such as `read_w_salience`, or
+    `redactor=None`.
+
+    The turns are spread over `config.span` of simulated time ending when the run starts,
+    so each turn's valid time is in the past. Transaction time is the wall clock, because
+    that is what `add()` records, and for that reason consolidation also runs at the wall
+    clock: a pass only sees claims recorded at or before its own instant.
+    """
+    if path is not None and Path(path).exists():
+        raise FileExistsError(f"{path} already exists; a soak starts from an empty store, "
+                              "so that its growth and its slots hold only what it wrote")
+    rec = SoakRecorder()
+    settings: dict[str, Any] = {
+        "embedder": evalkit.build_embedder("hashing"), "llm": NullLLM(), "user": USER,
+        "telemetry": rec, "redactor": PatternRedactor(), **PLAIN_READ}
+    settings.update(options or {})
+    mem = Memvara(str(path) if path is not None else ":memory:", **settings)
+    observed = Observations(config=config, recorder=rec, predicates=set(), crowded=[],
+                            panel_correlations=[], probes=0, probe_hits=0, gate={},
+                            planted=[], unplanted_changed=0, store_bytes=None,
+                            elapsed_s=0.0)
+    crowded: dict[str, tuple[str, str, int]] = {}
+    origin = datetime.now(timezone.utc).replace(microsecond=0) - config.span
+    step = config.span / config.turns
+    began = time.perf_counter()
+    try:
+        for turn in Workload(config):
+            _execute(mem, rec, turn, origin + step * turn.index, observed)
+            if (turn.index + 1) % config.per_day == 0:
+                mem.consolidate()
+                _count_slots(mem, crowded)
+        _count_slots(mem, crowded)
+        observed.predicates = {claim.predicate for claim in
+                               mem.get_all(states=("live", "ended", "retired"))}
+    finally:
+        mem.close()
+    observed.elapsed_s = time.perf_counter() - began
+    observed.crowded = sorted(crowded.values())
+    if path is not None:
+        observed.store_bytes = store_bytes(Path(path))
+    return observed
+
+
+def _counts(rec: MemoryRecorder) -> tuple[int, int, int]:
+    """Gate passes, gate drops and redacted turns so far."""
+    return (rec.total(GATE_PASS), rec.total(GATE_DROP),
+            rec.total(REDACT_CHANGED, field=EPISODE))
+
+
+def _execute(mem: Memvara, rec: SoakRecorder, turn: Turn, at: datetime,
+             observed: Observations) -> None:
+    """Perform one turn at simulated time `at`, and note what the detectors need."""
+    if turn.kind == "say":
+        before = _counts(rec)
+        mem.add(turn.text, ts=at)
+        passed, dropped, changed = (a - b for a, b in zip(_counts(rec), before))
+        if turn.fact and passed + dropped:
+            seen = observed.gate.setdefault(turn.script, [0, 0])
+            seen[0] += 1
+            seen[1] += passed
+        if turn.planted:
+            observed.planted.append((turn.index // observed.config.per_day, changed > 0))
+        elif changed:
+            observed.unplanted_changed += 1
+    elif turn.kind == "remember":
+        mem.remember(turn.subject, turn.predicate, turn.obj, polarity=turn.polarity,
+                     valid_from=at)
+    elif turn.kind == "probe":
+        results = mem.search(turn.text, k=10, **PLAIN_READ)
+        observed.probes += 1
+        if results:
+            top = results[0].claim
+            observed.probe_hits += (top.subject, top.predicate, top.object) == turn.gold
+    elif turn.kind == "panel":
+        rec.capture = observed.panel_correlations
+        try:
+            mem.search(turn.text, k=PANEL, **PLAIN_READ)
+        finally:
+            rec.capture = None
+    else:
+        mem.recall(turn.text, **PLAIN_READ)
+
+
+def _count_slots(mem: Memvara, crowded: dict[str, tuple[str, str, int]]) -> None:
+    """Note every single-valued slot now holding more than one live claim.
+
+    Single-valued by the workload's `VOCABULARY`, not by the registry, so a registry that
+    has lost a predicate's cardinality is caught rather than consulted.
+    """
+    live: dict[str, list[Any]] = {}
+    for claim in mem.get_all():
+        if VOCABULARY.get(claim.predicate):
+            live.setdefault(claim.fact_key, []).append(claim)
+    for key, claims in live.items():
+        if len(claims) > 1 and len(claims) > crowded.get(key, ("", "", 0))[2]:
+            crowded[key] = (claims[0].subject, claims[0].predicate, len(claims))
+
+
+def store_bytes(path: Path) -> int:
+    """The size on disk of the store at `path`: the database and every file beside it
+    whose name starts with the database's, such as its write-ahead log and vector file."""
+    return sum(p.stat().st_size for p in path.parent.iterdir()
+               if p.name.startswith(path.name) and p.is_file())
+
+
+# --- the detectors ------------------------------------------------------------------------
+
+OK, FAIL, TRACKED = "ok", "fail", "tracked"
+
+#: The design's thresholds, one per detector.
+PREDICATE_HEADROOM = 1.1
+RELEVANT_FIRST = 0.95
+SCRIPT_RATIO = 0.8
+REDACTION_RATIO = 0.99
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One detector's verdict on one soak.
+
+    `status` is `ok`, `fail`, or `tracked` for a detector that reports without failing.
+    `value` is what was measured and `threshold` what it was held against. `flagged` names
+    what the finding singles out: predicates outside the vocabulary, crowded slots, or
+    scripts the gate treats worse than Latin.
+    """
+
+    detector: str
+    status: str
+    value: float | None
+    threshold: float | None
+    detail: str
+    flagged: tuple[str, ...] = ()
+
+
+def predicate_explosion(obs: Observations) -> Finding:
+    """More distinct predicates than 1.1 times the vocabulary the workload writes."""
+    name, limit = "predicate explosion", PREDICATE_HEADROOM * len(VOCABULARY)
+    count = len(obs.predicates)
+    if not count:
+        return Finding(name, FAIL, None, limit, "not measured: the store holds no claim, "
+                       "so no predicate was counted")
+    extra = tuple(sorted(obs.predicates - set(VOCABULARY)))
+    detail = f"{count} distinct predicates against a vocabulary of {len(VOCABULARY)}"
+    if extra:
+        detail += f"; outside the vocabulary: {', '.join(extra)}"
+    return Finding(name, FAIL if count > limit else OK, float(count), limit, detail, extra)
+
+
+def recency_refresh(obs: Observations) -> Finding:
+    """The median rank correlation of the panel reads, which must stay above zero."""
+    name, values = "recency refresh", obs.panel_correlations
+    if not values:
+        return Finding(name, FAIL, None, 0.0, "not measured: no panel read produced a "
+                       "rank correlation, so whether restated facts rank higher was not "
+                       "checked")
+    median = statistics.median(values)
+    detail = (f"median rank correlation {median:+.3f} over {len(values)} panel reads: "
+              f"facts restated more often {'rank' if median > 0 else 'do not rank'} "
+              "higher")
+    return Finding(name, FAIL if median <= 0 else OK, median, 0.0, detail)
+
+
+def flip_flop(obs: Observations) -> Finding:
+    """A single-valued slot holding more than one live claim, or no merge at all."""
+    name, rec = "flip-flop row growth", obs.recorder
+    if CONSOLIDATE_MERGED not in rec.names():
+        return Finding(name, FAIL, None, 1.0, "not measured: no consolidation pass ran, "
+                       "so no slot was counted")
+    merged = rec.total(CONSOLIDATE_MERGED)
+    worst = max((count for _, _, count in obs.crowded), default=1)
+    flagged = tuple(f"{subject} {predicate}" for subject, predicate, _ in obs.crowded)
+    problems = []
+    if obs.crowded:
+        problems.append(f"{len(obs.crowded)} single-valued slots held more than one live "
+                        f"claim, at most {worst}")
+    if not merged:
+        problems.append("consolidation merged nothing, though the workload plants "
+                        "near-duplicates for it")
+    detail = "; ".join(problems) or (
+        f"every single-valued slot held at most one live claim, and consolidation merged "
+        f"{merged} near-duplicates")
+    return Finding(name, FAIL if problems else OK, float(worst), 1.0, detail, flagged)
+
+
+def salience_over_relevance(obs: Observations) -> Finding:
+    """How often a probe's relevant claim ranked first, which must be 95% or more."""
+    name = "salience over relevance"
+    if not obs.probes:
+        return Finding(name, FAIL, None, RELEVANT_FIRST, "not measured: no probe ran")
+    rate = obs.probe_hits / obs.probes
+    quality = obs.recorder.values(RETRIEVAL_QUALITY_FACTOR)
+    above = sum(1 for value in quality if value > 1.0)
+    detail = (f"the relevant claim ranked first in {obs.probe_hits} of {obs.probes} "
+              f"probes; {above} of {len(quality)} results had a quality factor above 1.0")
+    return Finding(name, FAIL if rate < RELEVANT_FIRST else OK, rate, RELEVANT_FIRST,
+                   detail)
+
+
+def script_bias(obs: Observations) -> Finding:
+    """Each script's gate pass rate against the Latin rate. Tracked, never failed: the
+    gate's vocabulary is English by design (docs/LIMITATIONS.md)."""
+    name = "script bias in the gate"
+    rates = {script: passed / reached for script, (reached, passed) in obs.gate.items()
+             if reached}
+    latin = rates.get("latin")
+    if not latin:
+        return Finding(name, TRACKED, None, SCRIPT_RATIO, "not measured: no Latin fact "
+                       "reached the gate, so there is no rate to compare with")
+    ratios = {script: rate / latin for script, rate in rates.items() if script != "latin"}
+    flagged = tuple(sorted(s for s, ratio in ratios.items() if ratio < SCRIPT_RATIO))
+    detail = "gate pass rate of fact-carrying turns: " + ", ".join(
+        f"{script} {rate:.0%}" for script, rate in sorted(rates.items()))
+    detail += (f"; below {SCRIPT_RATIO} times the Latin rate: {', '.join(flagged)}"
+               if flagged else f"; no script below {SCRIPT_RATIO} times the Latin rate")
+    return Finding(name, TRACKED, min(ratios.values(), default=None), SCRIPT_RATIO,
+                   detail, flagged)
+
+
+def retraction_noop(obs: Observations) -> Finding:
+    """A retraction that closed nothing, which must not happen at all."""
+    name, rec = "retraction that retires nothing", obs.recorder
+    noop = rec.total(WRITE_RETRACTION, outcome="noop")
+    closed = rec.total(WRITE_RETRACTION, outcome="retired")
+    if not noop + closed:
+        return Finding(name, FAIL, None, 0.0, "not measured: no retraction was counted")
+    detail = f"{closed} retractions closed a value and {noop} closed nothing"
+    return Finding(name, FAIL if noop else OK, float(noop), 0.0, detail)
+
+
+def redaction_drift(obs: Observations) -> Finding:
+    """The share of turns with planted personal data that the redactor changed, per
+    simulated day. Every day must reach 0.99."""
+    name, rec = "redaction drift", obs.recorder
+    turns = rec.total(WRITE_TURNS)
+    if turns and REDACT_INSPECTED not in rec.names():
+        return Finding(name, FAIL, None, REDACTION_RATIO, f"not running: {turns} turns "
+                       "were written and no string was offered to the redactor, so the "
+                       "deployment has lost its policy")
+    if not obs.planted:
+        return Finding(name, FAIL, None, REDACTION_RATIO, "not measured: no turn carried "
+                       "planted personal data")
+    days: dict[int, list[bool]] = {}
+    for day, changed in obs.planted:
+        days.setdefault(day, []).append(changed)
+    ratios = {day: sum(changed) / len(changed) for day, changed in days.items()}
+    worst = min(sorted(ratios), key=lambda day: ratios[day])
+    caught = sum(changed for _, changed in obs.planted)
+    detail = (f"the redactor changed {caught} of {len(obs.planted)} turns carrying "
+              f"planted personal data; the lowest day was day {worst + 1}, at "
+              f"{ratios[worst]:.0%}")
+    if obs.unplanted_changed:
+        detail += f"; it also changed {obs.unplanted_changed} turns with nothing planted"
+    return Finding(name, FAIL if ratios[worst] < REDACTION_RATIO else OK, ratios[worst],
+                   REDACTION_RATIO, detail)
+
+
+def store_growth(obs: Observations, history: Sequence[float],
+                 remeasure: Callable[[], float]) -> Finding:
+    """Bytes on disk per turn, judged against earlier soaks by the regression rule.
+
+    `history` holds the bytes per turn of earlier soaks with the same turns and seed,
+    oldest first. `remeasure` runs the soak again and returns its bytes per turn; it is
+    called only when the first two conditions of the rule hold.
+    """
+    name = "store growth"
+    if obs.store_bytes is None:
+        return Finding(name, TRACKED, None, None, "not measured: the store was in memory, "
+                       "so there are no files to measure")
+    turns = obs.config.turns
+    per_turn = obs.store_bytes / turns
+    verdict = perf_budget.judge(per_turn, history, remeasure, floor=PAGE_BYTES / turns)
+    if verdict.outcome == "no history":
+        return Finding(name, TRACKED, per_turn, None,
+                       f"{per_turn:,.0f} bytes a turn; not judged yet: {verdict.detail}")
+    limit = None if verdict.median is None else perf_budget.REGRESSION_RATIO * verdict.median
+    return Finding(name, FAIL if verdict.outcome == "regression" else OK, per_turn, limit,
+                   f"{per_turn:,.0f} bytes a turn; {verdict.outcome}: {verdict.detail}")
+
+
+#: Every detector that reads only the run itself, in the order the design lists them.
+DETECTORS: tuple[Callable[[Observations], Finding], ...] = (
+    predicate_explosion, recency_refresh, flip_flop, salience_over_relevance, script_bias,
+    retraction_noop, redaction_drift,
+)
+
+
+def _cannot_remeasure() -> float:
+    raise AssertionError("unreachable: judge_soak refuses history without remeasure")
+
+
+def judge_soak(obs: Observations, *, history: Sequence[float] = (),
+               remeasure: Callable[[], float] | None = None) -> list[Finding]:
+    """Every detector's finding on `obs`, store growth last.
+
+    Store growth is compared with `history` only when a way to measure again is given,
+    because the rule's third condition is a re-measure.
+    """
+    if history and remeasure is None:
+        raise ValueError("comparing store growth with earlier soaks needs a way to measure "
+                         "it again: pass remeasure")
+    findings = [detector(obs) for detector in DETECTORS]
+    findings.append(store_growth(obs, history, remeasure or _cannot_remeasure))
+    return findings
