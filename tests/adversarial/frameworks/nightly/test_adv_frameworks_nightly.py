@@ -24,7 +24,8 @@ from packaging.utils import canonicalize_name
 from harness import known_bugs
 
 from .. import environments, probe
-from . import checks_crewai, checks_langchain, checks_langgraph, checks_llamaindex
+from . import (checks_crewai, checks_langchain, checks_langgraph, checks_llamaindex,
+               checks_mem0)
 
 #: Each framework's checks, which the probe runs in that framework's environments.
 CHECKS: dict[str, Any] = {
@@ -32,6 +33,7 @@ CHECKS: dict[str, Any] = {
     "llamaindex": checks_llamaindex,
     "crewai": checks_crewai,
     "langgraph": checks_langgraph,
+    "mem0": checks_mem0,
 }
 
 ENVIRONMENTS = [pytest.param(name, pin, id=f"{name}-{pin}")
@@ -40,15 +42,20 @@ ENVIRONMENTS = [pytest.param(name, pin, id=f"{name}-{pin}")
 
 @dataclass(frozen=True)
 class Symptom:
-    """What one known bug's failure looks like: its exception type and part of its
-    message. A failure with anything else is not that bug."""
+    """What one known bug's failure looks like: its exception type and its message, or a
+    part of it. A failure with anything else is not that bug."""
 
     error_type: str
     text: str
+    #: Whether the message must be exactly `text`, rather than contain it. A message that
+    #: lists every difference found must match whole, or a new difference added to the
+    #: end of the list would pass as the known bug.
+    whole: bool = False
 
     def seen_in(self, result: probe.Result) -> bool:
-        return (not result.passed and result.error_type == self.error_type
-                and self.text in result.message)
+        if result.passed or result.error_type != self.error_type:
+            return False
+        return result.message == self.text if self.whole else self.text in result.message
 
 
 #: Checks that fail today because of a known bug: (framework, pin, check) -> the bug's
@@ -75,6 +82,75 @@ PINNED: dict[tuple[str, str, str], tuple[pytest.MarkDecorator, Symptom]] = {
     ("crewai", "latest", "a_repeated_memory_reaches_crewais_consolidation"): (
         known_bugs.xfail("B85"),
         Symptom("AssertionError", "CrewAI asked its model to consolidate 0 times")),
+    # mem0 2.x's add() requires one of the entity ids and its delete_all() takes them,
+    # and its search() and get_all() refuse them with ValueError, not TypeError.
+    ("mem0", "floor", "add_and_delete_all_take_the_entity_ids_mem0_takes"): (
+        known_bugs.xfail("B80"),
+        Symptom("TypeError", "mem0 2.x moved entity ids into filters=")),
+    ("mem0", "latest", "add_and_delete_all_take_the_entity_ids_mem0_takes"): (
+        known_bugs.xfail("B80"),
+        Symptom("TypeError", "mem0 2.x moved entity ids into filters=")),
+    ("mem0", "floor", "search_and_get_all_refuse_entity_ids_as_mem0_does"): (
+        known_bugs.xfail("B80"),
+        Symptom("AssertionError", "the shim's search raises TypeError where mem0 raises "
+                "ValueError", whole=True)),
+    ("mem0", "latest", "search_and_get_all_refuse_entity_ids_as_mem0_does"): (
+        known_bugs.xfail("B80"),
+        Symptom("AssertionError", "the shim's search raises TypeError where mem0 raises "
+                "ValueError", whole=True)),
+    # What mem0 has and the shim lacks grew between 2.0.0 and the newest release, so each
+    # pin lists its own.
+    ("mem0", "floor", "the_shim_takes_every_method_and_argument_mem0_takes"): (
+        known_bugs.xfail("B81"),
+        Symptom("AssertionError", "missing from the shim: close(), "
+                "from_config(config_dict=), update(metadata=)", whole=True)),
+    ("mem0", "latest", "the_shim_takes_every_method_and_argument_mem0_takes"): (
+        known_bugs.xfail("B81"),
+        Symptom("AssertionError", "missing from the shim: __enter__(), __exit__(), "
+                "add(expiration_date=), add(timestamp=), close(), from_config(config_dict=), "
+                "get_all(show_expired=), search(reference_date=), search(show_expired=), "
+                "update(expiration_date=), update(metadata=)", whole=True)),
+    ("mem0", "floor", "every_row_carries_mem0s_memoryitem_fields"): (
+        known_bugs.xfail("B81"),
+        Symptom("AssertionError", "fields mem0's rows carry and the shim's do not: "
+                "{'get': ['score']}", whole=True)),
+    ("mem0", "latest", "every_row_carries_mem0s_memoryitem_fields"): (
+        known_bugs.xfail("B81"),
+        Symptom("AssertionError", "fields mem0's rows carry and the shim's do not: "
+                "{'get': ['score']}", whole=True)),
+    ("mem0", "floor", "update_and_from_config_refuse_with_mem0compaterror"): (
+        known_bugs.xfail("B81"),
+        Symptom("TypeError", "got an unexpected keyword argument 'metadata'")),
+    ("mem0", "latest", "update_and_from_config_refuse_with_mem0compaterror"): (
+        known_bugs.xfail("B81"),
+        Symptom("TypeError", "got an unexpected keyword argument 'metadata'")),
+    ("mem0", "floor", "defaults_match_mem0s_except_the_documented_threshold"): (
+        known_bugs.xfail("B82"),
+        Symptom("AssertionError", "defaults that differ from mem0's: get_all(top_k=100, "
+                "mem0 20), search(top_k=10, mem0 20)", whole=True)),
+    ("mem0", "latest", "defaults_match_mem0s_except_the_documented_threshold"): (
+        known_bugs.xfail("B82"),
+        Symptom("AssertionError", "defaults that differ from mem0's: get_all(top_k=100, "
+                "mem0 20), search(top_k=10, mem0 20)", whole=True)),
+    # mem0 writes the time of an UPDATE or DELETE in updated_at, and the importer reads
+    # the memory's creation time in created_at instead, then sorts on it, so the random
+    # row id decides whether an update is replayed before its ADD.
+    ("mem0", "floor", "import_mem0_dates_each_event_when_mem0_recorded_it"): (
+        known_bugs.xfail("B86"),
+        Symptom("AssertionError", "the import dated mem0's update at 2024-03-01 and its "
+                "delete at 2024-03-02")),
+    ("mem0", "latest", "import_mem0_dates_each_event_when_mem0_recorded_it"): (
+        known_bugs.xfail("B86"),
+        Symptom("AssertionError", "the import dated mem0's update at 2024-03-01 and its "
+                "delete at 2024-03-02")),
+    ("mem0", "floor", "import_mem0_replays_each_event_after_the_add_it_changes"): (
+        known_bugs.xfail("B86"),
+        Symptom("AssertionError", "after the import the live values are ['Alice likes "
+                "tea', 'Alice lives in Berlin'], not only the updated value", whole=True)),
+    ("mem0", "latest", "import_mem0_replays_each_event_after_the_add_it_changes"): (
+        known_bugs.xfail("B86"),
+        Symptom("AssertionError", "after the import the live values are ['Alice likes "
+                "tea', 'Alice lives in Berlin'], not only the updated value", whole=True)),
 }
 
 
@@ -101,6 +177,15 @@ def _verify(frameworks: environments.Session, name: str, pin: str, check: str) -
         detail += f"\n\nThe probe's exit status was {probed.exit_code}, and its output ends:\n"
         detail += probed.output
     assert result.passed, detail
+
+
+def test_every_framework_has_its_checks() -> None:
+    """A framework added to `environments.FRAMEWORKS` without a checks module here would
+    never be tested, and nothing else would say so."""
+    assert set(CHECKS) == {framework.name for framework in environments.FRAMEWORKS}
+    for name, module in CHECKS.items():
+        assert Path(module.__file__) == environments.framework(name).checks
+        assert probe.checks(module), f"{name} has no checks"
 
 
 @pytest.mark.parametrize("name, pin", ENVIRONMENTS)
