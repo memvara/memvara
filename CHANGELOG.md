@@ -94,6 +94,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     unclassified break waits for the scheduled session that follows the run, which
     classifies it. A watchdog started by launchd writes a "did not run" report when a
     night is missed. Nothing in the run merges anything.
+  - **Hook conformance.** `tests/adversarial/hooks/` runs every plugin hook the way each
+    of the five hosts runs it, with the payload that host sends, and checks the reply
+    envelope the host reads, where the hooks find the store, the five outcomes of session
+    start and recall, deduplication, the recall daemon, the generated registration, the
+    time limits, the approve list, and capture's log. Every hook must exit 0 and answer
+    within its limit on hostile payloads: empty or invalid input, 8 MB, and nesting
+    100,000 levels deep. Twelve bugs it found are pinned as strict expected failures,
+    #337 to #348.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 - **`Store.unended_claims`, `store.unended_predicate()` and `Claim.is_unended()`.**
   `forget()` closes every value in a slot that the store believes and that has not ended
