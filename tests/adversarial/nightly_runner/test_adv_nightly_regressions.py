@@ -292,6 +292,13 @@ def test_the_layers_count_tests_that_ran_and_tests_that_failed() -> None:
                                            "unit": {"run": 2, "failed": 2}}
 
 
+def test_a_finding_a_step_reported_may_be_filed_as_it_stands() -> None:
+    """A step such as the red team confirms its own findings, by replaying each three
+    times, before it writes them down; they are not rerun here and may be filed."""
+    finding = Finding("redteam", "server", "scope isolation", ops=("call memory_search",))
+    assert regressions.Failure(finding, "finding", (), "confirmed").fileable
+
+
 def test_a_failure_survives_the_report_and_comes_back_whole() -> None:
     """The filing command reads the night's failures back from report.json, and must get
     the same finding, or it would file under the wrong fingerprint."""

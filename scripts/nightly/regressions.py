@@ -113,8 +113,9 @@ class Failure:
     """One failure of the night: its finding, its kind, and what its reruns said."""
 
     finding: Finding
-    #: "test", "xpass-strict" (a strict expected failure passed) or "session" (the run
-    #: failed outside any test).
+    #: "test", "xpass-strict" (a strict expected failure passed), "session" (the run
+    #: failed outside any test), or "finding" (a step wrote it, and confirmed it before
+    #: it did, as the red team does by replaying a break three times).
     kind: str
     reruns: tuple[str, ...]
     verdict: str
@@ -125,8 +126,9 @@ class Failure:
 
     @property
     def fileable(self) -> bool:
-        """Only a test that failed every time is a break that may be filed."""
-        return self.kind == "test" and self.verdict == "confirmed"
+        """Only a confirmed break may be filed: a test that failed every time, or a
+        finding its step confirmed."""
+        return self.kind in ("test", "finding") and self.verdict == "confirmed"
 
     def to_record(self) -> dict[str, Any]:
         """The failure as report.json keeps it."""

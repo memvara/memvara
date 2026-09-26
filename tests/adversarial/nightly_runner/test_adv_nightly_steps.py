@@ -161,6 +161,25 @@ def test_a_step_that_is_not_built_says_why(tmp_path: pathlib.Path) -> None:
     assert "scripts/nightly/run.py" in second[0].summary
 
 
+def test_the_worktree_a_step_waits_in_can_be_created_by_an_earlier_step(
+        tmp_path: pathlib.Path) -> None:
+    """Preflight creates the worktree, so the check for a step's file must look at the
+    worktree when that step is reached, not when the night began."""
+    created: dict[str, pathlib.Path] = {}
+
+    def preflight(context: Any, deadline: float) -> steps.Outcome:
+        (tmp_path / "bench").mkdir()
+        (tmp_path / "bench" / "soak.py").write_text("")
+        created["worktree"] = tmp_path
+        return steps.Outcome(steps.PASSED)
+
+    results = steps.run_steps(
+        [steps.Step("preflight", 60.0, preflight),
+         steps.Step("soak", 60.0, waits_for="bench/soak.py", not_built="not landed")],
+        context=None, worktree=lambda: created.get("worktree"))
+    assert "bench/soak.py has landed" in results[1].summary
+
+
 def test_after_an_essential_step_fails_the_steps_after_it_are_not_run(
         tmp_path: pathlib.Path, child: dict[str, str]) -> None:
     """With no worktree or no virtual environment, every later step would fail for the

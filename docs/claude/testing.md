@@ -378,6 +378,48 @@ These two checks keep the baseline equal to today's gaps, in both directions. Th
 
 The nightly run turns what the slow tiers find into a report and, for each new break, one issue. The plan is `docs/superpowers/plans/2026-09-26-adversarial-nightly.md`.
 
+### Running a night
+
+`scripts/nightly/run.py` runs one night. Its first act is to write the night's heartbeat. Its preflight step then hashes the operator's protected files for the isolation canary, removes the worktrees earlier nights left (unless one holds uncommitted work), fetches `origin`, adds a clean, detached worktree of `origin/main` at `local/nightly/<date>/worktree`, and builds a virtual environment inside it with `.[dev,cloud,ingest,encrypt]`, as CI does. After that it runs the design's steps in order, each within its own cap:
+
+| Step | Cap | Built |
+|---|---|---|
+| preflight | 20 minutes | yes |
+| regressions | 75 minutes: the test run may use 60, and the reruns of failed tests get the rest | yes |
+| agents | 20 minutes | no: waits for `tests/live/agents` |
+| red team | 25 minutes | no: waits for `tests/live/redteam` |
+| hosted | 15 minutes | no: waits for `tests/live/stack.py` |
+| production smoke | 5 minutes | no: waits for `tests/live/prod_smoke.py` |
+| performance | 15 minutes | no: waits for `bench/perf_budget.py` |
+| soak | 20 minutes | no: waits for `bench/soak.py` |
+| mutation | 15 minutes | no: waits for `bench/mutation.py` |
+| replay | 10 minutes | no: waits for `tests/live/replay.py` |
+
+A step that is not built appears in every report with its reason. When the file it waits for lands on `main`, the report says so, and the step's command still has to be added to `STEPS` in `scripts/nightly/run.py`. The caps of the unbuilt steps are placeholders for the work that builds them. A full `pytest --tier nightly` run took 16 minutes 37 seconds on a laptop on 2026-09-26, with other test suites running beside it, so the regressions cap leaves room.
+
+The run writes these files in `local/nightly/<date>/` in the main checkout, however it was started:
+
+- `report.md` for a person and `report.json` for a program. They list every step with its result, time and cap, every new, recurred and known break with what filing it still needs and the exact commands, the failures that need a person, the flakes, the flake rate of each layer, the canary, the dependencies and the notifications sent.
+- `findings.jsonl`, every break the night saw, one `Finding` per line.
+- One folder per step with its output; `regressions/results.jsonl` holds one line per test.
+- `heartbeat.json`, which the watchdog reads.
+
+It also adds one record per night to `local/nightly/history.jsonl`: the commit, each step's result, each layer's tests, failures and flaky tests, the fingerprints of the confirmed breaks, the dependencies and the canary. A later night reads it to recognise a break it has seen, to measure flake rates, and to notice a dependency that stays down. A step that raises costs only that step. If the run's own code crashes, it still writes the report, marked as crashed, and leaves the heartbeat without a finish, so the watchdog reports the night too.
+
+A step can report findings of its own by writing `findings.jsonl` into its folder. The run counts each as a confirmed break, because the step confirms a finding before it writes it, as the red team will by replaying it three times. Only a finding its step has classified can be filed without a person: with `--file`, a security-class one goes to a private draft advisory and any other one to an issue.
+
+To run a night by hand, from the main checkout:
+
+```bash
+python3 scripts/nightly/run.py                      # tonight, filing as a dry run
+python3 scripts/nightly/run.py --date 2026-09-27    # a named night, such as one the watchdog reported
+python3 scripts/nightly/run.py --worktree <checkout> --python <interpreter> --no-notify
+```
+
+The last form tests an existing checkout with an existing interpreter, and sends no notification. It is for a supervised run, and the report says the checkout was given rather than fresh. `--canary PATH` adds a file to the canary, and `--file` turns filing on.
+
+Notifications go out only for a new or recurred break, for an isolation breach (a file the canary watches changed during the night), and for a dependency such as `origin` that is down for the second night in a row. The canary watches `~/.memvara/credentials.json` and `~/.memvara/db.key` by default. It keeps only their hashes, never their contents.
+
 ### Findings
 
 A finding is the record of one break. `tests/harness/report.py` defines it as `Finding`, and a file of findings holds one JSON line per finding. A finding has these fields:
@@ -456,7 +498,7 @@ Each failed test becomes a finding (`scripts/nightly/regressions.py`). Its invar
 
 `scripts/nightly/filing.py` files a confirmed break, and it is a dry run unless `--file` is given: a dry run calls nothing, and prints the exact commands a real run would send. Nothing in the suite calls GitHub; the tests replay the output of `gh` and `git` from `tests/adversarial/nightly_runner/gh_recorded.json`.
 
-- **A public break** gets one issue with the label `nightly-break`. The issue's body ends with a hidden marker, `<!-- memvara-nightly-fingerprint: <fingerprint> -->`. Before filing, the run reads every issue with the label and compares their markers, so a break that was filed before is not filed again, even when the local history is lost. Then a branch named `test/nightly-<first 12 characters of the fingerprint>` is pushed with the strict-xfail test, by an explicit refspec that cannot reach `main`, and a draft pull request is opened. Nothing is merged.
+- **A public break** gets one issue with the label `nightly-break`. The issue's body ends with a hidden marker, `<!-- memvara-nightly-fingerprint: <fingerprint> -->`. Before filing, the run reads every issue with the label and compares their markers, so a break that was filed before is not filed again, even when the local history is lost; a break whose issue is closed is reported as recurred, and notified like a new one. Then a branch named `test/nightly-<first 12 characters of the fingerprint>` is pushed with the strict-xfail test, by an explicit refspec that cannot reach `main`, and a draft pull request is opened. Nothing is merged.
 - **A security-class break** gets a private draft advisory whose description carries the marker, and nothing else: no issue, no branch and no pull request, because its failing test lands together with its fix.
 - **An unclassified break** is filed nowhere public. A failed test from the regressions step is always unclassified, so the scheduled session checks it against the "In scope" section of `SECURITY.md` first, and then files it with the class it chose:
 

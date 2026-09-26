@@ -137,21 +137,26 @@ def _kill_group(group: int) -> None:
             pass
 
 
-def run_steps(steps: Sequence[Step], context: Any, *, worktree: Path | None = None,
+def run_steps(steps: Sequence[Step], context: Any, *,
+              worktree: Path | Callable[[], Path | None] | None = None,
               clock: Callable[[], float] = time.monotonic) -> list[StepResult]:
     """Run `steps` in order and report each one.
 
-    A step with no code is "not built yet", with its reason. After an essential step that
-    did not pass, every later step with code is "not run", naming that step. A step that
-    raises is an "error", and the night goes on. A step that returns after its cap ended
-    is "timed out", because work in this process cannot be stopped at the cap.
+    A step with no code is "not built yet", with its reason. `worktree` is the tested
+    checkout, where a step's `waits_for` file is looked for; it may be a function, called
+    when the step is reached, because preflight creates the worktree during the night.
+    After an essential step that did not pass, every later step with code is "not run",
+    naming that step. A step that raises is an "error", and the night goes on. A step that
+    returns after its cap ended is "timed out", because work in this process cannot be
+    stopped at the cap.
     """
     results: list[StepResult] = []
     blocked_by: str | None = None
     for step in steps:
         if step.run is None:
+            root = worktree() if callable(worktree) else worktree
             results.append(StepResult(step.name, NOT_BUILT, 0.0, step.cap,
-                                      _not_built(step, worktree)))
+                                      _not_built(step, root)))
             continue
         if blocked_by is not None:
             results.append(StepResult(
