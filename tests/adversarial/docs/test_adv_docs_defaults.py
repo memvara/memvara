@@ -7,7 +7,7 @@ model the opposite of what will happen, and the model cannot check.
 
 from __future__ import annotations
 
-import json
+import functools
 from typing import Any, Collection
 
 import pytest
@@ -16,7 +16,7 @@ from harness import known_bugs
 from memvara.server.tools import TOOLS
 
 from .defaults import Stated, conflicts, same, stated, stated_in_tool, undeclared
-from .surface import configurations, served
+from .surface import configurations, describe, every_tool, served
 
 
 # -- the parse, on planted text ----------------------------------------------------------
@@ -109,25 +109,23 @@ def test_a_stated_default_the_schema_does_not_declare_is_reported() -> None:
 
 # -- the real descriptions ---------------------------------------------------------------
 
-def _every_tool() -> list[tuple[str, dict[str, Any]]]:
-    """`(configurations, tool)` for each distinct tool any configuration serves. The
-    anchored server rewrites the `anchored` descriptions, so it is checked on its own."""
-    serving: dict[str, tuple[dict[str, Any], list[str]]] = {}
-    for configuration in configurations():
-        for tool in served(configuration):
-            key = json.dumps(tool, sort_keys=True)
-            serving.setdefault(key, (tool, []))[1].append(configuration.label)
-    everywhere = len(configurations())
-    return [("every configuration" if len(labels) == everywhere else ", ".join(labels), tool)
-            for tool, labels in serving.values()]
+@functools.lru_cache(maxsize=None)
+def _ways_served() -> dict[str, list[tuple[tuple[str, ...], dict[str, Any]]]]:
+    """Each tool's name, with every distinct way a configuration serves it."""
+    found: dict[str, list[tuple[tuple[str, ...], dict[str, Any]]]] = {}
+    for labels, tool in every_tool():
+        found.setdefault(tool["name"], []).append((labels, tool))
+    return found
 
 
 def test_a_default_stated_in_words_equals_the_declared_default() -> None:
+    """The anchored server rewrites the `anchored` descriptions, so each way a tool is
+    served is checked against its own schema."""
     problems = []
-    for labels, tool in _every_tool():
+    for labels, tool in every_tool():
         properties = tool["inputSchema"]["properties"]
-        problems += [f"{labels}: {tool['name']}.{argument} says {words!r}, and its schema "
-                     f"declares {properties[argument]['default']!r}"
+        problems += [f"{describe(labels)}: {tool['name']}.{argument} says {words!r}, and its "
+                     f"schema declares {properties[argument]['default']!r}"
                      for argument, words in conflicts(tool)]
     assert not problems, "\n".join(problems)
 
@@ -177,11 +175,9 @@ def test_a_default_stated_in_words_is_declared_in_the_schema(name: str) -> None:
     declared is implemented somewhere else, where the words and the code can drift apart
     without any check."""
     problems: dict[tuple[str, str], list[str]] = {}
-    for configuration in configurations():
-        for tool in served(configuration):
-            if tool["name"] == name:
-                for argument, words in undeclared(tool):
-                    problems.setdefault((argument, words), []).append(configuration.label)
+    for labels, tool in _ways_served()[name]:
+        for argument, words in undeclared(tool):
+            problems.setdefault((argument, words), []).extend(labels)
     report = "\n".join(
         f"{name}.{argument} says {words!r}, and its schema declares no default "
         f"({len(labels)} configurations)" for (argument, words), labels in problems.items())

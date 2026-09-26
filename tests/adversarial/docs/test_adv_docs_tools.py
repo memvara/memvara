@@ -8,6 +8,8 @@ server can be started in.
 
 from __future__ import annotations
 
+import functools
+
 import pytest
 
 from harness import known_bugs
@@ -18,18 +20,8 @@ from memvara.server.tools import FEATURE_ARGUMENTS, TOOLS
 from .mentions import (mentions, predicates, ties, tool_names, unknown_tools,
                        unresolved_identifiers, unserved_arguments, unserved_by_any_tool,
                        wrong_ties)
-from .surface import configurations, served, table, texts
-
-#: A small tool table for the planted cases, so each expected answer can be read off by
-#: hand rather than computed by the code under test.
-PLANTED = {
-    "memory_recall": frozenset({"query", "include_episodes", "ranked", "synthesize",
-                                "query_rewrite", "valid_at", "budget"}),
-    "memory_search": frozenset({"query", "k", "as_of", "valid_at"}),
-    "memory_end": frozenset({"claim_id", "at", "reason"}),
-    "memory_remember": frozenset({"subject", "predicate", "object", "true_since",
-                                  "true_until", "memory_type"}),
-}
+from .planted import TABLE as PLANTED
+from .surface import configurations, describe, every_tool, served, table, texts
 
 
 # -- the parse, on planted text ----------------------------------------------------------
@@ -192,23 +184,36 @@ def test_texts_labels_each_description_with_where_it_came_from() -> None:
     assert texts(tool) == [("t", "d"), ("t.a", "x"), ("t.b", "")]
 
 
+def test_every_tool_is_listed_once_for_each_way_it_is_served() -> None:
+    """The per-tool checks read this one list, so it must hold every served tool, once per
+    distinct way a server serves it, with exactly the configurations that serve it so."""
+    by_label = {configuration.label: configuration for configuration in configurations()}
+    variants = every_tool()
+    assert {tool["name"] for _, tool in variants} == {tool.name for tool in TOOLS}
+    for labels, tool in variants:
+        assert labels, tool["name"]
+        assert all(tool in served(by_label[label]) for label in labels), tool["name"]
+    for name in table():
+        seen = sorted(label for labels, tool in variants if tool["name"] == name
+                      for label in labels)
+        assert seen == sorted(label for label, configuration in by_label.items()
+                              if any(t["name"] == name for t in served(configuration))), name
+    anchored_search = [labels for labels, tool in variants if tool["name"] == "memory_search"
+                       and tool["inputSchema"]["properties"]["anchored"]["default"] is True]
+    assert anchored_search == [("anchored",)]
+    assert describe(tuple(by_label)) == "every configuration"
+    assert describe(("anchored", "read-only")) == "anchored, read-only"
+
+
 # -- the real descriptions ---------------------------------------------------------------
 
-def _every_text() -> list[tuple[str, str, str]]:
-    """`(configurations, where, text)` for each distinct description any configuration
-    serves, and for the instructions the server sends when a client connects.
-
-    Most descriptions are the same on every server, so each distinct text is checked once
-    and the message names the configurations that serve it.
-    """
-    serving: dict[tuple[str, str], list[str]] = {("INSTRUCTIONS", INSTRUCTIONS): []}
-    everywhere = [configuration.label for configuration in configurations()]
-    for configuration in configurations():
-        for tool in served(configuration):
-            for where, text in texts(tool):
-                serving.setdefault((where, text), []).append(configuration.label)
-    return [("every configuration" if labels in ([], everywhere) else ", ".join(labels),
-             where, text) for (where, text), labels in serving.items()]
+@functools.lru_cache(maxsize=None)
+def _every_text() -> tuple[tuple[str, str, str], ...]:
+    """`(configurations, where, text)` for each description of each distinct served tool,
+    and for the instructions the server sends when a client connects."""
+    return (("every configuration", "INSTRUCTIONS", INSTRUCTIONS),
+            *((describe(labels), where, text) for labels, tool in every_tool()
+              for where, text in texts(tool)))
 
 
 def test_every_tool_the_descriptions_name_exists() -> None:

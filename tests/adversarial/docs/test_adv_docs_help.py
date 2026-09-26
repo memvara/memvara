@@ -9,6 +9,7 @@ out is one nobody can find.
 
 from __future__ import annotations
 
+import functools
 import pathlib
 import sys
 from typing import Any, Callable, Iterable, Mapping
@@ -237,9 +238,10 @@ SUBCOMMANDS = [command for command in command_lines() if not command.top]
 SCRIPTS = [command for command in command_lines() if command.top]
 
 
-def _helps() -> list[str]:
+@functools.lru_cache(maxsize=None)
+def _helps() -> tuple[str, ...]:
     """Each distinct help text a command line prints."""
-    return list(dict.fromkeys(command.help for command in command_lines()))
+    return tuple(dict.fromkeys(command.help for command in command_lines()))
 
 
 def test_every_command_line_is_found() -> None:

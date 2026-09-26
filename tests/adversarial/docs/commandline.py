@@ -78,6 +78,7 @@ class CommandLine:
     top: bool
 
 
+@functools.lru_cache(maxsize=None)
 def console_scripts() -> dict[str, Callable[..., Any]]:
     """Each console script `pyproject.toml` declares, and `python -m memvara.server`,
     with the function it runs."""
@@ -130,7 +131,7 @@ def read_subcommand(name: str, function: Callable[..., Any]) -> CommandLine:
     target, branch = function, _help_branch(function)
     seen = {function}
     while branch is None:
-        following = _delegate(target)
+        following = _returned_call(_tree(target), target)
         if following is None or following in seen:
             raise LookupError(f"{name}: neither {function.__qualname__} nor anything it "
                               "hands its arguments to prints a *USAGE help")
@@ -142,28 +143,47 @@ def read_subcommand(name: str, function: Callable[..., Any]) -> CommandLine:
 def subcommands(function: Callable[..., Any]) -> dict[str, Callable[..., Any]]:
     """Each word a dispatch function sends to another function, with that function."""
     found: dict[str, Callable[..., Any]] = {}
-    for node in ast.walk(_tree(function)):
-        if not isinstance(node, ast.If):
-            continue
-        for test in ast.walk(node.test):
-            if not (isinstance(test, ast.Compare) and isinstance(test.left, ast.Subscript)
-                    and _uses_argv(test.left)):
-                continue
-            operator, right = test.ops[0], test.comparators[0]
-            if (isinstance(operator, ast.Eq) and isinstance(right, ast.Constant)
-                    and isinstance(right.value, str)):
-                callee = next((_lookup(statement.value.func, function, node)
-                               for statement in ast.walk(node)
-                               if isinstance(statement, ast.Return)
-                               and isinstance(statement.value, ast.Call)), None)
-                if callable(callee):
-                    found[right.value] = callee
-            elif isinstance(operator, ast.In) and isinstance(right, ast.Name):
-                table = function.__globals__.get(right.id)
-                if isinstance(table, Mapping):
-                    found.update({word: callee for word, callee in table.items()
-                                  if isinstance(word, str) and callable(callee)})
+    for branch in ast.walk(_tree(function)):
+        if isinstance(branch, ast.If):
+            for test in _word_tests(branch):
+                found.update(_routes(test, branch, function))
     return found
+
+
+def _word_tests(branch: ast.If) -> list[ast.Compare]:
+    """The comparisons in an `if` test that look at one word of the argument list, such
+    as `args[0] == "init"`."""
+    return [test for test in ast.walk(branch.test)
+            if isinstance(test, ast.Compare) and isinstance(test.left, ast.Subscript)
+            and _uses_argv(test.left)]
+
+
+def _routes(test: ast.Compare, branch: ast.If,
+            function: Callable[..., Any]) -> dict[str, Callable[..., Any]]:
+    """The words one comparison sends on. `args[0] == "word"` sends the word to the
+    function its branch returns a call to, and `args[0] in TABLE` sends each key of the
+    table to its value."""
+    operator, right = test.ops[0], test.comparators[0]
+    if (isinstance(operator, ast.Eq) and isinstance(right, ast.Constant)
+            and isinstance(right.value, str)):
+        callee = _returned_call(branch, function)
+        return {right.value: callee} if callee is not None else {}
+    if isinstance(operator, ast.In) and isinstance(right, ast.Name):
+        table = function.__globals__.get(right.id)
+        if isinstance(table, Mapping):
+            return {word: callee for word, callee in table.items()
+                    if isinstance(word, str) and callable(callee)}
+    return {}
+
+
+def _returned_call(scope: ast.AST, function: Callable[..., Any]) -> Callable[..., Any] | None:
+    """The first function that a `return f(...)` inside `scope` calls, or None."""
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
+            callee = _lookup(node.value.func, function, scope)
+            if inspect.isfunction(callee):
+                return callee
+    return None
 
 
 def undocumented(command: CommandLine) -> list[str]:
@@ -345,17 +365,6 @@ def _help_branch(function: Callable[..., Any]) -> tuple[frozenset[str], str] | N
                 text = function.__globals__.get(call.args[0].id)
                 if isinstance(text, str):
                     return frozenset(_strings(node.test, function.__globals__)), text
-    return None
-
-
-def _delegate(function: Callable[..., Any]) -> Callable[..., Any] | None:
-    """The function a wrapper returns a call to, or None."""
-    tree = _tree(function)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
-            callee = _lookup(node.value.func, function, tree)
-            if inspect.isfunction(callee):
-                return callee
     return None
 
 

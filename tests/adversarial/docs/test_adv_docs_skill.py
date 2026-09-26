@@ -8,23 +8,13 @@ ship with it, so they are checked too.
 
 from __future__ import annotations
 
+import functools
+
 from .mentions import tool_names, unknown_tools
+from .planted import TABLE as PLANTED
 from .skill import (Call, called_arguments, calls, skill_files, ties, unknown_arguments,
                     wrong_calls, wrong_ties)
 from .surface import table
-
-#: A small tool table for the planted cases, so each expected answer can be read off by
-#: hand rather than computed by the code under test.
-PLANTED = {
-    "memory_search": frozenset({"query", "k", "as_of", "valid_at", "memory_types",
-                                "filters", "filepath_prefix"}),
-    "memory_recall": frozenset({"query", "valid_at", "filters", "filepath_prefix"}),
-    "memory_end": frozenset({"claim_id", "at"}),
-    "memory_remember": frozenset({"subject", "predicate", "object", "true_since",
-                                  "true_until", "sources", "replaces", "memory_type"}),
-    "memory_add": frozenset({"text", "role"}),
-    "memory_standing": frozenset({"k"}),
-}
 
 
 # -- the parse, on planted text ----------------------------------------------------------
@@ -107,8 +97,10 @@ def test_windows_line_endings_read_the_same() -> None:
 
 # -- the real skill ----------------------------------------------------------------------
 
-def _pages() -> list[tuple[str, str]]:
-    return [(path.name, path.read_text(encoding="utf-8")) for path in skill_files()]
+@functools.lru_cache(maxsize=None)
+def _pages() -> tuple[tuple[str, str], ...]:
+    """Each page of the packaged skill, by name, with its text."""
+    return tuple((path.name, path.read_text(encoding="utf-8")) for path in skill_files())
 
 
 def test_every_tool_the_skill_names_exists() -> None:

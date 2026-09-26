@@ -15,8 +15,9 @@ would cost a second apiece and tell these checks nothing more.
 from __future__ import annotations
 
 import functools
+import json
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from memvara.server.config import FEATURE_DEFAULTS, FEATURES_OFF_BY_DEFAULT
 from memvara.server.mcp import MemvaraMCPServer
@@ -64,6 +65,29 @@ def served(configuration: Configuration) -> tuple[dict[str, Any], ...]:
     return tuple(reply["result"]["tools"])
 
 
+@functools.lru_cache(maxsize=None)
+def every_tool() -> tuple[tuple[tuple[str, ...], dict[str, Any]], ...]:
+    """Each tool any configuration serves, once for every distinct way it is served, with
+    the labels of the configurations that serve it that way.
+
+    Most tools are served the same way on every server, so a check that reads this list
+    reads each of them once instead of once per configuration, and can still say where a
+    problem appears.
+    """
+    serving: dict[str, tuple[dict[str, Any], list[str]]] = {}
+    for configuration in configurations():
+        for tool in served(configuration):
+            serving.setdefault(json.dumps(tool, sort_keys=True),
+                               (tool, []))[1].append(configuration.label)
+    return tuple((tuple(labels), tool) for tool, labels in serving.values())
+
+
+def describe(labels: Sequence[str]) -> str:
+    """How a message names the configurations something was found in."""
+    return "every configuration" if len(labels) == len(configurations()) else ", ".join(labels)
+
+
+@functools.lru_cache(maxsize=None)
 def table() -> dict[str, frozenset[str]]:
     """Every tool and all of its arguments, including the ones a switch can remove."""
     return {tool.name: frozenset(tool.properties) for tool in TOOLS}
