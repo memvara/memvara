@@ -131,7 +131,7 @@ class Pair:
                 result = exc
         elif isinstance(op, Forget):
             expect = m.forget(op, t)
-            result = mem.forget(SUBJECT, op.predicate, user=op.user)
+            result = mem.forget(SUBJECT, op.predicate, user=op.user, close=op.close)
         elif isinstance(op, Delete):
             expect = m.delete(op, t)
             result = mem.delete(self.real(op.handle), user=op.user, close=op.close)
