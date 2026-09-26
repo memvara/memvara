@@ -8,23 +8,25 @@ starts with a line naming why no summary was written, and a `ranked=True` block 
 a line naming why the model did not rank.
 
 Every test reads one store through two handles: one whose model is scripted to fail, and
-one with no model. A `search()` compared field by field passes `known_at`, one instant
-after every write, because recency is measured at `known_at`, and two present-tense reads
-a moment apart would otherwise differ in their scores' last digits.
+one with no model. The store is written once for the whole module, because no test here
+writes to it, and each test checks on its way out that the store is still as it was. A
+`search()` compared field by field passes `known_at`, one instant after every write,
+because recency is measured at `known_at`, and two present-tense reads a moment apart
+would otherwise differ in their scores' last digits.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import pytest
 
 from harness import known_bugs
 from memvara import EpisodeResult, Memvara
 from memvara.server import MemvaraMCPServer
-from memvara.store import SQLiteStore
+from memvara.store import SQLiteStore, Store
 from memvara.types import utcnow
 
 from .handles import USER, rendered, tool_text, with_model, without_model
@@ -34,6 +36,7 @@ from .scripted import (
 )
 
 Make = Callable[..., ScriptedModel]
+Pair = Callable[[ScriptedModel], tuple[Memvara, Memvara]]
 
 QUERY = "Lisbon trip"
 
@@ -42,16 +45,40 @@ FACTS = [("lives_in", "Berlin"), ("likes", "Lisbon trams"), ("visited", "Lisbon 
 TURN = "We talked about the Lisbon trip again on day {day}: the tram, the pastries, the tiles."
 
 
-def pair(model: ScriptedModel) -> tuple[Memvara, Memvara]:
-    """One store, written with no model, and two handles on it: the first has no model,
-    the second has `model` for its rewrite, its synthesis and its selector."""
+@pytest.fixture(scope="module")
+def notes() -> Iterator[SQLiteStore]:
+    """The store every test in this module reads, written once with no model: three facts
+    the caller asserted and eight turns."""
     store = SQLiteStore(":memory:")
     plain = without_model(store)
     for predicate, obj in FACTS:
         plain.remember("user", predicate, obj)
     for day in range(8):
         plain.add(TURN.format(day=day), role="system")
-    return plain, with_model(model, store=store, ranked=True)
+    yield store
+    store.close()
+
+
+def contents(store: Store) -> tuple[Any, ...]:
+    """Every claim in every state, every turn, and the store's row counts."""
+    return (list(store.iter_claims(states=("live", "ended", "retired"))),
+            list(store.iter_episodes()), store.stats())
+
+
+@pytest.fixture
+def pair(notes: SQLiteStore) -> Iterator[Pair]:
+    """Make two handles on the module's store for a scripted model: the first has no
+    model, the second has `model` for its rewrite, its synthesis and its selector.
+
+    The test fails if the store has changed by the time it ends, because every later test
+    in this module reads the same store and expects the notes `notes` wrote."""
+    before = contents(notes)
+
+    def handles(model: ScriptedModel) -> tuple[Memvara, Memvara]:
+        return without_model(notes), with_model(model, store=notes, ranked=True)
+
+    yield handles
+    assert contents(notes) == before, "this test wrote to the store the whole module reads"
 
 
 MALFORMED = ("fallback", "malformed", None)
@@ -97,7 +124,7 @@ def outcome(stage: Any) -> tuple[Any, ...]:
 
 @pytest.mark.parametrize("failure, expected", REWRITE_FAILURES)
 def test_a_failed_rewrite_serves_the_recall_a_store_with_no_model_serves(
-        scripted: Make, failure: object, expected: tuple[Any, ...]) -> None:
+        scripted: Make, pair: Pair, failure: object, expected: tuple[Any, ...]) -> None:
     model = scripted(chat=[failure])
     plain, mem = pair(model)
     got = mem.recall(QUERY, include_episodes=True, with_ids=True)
@@ -109,7 +136,7 @@ def test_a_failed_rewrite_serves_the_recall_a_store_with_no_model_serves(
 
 @pytest.mark.parametrize("failure, expected", REWRITE_FAILURES)
 def test_a_failed_rewrite_serves_the_search_a_store_with_no_model_serves(
-        scripted: Make, failure: object, expected: tuple[Any, ...]) -> None:
+        scripted: Make, pair: Pair, failure: object, expected: tuple[Any, ...]) -> None:
     model = scripted(chat=[failure])
     plain, mem = pair(model)
     now = utcnow()
@@ -127,7 +154,7 @@ def test_a_failed_rewrite_serves_the_search_a_store_with_no_model_serves(
     pytest.param(Text("Here are some other ways to ask about that."), id="prose"),
 ])
 def test_a_failed_rewrite_leaves_the_mcp_text_as_a_store_with_no_model_gives_it(
-        scripted: Make, failure: object) -> None:
+        scripted: Make, pair: Pair, failure: object) -> None:
     """What an agent reads: the tool's text, over each handle, for each read tool."""
     model = scripted(chat=[failure, failure])
     plain, mem = pair(model)
@@ -139,7 +166,7 @@ def test_a_failed_rewrite_leaves_the_mcp_text_as_a_store_with_no_model_gives_it(
 
 
 def test_a_rewrite_that_asks_for_too_much_costs_one_call_and_four_retrievals(
-        scripted: Make, monkeypatch: pytest.MonkeyPatch) -> None:
+        scripted: Make, pair: Pair, monkeypatch: pytest.MonkeyPatch) -> None:
     """Review Focus 2 of the plan. `select/stages.py`: repeats of the question, in any
     case, are skipped, and only the first `MAX_QUERIES` (3) alternatives are kept, "so
     this caps a rewritten read at four retrievals"."""
@@ -189,7 +216,7 @@ SYNTHESIS_FAILURES = [
 
 @pytest.mark.parametrize("failure, why", SYNTHESIS_FAILURES)
 def test_a_failed_synthesis_names_itself_and_keeps_every_note(
-        scripted: Make, failure: object, why: str) -> None:
+        scripted: Make, pair: Pair, failure: object, why: str) -> None:
     model = scripted(chat=[failure])
     plain, mem = pair(model)
     asked = dict(include_episodes=True, synthesize=True, query_rewrite=False)
@@ -204,7 +231,10 @@ def test_a_failed_synthesis_names_itself_and_keeps_every_note(
 
 
 def test_a_recall_that_finds_nothing_asks_for_no_summary(scripted: Make) -> None:
-    """`Memvara.recall`: "A recall that found no notes makes no call and stays empty.\""""
+    """`Memvara.recall`: "A recall that found no notes makes no call and stays empty."
+
+    This test reads a new, empty store rather than the module's store, because it needs a
+    recall that finds nothing. It writes nothing either."""
     model = scripted()
     mem = with_model(model)
     assert mem.recall(QUERY, synthesize=True, query_rewrite=False) == ""
@@ -230,7 +260,8 @@ RANKING_FAILURES = [
 
 @pytest.mark.parametrize("failure, expected", RANKING_FAILURES)
 def test_a_failed_ranking_selects_nothing_and_says_so_in_the_last_line(
-        scripted: Make, failure: object, expected: tuple[str, str | None]) -> None:
+        scripted: Make, pair: Pair, failure: object,
+        expected: tuple[str, str | None]) -> None:
     model = scripted(chat=[failure, failure])
     _, mem = pair(model)
     got = mem.recall(QUERY, include_episodes=True, ranked=True, query_rewrite=False,
@@ -245,7 +276,7 @@ def test_a_failed_ranking_selects_nothing_and_says_so_in_the_last_line(
 
 
 def test_a_partly_readable_selector_reply_keeps_only_what_it_can_read(
-        scripted: Make) -> None:
+        scripted: Make, pair: Pair) -> None:
     """Review Focus 3 of the plan. `select/model.py` drops an entry it cannot read and
     keeps the rest: a repeated number, a number out of range, a number that is text or a
     boolean, an empty span and a missing span are all dropped."""
@@ -278,7 +309,8 @@ def kinds(results: Any) -> list[str]:
     pytest.param(Text("I would keep the second excerpt."), id="prose"),
 ])
 @known_bugs.xfail("B31")
-def test_a_failed_ranking_serves_the_plain_read(scripted: Make, failure: object) -> None:
+def test_a_failed_ranking_serves_the_plain_read(
+        scripted: Make, pair: Pair, failure: object) -> None:
     """#308. INTERNALS invariant 1 says a failed stage serves the plain read. A ranked read
     gathers its turns at the reranker's depth whatever its outcome, so when the selector
     fails it interleaves more turns than a plain read takes, and they push out facts the
