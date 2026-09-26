@@ -422,5 +422,10 @@ The fast tier of this folder has 207 tests, 19 of them strict expected failures,
 ```bash
 PYTHONPATH=$PWD python -m pytest -q -p no:cacheprovider tests/adversarial/model_faults --tier nightly
 ```
+### Steps and time caps
+
+A night is a list of steps, run one after another by `scripts/nightly/steps.py`, and each step has a time cap. The commands a step runs start in a process group of their own. At the cap the whole group is stopped, so a stuck step cannot use up the night or leave a server running into the morning; on POSIX, whatever a command leaves running in its group is stopped when the command exits, too. The next step runs whatever happened to the one before it, with one exception: when an essential step does not pass, every later step is reported as "not run", naming it. Preflight is essential, because it builds the worktree and the virtual environment the other steps use. A step whose code has not landed is reported as "not built yet", with the reason and the file it waits for. A step that raises is reported as an "error", and a step that returns after its cap as "timed out".
+
+The steps run with the environment `night.step_env` builds. It is the run's own environment without the variables the harness keeps from every child process, with `HOME` pointed at `local/nightly/home/`, a private temporary folder, and the tested worktree on `PYTHONPATH`. The home folder is kept from night to night, because the nightly Hypothesis profile keeps the examples it finds under the home directory. No `MEMVARA_` variable is set, so the suite runs with the same defaults as in CI.
 
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
