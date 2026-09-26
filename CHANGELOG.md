@@ -124,10 +124,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `remember(..., polarity=-1, valid_from=<next year>)`, stored a row whose `valid_to` came
   before its `valid_from`, and `history()` and `why()` showed that inverted interval. The
   tombstone's world clock now closes at the write or at the tombstone's own start,
-  whichever is later, which is the clamp `close_out` gives every other closure. A
-  future-dated tombstone therefore has `valid_to == valid_from`, an empty interval. Its
-  belief clock still closes at the write, and the value it retracts still ends at the
-  retraction's start. #275.
+  whichever is later, which is the rule every other closure follows. A future-dated
+  tombstone therefore has `valid_to == valid_from`, an empty interval. Its belief clock
+  still closes at the write, and the value it retracts still ends at the retraction's
+  start. `Reconciler.apply` also reads a naive `now` as UTC, as the rest of the library
+  reads an instant built without a time zone, instead of raising `TypeError`. #275.
 
 ## [0.16.0] — 2026-09-25
 

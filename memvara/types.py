@@ -381,11 +381,21 @@ def close_out(claim: "Claim", at: datetime, by: str | None, close: Closure,
     # collapses the interval to zero length rather than inverting it. An interval that
     # ends before it begins is not a shorter fact, it is a row no `as_of` window can
     # return consistently.
-    edge = max(as_utc(at), as_utc(claim.valid_from))
+    edge = not_before_start(at, claim)
     landed = claim.valid_to
     if landed is None or as_utc(landed) > edge:
         claim.valid_to = landed = edge
     _witness(claim, as_utc(landed), by, close, reason)
+
+
+def not_before_start(at: datetime, claim: "Claim") -> datetime:
+    """`at`, or the claim's own start when `at` falls before it.
+
+    Every closure of a claim's world clock ends it here, so a closure dated before the
+    fact it closes leaves an empty interval rather than one that ends before it begins.
+    `close_out`, the backfill's supersession and a retraction's tombstone all use it.
+    """
+    return max(as_utc(at), as_utc(claim.valid_from))
 
 
 def planned_end(claim: "Claim", reason: str) -> None:

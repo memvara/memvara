@@ -89,6 +89,7 @@ from ..types import (
     content_hash,
     default_entity,
     fact_key_for,
+    not_before_start,
     owner_key,
     utcnow,
 )
@@ -289,7 +290,9 @@ class Reconciler:
         first with `types.closure_reason`. Agentic extraction passes the reason the model
         gave with a proposal (`memvara.write.agentic`); every other caller passes none.
         """
-        t = now or utcnow()
+        # A naive `now` is read as UTC, as `as_utc` reads every instant a caller builds
+        # by hand, rather than failing the first comparison below.
+        t = as_utc(now) if now is not None else utcnow()
         self._canonicalize(claim)
         # After `_canonicalize`, which resolves the subject this compares on.
         refiled = self.file_by_subject(claim)
@@ -913,10 +916,11 @@ class Reconciler:
         # interval to preserve and nothing an audit loses by it being unreachable from
         # either clock. Everything the retraction *says* lives on the claims below.
         claim.invalidated_at = t
-        # The world clock never closes before the row's own start, the clamp `close_out`
-        # gives every other closure. Without it a retraction dated in the future stored
-        # a row that ended before it began; with it, that row's interval is empty.
-        claim.valid_to = max(t, as_utc(claim.valid_from))
+        # The world clock closes at the write, or at the tombstone's own start when the
+        # retraction is dated later than the write. Every other closure follows the same
+        # rule (`not_before_start`). Without it, a retraction dated in the future stored
+        # a row that ended before it began. With it, that row's interval is empty.
+        claim.valid_to = not_before_start(t, claim)
         self.store.put_claim(claim)
 
         collapsed: list[Collapse] = []
@@ -1217,7 +1221,7 @@ def _supersede(older: Claim, newer: Claim, at: datetime, key: str) -> None:
     # Clamped exactly as `Reconciler._retire` clamps, so the rebuilt chain cannot produce
     # a row `Reconciler` never could: an interval that ends before it starts is not a
     # shorter fact, it is a row no `as_of` window can return consistently.
-    edge = max(at, as_utc(older.valid_from))
+    edge = not_before_start(at, older)
     if older.valid_to is None or older.valid_to > edge:
         older.valid_to = edge
     _note(older, at, "superseded", newer.id, key)
