@@ -12,6 +12,8 @@ from memvara.embed import HashingEmbedder
 
 def memory(**options: Any) -> Memvara:
     """An in-memory store."""
+    # `Context.memvara()` in tests/adversarial/frameworks/probe.py builds the same store,
+    # because a framework's environment cannot import this harness. Keep the two the same.
     return Memvara(embedder=HashingEmbedder(dim=512), llm=NullLLM(), **options)
 
 

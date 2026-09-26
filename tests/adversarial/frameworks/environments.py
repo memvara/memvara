@@ -349,7 +349,10 @@ def _json(text: str, what: str) -> Any:
                          f"{_tail(text, 5)}") from exc
 
 
-#: Run with `-I` in an environment: its installed distributions and where they live.
+#: Run with `-I` in an environment: its installed distributions and where they live. The
+#: names are normalised as `distributions()` in probe.py normalises them, and as
+#: packaging's `canonicalize_name` does, which the suite uses to look them up. The rule is
+#: written out because an environment cannot import packaging. Keep all three the same.
 _DESCRIBE = (
     "import importlib.metadata, json, re, sysconfig\n"
     "print(json.dumps({'purelib': sysconfig.get_paths()['purelib'], 'distributions': {\n"

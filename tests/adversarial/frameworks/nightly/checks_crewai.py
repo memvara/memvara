@@ -33,10 +33,15 @@ from memvara.integrations import crewai as adapter
 if TYPE_CHECKING:
     from ..probe import Context
 
-#: The fields CrewAI's analysis would otherwise ask a model for. Giving all three keeps
-#: `Memory.remember` on its path that makes no model call.
+#: The fields every memory in these checks has unless a check gives its own, whether it is
+#: saved through `Memory.remember` or built as a `MemoryRecord` by `_record`. They are the
+#: fields CrewAI's analysis would otherwise ask a model for, and giving all three keeps
+#: `Memory.remember` on its path that makes no model call. The importance is 0.5, the
+#: value CrewAI gives a memory that names none (`MemoryRecord.importance` and
+#: `MemoryConfig.default_importance`, at both pins), so a record here is the record
+#: CrewAI itself would write.
 FIELDS: dict[str, Any] = {"scope": "/crew/alice", "categories": ["profile"],
-                          "importance": 0.7}
+                          "importance": 0.5}
 
 
 def _ca(module: str) -> Any:
@@ -95,10 +100,8 @@ def _memory(storage: Any, llm: Any = None) -> Iterator[Any]:
 
 
 def _record(content: str, **fields: Any) -> Any:
-    values: dict[str, Any] = {"scope": "/crew/alice", "categories": ["profile"],
-                              "importance": 0.5}
-    values.update(fields)
-    return _ca(".memory.types").MemoryRecord(content=content, **values)
+    """A CrewAI `MemoryRecord` with `FIELDS`, and `fields` in place of any of them."""
+    return _ca(".memory.types").MemoryRecord(content=content, **{**FIELDS, **fields})
 
 
 def check_the_storage_satisfies_the_storagebackend_protocol(ctx: Context) -> None:

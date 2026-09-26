@@ -181,6 +181,9 @@ class Context:
         from memvara import HashingEmbedder, Memvara, NullLLM
 
         options.setdefault("user", "alice")
+        # A copy of `memory()` in tests/harness/stores.py, which this process cannot
+        # import: a framework's environment holds memvara and the framework, not the
+        # suite's harness. Keep the two recipes the same.
         store = Memvara(embedder=HashingEmbedder(dim=512), llm=NullLLM(), **options)
         self._stores.append(store)
         return store
@@ -214,6 +217,10 @@ def load(path: Path) -> ModuleType:
 
 def distributions() -> dict[str, str]:
     """Every distribution this interpreter can import, by its normalised name."""
+    # The same normalisation as `_DESCRIBE` in environments.py, which also runs inside an
+    # environment, and as packaging's `canonicalize_name`, which the suite uses to look
+    # these names up. An environment cannot import packaging, so the rule is written out
+    # here. Keep all three the same.
     return {re.sub(r"[-_.]+", "-", d.metadata["Name"]).lower(): d.version
             for d in importlib.metadata.distributions() if d.metadata["Name"]}
 
