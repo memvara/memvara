@@ -32,6 +32,27 @@ _STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}
 #: The line run.py writes to hooks.log when it hands capture to a child in a new session.
 _DETACHED = re.compile(r"^detached hook=capture host=\S+ pid=(\d+)")
 
+#: Where each host keeps its MCP servers, and in what shape: where a user who runs a
+#: local store configures it. The hooks look for the store in the files the host record
+#: lists (`client_configs`), so writing here lets a test check that the two agree.
+#:
+#: * Claude Code: `mcpServers` in ~/.claude.json, the first file hosts/claude.py lists.
+#: * Codex: a `[mcp_servers.<name>]` table in ~/.codex/config.toml (hosts/codex.py).
+#: * GitHub Copilot CLI: `mcpServers` in ~/.copilot/mcp-config.json, each server with a
+#:   `type`; hosts/copilot.py lists that file second.
+#: * Cursor: `mcpServers` in ~/.cursor/mcp.json, from Cursor's MCP documentation
+#:   (https://cursor.com/docs/mcp), which hosts/cursor.py does not list.
+#: * OpenCode: `mcp` in ~/.config/opencode/opencode.json, each local server with a
+#:   `command` list and an `environment` object, from OpenCode's MCP documentation
+#:   (https://opencode.ai/docs/mcp-servers/) and the opencode-memvara README.
+CLIENT_CONFIGS: dict[str, tuple[str, str]] = {
+    "claude": ("~/.claude.json", "mcpServers"),
+    "codex": ("~/.codex/config.toml", "toml"),
+    "copilot": ("~/.copilot/mcp-config.json", "copilot"),
+    "cursor": ("~/.cursor/mcp.json", "mcpServers"),
+    "opencode": ("~/.config/opencode/opencode.json", "opencode"),
+}
+
 #: The environment variable that names the file a daemon records its pid in.
 _DAEMONS_VAR = "HOOK_TEST_DAEMONS"
 
@@ -379,11 +400,12 @@ class HookRunner:
     """Runs `plugin/hooks/run.py <hook> --host <host>` with a payload shaped for that host.
 
     `home` becomes the child's HOME, and `cwd` its working directory. When `server_env`
-    is given, it is written into the host's first client config file as the memvara
-    server's env block, in that host's own format (JSON, or TOML for Codex), which is
-    where the hooks look for the store (plugin/hooks/lib/ipc.py). Without it, the hooks
-    find no store and report "not configured". `env` is different: it is applied last to
-    the hook process's own environment, on top of `child_env`.
+    is given, it is written as the memvara server's env block into the file where the
+    host keeps its MCP servers, in that host's shape (CLIENT_CONFIGS). The hooks look for
+    the store in the files the host record lists (plugin/hooks/lib/ipc.py); without a
+    store, they report "not configured". `env` is different: it is applied last to the
+    hook process's own environment, on top of `child_env`, and a `MEMVARA_DB` there wins
+    over any client config.
 
     No directory that holds a real agent CLI is on the child's PATH
     (`path_without_agent_clis`). `stubs` are stub agent CLIs put first on it, such as
@@ -443,24 +465,32 @@ class HookRunner:
         return dict(self._env)
 
     def write_client_config(self, server_env: Mapping[str, str]) -> pathlib.Path:
-        """Write the host's first client config file, holding a memvara server block, in
-        the host's own format: JSON with an `mcpServers` object, or for Codex, TOML with an
-        `[mcp_servers.memvara]` table."""
-        if self.host.config_format not in ("json", "toml"):
+        """Write a memvara server block into the file where this host keeps its MCP
+        servers, in that host's shape (CLIENT_CONFIGS)."""
+        known = CLIENT_CONFIGS.get(self.host.id)
+        if known is None:
             raise NotImplementedError(
-                f"HookRunner writes JSON and TOML client configs, and {self.host.id} keeps "
-                f"a {self.host.config_format} one")
-        path = pathlib.Path(str(self.host.client_configs[0]).replace("~", str(self.home), 1))
+                f"HookRunner does not know where {self.host.id} keeps its MCP servers")
+        where, shape = known
+        path = pathlib.Path(where.replace("~", str(self.home), 1))
         if not path.resolve().is_relative_to(self.home.resolve()):
             raise ValueError(f"refusing to write a client config outside the test's home: "
                              f"{path}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        command, args = sys.executable, ["-m", "memvara.server"]
-        if self.host.config_format == "toml":
-            text = toml_server_block("memvara", command, args, server_env)
+        command, args, env = sys.executable, ["-m", "memvara.server"], dict(server_env)
+        if shape == "toml":
+            text = toml_server_block("memvara", command, args, env)
+        elif shape == "opencode":
+            text = json.dumps({"$schema": "https://opencode.ai/config.json", "mcp": {
+                "memvara": {"type": "local", "command": [command, *args],
+                            "environment": env, "enabled": True}}})
+        elif shape == "copilot":
+            text = json.dumps({"mcpServers": {"memvara": {
+                "type": "local", "command": command, "args": args, "env": env,
+                "tools": ["*"]}}})
         else:
-            block = {"command": command, "args": args, "env": dict(server_env)}
-            text = json.dumps({"mcpServers": {"memvara": block}})
+            text = json.dumps({"mcpServers": {"memvara": {
+                "command": command, "args": args, "env": env}}})
         path.write_text(text, encoding="utf-8")
         return path
 

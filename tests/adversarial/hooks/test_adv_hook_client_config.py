@@ -1,10 +1,12 @@
 """Where each host's hooks look for the store.
 
 The hooks run in the client's environment, not the MCP server's, so they find the store
-by reading the memvara server block in the client's own config files
+by reading the memvara server block in the client config files the host record lists
 (plugin/hooks/lib/ipc.py, `server_env`), and a variable set in their own environment wins
-over that block (`client_env`). `HookRunner(server_env=...)` writes the block into the
-host's first client config file, in that host's format.
+over that block (`client_env`). `HookRunner(server_env=...)` writes the block where and
+how the host itself keeps its MCP servers (`harness.hooks.CLIENT_CONFIGS`), which is where
+a user who runs a local store configures it. Claude Code and Copilot keep their MCP
+servers in files their host records list.
 """
 
 from __future__ import annotations
@@ -20,12 +22,8 @@ from . import support
 
 Make = Callable[..., HookRunner]
 
-#: The hosts whose client config is JSON (hosts/<id>.py, `config_format`).
-JSON_HOSTS = ("claude", "copilot", "cursor", "opencode")
-
-
-@pytest.mark.parametrize("host", JSON_HOSTS)
-def test_the_hooks_find_the_store_their_hosts_client_config_names(
+@pytest.mark.parametrize("host", ("claude", "copilot"))
+def test_the_hooks_find_the_store_their_hosts_own_mcp_config_names(
         hooks: Make, store_env: dict[str, str], host: str) -> None:
     result = hooks(host, server_env=store_env).run("session_start")
     assert result.exit_code == 0

@@ -16,6 +16,7 @@ from typing import Callable, Iterator
 
 import pytest
 
+from harness import hooks as hooks_module
 from harness import stores
 from harness.fakes.cli import FakeClis
 from harness.hooks import (HookOutputError, HookRunner, HookTimeout, agent_clis, host_ids,
@@ -93,13 +94,34 @@ def test_a_codex_client_config_is_written_as_toml(hook_runner: Make) -> None:
     assert block["env"] == {"MEMVARA_DB": store, "MEMVARA_USER": "tester"}
 
 
-def test_a_client_config_format_the_runner_cannot_write_is_refused(
+def test_a_host_whose_mcp_config_the_runner_does_not_know_is_refused(
         hook_runner: Make, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = hook_runner("claude")
-    monkeypatch.setattr(runner, "host", SimpleNamespace(
-        id="claude", config_format="yaml", client_configs=("~/.claude.json",)))
-    with pytest.raises(NotImplementedError, match="yaml"):
+    monkeypatch.setattr(runner, "host", SimpleNamespace(id="nohost"))
+    with pytest.raises(NotImplementedError, match="nohost"):
         runner.write_client_config({"MEMVARA_DB": "unused.db"})
+
+
+#: Where and how each host keeps its MCP servers, written out by hand.
+MCP_CONFIGS = {
+    "claude": (".claude.json", lambda data: data["mcpServers"]["memvara"]["env"]),
+    "copilot": (".copilot/mcp-config.json",
+                lambda data: data["mcpServers"]["memvara"]["env"]),
+    "cursor": (".cursor/mcp.json", lambda data: data["mcpServers"]["memvara"]["env"]),
+    "opencode": (".config/opencode/opencode.json",
+                 lambda data: data["mcp"]["memvara"]["environment"]),
+}
+
+
+@pytest.mark.parametrize("host", sorted(MCP_CONFIGS))
+def test_the_store_is_written_where_and_how_the_host_keeps_its_mcp_servers(
+        hook_runner: Make, host: str) -> None:
+    """Where a user who runs a local store configures it, so a test can check that the
+    hooks look there too. Codex's TOML is checked above."""
+    server_env = {"MEMVARA_DB": "store.db", "MEMVARA_USER": "tester"}
+    runner = hook_runner(host, server_env=server_env)
+    relative, env_of = MCP_CONFIGS[host]
+    assert env_of(json.loads((runner.home / relative).read_text())) == server_env
 
 
 def test_a_hook_that_runs_past_its_limit_is_reported_as_a_timeout(hook_runner: Make) -> None:
@@ -364,7 +386,7 @@ def test_json_that_is_not_an_object_is_reported_with_stderr() -> None:
 def test_a_client_config_outside_the_home_directory_is_refused(
         hook_runner: Make, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = hook_runner("claude")
-    monkeypatch.setattr(runner, "host", SimpleNamespace(
-        id="claude", config_format="json", client_configs=("/etc/memvara.json",)))
+    monkeypatch.setitem(hooks_module.CLIENT_CONFIGS, "claude",
+                        ("/etc/memvara.json", "mcpServers"))
     with pytest.raises(ValueError, match="outside the test's home"):
         runner.write_client_config({"MEMVARA_DB": "unused.db"})
