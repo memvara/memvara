@@ -1929,14 +1929,60 @@ def _pending(claims: Sequence[Claim]) -> str:
     instant*, so the displaced value keeps answering until then. One wording for one
     outcome — a second, near-identical note is how two surfaces come to describe the same
     row differently.
+
+    A claim counts only when its ending is after now **and** after its own start. An
+    ending clamped onto the start leaves a value that is true at no instant, however far
+    ahead that start is, and saying it is true until then is false: `memory_end` says
+    what happened to such a value in its own line (`_never_began`). A value stored to
+    begin later whose ending comes after its start is true between the two, but not now,
+    so it gets its own sentence rather than "memory_recall keeps returning" it.
     """
     now = utcnow()
-    later = [c for c in claims if c.valid_to is not None and c.valid_to > now]
-    if not later:
+    later = [c for c in claims
+             if c.valid_to is not None and c.valid_to > max(now, c.valid_from)]
+    begun = sum(c.valid_from <= now for c in later)
+    lines = []
+    if begun:
+        lines.append(
+            f"note: {begun} of these end at an instant still in the future, so they are "
+            "true until then and memory_recall keeps returning them. That is the ending "
+            "working, not failing.")
+    if len(later) > begun:
+        lines.append(
+            f"note: {len(later) - begun} of these are stored to begin later, and each ends "
+            "at the instant shown, so it is true only from its own start until then: "
+            "memory_recall will return it in that period and not before.")
+    return "\n".join(lines)
+
+
+def _true_at_no_instant(claim: Claim) -> bool:
+    """Whether `claim` ends at or before its own start, so no instant falls inside it.
+
+    `close_out` clamps an ending onto the claim's start rather than before it, so this is
+    what ending a value that had not begun yet leaves behind.
+    """
+    return claim.valid_to is not None and claim.valid_to <= claim.valid_from
+
+
+#: What a value ended before it began answers, said once for both of `memory_end`'s
+#: addressing modes. The phrases are `_collapsed_note`'s, which reports the same row
+#: shape when a write leaves it.
+_NO_INSTANT = ("was ended at its own start and is now true at no instant: memory_recall "
+               "will never return it, and it answers no memory_search at any valid_at.")
+
+
+def _never_began(claims: Sequence[Claim]) -> str:
+    """A note for the values `memory_end` ended before they began, or "" for none.
+
+    The reply's first line says ended values still answer about the period before their
+    ending, which is what ending means. A value that had not begun when it was ended has
+    no such period, so it is named here instead of being left inside that sentence.
+    """
+    never = [c for c in claims if _true_at_no_instant(c)]
+    if not never:
         return ""
-    return (f"note: {len(later)} of these end at an instant still in the future, so they "
-            "are true until then and memory_recall keeps returning them. That is the "
-            "ending working, not failing.")
+    return (f"note: {len(never)} of these had not begun when they were ended, so each "
+            + _NO_INSTANT)
 
 
 def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
@@ -1987,9 +2033,12 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
                 "says the world moved on from something true; retiring already said the "
                 "record was wrong, which is the stronger claim and the one "
                 "memory_history keeps showing. Nothing changed here.")
+        answers = (f"It had not begun when it was ended, so it {_NO_INSTANT}"
+                   if _true_at_no_instant(closed) else
+                   "It answers nothing after that instant and still answers about the "
+                   "period before it.")
         return "\n".join(filter(None, [
-            f"Ended claim {claim_id} — {_state(closed)}. It answers nothing after that "
-            "instant and still answers about the period before it. memory_history shows "
+            f"Ended claim {claim_id} — {_state(closed)}. {answers} memory_history shows "
             "it as ended, not retired: the record stands, the world moved.",
             _pending([closed]),
         ]))
@@ -2002,14 +2051,19 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
                 f"{args['subject']}/{predicate}. Check the predicate spelling with "
                 "memory_search; if the value you meant is already closed, memory_history "
                 "says whether it ended or was retired.")
+    # Only the values that had begun still answer about a period before their ending.
+    # One that had not has no such period, and `_never_began` says so below.
+    never = sum(_true_at_no_instant(c) for c in ended)
+    held = ("" if never == len(ended) else
+            ("They" if not never else "Those that had begun")
+            + " answer nothing after it and still answer about the period before it; ")
     lines = [f"Ended {len(ended)} value(s) of {args['subject']}/{predicate}, each at the "
-             "instant shown. They answer nothing after it and still answer about the "
-             "period before it; memory_history keeps them, marked ended rather than "
+             f"instant shown. {held}memory_history keeps them, marked ended rather than "
              "retired."]
     lines += [f"- [{c.id} {_state(c)}] {safe_line(c.text)}" for c in ended]
     return "\n".join(filter(None, lines + [_fold_note(predicate,  # type: ignore[arg-type]
                                                       ended),
-                                           _pending(ended)]))
+                                           _pending(ended), _never_began(ended)]))
 
 
 #: What differs between `memory_end_matching` and `memory_forget_matching`, and nothing

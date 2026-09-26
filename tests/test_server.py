@@ -2472,6 +2472,66 @@ def test_ending_a_single_claim_in_the_future_says_so_too(server):
     assert "still in the future" in body
 
 
+def test_ending_a_slot_says_a_value_that_had_not_begun_is_true_at_no_instant(server):
+    """Ending a slot also ends a value stored to begin later, at that value's own start,
+    so the value is true at no instant. Its ending is still in the future, and the reply
+    used to count it as one: it said the value was true until then and that
+    memory_recall kept returning it, which was false on both counts, and it said every
+    value still answered about the period before its ending."""
+    now = utcnow()
+    memory = server._ctx.memory
+    memory.remember("user", "works_at", "Acme", valid_from=now - timedelta(days=30))
+    memory.remember("user", "works_at", "Globex", valid_from=now + timedelta(days=30))
+
+    body = text(server, "memory_end", {"predicate": "works_at"})
+
+    assert "Ended 2 value(s) of user/works_at" in body
+    assert "still in the future" not in body and "keeps returning" not in body
+    assert "They answer nothing after it" not in body
+    assert "Those that had begun answer nothing after it" in body
+    assert "note: 1 of these had not begun when they were ended" in body
+    assert "true at no instant" in body
+    # What the line says, checked against the store rather than taken on trust.
+    globex = [c for c in memory.history("user", "works_at") if c.object == "Globex"][0]
+    assert globex.valid_to == globex.valid_from
+    assert memory.get_all(valid_at=globex.valid_from + timedelta(days=1)) == []
+
+
+def test_ending_one_value_that_has_not_begun_says_it_is_true_at_no_instant(server):
+    """The id-addressed path clamps the same way, and said the same false things: that
+    the value still answered about the period before its ending, and that it was true
+    until then."""
+    starts = utcnow() + timedelta(days=30)
+    globex = server._ctx.memory.remember("user", "works_at", "Globex",
+                                         valid_from=starts).added[0]
+
+    body = text(server, "memory_end", {"claim_id": globex.id})
+
+    assert f"Ended claim {globex.id}" in body and "not retired" in body
+    assert "still answers about the period before it" not in body
+    assert "still in the future" not in body
+    assert "It had not begun when it was ended" in body and "true at no instant" in body
+
+
+@pytest.mark.parametrize("address", ["predicate", "claim_id"])
+def test_ending_a_value_stored_to_begin_later_after_its_start_says_when_it_answers(
+        server, address):
+    """Ended at an instant after its own start, a value stored to begin later is true
+    between the two. It is not true now, so memory_recall is not returning it, and the
+    note must not say it keeps doing so."""
+    starts = utcnow() + timedelta(days=30)
+    globex = server._ctx.memory.remember("user", "works_at", "Globex",
+                                         valid_from=starts).added[0]
+    arguments = {"at": (starts + timedelta(days=30)).isoformat()}
+    arguments[address] = "works_at" if address == "predicate" else globex.id
+
+    body = text(server, "memory_end", arguments)
+
+    assert "keeps returning" not in body and "true at no instant" not in body
+    assert "note: 1 of these are stored to begin later" in body
+    assert "true only from its own start until then" in body
+
+
 @pytest.mark.parametrize("address", ["predicate", "claim_id"])
 def test_ending_before_a_fact_began_is_clamped_and_reports_where_it_landed(server, address):
     """`close_out` refuses to invert an interval, so the tool must not claim it did.

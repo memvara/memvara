@@ -159,6 +159,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   values, and a value that has not begun by `at` is ended at its own start, so it is true
   at no instant. `memory_forget` and `memory_end` given a `predicate` call `forget()`, so
   they do the same, and their descriptions now say so. #282.
+- **`memory_end` no longer says a value it ended before it began is true until then.**
+  Ending a value that has not begun yet, by its `claim_id` or as part of its slot, ends
+  it at its own start, so it is true at no instant. The reply counted its ending as one
+  still in the future: it said the value was true until then, that `memory_recall` kept
+  returning it, and that it still answered about the period before its ending. It now
+  says the value had not begun when it was ended and is true at no instant. A value
+  stored to begin later and ended after its start is true between the two, and the
+  reply now says that too, where it used to say `memory_recall` kept returning it;
+  `memory_remember`'s reply shares that note.
 
 ## [0.16.0] — 2026-09-25
 
