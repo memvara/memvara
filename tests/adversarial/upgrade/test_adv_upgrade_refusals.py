@@ -38,10 +38,13 @@ def newer_store(tmp_path: pathlib.Path) -> pathlib.Path:
 
 def serve(db: pathlib.Path, home: pathlib.Path,
           **extra: str) -> subprocess.CompletedProcess[str]:
-    """Start the MCP server on `db` with nothing on its input, and wait for it to exit."""
+    """Start the MCP server on `db` with nothing on its input, and wait for it to exit.
+
+    The server is told to write UTF-8. Otherwise, on Windows, it writes the em dash in
+    its messages in the console's code page, and reading that as UTF-8 fails."""
+    env = child_env(home, {"MEMVARA_DB": str(db), "PYTHONIOENCODING": "utf-8", **extra})
     return subprocess.run([sys.executable, "-m", "memvara.server"], input="",
-                          capture_output=True, text=True, encoding="utf-8",
-                          env=child_env(home, {"MEMVARA_DB": str(db), **extra}),
+                          capture_output=True, text=True, encoding="utf-8", env=env,
                           timeout=60, check=False)
 
 
