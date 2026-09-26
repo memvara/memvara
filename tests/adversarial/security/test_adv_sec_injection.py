@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import sys
 from typing import Any, Callable
 
 import pytest
@@ -21,6 +22,12 @@ import pytest
 from harness import stores
 from harness.hooks import HookRunner, HookResult
 from harness.stdio import McpProcess, claim_id_of
+
+#: The tests that start a server with a predicate vocabulary: the server reads it with
+#: tomllib, which Python 3.10 does not have, and exits at startup there.
+needs_toml = pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="tomllib arrived in 3.11; the server reads its predicate vocabulary with it")
 
 
 def _injected(result: HookResult) -> str:
@@ -119,6 +126,7 @@ def _assert_neutralised(text: str) -> None:
 @pytest.mark.covers("tool:memory_search", "tool:memory_since", "tool:memory_standing",
                     "tool:memory_profile", "tool:memory_history", "tool:memory_why",
                     "tool:memory_list_documents", "tool:memory_stats")
+@needs_toml
 def test_every_flat_read_tool_neutralises_forged_structure(mcp: Mcp) -> None:
     """Drive the payload back out through every non-graph read tool; each one that renders
     it folds the forged bracket and refuses the payload a line of its own."""
@@ -136,6 +144,7 @@ def test_every_flat_read_tool_neutralises_forged_structure(mcp: Mcp) -> None:
 
 
 @pytest.mark.covers("tool:memory_neighborhood")
+@needs_toml
 def test_the_graph_walk_folds_a_forged_arrow_in_a_stored_label(mcp: Mcp) -> None:
     """memory_neighborhood renders its own arrow grammar `-rel->`, so a stored node label
     carrying `->` could forge a hop. The walk folds the arrow in the label it renders.

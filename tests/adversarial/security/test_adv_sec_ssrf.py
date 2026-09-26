@@ -11,6 +11,8 @@ on a refusal — a check made after connecting is a check made too late.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from harness.fakes.url_fetch import FakeResolver, FakeResponse, FakeTransport
@@ -71,9 +73,12 @@ def test_refusal_names_a_reason_for_each_non_public_class(address, reason) -> No
 #: and resolves it to 127.0.0.1, while macOS's libc reads it as decimal with an
 #: insignificant leading zero and resolves it to 177.0.0.1, a public-looking address.
 #: Testing it would pin one platform's answer as if it were the property under test.
+#: Windows reads none of the three as an address, so there the test is skipped.
 NUMERIC_LOOPBACK_SPELLINGS = ["2130706433", "017700000001", "0x7f.1"]  # decimal, octal, hex
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows's resolver does not read a host written as one number")
 @pytest.mark.parametrize("host", NUMERIC_LOOPBACK_SPELLINGS)
 def test_a_numeric_spelling_of_a_private_host_is_refused(host) -> None:
     """A host written in decimal, octal or hex is refused whatever spelling the caller
