@@ -104,6 +104,10 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
     KnownBug("B54", 336, "the documentation does not list end(), health(), whoami(), bind() "
              "or merge_predicate() among the methods only one client has"),
+    KnownBug("B50", 332, "add() drops a turn repeated word for word after the value it "
+             "stated has changed"),
+    KnownBug("B51", 333, "a fact restated often enough to reach the salience cap outranks "
+             "the fact a query asks about"),
 )}
 
 
