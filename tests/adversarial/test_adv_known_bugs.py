@@ -204,6 +204,26 @@ def test_a_backdated_retraction_leaves_a_tombstone_that_no_read_returns() -> Non
     assert seen == [], seen
 
 
+# -- B69: a repeated future-dated retraction writes a new tombstone each time ------------
+
+@known_bugs.xfail("B69")
+def test_a_future_dated_retraction_sent_again_is_a_repeat() -> None:
+    """A repeat of a retraction dated now reinforces its tombstone and reports nothing.
+    A repeat of one dated in the future must do the same (#349)."""
+    from harness.clock import FAR_FUTURE
+
+    mem = stores.memory()
+    user = mem.scope(user="u")
+    user.remember("user", "likes", "tea")
+    receipts = [user.remember("user", "likes", "tea", polarity=-1, valid_from=FAR_FUTURE)
+                for _ in range(3)]
+    tombstones = [c for c in mem.store.iter_claims(None, True) if c.polarity < 0]
+    reported = [len(r.invalidated) for r in receipts]
+    if len(tombstones) == 3 and reported == [1, 1, 1]:
+        raise known_bugs.Reproduced(f"{len(tombstones)} tombstones; ended reported {reported}")
+    assert len(tombstones) == 1 and reported == [1, 0, 0], (len(tombstones), reported)
+
+
 # -- B16: forget leaves a scheduled value believed ---------------------------------------
 
 @known_bugs.xfail("B16")

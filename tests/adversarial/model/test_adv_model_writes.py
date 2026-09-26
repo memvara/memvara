@@ -78,6 +78,25 @@ def test_a_retraction_dated_in_the_future_leaves_a_tombstone_with_an_empty_inter
     assert tombstone.valid_from == tombstone.valid_to == FAR_FUTURE
 
 
+def test_a_retraction_dated_in_the_future_can_retire_the_value_it_names(
+        pair: Pair) -> None:
+    pair.apply(Remember("u1", "likes", "tea"))
+    pair.apply(Remember("u1", "likes", "tea", polarity=-1, valid_from=FAR_FUTURE,
+                        close="retired"))
+    tombstone = pair.model.rows["r2"]
+    assert pair.model.rows["r1"].invalidated_at is not None
+    assert tombstone.valid_from == tombstone.valid_to == FAR_FUTURE
+
+
+def test_a_retraction_dated_in_the_future_sent_twice_agrees_with_the_model(
+        pair: Pair) -> None:
+    """The store and the model must agree on a repeat of a future-dated retraction. What
+    that repeat should do is #349; this checks only that the two do the same thing."""
+    pair.apply(Remember("u1", "likes", "tea"))
+    pair.apply(Remember("u1", "likes", "tea", polarity=-1, valid_from=FAR_FUTURE))
+    pair.apply(Remember("u1", "likes", "tea", polarity=-1, valid_from=FAR_FUTURE))
+
+
 def test_a_repeated_retraction_reinforces_its_tombstone_and_reports_nothing(
         pair: Pair) -> None:
     pair.apply(Remember("u1", "likes", "tea", valid_from=I0))
