@@ -23,7 +23,12 @@ difference is real:
   `GET /v1/standing` reports no total (`memvara/server/tools.py`, `_standing`);
 * `memory_recall` refuses `budget` and `valid_at` in cloud mode
   (`memvara/server/memory_api.py`, `MemoryAPI.recall`); memvara/memvara#298 tracks
-  giving the hosted recall a time axis.
+  giving the hosted recall a time axis;
+* in cloud mode, the descriptions of `memory_forget` and `memory_end` promise that,
+  given a predicate rather than a claim id, they close only the current values of that
+  fact, because a hosted deployment on a release from before memvara/memvara#282 does
+  not close a value stored to begin later (`memvara/server/tools.py`,
+  `for_a_hosted_deployment`).
 
 **One difference is a known bug, and it is pinned where the session meets it.** A write
 receipt read through the hosted client drops four lists the local receipt reports, so in
@@ -54,6 +59,7 @@ from harness.fakes.fake_v1 import FakeV1
 from harness.stdio import McpProcess, ToolResult, kill_all
 from memvara.server.config import ServerConfig, build_memvara
 from memvara.server.mcp import MemvaraMCPServer
+from memvara.server.tools import TOOLS, for_a_hosted_deployment
 from memvara.types import utcnow
 
 from .compare import ADDED, assert_same, normalise_text, text_labels, timed
@@ -342,8 +348,14 @@ def test_a_reply_that_lacks_an_id_does_not_stop_the_session() -> None:
 @pytest.mark.parametrize("answer", ["initialize", "tools/list"])
 def test_every_surface_answers_the_handshake_as_the_in_process_server_does(
         played: Played, answer: str, surface: str) -> None:
-    assert_same(played.handshake["in-process"][answer], played.handshake[surface][answer],
-                f"{answer} through {surface}")
+    """In cloud mode, the tool listing is compared with the in-process listing after
+    `listed_for_a_hosted_deployment` replaces the two descriptions that cloud mode
+    documents as different. Any other difference, in another tool or in another field of
+    those two, still fails."""
+    expected = played.handshake["in-process"][answer]
+    if surface == "stdio cloud" and answer == "tools/list":
+        expected = listed_for_a_hosted_deployment(expected)
+    assert_same(expected, played.handshake[surface][answer], f"{answer} through {surface}")
 
 
 # -- what cloud mode documents it writes differently -----------------------------------
@@ -382,6 +394,24 @@ def without_local_lines(step: str, text: str) -> str:
     if not starts:
         return text
     return "\n".join(row for row in text.split("\n") if not row.startswith(starts))
+
+
+#: The tools whose description cloud mode documents as different
+#: (`memvara/server/tools.py`, `for_a_hosted_deployment`). In cloud mode, each description
+#: promises that, given a predicate rather than a claim id, the tool closes only the
+#: current values of that fact, because a hosted deployment on a release from before
+#: memvara/memvara#282 does not close a value stored to begin later.
+HOSTED_DESCRIPTIONS = ("memory_forget", "memory_end")
+
+
+def listed_for_a_hosted_deployment(listing: list[Any]) -> list[Any]:
+    """`listing`, an answer to `tools/list`, with the description of each tool in
+    `HOSTED_DESCRIPTIONS` replaced by the one `for_a_hosted_deployment` gives it. Every
+    other field of those tools, and every other tool, is kept as it is."""
+    hosted = {tool.name: tool.description for tool in for_a_hosted_deployment(TOOLS)
+              if tool.name in HOSTED_DESCRIPTIONS}
+    return [{**tool, "description": hosted[tool["name"]]} if tool["name"] in hosted
+            else tool for tool in listing]
 
 
 # -- the known difference: memvara/memvara#334 --------------------------------------------
@@ -505,3 +535,25 @@ def test_cloud_mode_refuses_a_recall_budget(played: Played) -> None:
     assert error
     assert text.startswith("memory_recall failed: ValueError: recall(budget=...) is not "
                            "available against a hosted deployment"), text
+
+
+def test_cloud_mode_does_not_promise_to_close_a_value_stored_to_begin_later(
+        played: Played) -> None:
+    """`memvara/server/tools.py`, `for_a_hosted_deployment`: given a predicate,
+    `memory_forget` and `memory_end` call `forget()`, which in this library closes every
+    current value of the fact and any value stored to begin later (memvara/memvara#282),
+    and their descriptions say so. A hosted deployment runs its own `forget()`, and one on
+    a release from before that fix leaves a value stored to begin later alone. A server
+    cannot tell which release it reaches, so in cloud mode the two descriptions promise
+    only the current values."""
+    promise = "value stored to begin later"
+    hosted = {tool.name: tool.description for tool in for_a_hosted_deployment(TOOLS)}
+    listed = {surface: {tool["name"]: tool["description"]
+                        for tool in played.handshake[surface]["tools/list"]}
+              for surface in SURFACES}
+    for name in HOSTED_DESCRIPTIONS:
+        for surface in ("in-process", "stdio local"):
+            assert promise in listed[surface][name], (name, surface, listed[surface][name])
+        assert listed["stdio cloud"][name] != listed["in-process"][name], name
+        assert listed["stdio cloud"][name] == hosted[name], name
+        assert promise not in hosted[name], (name, hosted[name])
