@@ -56,6 +56,7 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "version"),
     KnownBug("B23", 300, "a store refused for its embedder has already been migrated"),
     KnownBug("B24", 301, "a store refused as too new leaves its SQLite connection open"),
+    KnownBug("B47", 327, "search() does not return its results in order of score"),
 )}
 
 

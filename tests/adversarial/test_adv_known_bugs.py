@@ -252,3 +252,34 @@ def test_a_retraction_repeated_after_the_first_expired_keeps_its_own_record() ->
     if left == []:
         raise known_bugs.Reproduced("B18: the repeat was erased with the expired tombstone")
     assert len(left) == 1 and left[0].expires_at is None
+
+
+# -- B47: search() does not return its results in order of score -----------------------
+
+#: A small store in which a claim that matches "C++" is returned after claims that score
+#: zero. Found by the upgrade tests in a store written fresh by today's code.
+B47_FACTS = (("knows_language", "C"), ("knows_language", "C#"), ("knows_language", "C++"),
+             ("visited", "Zurich"), ("visited", "Rome"), ("lives_in", "Lisbon"),
+             ("works_at", "Acme Corp"), ("favorite_color", "blue"),
+             ("likes_band", "the the band"), ("subscribes_to", "a jazz magazine"),
+             ("visited", "Florence"))
+
+
+@known_bugs.xfail("B47")
+def test_search_returns_its_results_best_first() -> None:
+    """`Result.score` is a normalized relevance, so the list search() returns is in that
+    order, and a claim that matches cannot fall below claims that score zero (#327)."""
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    mem = stores.memory()
+    for day, (predicate, obj) in enumerate(B47_FACTS):
+        when = start + timedelta(days=day)
+        mem.remember("user", predicate, obj, user="u1", valid_from=when, recorded_at=when)
+    results = mem.search("C++", k=10, user="u1")
+    order = [(r.claim.object, round(r.score, 3)) for r in results]
+    scores = [r.score for r in results]
+    if scores != sorted(scores, reverse=True):
+        raise known_bugs.Reproduced(f"results out of score order: {order}")
+    assert sorted(r.claim.object for r in results[:3]) == ["C", "C#", "C++"], order
+
