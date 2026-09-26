@@ -492,7 +492,8 @@ def scan(root: pathlib.Path = tiers.TESTS) -> Scan:
     need Docker or a package that this machine does not have. A test covers nothing when
     it is not expected to pass: when it is marked xfail, marked skip with no condition,
     or sits in the quarantine tier. A known bug is covered by the test that carries its
-    strict expected failure, `known_bugs.xfail("B2")`.
+    strict expected failure, `known_bugs.xfail("B2")`, as a decorator or on one case of a
+    parametrised test.
     """
     result = Scan()
     for path in sorted(root.rglob("*.py")):
@@ -507,6 +508,8 @@ def _scan_file(path: pathlib.Path, result: Scan) -> None:
     if path.name.startswith("test_") or path.name.endswith("_test.py"):
         runs = tiers.tier_of(path) != "quarantine"
         _scan_body(path, tree.body, _pytestmark(tree.body), runs, result, read)
+        if runs:
+            _scan_param_pins(path, tree, result)
     # A covers mark the walk above did not read is one that pytest applies somewhere the
     # scan does not look, or not at all. Either way its test would cover nothing without
     # saying so, so it is reported instead.
@@ -517,6 +520,25 @@ def _scan_file(path: pathlib.Path, result: Scan) -> None:
             result.problems.add(
                 f"{_where(path, node)}: a covers mark is read only as a decorator of a "
                 "test function or test class, or in pytestmark")
+
+
+def _scan_param_pins(path: pathlib.Path, tree: ast.Module, result: Scan) -> None:
+    """Cover each known bug pinned on one case of a parametrised test.
+
+    Such a pin is `pytest.param(..., marks=[known_bugs.xfail("B19")])`, which is no
+    decorator, so the walk over test functions does not see it. A marker that is a
+    decorator is left to that walk, which also knows whether its test is skipped.
+    """
+    decorators = {id(mark) for node in ast.walk(tree)
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                  for mark in node.decorator_list}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and id(node) not in decorators
+                and isinstance(node.func, ast.Attribute) and node.func.attr == "xfail"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "known_bugs"):
+            result.covered.update(
+                f"bug:{bug}" for bug in _literals(node, path, "known_bugs.xfail", result)[:1])
 
 
 def _scan_body(path: pathlib.Path, body: list[ast.stmt], marks: list[ast.expr],

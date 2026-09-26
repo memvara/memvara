@@ -530,6 +530,42 @@ def test_a_known_bugs_marker_covers_its_bug_and_nothing_else(tmp_path: pathlib.P
     assert found.covered == {"bug:B5"}
 
 
+def test_a_known_bug_pinned_on_one_parametrised_case_is_covered(tmp_path: pathlib.Path) -> None:
+    """A strict expected failure can sit on one case of a parametrised test, through
+    `pytest.param(..., marks=...)`, and it pins its bug as surely as a decorator does."""
+    found = _tests(tmp_path, {"test_one.py": '''
+        import pytest
+        from harness import known_bugs
+
+        BROKEN = {"b"}
+
+        def _cases():
+            return [pytest.param(name, marks=[known_bugs.xfail("B19")] if name in BROKEN
+                                 else []) for name in ("a", "b")]
+
+        @pytest.mark.parametrize("case", _cases())
+        def test_case(case):
+            pass
+        '''})
+    assert found.covered == {"bug:B19"}
+
+
+def test_a_known_bug_pinned_in_the_quarantine_tier_is_not_covered(
+        tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A quarantined test is not run, so a pin in one covers nothing. The tier comes from
+    where a file sits under tests/, which a scratch folder is not, so it is set here."""
+    monkeypatch.setattr(checklist.tiers, "tier_of", lambda path: "quarantine")
+    found = _tests(tmp_path, {"test_one.py": '''
+        import pytest
+        from harness import known_bugs
+
+        @pytest.mark.parametrize("case", [pytest.param("a", marks=[known_bugs.xfail("B19")])])
+        def test_case(case):
+            pass
+        '''})
+    assert found.covered == set()
+
+
 def test_marks_on_a_class_and_in_pytestmark_reach_the_tests_they_apply_to(
         tmp_path: pathlib.Path) -> None:
     found = _tests(tmp_path, {"test_one.py": '''
