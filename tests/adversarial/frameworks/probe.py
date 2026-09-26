@@ -11,9 +11,9 @@ the order the file defines them, and appends its outcome to the report as one JS
 
 Before it loads the checks, the probe installs an audit hook that blocks every attempt to
 reach the network and records it in the report: a connection or a datagram to anything
-but a unix socket, and a lookup of a host name that is not a numeric address or
-localhost. No check needs the network, so any attempt is a failure, whichever library
-made it. The hook sees only what goes through Python's `socket` module. Networking done in
+but a unix socket, a lookup of a host name other than localhost, and a reverse lookup of
+any address but a loopback one. No check needs the network, so any attempt is a failure,
+whichever library made it. The hook sees only what goes through Python's `socket` module. Networking done in
 C, or in a child process, goes unseen, so the nightly tests also start the probe with no
 credentials in its environment and with every proxy variable pointing at a closed port.
 
@@ -43,16 +43,21 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
 
-#: How long one check may run. Past it, `faulthandler` writes every thread's stack to
-#: stderr and ends the process, so the report shows which check never finished.
+#: How long loading the checks file may take, and each check, and the interpreter's shutdown
+#: after the last check. Past it, `faulthandler` writes every thread's stack to stderr and
+#: ends the process with a failure, so the report shows which step never finished.
 CHECK_SECONDS = 120.0
 
 #: Host names that are answered without asking a name server.
 _LOCAL_NAMES = frozenset({"", "localhost", "localhost.localdomain"})
 
 _SENDS = frozenset({"socket.connect", "socket.sendto", "socket.sendmsg"})
+#: The audit events of a name lookup. CPython raises socket.gethostbyname for
+#: gethostbyname_ex as well.
 _LOOKUPS = frozenset({"socket.getaddrinfo", "socket.gethostbyname",
-                      "socket.gethostbyname_ex", "socket.gethostbyaddr"})
+                      "socket.gethostbyaddr", "socket.getnameinfo"})
+#: Lookups that ask a name server about an address, so a numeric address counts.
+_REVERSE = frozenset({"socket.gethostbyaddr", "socket.getnameinfo"})
 
 
 class BlockedNetworkAccess(OSError):
@@ -70,8 +75,9 @@ def network_access(event: str, args: tuple[Any, ...]) -> str | None:
 
     A connection or a datagram counts unless its socket is a unix socket, which never
     leaves the machine. A lookup counts unless the name is empty, localhost or a loopback
-    address. A numeric address is answered without a name server too, except by
-    `gethostbyaddr`, which asks one what the address is called.
+    address. A numeric address is answered without a name server too, except by a
+    reverse lookup (`gethostbyaddr` or `getnameinfo`), which asks one what the address is
+    called.
     """
     if event in _SENDS:
         sock, address = args[0], args[-1]
@@ -81,11 +87,13 @@ def network_access(event: str, args: tuple[Any, ...]) -> str | None:
         return f"{verb} {_address(address)}"
     if event in _LOOKUPS:
         host = args[0]
+        if event == "socket.getnameinfo" and isinstance(host, tuple):
+            host = host[0]
         if isinstance(host, bytes):
             host = host.decode("ascii", "replace")
         if host is None or host.lower() in _LOCAL_NAMES or _loopback(host):
             return None
-        if _numeric(host) and event != "socket.gethostbyaddr":
+        if _numeric(host) and event not in _REVERSE:
             return None
         return f"look up {host}"
     return None
@@ -220,7 +228,9 @@ def run(checks_file: Path, report_file: Path, *,
     report.emit({"kind": "start", "python": sys.version, "executable": sys.executable,
                  "memvara": location, "distributions": distributions()})
     phase[0] = "load"
+    faulthandler.dump_traceback_later(check_seconds, exit=True)
     module = load(checks_file)
+    faulthandler.cancel_dump_traceback_later()
     for name, function in checks(module):
         phase[0] = name
         report.emit({"kind": "begin", "check": name})
@@ -236,12 +246,17 @@ def run(checks_file: Path, report_file: Path, *,
                               message=str(exc)[:4000],
                               traceback="".join(traceback.format_exception(exc))[-12000:])
             finally:
-                faulthandler.cancel_dump_traceback_later()
                 context.close()
+                faulthandler.cancel_dump_traceback_later()
         record["seconds"] = round(time.monotonic() - started, 3)
         report.emit(record)
     phase[0] = "exit"
     report.emit({"kind": "end"})
+    # The interpreter still has to shut down: it waits for every thread that is not a
+    # daemon, then runs the exit handlers, where telemetry often sends. A framework that
+    # left a thread running would keep the handlers from ever running, so the same limit
+    # applies here, and ends the process with a failure and every thread's stack.
+    faulthandler.dump_traceback_later(check_seconds, exit=True)
     return 0
 
 
@@ -281,7 +296,10 @@ class Run:
         found = self.results.get(check)
         if found is not None:
             return found
-        if check in self.begun:
+        if self.finished:
+            reason = ("it never ran: the probe finished without it, so the checks file "
+                      "defines no check of that name")
+        elif check in self.begun:
             reason = "it started and never finished: the probe stopped while running it"
         elif self.begun:
             reason = f"it never ran: the probe stopped while running {self.begun[-1]}"
@@ -324,7 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("checks", type=Path, help="the checks file to run")
     parser.add_argument("report", type=Path, help="the report file to append to")
     parser.add_argument("--check-seconds", type=float, default=CHECK_SECONDS,
-                        help="how long one check may run before the probe stops")
+                        help="how long loading, each check and the shutdown may take "
+                             "before the probe stops")
     options = parser.parse_args(argv)
     return run(options.checks, options.report, check_seconds=options.check_seconds)
 

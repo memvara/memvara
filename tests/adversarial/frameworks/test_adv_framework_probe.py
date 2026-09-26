@@ -62,10 +62,33 @@ HANGS = """
         pass
 """
 
+#: A check that passes but leaves a thread running, so the interpreter never finishes
+#: shutting down: it waits for every thread that is not a daemon before it runs the exit
+#: handlers.
+HANGS_AT_EXIT = """
+    import threading
+    import time
+
+
+    def check_leaves_a_thread_running(ctx):
+        threading.Thread(target=time.sleep, args=(30,), daemon=False).start()
+"""
+
+#: A checks file whose own import never finishes.
+HANGS_WHILE_LOADING = """
+    import time
+
+    time.sleep(30)
+
+
+    def check_never_reached(ctx):
+        pass
+"""
+
 Probed = tuple[probe.Run, "subprocess.CompletedProcess[str]"]
 
 
-def _probe(folder: Path, source: str, *options: str) -> Probed:
+def _probe(folder: Path, source: str, *options: str, timeout: float = 120) -> Probed:
     """Run the probe on the checks in `source`, with this interpreter."""
     checks = folder / "checks_planted.py"
     checks.write_text(textwrap.dedent(source), encoding="utf-8")
@@ -75,7 +98,7 @@ def _probe(folder: Path, source: str, *options: str) -> Probed:
     done = subprocess.run(
         [sys.executable, "-I", "-B", str(PROBE), str(checks), str(report), *options],
         env=environments.probe_env(home), cwd=folder, capture_output=True, text=True,
-        timeout=120)
+        timeout=timeout)
     return probe.read(report), done
 
 
@@ -144,6 +167,22 @@ def test_a_check_that_hangs_is_stopped_and_named(hung: Probed) -> None:
     assert "check_hangs" in after.message
 
 
+def test_a_probe_that_hangs_after_its_last_check_is_stopped(tmp_path: Path) -> None:
+    """A framework can leave a thread running that never ends. The interpreter then never
+    reaches the exit handlers, where telemetry sends, so the probe must stop itself and
+    exit with a failure rather than wait until the suite kills it."""
+    run, done = _probe(tmp_path, HANGS_AT_EXIT, "--check-seconds", "0.5", timeout=20)
+    assert run.results["check_leaves_a_thread_running"].passed and run.finished
+    assert done.returncode != 0 and "Timeout" in done.stderr, done.stderr
+
+
+def test_a_checks_file_that_hangs_while_loading_is_stopped(tmp_path: Path) -> None:
+    run, done = _probe(tmp_path, HANGS_WHILE_LOADING, "--check-seconds", "0.5", timeout=20)
+    assert run.start is not None and run.begun == [] and not run.finished
+    assert done.returncode != 0 and "Timeout" in done.stderr, done.stderr
+    assert "before its first check" in run.result("check_never_reached").message
+
+
 def test_network_access_is_recognised_in_each_form() -> None:
     """Connections and datagrams to an address count, and so do lookups of a name. What
     stays on the machine does not: a unix socket, a numeric address, localhost."""
@@ -157,8 +196,8 @@ def test_network_access_is_recognised_in_each_form() -> None:
     if hasattr(socket, "AF_UNIX"):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unix:
             assert probe.network_access("socket.connect", (unix, "/tmp/d.sock")) is None
-    for event in ("socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyname_ex",
-                  "socket.gethostbyaddr"):
+    # CPython raises the event socket.gethostbyname for gethostbyname_ex as well.
+    for event in ("socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr"):
         assert probe.network_access(event, ("pypi.org", 443)) == "look up pypi.org"
         assert probe.network_access(event, (b"pypi.org", 443)) == "look up pypi.org"
         for local in ("127.0.0.1", "::1", "localhost", "", None):
@@ -168,6 +207,9 @@ def test_network_access_is_recognised_in_each_form() -> None:
     assert probe.network_access("socket.getaddrinfo", ("192.0.2.1", 443)) is None
     assert probe.network_access("socket.gethostbyaddr", ("192.0.2.1",)) == (
         "look up 192.0.2.1")
+    assert probe.network_access("socket.getnameinfo", (("192.0.2.1", 80),)) == (
+        "look up 192.0.2.1")
+    assert probe.network_access("socket.getnameinfo", (("127.0.0.1", 80),)) is None
     assert probe.network_access("open", ("/etc/hosts", "r", 0)) is None
 
 
@@ -187,6 +229,19 @@ def test_a_report_cut_short_is_read_as_far_as_it_goes(tmp_path: Path) -> None:
     assert run.result("check_b").error_type == "ProbeStopped"
     missing = probe.read(tmp_path / "missing.jsonl").result("check_a")
     assert "before its first check" in missing.message
+
+
+def test_a_check_a_finished_run_never_reported_is_named_as_unknown(tmp_path: Path) -> None:
+    """A run that finished ran every check its file defines, so a check with no result is
+    one the file does not define, such as a renamed check that a pin still names."""
+    report = tmp_path / "report.jsonl"
+    report.write_text("\n".join(json.dumps(record) for record in (
+        {"kind": "begin", "check": "check_a"},
+        {"kind": "result", "check": "check_a", "passed": True},
+        {"kind": "end"})), encoding="utf-8")
+    result = probe.read(report).result("check_renamed")
+    assert (result.passed, result.error_type) == (False, "ProbeStopped")
+    assert "the probe finished" in result.message and "check_a" not in result.message
 
 
 def test_only_the_check_functions_a_file_defines_are_listed(tmp_path: Path) -> None:
