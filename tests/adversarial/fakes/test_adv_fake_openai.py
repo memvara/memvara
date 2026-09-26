@@ -17,6 +17,11 @@ from memvara.llm.base import Message, ToolSpec, TruncatedResponse
 from memvara.llm.openai import OpenAILLM
 from memvara.types import Episode
 
+#: Windows' monotonic clock ticks every 15.6 ms, so a wait can measure up to one tick
+#: shorter than the time it waited. Every lower bound on a measured wait allows for it.
+CLOCK_TICK = 0.016
+
+
 #: A turn the fast path does not recognise, so a store with a model has to ask it.
 TURN = "I have been practising the cello every evening since spring."
 
@@ -102,7 +107,7 @@ def test_a_hang_is_cut_off_by_the_client_s_timeout(fake_openai: FakeOpenAI) -> N
     with pytest.raises(httpx.ReadTimeout):
         llm.chat("system", "prompt", json_object=False, max_completion_tokens=10,
                  timeout=0.3)
-    assert 0.3 <= time.monotonic() - started < 5
+    assert 0.3 - CLOCK_TICK <= time.monotonic() - started < 5
     assert llm.chat("system", "prompt", json_object=False, max_completion_tokens=10,
                     timeout=5) == "after the hang"
 

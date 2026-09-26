@@ -13,6 +13,10 @@ import pytest
 
 from harness.fakes._http import HttpFake, Reply, Request, json_reply
 
+#: Windows' monotonic clock ticks every 15.6 ms, so a wait can measure up to one tick
+#: shorter than the time it waited. Every lower bound on a measured wait allows for it.
+CLOCK_TICK = 0.016
+
 
 class Echo(HttpFake):
     """The smallest fake: it answers `GET /echo` and `POST /echo` with what it was sent,
@@ -105,7 +109,7 @@ def test_a_delay_shorter_than_the_timeout_is_waited_out(echo: Echo) -> None:
     started = time.monotonic()
     with _client(echo, timeout=5) as client:
         assert client.get("/echo").status_code == 200
-    assert time.monotonic() - started >= 0.2
+    assert time.monotonic() - started >= 0.2 - CLOCK_TICK
 
 
 def test_over_a_mock_transport_a_hang_or_a_long_delay_ends_at_the_client_s_timeout(
@@ -117,7 +121,7 @@ def test_over_a_mock_transport_a_hang_or_a_long_delay_ends_at_the_client_s_timeo
             started = time.monotonic()
             with pytest.raises(httpx.ReadTimeout):
                 client.get("/echo")
-            assert 0.2 <= time.monotonic() - started < 5
+            assert 0.2 - CLOCK_TICK <= time.monotonic() - started < 5
         assert client.get("/echo").status_code == 200
     assert [r.status for r in echo.requests] == [None, None, 200]
 

@@ -18,7 +18,12 @@ from memvara.core import ScopedMemvara
 from memvara.remote.api import RemoteMemvara
 from memvara.remote.client import DEFAULT_ATTEMPTS
 from memvara.remote.errors import (AuthError, InvalidRequest, RateLimited, ReadOnly,
+
                                    RemoteError, ScopeError)
+
+#: Windows' monotonic clock ticks every 15.6 ms, so a wait can measure up to one tick
+#: shorter than the time it waited. Every lower bound on a measured wait allows for it.
+CLOCK_TICK = 0.016
 
 Start = Callable[..., McpProcess]
 
@@ -74,7 +79,7 @@ def test_a_delay_within_the_client_s_timeout_is_waited_out(fake_v1: FakeV1) -> N
     fake_v1.delay("GET /v1/stats", 0.3)
     started = time.monotonic()
     assert fake_v1.remote(timeout=5).stats()["claims"] == 0
-    assert time.monotonic() - started >= 0.3
+    assert time.monotonic() - started >= 0.3 - CLOCK_TICK
 
 
 def test_a_hang_is_cut_off_by_the_client_s_timeout_on_every_attempt(fake_v1: FakeV1) -> None:
@@ -84,7 +89,7 @@ def test_a_hang_is_cut_off_by_the_client_s_timeout_on_every_attempt(fake_v1: Fak
         fake_v1.remote(timeout=0.2).stats()
     assert caught.value.code == "transport"
     assert [r.status for r in fake_v1.requests] == [None] * DEFAULT_ATTEMPTS
-    assert time.monotonic() - started >= 0.2 * DEFAULT_ATTEMPTS
+    assert time.monotonic() - started >= 0.2 * DEFAULT_ATTEMPTS - CLOCK_TICK
 
 
 def test_the_async_client_times_out_on_a_hang_too(fake_v1: FakeV1) -> None:
