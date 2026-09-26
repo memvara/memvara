@@ -1080,14 +1080,16 @@ def _write_refusal(path: str) -> str | None:
     SQLite opens a file it may not write read-only, without an error, and on a read-only
     connection `BEGIN IMMEDIATE` and `BEGIN EXCLUSIVE` start only a read transaction, again
     without an error. A lock taken that way keeps nobody out, so a store asks here before
-    it relies on one. A missing file is no refusal: SQLite creates it for writing.
+    it relies on one. Only a refused permission counts. A missing file is no refusal,
+    because SQLite creates it for writing, and any other problem with the path is left to
+    SQLite, which reports it when it opens the file, as it always has.
     """
     try:
         os.close(os.open(path, os.O_RDWR))
-    except FileNotFoundError:
-        return None
     except PermissionError as exc:
         return exc.strerror or str(exc)
+    except OSError:
+        return None
     return None
 
 

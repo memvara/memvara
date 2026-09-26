@@ -2606,6 +2606,15 @@ def test_a_lock_file_that_is_not_a_database_is_named(tmp_path):
         SQLiteStore(str(tmp_path / "c.db"))
 
 
+def test_a_lock_path_that_is_a_directory_fails_the_open_as_it_always_did(tmp_path):
+    """The store asks, before SQLite opens `<db>.lock`, only whether this process may write
+    it. Any other problem with the path is left to SQLite, which reports it as it always
+    has, so a caller that catches `sqlite3.OperationalError` around an open still does."""
+    (tmp_path / "c.db.lock").mkdir()
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        SQLiteStore(str(tmp_path / "c.db"))
+
+
 @pytest.mark.parametrize("error", [sqlite3.InterfaceError, KeyboardInterrupt])
 def test_a_lock_that_fails_to_be_taken_leaves_no_connection_behind(tmp_path, monkeypatch,
                                                                    error):
