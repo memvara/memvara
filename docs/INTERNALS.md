@@ -2343,6 +2343,42 @@ On a file already in WAL mode the switch needs no stronger lock. `SCHEMA` holds 
 pragmas and `IF NOT EXISTS` statements, so running it again changes nothing. Any other error
 is raised at once.
 
+### Which embedder wrote the vectors
+
+Two embedders of the same width write vectors that no width check can tell apart, so a
+store records which embedder wrote its vectors in `<db>.embedder.json`
+(`memvara/embed/fingerprint.py`). `Memvara._check_embedder` reads the record at every open,
+beside the width `stored_dim` reads from the vectors themselves. An opener of another width
+is refused with `EmbedderMismatchError`. A record that names another embedder of the same
+width makes the open warn with `EmbedderChangedWarning`.
+
+**A missing or damaged record.** When the store holds vectors and its record is missing or
+unreadable, or names another width than the vectors have, the open cannot tell whether its
+embedder wrote them. It warns with `EmbedderChangedWarning` first, and then, if the open
+goes on, writes the record naming its embedder, so that the next change of embedder is
+noticed. The order matters. Turned into an error, the warning stops the open before the
+record names an embedder that may be wrong; written first, the record named the wrong
+embedder, and the store's owner, reopening with its own, was told that the wrong one wrote
+its vectors. When the record cannot be written, a second warning says so, and the first
+comes back on every open. A width that is not a JSON integer makes the record unreadable.
+
+**What the rewrite costs.** The record names whatever embedder made that open, which is
+the caller's choice or, with no `embedder=`, `_default_embedder`'s guess from the width.
+For 384-wide vectors and no record, that guess is the local model a default configuration
+loaded through 0.15, and it can be wrong. When it is, the one warning is the only notice:
+from the next open on, the record names the guessed embedder, no open warns again, and
+only `reembed()` fixes the wrong guess, by rebuilding every vector with the embedder in
+use. The rewrite stays anyway, because the common case is the embedder that wrote the store
+opening it again, and without a record nothing could notice a later change at all.
+
+**How the record is written.** `write_fingerprint` writes a temporary file beside the
+record, syncs it to disk and renames it over the record, so a crash or a full disk leaves
+the old record or the new one and never half of one. A record kept as a link is followed,
+so the file it names is replaced and the link stays. A directory where the account may
+write the existing files but may not add new ones refuses the temporary file, and the
+record is then overwritten in place, as it was before the rename, where a crash can still
+tear it.
+
 ### Encryption at rest
 
 `SQLiteStore(path, encryption=True)` creates a new store encrypted. An existing file is

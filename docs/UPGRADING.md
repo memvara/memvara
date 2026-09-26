@@ -7,6 +7,50 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A store whose embedder record is missing or unreadable warns when it opens
+
+### What changed
+
+A store records which embedder wrote its vectors in `<db>.embedder.json`. When a store
+holds vectors and that record is missing or unreadable, or names another width than the
+vectors have, opening it now warns with `EmbedderChangedWarning`: memvara cannot tell
+whether the embedder in use wrote the vectors. Before, such an open said nothing, whatever
+embedder opened it. If the open goes on, it then writes the record naming the embedder in
+use, so later opens are quiet and a later change of embedder is noticed. Where the record
+cannot be written, a second warning says so, and the first comes back on every open.
+
+### Who this changes
+
+**If a store was copied without its `<db>.embedder.json`**, or a crash tore the file, its
+first open after upgrading warns once.
+
+**If you turn warnings into errors** (`python -W error`, or `warnings.simplefilter("error")`),
+that first open raises `EmbedderChangedWarning` and writes nothing, so every later open
+raises it too, until you act.
+
+**If you construct `Memvara()` with no `embedder=`**, the record it writes names the
+embedder chosen from the vectors' width. For 384-wide vectors that is MiniLM, the model a
+default configuration wrote them with. If that guess is wrong, this warning is the only
+notice you get.
+
+**If the MCP server opens the store**, the warning goes to the server's stderr, which a
+client running the server over stdio does not show you.
+
+### What to do
+
+If the embedder in use wrote the vectors, nothing: the record is written and later opens
+are quiet. If it did not, or you cannot tell, run `mem.reembed()` or open the store once
+with `reembed=True`, which rebuilds every vector with the embedder in use; after the
+warning, nothing else will notice the mismatch. With warnings turned into errors, either
+re-embed, or let this warning through once so that the record is written.
+
+### How to find your instances
+
+Look for store files with no `<db>.embedder.json` beside them, or search your logs for
+"is missing or unreadable, so memvara cannot tell".
+
+---
+
 ## Creating, upgrading or re-embedding a store needs permission to write `<db>.lock`
 
 ### What changed
@@ -554,7 +598,10 @@ and 0.97.
 **If you construct `Memvara()` with no `embedder=`** and sentence-transformers is
 installed, an existing store opens with the local model its fingerprint names, so nothing
 changes for it. A new store gets bge-small. A store with 384-wide vectors and no
-fingerprint keeps MiniLM, the model a default configuration wrote it with.
+fingerprint keeps MiniLM, the model a default configuration wrote it with. Its open now
+warns with `EmbedderChangedWarning` that memvara cannot tell which model wrote those
+vectors, and writes a fingerprint naming MiniLM, so the next open is quiet; the entry on
+missing embedder records at the top of this file has the details.
 
 **If you run the MCP server with `MEMVARA_EMBEDDER=local`**, the same holds. The server
 reads the model off the store's fingerprint before it starts, so a deployment with an
