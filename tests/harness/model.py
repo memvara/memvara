@@ -219,7 +219,10 @@ class ReferenceStore:
 
         matches = [r for r in live if r.obj == op.obj]
         if not matches:
-            prior = [r for r in self.rows.values() if r.value == value]
+            # A tombstone whose expiry has passed does not count as the retraction on
+            # record, just as `live_at` above leaves an expired row out of a repeated fact.
+            prior = [r for r in self.rows.values()
+                     if r.value == value and not r.expired(t)]
             if prior:
                 keep = min(prior, key=self._tie)
                 keep.observations += 1

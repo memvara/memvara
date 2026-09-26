@@ -971,6 +971,29 @@ def test_repeating_a_retraction_does_not_pile_up_tombstones(rec, store):
     assert store.stats()["claims"] == before
 
 
+@pytest.mark.parametrize("expiry, folded", [
+    (timedelta(0), False),              # expires at the repeat's own instant: already gone
+    (timedelta(microseconds=1), True),  # expires just after it: still the one on record
+])
+def test_a_retraction_repeated_at_its_tombstones_expiry_is_judged_at_that_instant(
+        rec, store, expiry, folded):
+    """A tombstone counts as expired at its `expires_at` itself, as every read counts it
+    (#284). A repeat at that instant writes a tombstone of its own; a repeat one
+    microsecond earlier is folded into the tombstone on record."""
+    t0 = utcnow() - timedelta(days=2)
+    t1 = t0 + timedelta(days=1)
+    rec.apply(claim("works_at", "Acme", valid_from=t0, recorded_at=t0), now=t0)
+    first = rec.apply(claim("works_at", "Acme", polarity=-1, valid_from=t0, recorded_at=t0,
+                            expires_at=t1 + expiry), now=t0).claim
+    res = rec.apply(claim("works_at", "Acme", polarity=-1, valid_from=t1, recorded_at=t1),
+                    now=t1)
+    tombstones = [c for c in store.iter_claims(None, True) if c.polarity < 0]
+    if folded:
+        assert res.action == "noop" and [c.id for c in tombstones] == [first.id]
+    else:
+        assert res.action == "retract" and len(tombstones) == 2
+
+
 def test_retraction_is_visible_in_history(rec, store):
     t0 = utcnow() - timedelta(days=5)
     acme = rec.apply(claim("works_at", "Acme", valid_from=t0, recorded_at=t0), now=t0).claim

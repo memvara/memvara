@@ -190,6 +190,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   reply now says that too, where it used to say `memory_recall` kept returning it;
   `memory_remember`'s reply shares that note.
 
+- **A retraction repeated after the first one's expiry has passed keeps a record of its
+  own.** A retraction that repeated an earlier one was folded into the earlier tombstone
+  even when that tombstone's `expires_at` had passed. The write reported nothing, and
+  when the expiry sweep erased the old tombstone it erased the only record of the new
+  retraction with it, so a retraction written with no expiry disappeared. A tombstone
+  whose expiry has passed is now left out of that lookup, as an expired claim already is
+  when a fact is repeated, so the repeat is handled as a retraction the store has no
+  record of. Where nothing else in the slot is live, it writes a tombstone of its own,
+  which the sweep leaves in place. #284.
+
 ## [0.16.0] — 2026-09-25
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store moves to schema 16 on
