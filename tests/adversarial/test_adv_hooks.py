@@ -73,11 +73,28 @@ def test_output_that_is_not_json_is_reported_with_its_text() -> None:
     assert parse_reply("", what="recall on claude") is None
 
 
-def test_a_toml_client_config_is_refused_with_the_reason(hook_runner: Make) -> None:
-    """Codex keeps its client config in TOML, and HookRunner writes JSON only. The
-    refusal is deliberate and must say so, so nobody mistakes it for a harness bug."""
-    with pytest.raises(NotImplementedError, match="writes JSON client configs only"):
-        hook_runner("codex", server_env={"MEMVARA_DB": "unused.db"})
+def test_a_codex_client_config_is_written_as_toml(hook_runner: Make) -> None:
+    """Codex keeps its MCP servers in ~/.codex/config.toml, one `[mcp_servers.<name>]`
+    table each. A value with a backslash and a quote must survive the round trip."""
+    if sys.version_info < (3, 11):
+        pytest.skip("tomllib arrives in 3.11")
+    import tomllib  # noqa: PLC0415 - Python 3.11 and later
+
+    store = 'C:\\stores\\a "quoted" name.db'
+    runner = hook_runner("codex", server_env={"MEMVARA_DB": store, "MEMVARA_USER": "tester"})
+    config = tomllib.loads((runner.home / ".codex" / "config.toml").read_text())
+    block = config["mcp_servers"]["memvara"]
+    assert block["args"] == ["-m", "memvara.server"]
+    assert block["env"] == {"MEMVARA_DB": store, "MEMVARA_USER": "tester"}
+
+
+def test_a_client_config_format_the_runner_cannot_write_is_refused(
+        hook_runner: Make, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = hook_runner("claude")
+    monkeypatch.setattr(runner, "host", SimpleNamespace(
+        id="claude", config_format="yaml", client_configs=("~/.claude.json",)))
+    with pytest.raises(NotImplementedError, match="yaml"):
+        runner.write_client_config({"MEMVARA_DB": "unused.db"})
 
 
 def test_a_hook_that_runs_past_its_limit_is_reported_as_a_timeout(hook_runner: Make) -> None:

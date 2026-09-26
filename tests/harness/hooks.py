@@ -144,6 +144,69 @@ def parse_reply(stdout: str, *, what: str, stderr: str = "") -> dict[str, Any] |
     return reply
 
 
+#: How a TOML basic string writes each character that it cannot hold as itself.
+_TOML_ESCAPES = {'"': '\\"', "\\": "\\\\", "\b": "\\b", "\t": "\\t", "\n": "\\n",
+                 "\f": "\\f", "\r": "\\r"}
+
+
+def toml_string(text: str) -> str:
+    r"""`text` as a TOML basic string.
+
+    >>> print(toml_string('say "hi"'))
+    "say \"hi\""
+    >>> print(toml_string("C:\\stores\\memory.db"))
+    "C:\\stores\\memory.db"
+    >>> print(toml_string("tab\there, bell\x07"))
+    "tab\there, bell\u0007"
+    >>> toml_string("\ud800")
+    Traceback (most recent call last):
+    ...
+    ValueError: TOML cannot hold the lone surrogate '\ud800'
+    """
+    out = []
+    for char in text:
+        code = ord(char)
+        if char in _TOML_ESCAPES:
+            out.append(_TOML_ESCAPES[char])
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04x}")
+        elif 0xD800 <= code <= 0xDFFF:
+            raise ValueError(f"TOML cannot hold the lone surrogate {char!r}")
+        else:
+            out.append(char)
+    return '"' + "".join(out) + '"'
+
+
+def _toml_key(name: str) -> str:
+    """`name` as a TOML key: bare when TOML allows that, quoted otherwise."""
+    return name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else toml_string(name)
+
+
+def toml_server_block(name: str, command: str, args: Sequence[str],
+                      env: Mapping[str, str]) -> str:
+    """One MCP server as Codex keeps it in ~/.codex/config.toml: a `[mcp_servers.<name>]`
+    table, with its environment as a sub-table.
+
+    >>> print(toml_server_block("memvara", "python3", ["-m", "memvara.server"],
+    ...                         {"MEMVARA_USER": "tester"}))
+    [mcp_servers.memvara]
+    command = "python3"
+    args = ["-m", "memvara.server"]
+    <BLANKLINE>
+    [mcp_servers.memvara.env]
+    MEMVARA_USER = "tester"
+    <BLANKLINE>
+    """
+    table = f"mcp_servers.{_toml_key(name)}"
+    lines = [f"[{table}]",
+             f"command = {toml_string(command)}",
+             "args = [" + ", ".join(toml_string(arg) for arg in args) + "]",
+             "",
+             f"[{table}.env]"]
+    lines += [f"{_toml_key(key)} = {toml_string(value)}" for key, value in env.items()]
+    return "\n".join(lines) + "\n"
+
+
 def _detached_pid(lines: Sequence[str]) -> int | None:
     """The pid in run.py's line saying it handed capture to a child, if there is one."""
     for line in lines:
@@ -208,18 +271,15 @@ class HookRunner:
 
     `home` becomes the child's HOME, and `cwd` its working directory. When `server_env`
     is given, it is written into the host's first client config file as the memvara
-    server's env block, which is where the hooks look for the store
-    (plugin/hooks/lib/ipc.py). Without it, the hooks find no store and report
-    "not configured". `env` is different: it is applied last to the hook process's own
-    environment, on top of `child_env`.
+    server's env block, in that host's own format (JSON, or TOML for Codex), which is
+    where the hooks look for the store (plugin/hooks/lib/ipc.py). Without it, the hooks
+    find no store and report "not configured". `env` is different: it is applied last to
+    the hook process's own environment, on top of `child_env`.
 
     No directory that holds a real agent CLI is on the child's PATH
     (`path_without_agent_clis`). `stubs` are stub agent CLIs put first on it, such as
     `harness.fakes.cli.FakeClis`. `capture` is refused without them, because it starts
     an agent CLI to mine the turn.
-
-    Client configs are written as JSON only. Codex keeps its config in TOML, so a Codex
-    run with a store is refused here until the hook-conformance tests add a TOML writer.
     """
 
     def __init__(self, host: str, *, home: pathlib.Path, cwd: pathlib.Path,
@@ -246,19 +306,25 @@ class HookRunner:
         return dict(self._env)
 
     def write_client_config(self, server_env: Mapping[str, str]) -> pathlib.Path:
-        """Write the host's first client config file, holding a memvara server block."""
-        if self.host.config_format != "json":
+        """Write the host's first client config file, holding a memvara server block, in
+        the host's own format: JSON with an `mcpServers` object, or for Codex, TOML with an
+        `[mcp_servers.memvara]` table."""
+        if self.host.config_format not in ("json", "toml"):
             raise NotImplementedError(
-                f"HookRunner writes JSON client configs only, and {self.host.id} keeps a "
-                f"{self.host.config_format} one; the hook-conformance tests add that writer")
+                f"HookRunner writes JSON and TOML client configs, and {self.host.id} keeps "
+                f"a {self.host.config_format} one")
         path = pathlib.Path(str(self.host.client_configs[0]).replace("~", str(self.home), 1))
         if not path.resolve().is_relative_to(self.home.resolve()):
             raise ValueError(f"refusing to write a client config outside the test's home: "
                              f"{path}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        block = {"command": sys.executable, "args": ["-m", "memvara.server"],
-                 "env": dict(server_env)}
-        path.write_text(json.dumps({"mcpServers": {"memvara": block}}), encoding="utf-8")
+        command, args = sys.executable, ["-m", "memvara.server"]
+        if self.host.config_format == "toml":
+            text = toml_server_block("memvara", command, args, server_env)
+        else:
+            block = {"command": command, "args": args, "env": dict(server_env)}
+            text = json.dumps({"mcpServers": {"memvara": block}})
+        path.write_text(text, encoding="utf-8")
         return path
 
     def payload(self, hook: str, **fields: Any) -> dict[str, Any]:
