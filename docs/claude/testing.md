@@ -546,6 +546,18 @@ The fast tier of this folder has 207 tests, 19 of them strict expected failures,
 ```bash
 PYTHONPATH=$PWD python -m pytest -q -p no:cacheprovider tests/adversarial/model_faults --tier nightly
 ```
+## The security properties
+
+`tests/adversarial/security/` attacks the places a defect would be a vulnerability rather than a bug. Each file drives the real code the way an attacker reaches it — the MCP server over its stdio pipe, the plugin hooks, and the library store — and every test asserts a property that holds today. When a property fails because of a security-class defect, the test is left out of these files and the finding is reported through `SECURITY.md` instead, so nothing here names an unfixed hole. The plan is `docs/superpowers/plans/2026-09-26-adversarial-security.md`.
+
+- **Prompt injection** (`test_adv_sec_injection.py`). A stored value carrying a forged result row, a fake header, leading list markers, a control character and the graph arrow grammar is read back through every read tool the server lists and through both reading hooks. The forged brackets come back folded to their fullwidth forms, the graph tools fold the arrows, and no stored text opens a line of its own.
+- **Scope isolation** (`test_adv_sec_scope.py`). Two server processes bound to sibling scopes share one store file. For every tool that takes an id, the reply about an id that exists only in the other scope equals, byte for byte after the id is normalised away, the reply about an id that never existed — so no tool is an existence oracle across the boundary.
+- **The SSRF matrix** (`test_adv_sec_ssrf.py`). `SafeFetcher` is driven with a stub resolver and a recording transport, so nothing touches the network. Every private, loopback, link-local and embedded-IPv4 address class is refused before the transport is called, a decimal or octal spelling of a private host is refused, and a redirect to a private address is refused on the second hop. The documented limit — a private IPv4 behind a NAT64 prefix nobody configured — is asserted as documented behaviour, not a bug.
+- **Encryption** (`test_adv_sec_encryption.py`). A tampered, truncated or cross-owner vector record and a wrong key are all detected rather than served, and neither the stored text nor its embedding is on disk in the clear. The documented limits — the plaintext `<db>.embedder.json`, and the replay of an older record for the same row and owner — are pinned as documented behaviour. These tests need the `encrypt` extra and skip without it.
+- **Redaction** (`test_adv_sec_redaction.py`). A recording redactor confirms every field in `redact.FIELDS` reaches it before anything durable at every write door, and the built-in redactor's documented misses (unpunctuated digits, prose PII, non-Latin scripts, a number split across turns) are pinned as documented behaviour.
+- **Confirm tokens** (`test_adv_sec_confirm.py`). The token behind the bulk closures is refused when forged, replayed after expiry, presented for the other closure, or minted by another key, and a token from one scope cannot close another scope's memories even under a shared secret. A non-ASCII token is refused cleanly rather than raising.
+- **Secret hygiene** (`test_adv_sec_secrets.py`). A sentinel API key, store key and confirmation secret set in a server's environment never reach its standard error, its argv, or the `memory_stats` a model sees, and the remote client never prints its bearer token in a repr.
+- **File modes** (`test_adv_sec_filemodes.py`, POSIX only). The vector sidecar, a generated key file and the daemon socket are owner-only (0600, the socket inside a 0700 directory); the database and its lock file take the umask, which `SECURITY.md` documents as out of scope.
 
 ## Hook conformance
 
