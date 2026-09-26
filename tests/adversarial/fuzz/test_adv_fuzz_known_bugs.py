@@ -192,7 +192,6 @@ def test_every_pattern_a_tool_declares_is_anchored_at_both_ends() -> None:
 
 # -- B38: a lone surrogate in an object key is stored ------------------------------------
 
-@known_bugs.xfail("B38")
 def test_a_lone_surrogate_in_an_object_key_is_refused_like_one_in_a_value(
         shared_server: McpProcess) -> None:
     before = rows(shared_server.db)

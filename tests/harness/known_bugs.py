@@ -52,7 +52,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B34", 311, "the MCP server reads its input in the locale's encoding, not "
              "UTF-8"),
     KnownBug("B36", 313, "a refusal or a no-match reply quotes the whole argument"),
-    KnownBug("B38", 315, "a lone surrogate in an object argument's key is stored"),
     KnownBug("B39", 316, "memory_recall reports ranked without include_episodes as a "
              "ValueError"),
 

@@ -194,12 +194,14 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
         if not isinstance(value, dict):
             raise ToolError(
                 f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
-        names = spec.get("propertyNames")
-        if names is not None:
-            # The keys are names the caller chose, such as a metadata field, so each one
-            # is checked like a string argument against the declared pattern.
-            for key in value:
-                _checked(f"{label} key {key!r}", key, {"type": "string", **names})
+        # The keys are names the caller chose, such as a metadata field, so each one is
+        # checked like a string argument, against `propertyNames` when the schema
+        # declares it. The check runs when it does not, too, because it is also what
+        # refuses a lone surrogate: `memory_add_document.metadata` declares no key
+        # pattern, and a key holding half of a character was stored.
+        names = spec.get("propertyNames", {})
+        for key in value:
+            _checked(f"{label} key {key!r}", key, {"type": "string", **names})
         return {key: _checked(f"{label}.{key}", item, spec["additionalProperties"])
                 for key, item in value.items()}
     elif not isinstance(value, str):

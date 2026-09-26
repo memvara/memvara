@@ -17,6 +17,9 @@ The MCP server's argument validator now refuses these values, which it used to a
   to act as no floor at all.
 - A metadata filter key that ends in a newline, such as `"team\n"`, in the `filters`
   argument of `memory_search` or `memory_recall`.
+- A lone surrogate, half of a character, in the key of an object argument, such as a
+  key of `memory_add_document.metadata`. A lone surrogate in a string value was already
+  refused.
 
 Each refusal is an ordinary tool result with `isError: true` whose message names the
 argument, like every other argument the validator refuses.
