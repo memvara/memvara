@@ -13,8 +13,9 @@ from typing import Any, Iterator
 
 import pytest
 
-from harness import known_bugs
+from harness import known_bugs, skips
 from harness.env import REPO
+from memvara.confirm import Confirmer
 
 from . import runner
 
@@ -633,3 +634,83 @@ def test_the_sample_scenarios_gold_holds_on_a_real_server(tmp_path: pathlib.Path
     outcome = runner.run(sample(), tmp_path)
     for gold in runner.gold_items(sample()):
         runner.judge(gold, outcome)
+
+
+# -- the confirmation key and the predicate vocabularies ---------------------------------
+
+def test_a_confirm_secret_and_predicates_can_be_set_and_must_not_be_empty() -> None:
+    scenario = sample(env={"user": "tester", "confirm_secret": "k", "predicates": "engineering"})
+    assert errors(scenario) == []
+    scenario["sessions"][1]["env"] = {"confirm_secret": ""}
+    assert ("$.sessions[1].env.confirm_secret: must be at least 1 character(s) long"
+            in errors(scenario))
+
+
+def test_the_two_fields_become_server_variables() -> None:
+    env = {**runner.DEFAULT_ENV, "confirm_secret": "k", "predicates": "engineering"}
+    assert runner.variables(env) == {"MEMVARA_CONFIRM_SECRET": "k",
+                                     "MEMVARA_PREDICATES": "engineering"}
+    assert runner.variables(runner.DEFAULT_ENV) == {}
+
+
+@pytest.mark.parametrize("field", sorted(runner.VARIABLES))
+def test_an_empty_field_is_refused_rather_than_dropped(field: str) -> None:
+    """None leaves a variable unset, so the server uses its default. An empty string, which
+    only an env built by hand can hold, is refused by name instead of vanishing."""
+    with pytest.raises(ValueError, match=f"the env field '{field}' is an empty string"):
+        runner.variables({**runner.DEFAULT_ENV, field: ""})
+
+
+def test_a_scenario_that_loads_predicates_skips_below_python_3_11() -> None:
+    """A session's env counts as much as the scenario's. The mark is the skip ledger's own
+    `needs_toml`, whose tests check that a rule explains its reason."""
+    assert runner.marks(sample()) == []
+    in_a_session = sample()
+    in_a_session["sessions"][1]["env"] = {"predicates": "engineering"}
+    for scenario in (sample(env={"user": "tester", "predicates": "engineering"}),
+                     in_a_session):
+        assert runner.marks(scenario) == [skips.needs_toml]
+
+
+def expired_token(secret: str) -> str:
+    """A token that `secret` signed correctly and that expired in August 2026."""
+    token, _ = Confirmer(secret).issue(["cl_0f0f0f0f0f0f0f0f0f0f"], "ended",
+                                       now=datetime(2026, 8, 20, 9, tzinfo=timezone.utc))
+    return token
+
+
+def test_the_confirm_secret_reaches_the_server_on_a_real_server(
+        tmp_path: pathlib.Path) -> None:
+    """With the secret, the server holds the key that signed the token, so it checks the
+    token as far as its expiry. Without it, the server's own key refuses the signature."""
+    def answer(env: dict[str, Any], where: str) -> str:
+        scenario = sample(env=env)
+        del scenario["sessions"][0]
+        script(scenario)[:] = [{"tool": "memory_end_matching", "expect_error": True,
+                                "args": {"confirm": expired_token("k")}}]
+        outcome = runner.run(scenario, tmp_path / where)
+        assert outcome.problems == []
+        return outcome.turn().answer
+
+    assert "this confirmation token expired at" in answer(
+        {"user": "tester", "confirm_secret": "k"}, "with")
+    assert "was not issued by this memory server" in answer({"user": "tester"}, "without")
+
+
+@skips.needs_toml
+def test_predicates_reach_the_server_on_a_real_server(tmp_path: pathlib.Path) -> None:
+    """With the engineering vocabulary, runs_on is another spelling of current_host, and
+    the receipt says so. With the built-in predicates alone, runs_on is a new predicate,
+    and nothing is folded."""
+    def answer(env: dict[str, Any], where: str) -> str:
+        scenario = sample(env=env)
+        del scenario["sessions"][0]
+        script(scenario)[:] = [{"tool": "memory_remember", "args": {
+            "subject": "payments-api", "predicate": "runs_on", "object": "host-7"}}]
+        outcome = runner.run(scenario, tmp_path / where)
+        assert outcome.problems == []
+        return outcome.turn().answer
+
+    fold = "'runs_on' is another spelling of 'current_host'"
+    assert fold in answer({"user": "tester", "predicates": "engineering"}, "with")
+    assert fold not in answer({"user": "tester"}, "without")

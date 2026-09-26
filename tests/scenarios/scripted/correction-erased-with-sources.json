@@ -1,0 +1,68 @@
+{
+  "id": "correction-erased-with-sources",
+  "description": "The user asks for their passport number to be deleted outright, including the sentence they gave it in. Unlike correction-erased, this fact has a source turn: memory_add stored the sentence, and memory_remember cited it. No tool can erase a memory, so the operator erases the claim with its source turns. From then on no read shows the number or the sentence, in the same session or the next one, an anchored search that found the claim before the erase finds nothing, and memory_why cannot find the claim. A locker code the user gave in another turn, with a source turn of its own, is untouched.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "sessions": [
+    {"turns": [
+      {"user": "For the visa form: my passport number is K4471902.",
+       "script": [
+         {"tool": "memory_add", "args": {"text": "For the visa form: my passport number is K4471902."}, "capture": {"passport_turn": "turn id\\(s\\): (ep_[0-9a-f]+)"}},
+         {"tool": "memory_remember", "args": {"predicate": "passport_number", "object": "K4471902", "sources": ["{passport_turn}"]}, "capture": {"passport_id": "\\[(cl_[0-9a-f]+)\\] user passport number K4471902"}}
+       ]},
+      {"user": "And my gym locker code is 5521.",
+       "script": [
+         {"tool": "memory_add", "args": {"text": "And my gym locker code is 5521."}, "capture": {"locker_turn": "turn id\\(s\\): (ep_[0-9a-f]+)"}},
+         {"tool": "memory_remember", "args": {"predicate": "locker_code", "object": "5521", "sources": ["{locker_turn}"]}, "capture": {"locker_id": "\\[(cl_[0-9a-f]+)\\] user locker code 5521"}}
+       ]},
+      {"id": "before", "user": "Where did my passport number come from?",
+       "script": [{"tool": "memory_why", "args": {"claim_id": "{passport_id}"}}]},
+      {"id": "before-anchored", "user": "Is my passport number stored?",
+       "script": [{"tool": "memory_search", "args": {"query": "passport number K4471902", "anchored": true}}]}
+    ]},
+    {"turns": [
+      {"user": "The visa is done. Delete my passport number completely, including what I said when I gave it to you.",
+       "script": [{"op": "erase", "claim_id": "{passport_id}", "sources": true}]},
+      {"id": "same-session", "user": "Is it gone?",
+       "script": [{"tool": "memory_recall", "args": {"query": "passport number for the visa form", "include_episodes": true}}]},
+      {"id": "same-session-anchored", "user": "Is anything about my passport left at all?",
+       "script": [{"tool": "memory_search", "args": {"query": "passport number K4471902", "anchored": true}}]}
+    ]},
+    {"turns": [
+      {"id": "next-session", "user": "What's my passport number?",
+       "script": [
+         {"tool": "memory_recall", "args": {"query": "what is the user's passport number for the visa form", "include_episodes": true}},
+         {"tool": "memory_history", "args": {"predicate": "passport_number"}}
+       ]},
+      {"id": "why", "user": "Where did you get my passport number?",
+       "script": [{"tool": "memory_why", "args": {"claim_id": "{passport_id}"}}]},
+      {"id": "locker", "user": "What's my gym locker code?",
+       "script": [
+         {"tool": "memory_recall", "args": {"query": "gym locker code", "include_episodes": true}},
+         {"tool": "memory_why", "args": {"claim_id": "{locker_id}"}}
+       ]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "passport-erased", "text": "user passport number K4471902", "state": "absent"},
+    {"id": "locker-kept", "text": "user locker code 5521", "state": "live", "count": 1}
+  ],
+  "answer_gold": [
+    {"id": "source-shown-before", "turn": "before", "must_contain": "For the visa form: my passport number is K4471902"},
+    {"id": "anchored-search-finds-it-before", "turn": "before-anchored", "must_contain": "user passport number K4471902"},
+    {"id": "locker-still-found-in-the-same-session", "turn": "same-session", "must_contain": "user locker code 5521"},
+    {"id": "number-gone-in-the-same-session", "turn": "same-session", "must_not_contain": "K4471902"},
+    {"id": "sentence-gone-in-the-same-session", "turn": "same-session", "must_not_contain": "visa form"},
+    {"id": "anchored-search-finds-nothing", "turn": "same-session-anchored", "abstain": true},
+    {"id": "locker-still-found-in-the-next-session", "turn": "next-session", "must_contain": "user locker code 5521"},
+    {"id": "number-gone-in-the-next-session", "turn": "next-session", "must_not_contain": "K4471902"},
+    {"id": "sentence-gone-in-the-next-session", "turn": "next-session", "must_not_contain": "visa form"},
+    {"id": "why-finds-nothing", "turn": "why", "must_contain": "is not visible here"},
+    {"id": "why-shows-no-number", "turn": "why", "must_not_contain": "K4471902"},
+    {"id": "locker-code-kept", "turn": "locker", "must_contain": "user locker code 5521"},
+    {"id": "locker-source-kept", "turn": "locker", "must_contain": "And my gym locker code is 5521"}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}

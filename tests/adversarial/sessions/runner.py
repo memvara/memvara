@@ -26,7 +26,7 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import pytest
 
-from harness import known_bugs, stores, tiers
+from harness import known_bugs, skips, stores, tiers
 from harness.env import REPO, feature_env
 from harness.hooks import HookRunner, host_record
 from harness.stdio import PROTOCOL, McpProcess
@@ -428,6 +428,19 @@ def selected(scenarios: Iterable[Mapping[str, Any]], tier: str) -> list[Mapping[
     return [scenario for scenario in scenarios if scenario["tier"] in wanted]
 
 
+def marks(scenario: Mapping[str, Any]) -> list[pytest.MarkDecorator]:
+    """The marks every test that plays `scenario` carries.
+
+    A scenario whose env, or any session's env, names `predicates` carries
+    `skips.needs_toml`, so it skips on Python 3.10: loading a vocabulary needs `tomllib`,
+    and the server would refuse to start. Any other scenario carries none.
+    """
+    envs = [scenario["env"], *(session.get("env", {}) for session in scenario["sessions"])]
+    if any(env.get("predicates") for env in envs):
+        return [skips.needs_toml]
+    return []
+
+
 # -- running -----------------------------------------------------------------------------
 
 class RunError(RuntimeError):
@@ -438,7 +451,33 @@ class RunError(RuntimeError):
 #: The server settings a scenario gets for anything its `env` leaves out.
 DEFAULT_ENV: Mapping[str, Any] = {
     "user": "tester", "project": None, "features": {}, "read_only": False,
-    "protocol": PROTOCOL}
+    "protocol": PROTOCOL, "confirm_secret": None, "predicates": None}
+
+#: The env fields that each set one server variable, for the server and for the client
+#: config the hooks read.
+VARIABLES: Mapping[str, str] = {"confirm_secret": "MEMVARA_CONFIRM_SECRET",
+                                "predicates": "MEMVARA_PREDICATES"}
+
+
+def variables(env: Mapping[str, Any]) -> dict[str, str]:
+    """The variables an env's `confirm_secret` and `predicates` fields set.
+
+    A field that is None, or missing, sets nothing, so the server uses its default. An
+    empty string is refused. The schema refuses one in a scenario file, so only an env
+    built by hand can hold one, and it must not vanish without a word.
+
+    >>> variables({"confirm_secret": "k", "predicates": None})
+    {'MEMVARA_CONFIRM_SECRET': 'k'}
+    """
+    found: dict[str, str] = {}
+    for field, name in VARIABLES.items():
+        value = env.get(field)
+        if value == "":
+            raise ValueError(f"the env field {field!r} is an empty string; leave it out, or "
+                             "set it to None, for the server's default")
+        if value is not None:
+            found[name] = value
+    return found
 
 #: The three states a stored claim can be in. A snapshot reads all of them.
 STATES = ("live", "ended", "retired")
@@ -731,7 +770,7 @@ class _Session:
         self.hooks: dict[str, HookRunner] = {}
         self.server = McpProcess(
             db, home=home, user=env["user"], features=env["features"],
-            read_only=env["read_only"], cwd=work,
+            read_only=env["read_only"], cwd=work, env=variables(env),
             scope={"project": env["project"]} if env["project"] else None)
 
     def play(self, turns: Sequence[Mapping[str, Any]]) -> None:
@@ -846,6 +885,7 @@ class _Session:
             env["MEMVARA_PROJECT"] = self.env["project"]
         if self.env["read_only"]:
             env["MEMVARA_READ_ONLY"] = "1"
+        env.update(variables(self.env))
         env.update(feature_env(self.env["features"]))
         return env
 
@@ -889,10 +929,12 @@ def gold_items(scenario: Mapping[str, Any]) -> list[Gold]:
 
 def gold_params(scenarios: Iterable[Mapping[str, Any]]) -> list[Any]:
     """One pytest parameter per gold item. An item that a known bug breaks carries that
-    bug's strict expected-failure marker, and no other item does."""
+    bug's strict expected-failure marker, and no other item does. Every item also carries
+    its scenario's `marks`."""
     return [pytest.param(gold, id=gold.test_id,
-                         marks=[known_bugs.xfail(gold.known_bug["bug"])] if gold.known_bug
-                         else [])
+                         marks=[*marks(scenario),
+                                *([known_bugs.xfail(gold.known_bug["bug"])]
+                                  if gold.known_bug else [])])
             for scenario in scenarios for gold in gold_items(scenario)]
 
 

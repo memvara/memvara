@@ -1,0 +1,70 @@
+{
+  "id": "correction-retire-forms",
+  "description": "Retiring, the correction that says a record was wrong, in the forms correction-retired does not use. memory_forget with a predicate retires every current value of that fact at once: here two allergies that were the user's sister's, not the user's. With a subject as well, it retires a third party's value and leaves the user's own alone. With a claim id, it retires one value of a fact that holds several and leaves the others. A call that names both a claim id and a predicate is refused, and an id that is not visible here retires nothing. memory_history keeps every retired value with its reason, and recall shows only what is still believed.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "seed": [
+    {"op": "remember", "predicate": "allergic_to", "object": "shellfish"},
+    {"op": "remember", "predicate": "allergic_to", "object": "pollen"},
+    {"op": "remember", "predicate": "lives_in", "object": "Braga"},
+    {"op": "remember", "subject": "Mei", "predicate": "lives_in", "object": "Porto"}
+  ],
+  "sessions": [
+    {"turns": [
+      {"id": "not-mine", "user": "Those allergies you have for me are wrong. Shellfish and pollen are my sister Mei's allergies. I'm not allergic to anything.",
+       "script": [
+         {"tool": "memory_forget", "args": {"predicate": "allergic_to", "reason": "they are the user's sister Mei's allergies"}},
+         {"tool": "memory_remember", "args": {"subject": "Mei", "predicate": "allergic_to", "object": "shellfish"}},
+         {"tool": "memory_remember", "args": {"subject": "Mei", "predicate": "allergic_to", "object": "pollen"}}
+       ]},
+      {"id": "mine-now", "user": "So what am I allergic to?",
+       "script": [{"tool": "memory_history", "args": {"predicate": "allergic_to"}}]}
+    ]},
+    {"turns": [
+      {"id": "mei-fix", "user": "One more fix: Mei was never allergic to pollen. It's walnuts.",
+       "script": [
+         {"tool": "memory_search", "args": {"query": "what is Mei allergic to"}, "capture": {"pollen_id": "id=(cl_[0-9a-f]+) [^\\]]*\\] Mei allergic to pollen"}},
+         {"tool": "memory_forget", "args": {"claim_id": "{pollen_id}", "predicate": "allergic_to"}, "expect_error": true},
+         {"tool": "memory_forget", "args": {"claim_id": "{pollen_id}", "reason": "Mei's allergy is walnuts, not pollen"}},
+         {"tool": "memory_remember", "args": {"subject": "Mei", "predicate": "allergic_to", "object": "walnuts"}}
+       ]},
+      {"id": "mei-city", "user": "And Mei doesn't live in Porto. You've mixed her up with someone else.",
+       "script": [{"tool": "memory_forget", "args": {"subject": "Mei", "predicate": "lives_in", "reason": "mixed up with someone else"}}]},
+      {"id": "unknown-id", "user": "Forget the other allergy note too, the one with that old id.",
+       "script": [{"tool": "memory_forget", "args": {"claim_id": "cl_00000000000000000000"}}]},
+      {"id": "mei-now", "user": "What is Mei allergic to?",
+       "script": [{"tool": "memory_history", "args": {"subject": "Mei", "predicate": "allergic_to"}}]},
+      {"id": "party", "user": "What allergies should I plan for at Mei's party?",
+       "script": [{"tool": "memory_recall", "args": {"query": "Mei allergic to"}}]},
+      {"id": "where", "user": "Where do I live, and where does Mei live?",
+       "script": [{"tool": "memory_recall", "args": {"query": "where does the user live and where does Mei live"}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "user-shellfish-retired", "text": "user allergic to shellfish", "state": "retired", "count": 1},
+    {"id": "user-pollen-retired", "text": "user allergic to pollen", "state": "retired", "count": 1},
+    {"id": "user-allergies-not-ended", "text": "user allergic to shellfish", "state": "ended", "count": 0},
+    {"id": "mei-shellfish-live", "text": "Mei allergic to shellfish", "state": "live", "count": 1},
+    {"id": "mei-pollen-retired", "text": "Mei allergic to pollen", "state": "retired", "count": 1},
+    {"id": "mei-walnuts-live", "text": "Mei allergic to walnuts", "state": "live", "count": 1},
+    {"id": "mei-city-retired", "text": "Mei lives in Porto", "state": "retired", "count": 1},
+    {"id": "user-city-kept", "text": "user lives in Braga", "state": "live", "count": 1}
+  ],
+  "answer_gold": [
+    {"id": "one-call-retires-both", "turn": "not-mine", "must_contain": "Retired 2 value(s) of user/allergic_to"},
+    {"id": "history-keeps-the-reason", "turn": "mine-now", "must_contain": "retired because: they are the user's sister Mei's allergies"},
+    {"id": "both-addresses-refused", "turn": "mei-fix", "must_contain": "memory_forget needs exactly one of"},
+    {"id": "third-party-retired-alone", "turn": "mei-city", "must_contain": "Retired 1 value(s) of Mei/lives_in"},
+    {"id": "unknown-id-retires-nothing", "turn": "unknown-id", "must_contain": "Nothing retired"},
+    {"id": "one-value-retired-with-its-reason", "turn": "mei-now", "must_contain": "retired because: Mei's allergy is walnuts, not pollen"},
+    {"id": "party-walnuts", "turn": "party", "must_contain": "Mei allergic to walnuts"},
+    {"id": "party-shellfish", "turn": "party", "must_contain": "Mei allergic to shellfish"},
+    {"id": "party-not-pollen", "turn": "party", "must_not_contain": "pollen"},
+    {"id": "user-lives-in-braga", "turn": "where", "must_contain": "user lives in Braga"},
+    {"id": "mei-not-in-porto", "turn": "where", "must_not_contain": "Porto"}
+  ],
+  "forbidden": [{"tool": "memory_end"}, {"tool": "memory_forget_matching"}],
+  "requires": ["tools"],
+  "negative_control": true
+}

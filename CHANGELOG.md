@@ -121,6 +121,25 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     hooks' time limits apply from the first run. The library budgets are set from 14
     valid nights by a rule fixed before any number was measured. Two bugs the soak found
     are pinned as strict expected failures: #332 and #333.
+  - **Security properties.** `tests/adversarial/security/` checks the places where a
+    defect would be a vulnerability. Stored text that imitates a result row or a header
+    comes back harmless through every read tool and both hooks that read the store. Two
+    servers bound to sibling scopes on one store file answer an id from the other scope
+    exactly as they answer an id that never existed. The URL fetcher refuses every private
+    address class, including spellings and redirects that hide one. A tampered or
+    truncated vector record and a wrong key are detected rather than served. The redactor
+    sees every field before it is stored, confirmation tokens cannot be forged, replayed or
+    carried to another scope, secrets never reach standard error, argv or `memory_stats`,
+    and the vector file, the key file and the daemon socket are owner-only on POSIX.
+  - **Scripted sessions and the tool surface.** `tests/adversarial/sessions/` checks the
+    MCP server's tool list, input schemas, refusals and one minimal call to each tool under
+    every combination of the eleven settings that shape them: in process for all 2,048
+    combinations, and over the real pipe for a 12-run orthogonal array in the fast tier, a
+    covering array of every three settings nightly, and all 2,048 weekly. Ten more
+    scripted scenarios cover recall on every prompt, the three ways to close a fact, time
+    travel, documents, confirmation tokens, the graph tools, the profile at session start,
+    and expiry switched off beside a read-only server. One bug it found is pinned as a
+    strict expected failure: #353.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`,
     `bench/soak.py` and `bench/perf_budget.py`.
 - **`Store.unended_claims`, `store.unended_predicate()` and `Claim.is_unended()`.**
@@ -135,17 +154,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   filtering took 7.3 ms (best of 200 runs on a laptop). The method is optional and listed
   in `OMITTABLE`: a store without it keeps working and closes the same values, reading the
   slot whole. `docs/UPGRADING.md` says what the new member does to `isinstance(x, Store)`.
-  - **Security properties.** `tests/adversarial/security/` checks the places where a
-    defect would be a vulnerability. Stored text that imitates a result row or a header
-    comes back harmless through every read tool and both hooks that read the store. Two
-    servers bound to sibling scopes on one store file answer an id from the other scope
-    exactly as they answer an id that never existed. The URL fetcher refuses every private
-    address class, including spellings and redirects that hide one. A tampered or
-    truncated vector record and a wrong key are detected rather than served. The redactor
-    sees every field before it is stored, confirmation tokens cannot be forged, replayed or
-    carried to another scope, secrets never reach standard error, argv or `memory_stats`,
-    and the vector file, the key file and the daemon socket are owner-only on POSIX.
-  - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed
 
