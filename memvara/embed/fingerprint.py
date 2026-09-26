@@ -32,7 +32,6 @@ embedder in use so that the next change is noticed.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import uuid
@@ -151,6 +150,12 @@ def write_fingerprint(store: Any, fp: EmbedderFingerprint) -> bool:
     crash in the middle of the write can leave the temporary file behind; nothing reads
     it.
 
+    A record kept as a link is followed: the temporary file is made beside the file the
+    link names, and that file is replaced, so the link stays. A directory where the
+    account may write the existing files but may not add new ones refuses the temporary
+    file; the record is then written in place, as it was before the rename, and a crash
+    during that write can tear it.
+
     Returns whether it was written, which is information for tests rather than for
     callers: a read-only directory is a fine place to keep a memory store, and losing
     the identity check there is a smaller harm than refusing to run.
@@ -158,22 +163,42 @@ def write_fingerprint(store: Any, fp: EmbedderFingerprint) -> bool:
     path = sidecar_path(store)
     if path is None:
         return False
+    target = os.path.realpath(path)
+    record = {"embedder": fp.name, "dim": fp.dim}
     # A name of its own for each write, so two processes writing at once never write
     # into one temporary file.
-    staged = f"{path}.{uuid.uuid4().hex}.tmp"
+    staged = f"{target}.{uuid.uuid4().hex}.tmp"
+    made = False
     try:
-        fh = open(staged, "x", encoding="utf-8")
-    except OSError:
+        with open(staged, "x", encoding="utf-8") as fh:
+            made = True
+            _dump(record, fh)
+        os.replace(staged, target)
+    except OSError as exc:
+        if not made and isinstance(exc, PermissionError):
+            return _write_in_place(target, record)
+        if made:
+            try:
+                os.remove(staged)
+            except OSError:
+                return False
         return False
+    return True
+
+
+def _dump(record: dict[str, Any], fh: Any) -> None:
+    """Write `record` to `fh` and make sure it has reached the disk."""
+    json.dump(record, fh)
+    fh.flush()
+    os.fsync(fh.fileno())
+
+
+def _write_in_place(path: str, record: dict[str, Any]) -> bool:
+    """Overwrite the record itself, for a directory that refuses a temporary file."""
     try:
-        with fh:
-            json.dump({"embedder": fp.name, "dim": fp.dim}, fh)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(staged, path)
+        with open(path, "w", encoding="utf-8") as fh:
+            _dump(record, fh)
     except OSError:
-        with contextlib.suppress(OSError):
-            os.remove(staged)
         return False
     return True
 

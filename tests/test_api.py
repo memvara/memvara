@@ -703,6 +703,18 @@ def test_a_corrupt_fingerprint_file_is_ignored_rather_than_believed(tmp_path, pa
     assert read_fingerprint(store) is None
 
 
+class _DiskFull:
+    """The `json` module, except that `dump` writes part of the record and fails."""
+
+    def __getattr__(self, name):
+        return getattr(json, name)
+
+    @staticmethod
+    def dump(obj, fh, **kwargs):
+        fh.write('{"embedder": "hash')
+        raise OSError(28, "No space left on device")
+
+
 def test_a_record_write_that_fails_halfway_leaves_the_old_record_whole(
         tmp_path, monkeypatch):
     """A full disk or a crash in the middle of writing the record must leave the old
@@ -713,23 +725,89 @@ def test_a_record_write_that_fails_halfway_leaves_the_old_record_whole(
     store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
     old = make_fingerprint(HashingEmbedder(dim=8))
     assert write_fingerprint(store, old) is True
-
-    class DiskFull:
-        """The `json` module, except that `dump` writes part of the record and fails."""
-
-        def __getattr__(self, name):
-            return getattr(json, name)
-
-        @staticmethod
-        def dump(obj, fh, **kwargs):
-            fh.write('{"embedder": "hash')
-            raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(fingerprint_module, "json", DiskFull())
+    monkeypatch.setattr(fingerprint_module, "json", _DiskFull())
     assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=16))) is False
     assert read_fingerprint(store) == old
     assert [p.name for p in tmp_path.iterdir()] == ["m.db.embedder.json"], (
         "a failed write must not leave its temporary file behind")
+
+
+def test_a_temporary_record_that_cannot_be_removed_is_not_fatal(tmp_path, monkeypatch):
+    """After a failed write the temporary file is removed, and when even that fails, the
+    write reports that it did not write rather than raising: the record is advisory, and
+    it must never be the reason a store does not open."""
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+
+    class NoRemove:
+        """The `os` module, except that `remove` is refused."""
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def remove(path):
+            raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(fingerprint_module, "json", _DiskFull())
+    monkeypatch.setattr(fingerprint_module, "os", NoRemove())
+    assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8))) is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_record_is_updated_in_place_in_a_directory_that_forbids_new_files(tmp_path):
+    """The record is written to a temporary file beside it and renamed, and a directory
+    where the account may write the existing files but may not add new ones refuses that
+    temporary file. The record used to be overwritten in place, which such a directory
+    allows, so when the temporary file is refused, the record is still written in place."""
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+    assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8))) is True
+    tmp_path.chmod(0o555)
+    try:
+        written = write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=16)))
+    finally:
+        tmp_path.chmod(0o755)
+    assert written is True
+    assert read_fingerprint(store) == make_fingerprint(HashingEmbedder(dim=16))
+    assert [p.name for p in tmp_path.iterdir()] == ["m.db.embedder.json"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_record_that_does_not_exist_cannot_be_written_where_new_files_are_refused(
+        tmp_path):
+    """Writing in place needs the record to exist already. Where there is none yet and the
+    directory refuses new files, nothing can be written, and the write says so."""
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+    tmp_path.chmod(0o555)
+    try:
+        if os.access(tmp_path, os.W_OK):
+            pytest.skip("this user may write a read-only file")
+        written = write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8)))
+    finally:
+        tmp_path.chmod(0o755)
+    assert written is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_record_that_is_a_link_stays_a_link_to_the_updated_file(tmp_path):
+    """`os.replace` replaces a link itself, so a record kept as a link to a file elsewhere
+    became a plain file beside the store, and the file the link named kept the old record.
+    The link is followed now: the temporary file is made beside the file it names, and
+    that file is the one replaced."""
+    elsewhere = tmp_path / "records"
+    elsewhere.mkdir()
+    target = elsewhere / "m.json"
+    target.write_text(json.dumps({"embedder": "hashing:8:3-5", "dim": 8}))
+    link = tmp_path / "m.db.embedder.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("this platform may not make a symbolic link")
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+    new = make_fingerprint(HashingEmbedder(dim=16))
+    assert write_fingerprint(store, new) is True
+    assert link.is_symlink() and link.resolve() == target.resolve()
+    assert json.loads(target.read_text()) == {"embedder": new.name, "dim": new.dim}
+    assert [p.name for p in elsewhere.iterdir()] == ["m.json"]
 
 
 def test_stored_dim_reads_the_vectors_through_the_protocol_alone():

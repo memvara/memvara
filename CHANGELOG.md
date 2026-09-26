@@ -299,9 +299,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   be written, a second warning says so, and the first comes back on every open. A record
   that names another width than the stored vectors have is treated as damaged in the same
   way, where before only its name was compared, and so is one whose width is not a JSON
-  integer, such as "128", 128.9 or true. The record itself is now
-  written to a temporary file and renamed into place, so a crash or a full disk during the
-  write leaves the old record or the new one, never half of one. #280.
+  integer, such as "128", 128.9 or true. The record itself is now written to a temporary
+  file and renamed into place, so a crash or a full disk during the write leaves the old
+  record or the new one, never half of one. A record kept as a link stays a link, and the
+  file it names is the one replaced. In a directory where the account may write the
+  existing files but may not add new ones, the record is written in place, as it always
+  was. #280.
 
 ## [0.16.0] — 2026-09-25
 
