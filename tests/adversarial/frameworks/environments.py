@@ -498,7 +498,7 @@ class Cache:
         python = python_in(path)
         started = time.monotonic()
         how = "built"
-        #: Why a reusable environment was built again instead.
+        # Why an environment whose key matched was built again instead of reused.
         not_reused = ""
         if _read_marker(path).get("key") == wanted.key:
             how = "rebuilt"
@@ -564,6 +564,7 @@ def _remove(path: Path) -> None:
 
 
 def _refuse(error: OSError) -> None:
+    """Raise a listing error, which `os.walk` would otherwise skip silently."""
     raise error
 
 

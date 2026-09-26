@@ -586,6 +586,7 @@ def test_a_pip_command_past_its_time_limit_is_stopped_with_every_process_it_star
     pip = environments.Pip(tmp_path / "home", timeout=3)
     with pytest.raises(environments.BuildError, match="ran past 3 seconds"):
         pip.describe(Path(sys.executable))
+    assert pid_file.exists(), "the command never started its process"
     child = int(pid_file.read_text())
     try:
         assert _poll(lambda: not _alive(child), 10), (
