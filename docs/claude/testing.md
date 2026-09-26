@@ -312,4 +312,67 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 
   The tests for #311 set `PYTHONIOENCODING` rather than a locale, because it sets the stream encoding the same way on every platform, whatever locales a machine has installed.
 
+## The coverage checklist
+
+The checklist is a list of everything the suite has to test, together with the tests that cover each item. It is read from the code, so a new tool, switch or invariant is added to it as soon as it exists. `tests/harness/checklist.py` builds it, and `tests/adversarial/test_adv_checklist.py` checks it in every fast run.
+
+**What is on the checklist.** Each item has an id of the form `kind:name`.
+
+| Kind | One item for each | Example |
+|---|---|---|
+| `tool` | tool in `memvara.server.tools.TOOLS` | `tool:memory_recall` |
+| `switch` | feature switch in `FEATURES` (`memvara/server/config.py`), and the read-only and anchored modes | `switch:documents`, `switch:read_only` |
+| `tool-switch` | tool whose entry in `tools/list` changes when a switch is flipped from its default | `tool-switch:memory_add_document/documents` |
+| `env` | `MEMVARA_*` variable that `memvara/server/config.py` reads | `env:MEMVARA_DB` |
+| `hook` | hook that a host in `plugin/hooks/hosts/` fires | `hook:claude/recall` |
+| `inv` | numbered invariant in `docs/INTERNALS.md`, and bullet under "Invariants and assumptions" on a `docs/claude/` page | `inv:I3`, `inv:MM5` |
+| `silent` | silent failure mode that the `memvara/telemetry.py` docstring lists | `silent:predicate-explosion` |
+| `bug` | open bug in `tests/harness/known_bugs.py` | `bug:B2` |
+
+These details explain how some of the sources are read:
+
+- **Tool-switch pairs.** The checklist compares the `tools/list` reply of a server with every setting at its default against the reply with one switch flipped. A switch is flipped rather than turned off because two features, and both modes, are off by default. The servers run inside the test process, which is enough: `python -m memvara.server` builds the same server from the same three settings.
+- **Environment variables.** A variable counts only when `config.py` reads it, through `.get()`, `getenv()` or a subscript. A variable that appears only in an error message does not count. The `MEMVARA_FEATURE_*` variables are the `switch` items.
+- **Silent failure modes.** The telemetry docstring lists six in a table and announces the seventh in a sentence of its own. The checklist reads both.
+- **A source that yields nothing stops the run.** Otherwise a renamed heading, or a table that is missing or has no rows, would drop that source's items from the checklist, and nothing would report it. The known bugs are the exception, because running out of open bugs is the goal.
+
+**Each source written as text is read by a parser that recognises particular forms.** For the environment variables, it recognises a read through `.get()`, `getenv()` or a subscript. For the silent failure modes, it reads the table whose header names the columns failure and signal, and any sentence that announces a mode on its own, in the form "A seventh arrived with the ...". For the invariants, it reads the numbered list under the design invariants heading in INTERNALS, and the bullets under "Invariants and assumptions" on each page. So a new form of a source the checklist already reads, such as a new way of reading an environment variable, is missed until its parser learns it: update the parser in the same change. The check above catches only a source that yields nothing at all, not one that has lost some of its items.
+
+**Invariant ids.** An invariant's wording changes over time, so it needs an id that does not. `tests/harness/invariant_ids.json` records, for each document, each invariant's id and the bold sentence the invariant opens with. The sentence is how the checklist finds the invariant.
+
+- The numbered invariants in INTERNALS take their number as their id, `I1` to `I8`.
+- A bullet on a `docs/claude/` page gets its page's prefix and a number, such as `MM5` on `memory-model.md`. Give a new bullet the next unused number on its page.
+- A bullet that restates an INTERNALS invariant carries that invariant's id, so that one test covers both. When the bullet says so, as in "This is invariant 3", the fast tier checks that it carries the right id.
+- When you reword an invariant's opening sentence, change the sentence in the file and keep the id. Until you do, the fast tier fails and names the sentence.
+
+**Declaring what a test covers.** Put a `covers` mark on the test, naming the items that its assertions check:
+
+```python
+@pytest.mark.covers("tool:memory_history", "env:MEMVARA_DB")
+def test_the_store_outlives_the_server_process(mcp: Start, tmp_path: pathlib.Path) -> None:
+```
+
+Name only what the assertions check. A test that happens to start a server does not cover every variable the server reads.
+
+The checklist reads the marks from each file's source instead of importing it, because importing a nightly or local test can need Docker or a package that is not installed. So the ids must be string literals, and the mark must sit on a test function, on a test class, or in a module's `pytestmark`. A mark anywhere else, or one built from a variable, fails the run with its file and line. Without that check, the test would cover nothing and nobody would be told.
+
+Three kinds of test cover nothing, because none of them shows that anything works:
+
+- a test marked `xfail`;
+- a test marked `skip` without a condition;
+- a test in `quarantine/`.
+
+A known bug is covered differently. Its item is covered by the test that carries its strict expected failure, `known_bugs.xfail("B2")`, so registering a bug and pinning it is all the checklist needs. A `covers` mark cannot name a bug.
+
+**The baseline.** `tests/harness/checklist_baseline.txt` lists the items that no test covers today, one per line. The fast tier fails in two cases, and each failure lists the items concerned:
+
+- An item has no test and is not in the baseline, for example a tool that was added without a test. Write a test that covers it. Adding the item to the baseline instead would hide exactly what the checklist exists to catch.
+- A line of the baseline is no longer a gap, because a test now covers the item or the item no longer exists. Delete the line.
+
+These two checks keep the baseline equal to today's gaps, in both directions. They do not make it shrink: review does that, as the next paragraph explains. The checklist is complete when the baseline is empty. `test_a_new_feature_switch_is_a_gap_the_baseline_does_not_list` shows the first check working: it adds a switch to `FEATURES` and checks that the checklist reports that switch, and nothing else, as a new gap.
+
+**Adding a line to the baseline excuses a gap instead of closing it.** The tests check only that the baseline and today's gaps hold the same items. So a pull request could add a tool with no test and, in the same diff, a baseline line for it, and the fast tier would pass. A pull request that adds a line to the baseline must therefore give the reason in its body, and the code review checks the baseline's diff for added lines.
+
+**Exempt items.** Four invariant bullets are rules for people rather than behaviour of memvara, so no test can check them: `TB1` ("verify" means comparing an output), `TB2` (a number is reported with its caveat), `RC5` (this repository does not implement the hosted server) and `RP1` (a published version is final; the release process is outside the suite's scope). `EXEMPT` in `tests/harness/checklist.py` lists each with its reason. An exempt item stays on the checklist, so a reworded rule is still noticed, but it is never a gap. The fast tier fails if an exemption names an item that no longer exists, or an item that a test covers. Add an exemption only for a rule that no test could ever check, and give the reason.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

@@ -11,6 +11,15 @@ from harness.hooks import HookRunner
 from harness.stdio import McpProcess, kill_all
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the covers mark, which tests/harness/checklist.py reads from each test's
+    source. docs/claude/testing.md explains it."""
+    config.addinivalue_line(
+        "markers",
+        "covers(*items): the checklist items this test covers, such as "
+        "'tool:memory_recall' or 'inv:I3'. See docs/claude/testing.md.")
+
+
 @pytest.fixture
 def mcp(tmp_path: pathlib.Path,
         tmp_path_factory: pytest.TempPathFactory) -> Iterator[Callable[..., McpProcess]]:

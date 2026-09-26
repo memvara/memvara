@@ -16,6 +16,7 @@ from harness.stdio import PROTOCOL, McpProcess, McpProcessError, kill_all
 Start = Callable[..., McpProcess]
 
 
+@pytest.mark.covers("tool:memory_remember", "tool:memory_recall")
 def test_a_real_server_process_remembers_and_recalls_over_its_pipe(mcp: Start) -> None:
     server = mcp()
     hello = server.initialize()
@@ -31,6 +32,7 @@ def test_a_real_server_process_remembers_and_recalls_over_its_pipe(mcp: Start) -
     assert server.close() == 0
 
 
+@pytest.mark.covers("tool:memory_history", "env:MEMVARA_DB")
 def test_the_store_outlives_the_server_process(mcp: Start, tmp_path: pathlib.Path) -> None:
     db = tmp_path / "shared.db"
     first = mcp(db)
@@ -66,6 +68,7 @@ def test_an_unknown_feature_is_refused_before_a_server_starts(mcp: Start) -> Non
         mcp(features={"no_such_feature": True})
 
 
+@pytest.mark.covers("tool-switch:memory_add_document/documents")
 def test_a_switched_off_feature_hides_its_tools(mcp: Start) -> None:
     server = mcp(features={"documents": False})
     server.initialize()
@@ -74,6 +77,7 @@ def test_a_switched_off_feature_hides_its_tools(mcp: Start) -> None:
     assert "memory_remember" in names
 
 
+@pytest.mark.covers("switch:read_only", "env:MEMVARA_READ_ONLY")
 def test_a_read_only_server_lists_only_read_only_tools(mcp: Start) -> None:
     server = mcp(read_only=True)
     server.initialize()
