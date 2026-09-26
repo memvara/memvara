@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
+import socket
 import sys
+import tempfile
 from types import SimpleNamespace
 from typing import Callable
 
@@ -14,7 +17,7 @@ import pytest
 from harness import stores
 from harness.fakes.cli import FakeClis
 from harness.hooks import (HookOutputError, HookRunner, HookTimeout, agent_clis, host_ids,
-                           host_record, parse_reply)
+                           host_record, parse_reply, socket_peer_pid)
 from memvara import MemoryType
 
 Make = Callable[..., HookRunner]
@@ -168,6 +171,68 @@ def test_a_detached_capture_is_waited_for(hook_runner: Make, tmp_path: pathlib.P
     assert result.exit_code == 0
     assert result.detached_pid is not None
     assert result.log("capture") == ("turn=8c skipped=continuation",)
+
+
+#: Why a test of the recall daemon skips on Windows. It has a rule in harness/skips.py.
+NO_UNIX_SOCKETS = "the recall daemon listens on a unix socket, which Windows lacks"
+
+
+def _short_dir() -> pathlib.Path:
+    """A private directory with a short path. macOS refuses a unix socket path longer
+    than 104 bytes, which a directory under a long TMPDIR can pass on its own."""
+    return pathlib.Path(tempfile.mkdtemp(prefix="mv-hooks-", dir="/tmp"))
+
+
+def test_the_peer_pid_of_a_socket_is_the_process_listening_on_it() -> None:
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    directory = _short_dir()
+    path = directory / "s.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(str(path))
+        server.listen(1)
+        assert socket_peer_pid(path) == os.getpid()
+    finally:
+        server.close()
+        shutil.rmtree(directory, ignore_errors=True)
+    assert socket_peer_pid(path) is None
+
+
+def test_the_daemon_option_lets_the_recall_hook_start_its_daemon(hook_runner: Make) -> None:
+    """child_env forbids the daemon, because it outlives the hook. daemon=True lifts that."""
+    assert hook_runner("claude").environment["MEMVARA_DAEMON"] == "1"
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    assert "MEMVARA_DAEMON" not in hook_runner("claude", daemon=True).environment
+
+
+def test_the_daemon_option_is_refused_where_there_are_no_unix_sockets(
+        hook_runner: Make, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delattr(socket, "AF_UNIX", raising=False)
+    with pytest.raises(NotImplementedError, match="unix socket"):
+        hook_runner("claude", daemon=True)
+
+
+def test_close_stops_the_daemon_a_recall_started(tmp_path: pathlib.Path) -> None:
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    db = tmp_path / "memory.db"
+    stores.file(db).close()
+    home = _short_dir()
+    runner = HookRunner("claude", home=home, cwd=tmp_path, daemon=True,
+                        env={"MEMVARA_DB": str(db), "MEMVARA_USER": "tester"})
+    try:
+        runner.run("recall", prompt="where does the user live")
+        sock, pid = runner.wait_for_daemon()
+        assert runner.daemon_sockets() == [sock]
+    finally:
+        runner.close()
+        shutil.rmtree(home, ignore_errors=True)
+    assert socket_peer_pid(sock) is None
+    assert not sock.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 def test_output_that_is_not_utf8_is_reported(hook_runner: Make,

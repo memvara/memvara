@@ -8,6 +8,8 @@ import os
 import pathlib
 import re
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import time
@@ -216,6 +218,35 @@ def _detached_pid(lines: Sequence[str]) -> int | None:
     return None
 
 
+def socket_peer_pid(path: pathlib.Path) -> int | None:
+    """The pid of the process listening on the unix socket at `path`, or None when
+    nothing accepts a connection there.
+
+    The kernel reports it (`LOCAL_PEERPID` on macOS, `SO_PEERCRED` on Linux), so it names
+    the listener itself, whatever its command line says. Every recall daemon runs the same
+    command, so a command line could not tell this test's daemon from another's.
+    """
+    if sys.platform == "win32":
+        return None
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(1.0)
+    try:
+        probe.connect(str(path))
+        if sys.platform == "darwin":
+            # SOL_LOCAL and LOCAL_PEERPID, from <sys/un.h>; Python names neither.
+            raw = probe.getsockopt(0, 0x002, 4)
+        elif sys.platform.startswith("linux"):
+            raw = probe.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                   struct.calcsize("3i"))
+        else:
+            return None
+        return int(struct.unpack_from("i", raw)[0])
+    except OSError:
+        return None
+    finally:
+        probe.close()
+
+
 def _alive(pid: int) -> bool:
     """Whether process `pid` is still running. POSIX only.
 
@@ -280,12 +311,20 @@ class HookRunner:
     (`path_without_agent_clis`). `stubs` are stub agent CLIs put first on it, such as
     `harness.fakes.cli.FakeClis`. `capture` is refused without them, because it starts
     an agent CLI to mine the turn.
+
+    `daemon=True` lets the recall hook start its background daemon, which `child_env`
+    otherwise forbids. The daemon outlives the hook and idles for 30 minutes, so a test
+    that allows it calls `close()` when it ends. Its socket lives under `home`, and macOS
+    refuses a unix socket path longer than 104 bytes, so such a home needs a short path.
     """
 
     def __init__(self, host: str, *, home: pathlib.Path, cwd: pathlib.Path,
                  server_env: Mapping[str, str] | None = None,
                  env: Mapping[str, str] | None = None,
-                 stubs: Stubs | None = None) -> None:
+                 stubs: Stubs | None = None, daemon: bool = False) -> None:
+        if daemon and not hasattr(socket, "AF_UNIX"):
+            raise NotImplementedError(
+                "the recall daemon listens on a unix socket, which this platform lacks")
         self.host = host_record(host)
         self.home = pathlib.Path(home)
         self.cwd = pathlib.Path(cwd)
@@ -293,6 +332,8 @@ class HookRunner:
         environment = child_env(self.home, env)
         rest = path_without_agent_clis(environment.get("PATH", ""))
         environment["PATH"] = stubs.path(rest) if stubs is not None else rest
+        if daemon:
+            environment.pop("MEMVARA_DAEMON", None)
         self._env = environment
         #: Captures handed to a child that `run` was told not to wait for. `close` kills
         #: each one with everything it started.
@@ -405,9 +446,38 @@ class HookRunner:
         return HookResult(exit_code=done.returncode, stdout=stdout, stderr=stderr,
                           reply=reply, elapsed=elapsed, logs=logs, detached_pid=pid)
 
+    def daemon_sockets(self) -> list[pathlib.Path]:
+        """The recall daemons' socket files under this runner's home."""
+        return sorted((self.home / HOOKS_HOME / "run").glob("recall-*.sock"))
+
+    def wait_for_daemon(self, timeout: float = 10.0) -> tuple[pathlib.Path, int]:
+        """The socket and the pid of a recall daemon under this home, once it accepts a
+        connection. The recall hook starts one after it has answered, and the daemon
+        opens the store before it listens, so it can take a moment to appear."""
+        deadline = time.monotonic() + timeout
+        while True:
+            for path in self.daemon_sockets():
+                pid = socket_peer_pid(path)
+                if pid is not None:
+                    return path, pid
+            if time.monotonic() >= deadline:
+                raise HookTimeout(f"no recall daemon under {self.home} accepted a "
+                                  f"connection within {timeout}s")
+            time.sleep(0.05)
+
     def close(self) -> None:
-        """Kill every capture child this runner did not wait for, with everything each
-        one started. Safe to call more than once."""
+        """Kill every recall daemon listening under this runner's home, and every capture
+        child it did not wait for, each with everything it started. Safe to call more
+        than once."""
+        for path in self.daemon_sockets():
+            pid = socket_peer_pid(path)
+            if pid is not None:
+                _kill_group(pid)
+                _wait_for_exit(pid, 5.0)
+            try:
+                path.unlink()
+            except OSError:
+                pass
         for pid in self._detached:
             _kill_group(pid)
             _wait_for_exit(pid, 5.0)
