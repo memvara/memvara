@@ -1885,10 +1885,27 @@ class SQLiteStore:
         connection holds it at a time, and it leaves every open store's shared lock alone,
         so a store that is merely open holds nobody up. It is taken on a second
         connection, so that this store's own shared lock is held throughout.
+
+        The reserved lock needs a lock file this process may write. SQLite opens a file
+        it may not write read-only, and `BEGIN IMMEDIATE` on a read-only connection takes
+        only a shared lock, without an error, so the lock would keep nobody out. Such a
+        file is refused here, with `PermissionError`, before anything is created or
+        upgraded. `_hold_presence` has already created the file if it was missing.
         """
+        path = _lock_path(self.path)
+        if path is not None:
+            try:
+                os.close(os.open(path, os.O_RDWR))
+            except PermissionError as exc:
+                raise PermissionError(
+                    f"{self.path} has to be created or upgraded, and a store does that "
+                    f"only while it holds a write lock on {path}, so that one process at a "
+                    f"time does it. This process may not write that file ({exc.strerror}). "
+                    "Give this user permission to write it, or delete it while nothing has "
+                    "the store open; the next open creates it again.") from exc
         conn = self._take_lock_file(
-            lambda c: c.execute("BEGIN IMMEDIATE"),
-            "is being created or upgraded by another store", "that has finished")
+            self._reserve, "is being created or upgraded by another store",
+            "that has finished")
         try:
             yield
         finally:
@@ -1897,6 +1914,18 @@ class SQLiteStore:
                 # would not: on the empty lock file, BEGIN IMMEDIATE starts a first page
                 # in memory, and writing it needs every other store's shared lock gone.
                 conn.close()
+
+    @staticmethod
+    def _reserve(conn: sqlite3.Connection) -> None:
+        """Take SQLite's reserved lock on `conn` without making a file beside it.
+
+        On the empty lock file, `BEGIN IMMEDIATE` starts a first page, and with SQLite's
+        default journal that made `<db>.lock-journal`, which a directory the account may
+        not add files to refuses. Nothing is ever written through this connection, so its
+        rollback journal is kept in memory, where it costs nothing.
+        """
+        conn.execute("PRAGMA journal_mode=MEMORY").fetchone()
+        conn.execute("BEGIN IMMEDIATE")
 
     def _take_lock_file(self, take: Callable[[sqlite3.Connection], Any], doing: str,
                         done: str) -> sqlite3.Connection | None:

@@ -224,9 +224,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   that opens while another is creating the file waits for it, for up to 60 seconds, and
   then opens the finished store. Only an open that creates or upgrades the store does
   this. The open of a store this version has already finished with takes no such lock,
-  so established stores never wait for one another. The switch to WAL mode is also tried
-  again for up to five seconds, for a connection from outside memvara that holds the write
-  lock. #281.
+  so established stores never wait for one another. An open that creates or upgrades the
+  store must be able to write `<db>.lock`, and if the file exists and this user may not
+  write it, the open raises `PermissionError` naming the file and the fix. An open of an
+  established store needs only to read it, as before, and neither kind needs permission to
+  add a file to the store's directory. The switch to WAL mode is also tried again for up
+  to five seconds, for a connection from outside memvara that holds the write lock. #281.
 
 ## [0.16.0] — 2026-09-25
 

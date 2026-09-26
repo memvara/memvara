@@ -2240,21 +2240,48 @@ to `_PRESENCE_WAIT` (60 seconds), and then finds the file finished, so its own s
 changes nothing. The reserved lock leaves every open store's shared lock alone, so a store
 that is merely open delays nobody. `_creating` lets go by closing its connection, which
 rolls back: on the empty lock file, `BEGIN IMMEDIATE` starts a first page in memory, and a
-commit would have to write it, which needs every shared lock gone. A process that runs the
-schema step must be able to write `<db>.lock`.
+commit would have to write it, which needs every shared lock gone.
 
 **An established store skips the step.** `_needs_schema_step` reads three things before the
 step: the version stamp, the journal mode, and the names of the indexes. A file whose stamp
 is this version's, which is in WAL mode, and which has every index `_LATE_INDEXES` creates,
 has nothing left to create or upgrade. Its open runs only `_CONNECTION_PRAGMAS`, the two
 settings that belong to a connection rather than to the file, and takes no creation lock,
-so the opens of an established store never wait for one another. Its opener needs only to
-read `<db>.lock`, as before this change. Every other file takes the step under the lock: a
-new one, one an older version wrote, one a tool switched out of WAL mode, and one missing
-an index that `_LATE_INDEXES` gained without a version bump, which is how `ep_cover` reached
-older files. The stamp is committed before the late indexes are built, so a store that
-opens in between sees an index missing, takes the step, and waits for the store building
-it.
+so the opens of an established store never wait for one another. Every other file takes the
+step under the lock: a new one, one an older version wrote, one a tool switched out of WAL
+mode, and one missing an index that `_LATE_INDEXES` gained without a version bump, which is
+how `ep_cover` reached older files. The stamp is committed before the late indexes are
+built, so a store that opens in between sees an index missing, takes the step, and waits
+for the store building it.
+
+**What the lock needs.** Taking it needs one permission: to write `<db>.lock`. Two details
+keep it to that. The lock's connection keeps its rollback journal in memory (`_reserve`),
+because nothing is ever written through it. With SQLite's default journal, `BEGIN
+IMMEDIATE` made `<db>.lock-journal`, so the step needed permission to add a file to the
+store's directory, which no open needed before, and the refusal came back as the misleading
+"cannot be used as this store's lock file". And SQLite opens a file the process may not
+write read-only, and `BEGIN IMMEDIATE` on a read-only connection starts only a read
+transaction, without an error, so a second store could take the same lock at once.
+`_creating` therefore opens the file for writing itself first, and when that is refused it
+raises `PermissionError` naming the file, before anything is created or upgraded.
+
+Measured scenario by scenario against the code before this change, what an opener needs is
+the same in every case but one: an open that runs the schema step must be able to write
+`<db>.lock`, where before it needed only to read it. In detail:
+
+- An open of an established store needs to read `<db>.lock`, or to create it when it is
+  missing, which needs the directory to allow a new file. That is as before.
+- An open that runs the step also needs to write `<db>.lock`. A lock file this user may
+  read but not write, such as one another account created, is refused with
+  `PermissionError`, for a new store and for an upgrade. Before, both opened without it.
+- Neither needs permission to add a file to the directory when `<db>.lock` exists, and an
+  upgrade then works in such a directory, as it did before.
+- A lock file this user may not read fails every open with SQLite's "unable to open
+  database file", as before, and so does a missing one in a directory that refuses new
+  files.
+- The database itself needs what it always did. A store in WAL mode needs its `-wal` and
+  `-shm` files, so in a directory that refuses new files it opens only while another
+  connection has them open.
 
 The retry described next was not enough on its own. With it, a store could still fail
 inside `_migrate_to_v3` with "vtable constructor failed: episodes_fts" when it opened the

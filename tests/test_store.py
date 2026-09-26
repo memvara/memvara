@@ -2,6 +2,7 @@
 and the bitemporal SQL that makes time travel work."""
 
 import gc
+import os
 import pathlib
 import re
 import sqlite3
@@ -2110,6 +2111,80 @@ def test_the_fast_path_checks_every_index_the_late_indexes_create():
              for s in statements]
     assert all(names), [s for s, n in zip(statements, names) if not n]
     assert {n.group(1) for n in names if n} == sqlite_store._LATE_INDEX_NAMES
+
+
+def _behind(path: pathlib.Path) -> None:
+    """A store at `path` that the next open must upgrade, so it takes the creation lock."""
+    SQLiteStore(str(path)).close()
+    raw = sqlite3.connect(path)
+    raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+    raw.commit()
+    raw.close()
+
+
+def test_the_creation_lock_adds_no_file_beside_the_store(tmp_path, monkeypatch):
+    """Nothing is written through the creation lock's connection, so it needs no rollback
+    journal. With SQLite's default journal, `BEGIN IMMEDIATE` on the empty lock file
+    created `<db>.lock-journal`, so the schema step needed permission to add a file to the
+    store's directory, which an open never needed before."""
+    seen: list[list[str]] = []
+    run_schema = SQLiteStore._run_schema
+
+    def listing_first(self, *args, **kwargs):
+        seen.append(sorted(p.name for p in tmp_path.iterdir()))
+        return run_schema(self, *args, **kwargs)
+
+    monkeypatch.setattr(SQLiteStore, "_run_schema", listing_first)
+    SQLiteStore(str(tmp_path / "c.db")).close()
+    assert seen and not any("c.db.lock-journal" in names for names in seen), seen
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_store_opens_in_a_directory_it_may_not_add_files_to(tmp_path):
+    """The account may write the database and the lock file but may not add a file to the
+    directory. The database needs its `-wal` and `-shm` files, which exist while another
+    connection has it open, as a running server does. Such a store opened before the
+    creation lock existed, and a store that needs its schema step opens so again."""
+    path = tmp_path / "c.db"
+    _behind(path)
+    holder = sqlite3.connect(path)
+    holder.execute("SELECT count(*) FROM sqlite_master").fetchall()
+    os.chmod(tmp_path, 0o555)
+    try:
+        with SQLiteStore(str(path)) as store:
+            version = store._db.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        os.chmod(tmp_path, 0o755)
+        holder.close()
+    assert version == SCHEMA_VERSION
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_an_upgrade_refuses_a_lock_file_it_may_not_write_and_says_so(tmp_path):
+    """SQLite opens a file this process may not write read-only, and `BEGIN IMMEDIATE` on
+    a read-only connection takes only a shared lock, without an error, so the creation
+    lock would keep nobody out. An open that needs the schema step refuses instead, and
+    names the file and what it needs. An established store needs only to read the lock
+    file, as it always did, so it still opens."""
+    path = tmp_path / "c.db"
+    lock = tmp_path / "c.db.lock"
+    _behind(path)
+    os.chmod(lock, 0o444)
+    try:
+        if os.access(lock, os.W_OK):
+            pytest.skip("this user may write a read-only file")
+        with pytest.raises(PermissionError, match=r"c\.db\.lock") as refused:
+            SQLiteStore(str(path))
+        os.chmod(lock, 0o644)
+        SQLiteStore(str(path)).close()            # upgrades the store
+        os.chmod(lock, 0o444)
+        with SQLiteStore(str(path)) as store:     # an established store: no lock taken
+            assert store._db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        os.chmod(lock, 0o644)
+    message = str(refused.value)
+    assert "may not write" in message and "delete it while nothing has the store open" \
+        in message, message
 
 
 # --- Cross-process coherence for episode vectors ----------------------------
