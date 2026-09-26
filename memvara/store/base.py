@@ -798,7 +798,10 @@ class Store(Protocol):
 
         A store that other processes share may refuse while they have it open, as
         `SQLiteStore` does with `StoreInUseError`: emptying a matrix another process
-        still reads is how that process crashes.
+        still reads is how that process crashes. `SQLiteStore` also raises
+        `PermissionError`, naming `<db>.lock` and having changed nothing, when this
+        process may not write that file, because it then cannot tell whether another
+        process has the store open.
         """
         ...
 
