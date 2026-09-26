@@ -312,4 +312,82 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 
   The tests for #311 set `PYTHONIOENCODING` rather than a locale, because it sets the stream encoding the same way on every platform, whatever locales a machine has installed.
 
+## Soak and performance
+
+`bench/soak.py` runs memvara for thousands of seeded turns and fails when one of the failures that raise no error appears. `bench/perf_budget.py` times the reads and writes an agent waits for. Their tests are in `tests/adversarial/soak/`, and the plan is `docs/superpowers/plans/2026-09-26-adversarial-soak-perf.md`.
+
+### The soak
+
+A soak drives a new store through a seeded workload, using the real library: a SQLite file, the hashing embedder, no model, the built-in `PatternRedactor` and a `MemoryRecorder`. The workload's cast is made up. Sixteen people move and change jobs. The user has favourite likes, which are restated often, and one-off likes, some of which are taken back. Eight "panel" subjects hold values under the fast-moving predicate `working_on`: four restate one value, and four keep changing theirs. There are also three standing preferences, each with near-duplicates. A turn is one operation: a user turn for `add()`, which may be in one of seven other scripts or carry made-up personal data; a write with `remember()`, which spells its predicate with one of the aliases memvara declares for it; or a read. The turns are spread over 21 simulated days that end when the run starts, and consolidation runs once a simulated day.
+
+Each silent failure mode that `memvara/telemetry.py` lists has a detector, and each fails as the design's table says:
+
+| Detector | What it measures | Fails when |
+|---|---|---|
+| predicate explosion | the distinct predicates in the store | there are more than 1.1 times the six the workload writes |
+| recency refresh | the median rank correlation of the panel reads | it is 0 or less |
+| flip-flop row growth | the live claims in each single-valued slot after each consolidation, and `consolidate.merged` | a slot holds more than one, or nothing is ever merged |
+| salience over relevance | how often a probe, "tell me where X lives", ranks the right claim first | it is less than 95% |
+| script bias in the gate | each script's gate pass rate against the Latin rate | never: it is tracked, and it names every script below 0.8 times the Latin rate |
+| a retraction that retires nothing | `write.retraction{outcome="noop"}` | it happens at all |
+| redaction drift | the share of turns with planted personal data that the redactor changed, for each simulated day | any day is below 0.99 |
+| store growth | bytes on disk per turn | the regression rule in the next section triggers against earlier soaks of the same length and seed |
+
+A detector whose evidence is missing fails with "not measured"; script bias and store growth say so without failing. Otherwise a telemetry series that stopped arriving would read as a healthy one.
+
+Three choices decide what the detectors see:
+
+- **Recency is read only from the panel.** The panel's claims all match the panel query equally, so only freshness and salience can order them. A search that names one entity ranks that entity's claims first, and reports a positive correlation even when reinforcement is broken: calibrating the soak measured a median of 0.29 with reinforcement disabled.
+- **The probes say "lives", as the claim renders.** Asked "where does X live?", the hashing embedder scores "X likes Y" as high as "X lives in Z", and a healthy store ranked the right claim first only 62% of the time. The detector would have measured the embedder rather than salience.
+- **The gate's rate counts only fact-carrying turns that reached the gate.** Tier 0 drops a turn that repeats an earlier one word for word before the gate sees it.
+
+**What the tests show.** `test_adv_soak_faults.py` runs a healthy 200-turn soak, on which no detector fails, and one 200-turn soak per injected fault, on which that fault's detector fires: predicate aliases that stop folding; reinforcement that counts a restatement but refreshes nothing, which is the bug `telemetry.py` describes; single-valued predicates declared as holding many values; a merge threshold nothing can reach; a ranking that puts salience before relevance; a gate that drops Han and kana turns as too short; a misspelt retraction; personal data that switches to unpunctuated phone numbers halfway; and a deployment with no redactor. `test_adv_soak_run.py` shows store growth failing when neither a repeated turn nor a restated fact is recognised any more. A gentler salience fault needs a longer run: at 10,000 turns, `read_w_salience=1.0` left only 427 of 1,361 probes right, while at 200 turns even a weight of 30 left every probe right, because a short run restates too little. `test_adv_soak_detectors.py` checks each detector's boundary on hand-built observations.
+
+**What it found.** Two bugs, each pinned as a strict expected failure in `test_adv_soak_known_bugs.py`:
+
+- **#332 (B50).** `add()` drops a turn repeated word for word after the value it stated has changed. A user who says "I live in Berlin.", then "I moved to Paris.", then "I live in Berlin." again stays recorded in Paris: tier 0 reads the third turn as a restatement of the first, whose claim has ended, so it reinforces nothing and extracts nothing. A like taken back and then stated again in the same words is lost the same way. The workload makes every one-off like a new word, so it never retracts the same sentence twice.
+- **#333 (B51).** A fact restated often enough to reach the salience cap outranks the fact a query asks about, although that fact has more evidence. The weekly soak found it: the relevant claim ranked first in 11,019 of 13,852 probes. The nightly soak's 10,000 turns do not restate any fact often enough to reach the cap, and every probe there ranked right. The weekly soak is pinned to B51: its salience detector failing counts as the known bug, and any other detector failing still fails the run.
+
+To run a soak by hand:
+
+```bash
+PYTHONPATH=$PWD python bench/soak.py --turns 10000 --out local/soak.json --history local/soak-history
+```
+
+It prints one line per detector and exits with 1 when one fails. `--store <folder>` keeps the store for inspection. With `--history`, store growth is judged against the records in that folder, and a suspected regression runs the soak again to confirm it.
+
+### Timing
+
+`bench/perf_budget.py` builds stores of 1,000, 10,000 and 100,000 claims through `remember()`, four made-up claims per made-up person, and times five operations on each: `search`, `recall` and `remember` from the library, and the session-start and recall hooks.
+
+- **Cold and warm.** A cold library series is the first call in each of 30 new child processes; a warm one is 200 calls in one process, after five untimed ones. Every child gets its environment from `harness.env.child_env`. `remember` writes to a copy of the store, so that the reads always see the size they are named for.
+- **The hooks** run through `harness.hooks.HookRunner` as Claude Code runs them, without their background daemon, which the child environment switches off. A cold run gets a new home directory, so none of the state the hooks keep there carries over; warm runs share one. Each reply must show that the hook read the store: a recall that says "not configured", or never says "recalled", and a session start that sees no claim are refused rather than timed, because they answer faster than a read and would pass for a fast one. A run that passes the host's time limit is recorded at the limit and counted as a timeout.
+- **What is reported.** For each series, the p50, p90, p95, p99 and maximum, each percentile taken by nearest rank as `bench/evalkit.py` takes it, with a 95% bootstrap interval. Each record also holds the raw samples and the fingerprint of the machine: its processor, CPU count, memory and system, and the Python, SQLite and memvara versions and the commit. The fingerprint's id hashes only the hardware, so an operating-system update keeps a machine's budgets.
+
+**The budget rule**, which the design fixed before any number was measured:
+
+1. **Hard ceilings, from the first run.** The recall hook's p95 may not pass 7.5 seconds at any size, cold or warm, and no recall may take longer than 10 seconds; a run that times out counts as a breach of that limit. Session start's p95 may not pass 20 seconds.
+2. **Library budgets, after 14 valid nights.** `--write-budgets bench/expected/perf_budgets.json --history <folder>` sets each library series' budget to 1.5 times its median p95 over the last 14 valid nights on this machine, rounded up to the next step of 1, 2, 5, 10, 20, 50 and so on. It writes the file once, with the machine's fingerprint, and refuses to overwrite it. From then on, a valid run on that machine fails when a library p95 is over its budget. No budget has been committed yet.
+3. **A regression** needs all three of these: the p95 is more than 1.20 times the median of the last 7 valid nights on this machine; the increase is more than 2 ms and more than 3 times those nights' median absolute deviation; and measuring that series again at once shows the same.
+
+**An invalid night.** A run is invalid when the machine is on battery, or when the one-minute load average per CPU is above 0.5 at any of the checks made before, between and after the store sizes. An invalid run is reported and not failed: it exits with 3, it is not judged against history, and it never becomes history. The rule for "under load" is this workstream's reading of the design, which does not define it.
+
+To run it by hand:
+
+```bash
+PYTHONPATH=$PWD python bench/perf_budget.py --out local/perf/$(date +%F).json --history local/perf
+```
+
+It prints a table and exits with 0 for a valid run that passes, 1 for a valid run that breaches a ceiling, regresses or goes over a budget, and 3 for an invalid run. `--sizes 1000 --cold 5 --warm 20` gives a quick look.
+
+### The tiers they run in
+
+- **Fast**, on every pull request: the statistics and the rules, the detectors on hand-built observations, the fault tests, a 200-turn soak through the command line, a timing run at 40 claims with one cold process and two warm calls per series, and the pins of the two bugs the soak found. They assert how the scripts behave and never how long anything took.
+- **Nightly** (`tests/adversarial/soak/nightly/`): the 10,000-turn soak, and the full timing run at the three sizes. An invalid timing run skips with "the performance run is invalid: " and its reasons, which the skip ledger explains.
+- **Weekly** (`tests/adversarial/soak/weekly/`): the 100,000-turn soak, pinned to B51 until #333 is fixed.
+
+Measured once on a laptop that other work kept busy, which made the timing run invalid: the full timing run took 22 minutes, the 10,000-turn soak 15 seconds, and the 100,000-turn soak 8 minutes. The fast tier of this section takes about 10 seconds.
+
+The long runs write their records before they assert anything, so a failing night still leaves its evidence, and they read their history from the same folder: `$NIGHTLY_RECORDS_DIR`, or `local/nightly/records` in the checkout when it is unset. The nightly run starts each night in a clean worktree, so it must set the variable to a folder outside the worktree; otherwise every night starts with no history, and neither the regression rule nor the budgets can ever apply.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

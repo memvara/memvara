@@ -15,8 +15,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
   scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
   covers the suite's foundation, its reference model, its crash tests, its scripted
-  agent sessions, its fakes, its documentation checks, its stores from old releases
-  and its protocol fuzzing. None of it changes the library.
+  agent sessions, its fakes, its documentation checks, its stores from old releases,
+  its protocol fuzzing and its soak and timing runs. None of it changes the library.
   - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
     which includes the doctests in `memvara/`, and the new `--tier nightly`,
     `--tier weekly`, `--tier local` and `--tier quarantine` options select the others.
@@ -72,6 +72,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     tool's own input schema. Every request must get exactly one reply, a refused call must
     change nothing in the store, and the server must still answer a ping afterwards. The
     nightly tier adds lines of 20 MB and servers configured other ways.
+  - **A soak and a timing run.** `bench/soak.py` drives a store through thousands of
+    seeded turns and has one detector for each failure that raises no error, the ones
+    `memvara/telemetry.py` lists, such as a restatement that refreshes nothing or
+    redaction that stops matching. It runs 10,000 turns nightly and 100,000 weekly.
+    `bench/perf_budget.py` times `search`, `recall`, `remember` and the two hooks that
+    read the store, at 1,000, 10,000 and 100,000 claims. It records the machine it ran
+    on, and a run made on battery or under load is reported as invalid rather than as a
+    failure. The hooks' time limits apply from the first run. The library budgets are set
+    from 14 valid nights by a rule fixed before any number was measured. Two bugs the soak
+    found are pinned as strict expected failures: #332 and #333.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 
 ### Fixed

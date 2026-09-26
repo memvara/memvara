@@ -95,6 +95,10 @@ RULES: tuple[SkipRule, ...] = (
              "The encrypt extra is optional. CI installs it."),
     SkipRule(r"^no system tz database and no tzdata package$",
              "The time zone tests need a tz database."),
+    SkipRule(r"^the performance run is invalid: ",
+             "A timing run on battery or under load measures the machine, not memvara. The "
+             "design marks such a run invalid rather than failed, and its record keeps the "
+             "reason (bench/perf_budget.py)."),
 )
 
 
