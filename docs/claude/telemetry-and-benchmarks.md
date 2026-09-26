@@ -31,6 +31,10 @@ answer quality with no error, no exception and nothing in any log.
 - Where each embedder-dependent cosine threshold sits in each embedding space:
   `bench/embedder_calibration.py`, the measurement behind `memvara/embed/calibration.py`.
 - Against a hosted store: `bench/hosted.py`.
+- The silent failures above, watched over a long run: `bench/soak.py`, which drives a
+  seeded workload of thousands of turns through the real library and fails when one of
+  the failure modes in `memvara/telemetry.py` appears. `docs/claude/testing.md` describes
+  its detectors.
 - The release bar for agentic extraction: `bench/extraction_bar.py`, which runs the same
   turns through two stores that differ only in the `agentic_extraction` switch, and the
   199-question LongMemEval sample it reads, `bench/samples/longmemeval_s_199.txt`.
@@ -46,7 +50,7 @@ answer quality with no error, no exception and nothing in any log.
   `tests/test_bench_retrieval_regression.py`,
   `tests/test_agent_memory_bench.py`, `tests/test_demo.py`, `tests/test_demo_scenario.py`,
   `tests/test_demo_hosted.py`, `tests/test_demo_competitors.py`,
-  `tests/test_plugin_recall_bench.py`.
+  `tests/test_plugin_recall_bench.py`, and `tests/adversarial/soak/` for the soak.
 - Documentation: [BENCHMARKS.md](../BENCHMARKS.md) is the results document — every number,
   what it measures, and what it does not.
   [The Agent Memory Benchmark page](../benchmarks/agent-memory-benchmark.md) is the reader's

@@ -18,9 +18,13 @@ explains how the run works and how each detector is shown to fire.
 
 from __future__ import annotations
 
+import argparse
+import dataclasses
+import json
 import random
 import statistics
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -435,6 +439,8 @@ class Observations:
     unplanted_changed: int
     store_bytes: int | None
     elapsed_s: float
+    #: When the run started, in ISO 8601 and UTC; the order history is read in.
+    started: str = ""
 
 
 def run(config: SoakConfig, path: Path | None, *,
@@ -466,7 +472,9 @@ def run(config: SoakConfig, path: Path | None, *,
                             planted=[], unplanted_changed=0, store_bytes=None,
                             elapsed_s=0.0)
     crowded: dict[str, tuple[str, str, int]] = {}
-    origin = datetime.now(timezone.utc).replace(microsecond=0) - config.span
+    started = datetime.now(timezone.utc).replace(microsecond=0)
+    observed.started = started.isoformat()
+    origin = started - config.span
     step = config.span / config.turns
     began = time.perf_counter()
     try:
@@ -747,3 +755,103 @@ def judge_soak(obs: Observations, *, history: Sequence[float] = (),
     findings = [detector(obs) for detector in DETECTORS]
     findings.append(store_growth(obs, history, remeasure or _cannot_remeasure))
     return findings
+
+
+# --- the record, the history and the command line ------------------------------------------
+
+#: What every soak record says it is, so a folder of mixed records can be read safely.
+RECORD_KIND = "memvara-soak"
+RECORD_VERSION = 1
+
+
+def record(obs: Observations, findings: Sequence[Finding]) -> dict[str, Any]:
+    """The run as JSON: what ran, on which machine, what it counted, and every finding."""
+    rec = obs.recorder
+    return {
+        "kind": RECORD_KIND, "version": RECORD_VERSION, "started": obs.started,
+        "turns": obs.config.turns, "seed": obs.config.seed,
+        "fingerprint": perf_budget.machine_fingerprint(),
+        "bytes_per_turn": (None if obs.store_bytes is None
+                           else obs.store_bytes / obs.config.turns),
+        "elapsed_s": round(obs.elapsed_s, 3),
+        "counts": {
+            "reconcile": {action: rec.total("write.reconcile", action=action)
+                          for action in ("add", "reinforce", "supersede", "retract",
+                                         "noop")},
+            "retraction": {outcome: rec.total(WRITE_RETRACTION, outcome=outcome)
+                           for outcome in ("retired", "noop")},
+            "merged": rec.total(CONSOLIDATE_MERGED),
+        },
+        "findings": [dataclasses.asdict(finding) for finding in findings],
+    }
+
+
+def load_history(directory: Path, *, turns: int, seed: int) -> list[float]:
+    """Bytes per turn of every earlier soak in `directory` with these turns and this
+    seed, oldest first.
+
+    Only a soak of the same length and seed runs the same operations, so only its growth
+    can be compared. Files that are not soak records, and soaks kept in memory, are
+    skipped. A folder that does not exist yet is an empty history.
+    """
+    if not directory.is_dir():
+        return []
+    found: list[tuple[str, float]] = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (isinstance(data, dict) and data.get("kind") == RECORD_KIND
+                and data.get("turns") == turns and data.get("seed") == seed
+                and isinstance(data.get("bytes_per_turn"), (int, float))):
+            found.append((str(data.get("started", "")), float(data["bytes_per_turn"])))
+    return [value for _, value in sorted(found)]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run one soak, print its findings, and return 1 if any failed."""
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    parser.add_argument("--turns", type=int, default=10_000)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--store", type=Path, default=None,
+                        help="the folder to create the store in, which keeps it; by "
+                             "default a temporary folder that is removed afterwards")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="write the run's record to this JSON file")
+    parser.add_argument("--history", type=Path, default=None,
+                        help="a folder of earlier records to judge store growth against")
+    args = parser.parse_args(argv)
+    config = SoakConfig(args.turns, args.seed)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    with tempfile.TemporaryDirectory(prefix="memvara-soak-") as scratch:
+        folder = args.store if args.store is not None else Path(scratch)
+        folder.mkdir(parents=True, exist_ok=True)
+        name = f"soak-{config.turns}-{config.seed}-{stamp}"
+        observed = run(config, folder / f"{name}.db")
+        history = (load_history(args.history, turns=config.turns, seed=config.seed)
+                   if args.history is not None else [])
+        again = iter(range(1, 1_000))
+
+        def remeasure() -> float:
+            repeat = run(config, folder / f"{name}-again-{next(again)}.db")
+            assert repeat.store_bytes is not None
+            return repeat.store_bytes / config.turns
+
+        findings = judge_soak(observed, history=history,
+                              remeasure=remeasure if history else None)
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(json.dumps(record(observed, findings), indent=2) + "\n",
+                                encoding="utf-8")
+    per_turn = ("" if observed.store_bytes is None
+                else f", {observed.store_bytes / config.turns:,.0f} bytes a turn")
+    print(f"soak: {config.turns} turns, seed {config.seed}, "
+          f"{observed.elapsed_s:.1f} s{per_turn}")
+    for finding in findings:
+        print(f"{finding.status:7} {finding.detector}: {finding.detail}")
+    return 1 if any(finding.status == FAIL for finding in findings) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
