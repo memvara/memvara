@@ -13,7 +13,8 @@ spelling and the words around it which words are names. These are the rules.
   arguments written in single quotes, or by two of the tool's own arguments joined by a
   comma, "and", "or" or "/", as in "ranked and synthesize".
 - **A tie** says which tool an argument belongs to: "memory_recall with include_episodes",
-  "memory_end and claim_id", "memory_remember's expires_at".
+  "memory_end and claim_id", "memory_remember's expires_at". A one-word name ties only
+  after "with" with no article; after "and" or a possessive it is read as English.
 
 What the parse cannot see:
 
@@ -57,13 +58,16 @@ QUOTED = re.compile(r"(?<![\w])'(" + _WORD + r")'(?![\w])")
 #: the first word of the next, and a list of three is read whole.
 PAIR = re.compile(r"(?<![\w'.-])(?=(" + _WORD + ")" + _JOIN + "(" + _WORD + r")(?![\w'-]))")
 
-#: The phrases that tie an argument to a tool. The optional article is captured, because
-#: an article before a one-word name ("memory_search with a question") reads as English.
+#: The phrases that tie an argument to a tool, each with whether a one-word name counts
+#: in it. After "with" it counts unless an article comes first, because "memory_search
+#: with a question" is English. After "and" or a possessive it never counts:
+#: "memory_end's predicate" is the predicate of a fact, and "memory_end and query" joins
+#: two verbs. A snake_case word always counts.
 _TIES = (
-    re.compile(_BEFORE + _TOOL + r"(?:\s+again)?\s+with\s+(the\s+same\s+|the\s+|an?\s+)?("
-               + _WORD + ")"),
-    re.compile(_BEFORE + _TOOL + r"\s+and\s+()(" + _WORD + ")"),
-    re.compile(_BEFORE + _TOOL + r"'s\s+()(" + _WORD + ")"),
+    (re.compile(_BEFORE + _TOOL + r"(?:\s+again)?\s+with\s+(the\s+same\s+|the\s+|an?\s+)?("
+                + _WORD + ")"), True),
+    (re.compile(_BEFORE + _TOOL + r"\s+and\s+()(" + _WORD + ")"), False),
+    (re.compile(_BEFORE + _TOOL + r"'s\s+()(" + _WORD + ")"), False),
 )
 
 #: The list after "like", "such as" or "e.g.": example data, not names.
@@ -117,14 +121,15 @@ def mentions(text: str, own: Collection[str]) -> list[Mention]:
 def ties(text: str) -> list[tuple[str, str]]:
     """Each `(tool, word)` the text ties together, in order.
 
-    A one-word name after an article is left out, because "memory_search with a question"
-    is English. A snake_case word keeps its article: "with the same custom_id".
+    A one-word name counts only after "with" and no article, because "memory_search with a
+    question" and "memory_end's predicate" are English. A snake_case word counts in every
+    form, and keeps its article: "with the same custom_id".
     """
     found = []
-    for pattern in _TIES:
+    for pattern, one_word in _TIES:
         for match in pattern.finditer(text):
             tool, article, word = match.group(1), match.group(2), match.group(3)
-            if article and "_" not in word:
+            if "_" not in word and (article or not one_word):
                 continue
             found.append((match.start(1), tool, word))
     return [(tool, word) for _, tool, word in sorted(found)]

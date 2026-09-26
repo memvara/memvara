@@ -83,6 +83,16 @@ def test_a_tie_to_the_right_tool_is_not() -> None:
     assert wrong_ties(text, PLANTED) == []
 
 
+def test_a_one_word_name_after_a_possessive_or_and_is_english() -> None:
+    """"memory_end's predicate" is the predicate of the fact memory_end closes, and "memory_end
+    and query" joins two verbs. Neither names an argument, so neither is a tie, as a one-word
+    name after "with a" is not."""
+    assert wrong_ties("memory_end's predicate stays exactly as memory_remember first wrote "
+                      "it.", PLANTED) == []
+    assert wrong_ties("Call memory_end and query the store again.", PLANTED) == []
+    assert ties("memory_end's predicate; memory_end and query.") == []
+
+
 def test_each_way_of_naming_an_argument_is_read() -> None:
     text = ("Give 'predicate' (with 'subject', default 'user'); at k=5; ranked and "
             "synthesize each add a call; send true_since / true_until.")
