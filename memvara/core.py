@@ -2164,6 +2164,14 @@ class Memvara:
         queries but remain visible to `as_of` and `history`. For true erasure (a GDPR
         deletion, say), use `purge`.
 
+        "Everything currently believed" is every value in the slot that the store
+        believes and that has not ended. That is the values in force now and any value
+        stored to begin later, which is believed from the moment it is recorded; leaving
+        that one out would let the forgotten slot answer again when it began. A value that
+        has already ended is history and is left as it is. Under `close="ended"` the
+        ending is clamped to each value's own start, as every ending is, so a value that
+        has not begun by `at` is ended where it would have begun and is true at no instant.
+
         **This is the one write that defaults to `close="retired"`, and the name is the
         argument.** Forgetting is something the holder of a memory does, not something
         the world does. The call names no successor value and no end date for the fact,
@@ -2195,7 +2203,8 @@ class Memvara:
         and `why()` show it. At most 500 characters; see `types.closure_reason`.
         """
         scope = self._scope(tenant, user, agent, session)
-        now = at or utcnow()
+        clock = utcnow()
+        now = at or clock
         how = closure(close)
         why = closure_reason(reason)
         pred = self.registry.normalize(predicate)
@@ -2214,10 +2223,31 @@ class Memvara:
         # Checked against `slot`, not `scope`, because `contains` compares the project:
         # a globally-declared predicate is stored with no project, and a caller inside a
         # repository still has to reach it.
-        retired = [c for c in self.store.competing_claims(scope.tenant, probe.fact_key)
+        #
+        # Every value the store believes at the clock and that has not ended by then,
+        # which is more than the live ones: a value stored to begin later is believed
+        # from the moment it is recorded. A lookup of live values left it believed, so
+        # the forgotten slot answered again when that value began (#282). A value that
+        # has already ended is history and is left as it is.
+        retired = [c for c in self._unended(scope.tenant, probe.fact_key, clock)
                    if slot.contains(c.scope)]
         self._close_all(retired, now, how, why)
         return retired
+
+    def _unended(self, tenant: str, fact_key: str, at: datetime) -> list[Claim]:
+        """The claims in one slot believed at `at` and not ended by it, oldest first.
+
+        `Store.unended_claims` where the store has it, which selects them in its own
+        query. A store without it has its slot read whole through `slot_history` and
+        filtered here with `Claim.is_unended`, the same test in Python, and with `_gone`
+        at the same instant; `OMITTABLE` says what that costs. `at` is one instant for
+        both clocks and for the expiry, so one `forget()` reads the clock once.
+        """
+        lookup = getattr(self.store, "unended_claims", None)
+        if lookup is not None:
+            return cast(list[Claim], lookup(tenant, fact_key, valid_at=at, known_at=at))
+        return [c for c in self.store.slot_history(tenant, fact_key)
+                if c.is_unended(at) and not self._gone(c, at)]
 
     def _close_all(self, claims: Sequence[Claim], at: datetime, how: Closure,
                    why: str | None) -> None:
@@ -2234,14 +2264,18 @@ class Memvara:
                 close_out(c, at, None, how, why)
                 self.store.put_claim(c)
 
-    def _gone(self, claim: Claim) -> bool:
-        """Whether `claim`'s expiry has passed, so no read returns it any more.
+    def _gone(self, claim: Claim, at: datetime | None = None) -> bool:
+        """Whether `claim`'s expiry has passed by `at`, so no read returns it any more.
 
         The id-addressed reads (`get`, `why`, `history`, `produced`) check this
         themselves; the searched ones leave such a claim out inside the store query.
         With `expiry_erasure` off an expiry does nothing, and this is always false.
+
+        `at` is the wall clock when it is not given. A caller that tests many claims for
+        one operation passes the instant it read, as `forget()` does, so the operation
+        has one instant rather than a clock read per claim.
         """
-        return self.expiry_erasure and expired(claim, utcnow())
+        return self.expiry_erasure and expired(claim, utcnow() if at is None else at)
 
     def _visible(self, claim_ids: Sequence[str], scope: Scope) -> dict[str, Claim]:
         """The claims among `claim_ids` this scope may read, fetched in one call.
@@ -2665,6 +2699,14 @@ class Memvara:
         preview can list a claim that matched only weakly, and never one that matched
         only a model's rephrasing of the query; reading it before confirming is the
         whole design.
+
+        **It closes only claims in force now, which is less than `forget()` closes.** The
+        preview is a present-tense search, and the confirming call refuses a claim that is
+        no longer live, so a value stored to begin later is never listed and never
+        closed. `forget()` closes such a value with the rest of its slot (#282). Listing
+        it here would need a search over values not yet in force, which `search()` does
+        not offer, and closing it without listing it would break the one promise the
+        preview makes. Close one with `forget()` on its slot, or with `delete()` by id.
 
         >>> mem = Memvara(llm=NullLLM(), user="alice")
         >>> _ = mem.remember("user", "works_at", "Acme")

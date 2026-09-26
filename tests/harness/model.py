@@ -9,7 +9,8 @@ of rows and the rules copied from the code, each with the place it was copied fr
 - expiry, where reads drop a row whose `expires_at` has passed on the wall clock;
 - `remember`, `forget`, `delete`, `erase` and `erase_expired`, from `Reconciler.apply`,
   `types.close_out` and `Memvara`'s methods of the same names, with `remember`'s
-  `valid_to` and its refusal of an end at or before the start;
+  `valid_to` and its refusal of an end at or before the start, and `forget` and `delete`
+  with either closure;
 - `stats()`, `count()`, `history()` and `get()`.
 
 **What it leaves out,** so a reader does not take its silence for a pass:
@@ -337,12 +338,30 @@ class ReferenceStore:
         return e
 
     def forget(self, op: Forget, t: datetime) -> Expect:
-        """`Memvara.forget`: retire every live row in the slot, at the clock."""
+        """`Memvara.forget`: close, at the clock, every row in the slot that the store
+        believes and that has not ended. That is the live rows and the rows stored to
+        begin later; an ended row is left as it is.
+
+        Each row is closed through `close_out`: a retirement at the clock, or an ending at
+        the clock that never falls before the row's own start. So under `close="ended"` a
+        row stored to begin later ends at its start and is true at no instant."""
         e = Expect()
         slot = (op.user, SUBJECT, op.predicate)
-        closed = [r for r in self.rows.values() if r.slot == slot and self.live_at(r, t)]
+        closed = [r for r in self.rows.values()
+                  if r.slot == slot and not r.expired(t) and r.recorded_at <= t
+                  and (r.invalidated_at is None or r.invalidated_at > t)
+                  and (r.valid_to is None or r.valid_to > t)]
         for r in closed:
-            e.stamps.append(Stamp(r.id, "invalidated_at"))
+            if op.close == "retired":
+                e.stamps.append(Stamp(r.id, "invalidated_at"))
+            elif r.valid_from > t:
+                # The edge is the row's own start, later than the clock.
+                if r.valid_to is None or r.valid_to > r.valid_from:
+                    r.valid_to = r.valid_from
+            else:
+                # The row has begun and ends after the clock or never, so it now ends at
+                # the clock: no instant the model holds lies between `t` and the clock.
+                e.stamps.append(Stamp(r.id, "valid_to"))
         e.closed = [r.id for r in closed]
         e.returned = sorted(e.closed)
         return e
@@ -437,10 +456,13 @@ class Remember:
 
 @dataclass(frozen=True)
 class Forget:
-    """`forget(subject, predicate)`: retire every live row in the slot."""
+    """`forget(subject, predicate, close=...)`: close every row in the slot that is
+    believed and has not ended, including a row stored to begin later. `close` is
+    `"retired"`, the default, or `"ended"`."""
 
     user: str
     predicate: str
+    close: str = "retired"
 
 
 @dataclass(frozen=True)

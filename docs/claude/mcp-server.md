@@ -91,6 +91,14 @@ instant it expires. A read-only server runs neither sweep, because erasing is a 
 `memory_remember` argument descriptions then say that nothing is erased. A cloud-mode
 server runs no sweep, because the deployment runs its own.
 
+A cloud-mode server also describes `memory_forget` and `memory_end` differently. Given a
+predicate, a local server's tools close every current value and any value stored to begin
+later, because that is what this release's `forget()` does. A cloud-mode server's tools
+promise only the current values: the deployment runs its own release of `forget()`, and a
+release from before that change leaves a value stored to begin later alone.
+`for_a_hosted_deployment` in `memvara/server/tools.py` swaps the two descriptions, and
+`ToolContext.hosted` picks the wording of their argument errors and replies.
+
 ## Invariants and assumptions
 
 - **The scope is bound at startup and no tool call can change it.** That is what stops a

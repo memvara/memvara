@@ -11,8 +11,14 @@ history of a run rather than one step, and one check at the end of each run:
   its store in a file of its own for this reason, and the file is deleted afterwards.
 
 The value pools are small, so two operations often touch the same slot or value, and a
-second `remember` rule writes only `lives_in` at two instants, so that two values often
-begin at the same moment.
+second `remember` rule writes only `lives_in` at three instants: two in the past, so that
+two values often begin at the same moment, and one in the future, so that the slot often
+holds a value stored to begin later. `forget` runs with either closure, so ending a slot
+is driven too, including the clamp of an ending onto the start of a value that has not
+begun. The nightly tier's runs reach that clamp often. The fast tier's 30 short runs may
+not, because Hypothesis switches a random subset of the rules off in each run and seeds
+the fast tier from this class's source, so its hand-written case in
+`test_adv_model_writes.py` is what checks the clamp there.
 
 Operations that would trigger a known, open bug are skipped, so the machine keeps looking
 for new bugs rather than rediscovering old ones. The test prints how many steps it ran and
@@ -101,15 +107,21 @@ class MemoryMachine(RuleBasedStateMachine):
                              confidence, close, expires_at, valid_to))
 
     @rule(user=st.sampled_from(USERS), obj=st.sampled_from(POOLS["lives_in"]),
-          valid_from=st.sampled_from([INSTANTS[1], INSTANTS[3]]))
+          valid_from=st.sampled_from([INSTANTS[1], INSTANTS[3], FAR_FUTURE]))
     def remember_a_home(self, user: str, obj: str, valid_from: datetime) -> None:
-        """Values of the one single-valued predicate, at two instants only, so that two
-        often begin at the same moment and one collapses the other."""
+        """Values of the one single-valued predicate, at three instants only. Two are in
+        the past, so that two values often begin at the same moment and one collapses
+        the other. The third is in the future, so that the slot often holds a value
+        stored to begin later when it is forgotten or ended. The `remember` rule alone
+        put one there too rarely: in 80 random runs of 25 steps, no `forget` met one."""
         self._apply(Remember(user, "lives_in", obj, valid_from=valid_from))
 
-    @rule(user=st.sampled_from(USERS), predicate=st.sampled_from(sorted(POOLS)))
-    def forget(self, user: str, predicate: str) -> None:
-        self._apply(Forget(user, predicate))
+    @rule(user=st.sampled_from(USERS), predicate=st.sampled_from(sorted(POOLS)),
+          close=st.sampled_from(["retired", "ended"]))
+    def forget(self, user: str, predicate: str, close: str) -> None:
+        """Both closures, so ending a slot is driven too, with the clamp of an ending
+        onto the start of a row that has not begun."""
+        self._apply(Forget(user, predicate, close))
 
     @precondition(lambda self: bool(self.pair.model.real_ids))
     @rule(user=st.sampled_from(USERS), data=st.data(),

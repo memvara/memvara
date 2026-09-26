@@ -2310,6 +2310,43 @@ def test_forget_an_unknown_slot_says_so_without_pretending(server):
                                        {"predicate": "favourite_colour"})
 
 
+@pytest.mark.parametrize("name, single", [("memory_end_matching", "memory_end"),
+                                          ("memory_forget_matching", "memory_forget")])
+def test_the_matching_tools_say_they_never_list_a_value_stored_to_begin_later(
+        server, name, single):
+    """The two matching tools preview with a present-tense search, so a fact stored to
+    begin later is never listed and never closed, while the slot form of memory_end and
+    memory_forget closes it. memory_history shows such a fact as live, and these tools
+    say they close every live fact that matches, so the description has to name the
+    exception and the way to close one, which works on every server: its claim_id."""
+    now = utcnow()
+    server._ctx.memory.remember("user", "works_at", "Globex",
+                                valid_from=now + timedelta(days=30))
+    description = BY_NAME[name].description
+
+    assert "Nothing matched 'Globex'" in text(server, name, {"query": "Globex"})
+    assert "a fact stored to begin later is never listed" in description
+    assert f"pass its claim_id from memory_history to {single}" in description
+
+
+@pytest.mark.parametrize("name", ["memory_forget", "memory_end"])
+def test_the_slot_form_names_a_value_stored_to_begin_later_in_one_term(server, name):
+    """Given a predicate, both tools also close a value stored to begin later (#282).
+    The description, the argument error and the reply when nothing was closed all say
+    so, and `.claude/rules/tool-descriptions.md` asks for one term per concept: the
+    replies had said "scheduled" where the other two said "stored to begin later"."""
+    description = BY_NAME[name].description
+    error, is_error = call(server, name, {})
+    reply = text(server, name, {"predicate": "favourite_colour"})
+
+    assert ("every current value of that fact and any value stored to begin later"
+            in description)
+    assert is_error and "any value stored to begin later" in error
+    assert "has no current value and no value stored to begin later" in reply
+    for said in (description, error, reply):
+        assert "scheduled" not in said
+
+
 # -- ending a fact -----------------------------------------------------------
 #
 # The half of the closure split the agent-facing surface used to be missing. `Closure`
@@ -2470,6 +2507,66 @@ def test_ending_a_single_claim_in_the_future_says_so_too(server):
     body = text(server, "memory_end", {
         "claim_id": claim_id, "at": (utcnow() + timedelta(days=16)).isoformat()})
     assert "still in the future" in body
+
+
+def test_ending_a_slot_says_a_value_that_had_not_begun_is_true_at_no_instant(server):
+    """Ending a slot also ends a value stored to begin later, at that value's own start,
+    so the value is true at no instant. Its ending is still in the future, and the reply
+    used to count it as one: it said the value was true until then and that
+    memory_recall kept returning it, which was false on both counts, and it said every
+    value still answered about the period before its ending."""
+    now = utcnow()
+    memory = server._ctx.memory
+    memory.remember("user", "works_at", "Acme", valid_from=now - timedelta(days=30))
+    memory.remember("user", "works_at", "Globex", valid_from=now + timedelta(days=30))
+
+    body = text(server, "memory_end", {"predicate": "works_at"})
+
+    assert "Ended 2 value(s) of user/works_at" in body
+    assert "still in the future" not in body and "keeps returning" not in body
+    assert "They answer nothing after it" not in body
+    assert "Those that had begun answer nothing after it" in body
+    assert "note: 1 of these had not begun when they were ended" in body
+    assert "true at no instant" in body
+    # What the line says, checked against the store rather than taken on trust.
+    globex = [c for c in memory.history("user", "works_at") if c.object == "Globex"][0]
+    assert globex.valid_to == globex.valid_from
+    assert memory.get_all(valid_at=globex.valid_from + timedelta(days=1)) == []
+
+
+def test_ending_one_value_that_has_not_begun_says_it_is_true_at_no_instant(server):
+    """The id-addressed path clamps the same way, and said the same false things: that
+    the value still answered about the period before its ending, and that it was true
+    until then."""
+    starts = utcnow() + timedelta(days=30)
+    globex = server._ctx.memory.remember("user", "works_at", "Globex",
+                                         valid_from=starts).added[0]
+
+    body = text(server, "memory_end", {"claim_id": globex.id})
+
+    assert f"Ended claim {globex.id}" in body and "not retired" in body
+    assert "still answers about the period before it" not in body
+    assert "still in the future" not in body
+    assert "It had not begun when it was ended" in body and "true at no instant" in body
+
+
+@pytest.mark.parametrize("address", ["predicate", "claim_id"])
+def test_ending_a_value_stored_to_begin_later_after_its_start_says_when_it_answers(
+        server, address):
+    """Ended at an instant after its own start, a value stored to begin later is true
+    between the two. It is not true now, so memory_recall is not returning it, and the
+    note must not say it keeps doing so."""
+    starts = utcnow() + timedelta(days=30)
+    globex = server._ctx.memory.remember("user", "works_at", "Globex",
+                                         valid_from=starts).added[0]
+    arguments = {"at": (starts + timedelta(days=30)).isoformat()}
+    arguments[address] = "works_at" if address == "predicate" else globex.id
+
+    body = text(server, "memory_end", arguments)
+
+    assert "keeps returning" not in body and "true at no instant" not in body
+    assert "note: 1 of these are stored to begin later" in body
+    assert "true only from its own start until then" in body
 
 
 @pytest.mark.parametrize("address", ["predicate", "claim_id"])

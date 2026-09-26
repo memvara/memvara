@@ -2694,6 +2694,113 @@ def test_forget_can_close_out_a_slot_that_genuinely_finished(mem):
     assert mem.get_all(user="alice") == []
 
 
+def test_forget_retires_a_value_scheduled_to_begin_later_as_well_as_the_live_one(mem):
+    """`forget` retires everything the store believes in the slot, and a value stored to
+    begin later is believed from the moment it is recorded. Retiring only the live values
+    left it believed, so the forgotten slot answered again when it began (#282). A value
+    that has already ended is history and is left as it is."""
+    now = utcnow()
+    mem.remember("user", "lives_in", "Rome", valid_from=now - timedelta(days=60),
+                 valid_to=now - timedelta(days=30))
+    mem.remember("user", "lives_in", "Berlin", valid_from=now - timedelta(days=10))
+    mem.remember("user", "lives_in", "Paris", valid_from=now + timedelta(days=30))
+
+    forgotten = mem.forget("user", "lives_in")
+
+    assert sorted(c.object for c in forgotten) == ["Berlin", "Paris"]
+    assert {c.state for c in forgotten} == {"retired"}
+    assert mem.get_all(valid_at=now + timedelta(days=60)) == []
+    assert [c.object for c in mem.get_all(valid_at=now - timedelta(days=45))] == ["Rome"]
+
+
+def test_ending_a_slot_ends_a_scheduled_value_at_its_own_start(mem):
+    """The world-change reading closes the same values. One that has not begun is ended
+    where it would have begun, the clamp every ending gets, so it is true at no instant
+    instead of becoming true later."""
+    now = utcnow()
+    later = now + timedelta(days=30)
+    mem.remember("user", "works_at", "Acme", valid_from=now - timedelta(days=30))
+    mem.remember("user", "works_at", "Globex", valid_from=later)
+
+    ended = {c.object: c for c in mem.forget("user", "works_at", close="ended")}
+
+    assert sorted(ended) == ["Acme", "Globex"]
+    assert ended["Globex"].valid_from == ended["Globex"].valid_to == later
+    assert ended["Globex"].invalidated_at is None
+    assert mem.get_all(valid_at=later + timedelta(days=1)) == []
+
+
+@pytest.mark.parametrize("close", ["ended", "retired"])
+def test_forget_matching_closes_only_what_is_in_force_now(mem, close):
+    """Unlike `forget()`, which closes a value stored to begin later with its slot
+    (#282), `forget_matching` closes only claims in force now. Its preview is a
+    present-tense search, and its confirming call refuses a claim that is not live, so
+    a value stored to begin later is neither listed nor closed. The docstring states the
+    difference; this pins it, and shows the two ways that do close such a value."""
+    now = utcnow()
+    acme = mem.remember("user", "works_at", "Acme",
+                        valid_from=now - timedelta(days=30)).added[0]
+    globex = mem.remember("user", "works_at", "Globex",
+                          valid_from=now + timedelta(days=30)).added[0]
+    next_month = now + timedelta(days=60)
+
+    preview = mem.forget_matching("Globex Acme", close=close, k=10)
+    assert set(preview.matches) == {acme.id}
+    done = mem.forget_matching("Globex Acme", close=close, k=10,
+                               confirm=preview.confirm)
+    assert [c.object for c in done.closed] == ["Acme"]
+    assert [c.object for c in mem.get_all(valid_at=next_month)] == ["Globex"]
+
+    assert mem.delete(globex.id, close=close)
+    assert mem.get_all(valid_at=next_month) == []
+    assert "stored to begin later" in (Memvara.forget_matching.__doc__ or "")
+
+
+def test_forget_asks_the_store_for_the_open_values_instead_of_reading_the_whole_slot(
+        mem, monkeypatch):
+    """A slot restated hundreds of times holds a few values that have not ended and
+    many that have. `forget()` read every row the slot had ever held with `slot_history`
+    and picked the open ones in Python, so each call paid for the whole history. The
+    store selects them now, with `unended_predicate` in its own query."""
+    now = utcnow()
+    for days, city in ((90, "Rome"), (60, "Oslo"), (30, "Berlin")):
+        mem.remember("user", "lives_in", city, valid_from=now - timedelta(days=days))
+    mem.remember("user", "lives_in", "Paris", valid_from=now + timedelta(days=30))
+    monkeypatch.setattr(mem.store, "slot_history",
+                        lambda *a, **kw: pytest.fail("forget() read the whole slot"))
+
+    forgotten = mem.forget("user", "lives_in")
+
+    assert [c.object for c in forgotten] == ["Berlin", "Paris"], "in recorded order"
+
+
+def test_forget_on_a_store_without_unended_claims_reads_the_clock_once(monkeypatch):
+    """A store written before `unended_claims` still has every value `forget()` closes
+    picked for it: the slot's history, filtered with `Claim.is_unended`. That filter also
+    leaves out an expired claim, and it read the wall clock again for every claim it
+    tested. One `forget()` is one instant, so it now reads the clock once and tests every
+    claim at that instant."""
+    class OldStore(SQLiteStore):
+        unended_claims = None
+
+    mem = Memvara(store=OldStore(":memory:"), embedder=HashingEmbedder(dim=64),
+                  llm=NullLLM(), user="alice")
+    now = utcnow()
+    mem.remember("user", "lives_in", "Rome", valid_from=now - timedelta(days=60),
+                 valid_to=now - timedelta(days=30))
+    mem.remember("user", "lives_in", "Berlin", valid_from=now - timedelta(days=10))
+    mem.remember("user", "lives_in", "Paris", valid_from=now + timedelta(days=30))
+    reads = []
+    monkeypatch.setattr(core_module, "utcnow",
+                        lambda: reads.append(1) or utcnow())
+
+    forgotten = mem.forget("user", "lives_in")
+
+    assert [c.object for c in forgotten] == ["Berlin", "Paris"]
+    assert len(reads) == 1, f"forget() read the clock {len(reads)} times"
+    mem.close()
+
+
 @pytest.mark.parametrize("key, value", [
     ("salience_base", 5.0),
     ("last_observed_at", 4102444800.0),

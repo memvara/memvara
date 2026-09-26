@@ -175,6 +175,31 @@ def test_forget_retires_every_live_row_in_the_slot(pair: Pair) -> None:
     assert e.returned == ["r1", "r2"]
 
 
+def test_forget_retires_a_row_scheduled_to_begin_later_and_leaves_an_ended_one(
+        pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I0, valid_to=I1))
+    pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I2))
+    pair.apply(Remember("u1", "lives_in", "Paris", valid_from=FAR_FUTURE))
+    e = pair.apply(Forget("u1", "lives_in"))
+    assert e.returned == ["r2", "r3"] and pair.model.rows["r1"].state == "ended"
+
+
+def test_forget_can_end_a_slot_and_ends_a_row_that_has_not_begun_at_its_own_start(
+        pair: Pair) -> None:
+    """`forget(close="ended")` closes the same rows as a retirement, through `close_out`'s
+    ending: a row that has begun ends at the clock, and a row stored to begin later ends
+    at its own start, so it is true at no instant. The ended row is left as it is."""
+    pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I0, valid_to=I1))
+    pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I2))
+    pair.apply(Remember("u1", "lives_in", "Paris", valid_from=FAR_FUTURE))
+    e = pair.apply(Forget("u1", "lives_in", close="ended"))
+    rows = pair.model.rows
+    assert e.returned == ["r2", "r3"] and rows["r1"].valid_to == I1
+    assert rows["r3"].valid_to == rows["r3"].valid_from == FAR_FUTURE
+    assert rows["r2"].valid_to is not None and rows["r2"].valid_to < FAR_FUTURE
+    assert rows["r2"].invalidated_at is None and rows["r3"].invalidated_at is None
+
+
 def test_delete_can_end_a_row_instead_of_retiring_it(pair: Pair) -> None:
     pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I0))
     pair.apply(Delete("u1", "r1", close="ended"))

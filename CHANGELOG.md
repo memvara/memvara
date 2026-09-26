@@ -87,6 +87,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     alone, a read stage that fails must serve the read a store with no model serves, and
     each operation must make the number of model calls `docs/INTERNALS.md` states.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
+- **`Store.unended_claims`, `store.unended_predicate()` and `Claim.is_unended()`.**
+  `forget()` closes every value in a slot that the store believes and that has not ended
+  (#282), and it now asks the store for those values instead of reading every value the
+  slot has ever held and choosing in Python. `unended_predicate()` is the SQL for that
+  population, with the clock behind each marker, built from the same clauses as
+  `state_predicate()`. `Store.unended_claims` runs it inside the slot lookup, in
+  `slot_history`'s order, and `Claim.is_unended()` is the same test in Python, which
+  `Claim.is_live()` now calls after its own valid-time check. On an in-memory store with
+  one slot of 501 values, the lookup took 102 µs where reading the slot whole and
+  filtering took 7.3 ms (best of 200 runs on a laptop). The method is optional and listed
+  in `OMITTABLE`: a store without it keeps working and closes the same values, reading the
+  slot whole. `docs/UPGRADING.md` says what the new member does to `isinstance(x, Store)`.
 
 ### Fixed
 
@@ -150,6 +162,33 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     extraction and so before the reconciler. A turn that embeds as a near-duplicate of a
     stored claim, or whose text is exactly that of the turn a claim came from, still
     reinforces that claim, and its earlier date is lost. #318 tracks this.
+- **`forget()` retires a value written to begin later, as well as the values in force.**
+  It retired only the values in force at the time of the call, so a value written with a
+- **`forget()` retires a value stored to begin later, as well as the values in force.**
+  It retired only the values in force at the time of the call, so a value stored with a
+  future `valid_from` stayed believed, and the forgotten slot answered again when that
+  value began. `forget()` now retires every value in the slot that the store believes and
+  that has not ended, values stored to begin later included, and returns them with the
+  others. A value that has already ended is left as it is. `forget(close="ended")` closes
+  the same values, and a value that has not begun by `at` is ended at its own start, so
+  it is true at no instant. `memory_forget` and `memory_end` given a `predicate` call
+  `forget()`, so they do the same, and their descriptions, argument errors and replies now
+  say so in one term, "a value stored to begin later". A server started with
+  `MEMVARA_MODE=cloud` does not say it: the hosted deployment runs its own `forget`, which
+  does this only once the deployment runs a release with this fix, so there the two tools
+  promise every current value and nothing more. `forget_matching()` and its two tools
+  are unchanged and still close only what is in force now, because their preview is a
+  present-tense search; their docstring and descriptions now say so, and say to close a
+  value stored to begin later by its id. #282.
+- **`memory_end` no longer says a value it ended before it began is true until then.**
+  Ending a value that has not begun yet, by its `claim_id` or as part of its slot, ends
+  it at its own start, so it is true at no instant. The reply counted its ending as one
+  still in the future: it said the value was true until then, that `memory_recall` kept
+  returning it, and that it still answered about the period before its ending. It now
+  says the value had not begun when it was ended and is true at no instant. A value
+  stored to begin later and ended after its start is true between the two, and the
+  reply now says that too, where it used to say `memory_recall` kept returning it;
+  `memory_remember`'s reply shares that note.
 
 ## [0.16.0] — 2026-09-25
 

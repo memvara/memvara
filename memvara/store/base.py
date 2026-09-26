@@ -139,6 +139,25 @@ def _either(*parts: str) -> str:
             else "(" + " OR ".join(f"({p})" for p in parts) + ")")
 
 
+# The three clauses `state_predicate` and `unended_predicate` share, each written once so
+# the two predicates cannot come to disagree about what one of them means. `a` is the
+# column prefix and `at` the SQL expression for the instant, as in both callers.
+
+def _recorded_by(a: str, at: str) -> str:
+    """The belief floor: recorded by `at`. No population ever lifts it."""
+    return f"{a}recorded_at <= {at}"
+
+
+def _not_retired_by(a: str, at: str) -> str:
+    """Still believed at `at`: not retired, or retired only later."""
+    return f"({a}invalidated_at IS NULL OR {a}invalidated_at > {at})"
+
+
+def _not_ended_by(a: str, at: str) -> str:
+    """Not ended by `at`: open, or ending only later. Says nothing about the start."""
+    return f"({a}valid_to IS NULL OR {a}valid_to > {at})"
+
+
 def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
                     alias: str = "") -> tuple[str, tuple[str, ...]]:
     """SQL for "in one of `states` at `at`", plus the axis each bind marker reads.
@@ -179,7 +198,7 @@ def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
     """
     a = f"{alias}." if alias else ""
     wanted = resolve_states(states)
-    floor = f"{a}recorded_at <= {at}"
+    floor = _recorded_by(a, at)
     if len(wanted) == len(STATES):
         return f"({floor})", ("known",)
 
@@ -188,8 +207,7 @@ def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
     # closes (see `types.close_out`), so `valid_to <= V` already implies `valid_from <= V`
     # and the two intervals between them cover everything that had started by `V`.
     world, world_axes = {
-        ("live",): (f"{a}valid_from <= {at} "
-                    f"AND ({a}valid_to IS NULL OR {a}valid_to > {at})",
+        ("live",): (f"{a}valid_from <= {at} AND {_not_ended_by(a, at)}",
                     ("valid", "valid")),
         ("ended",): (f"{a}valid_to IS NOT NULL AND {a}valid_to <= {at}", ("valid",)),
         ("live", "ended"): (f"{a}valid_from <= {at}", ("valid",)),
@@ -198,8 +216,7 @@ def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
     axes = ("known", "known") + world_axes
 
     if "retired" not in wanted:
-        not_retired = f"({a}invalidated_at IS NULL OR {a}invalidated_at > {at})"
-        return f"({floor} AND {not_retired} AND {world})", axes
+        return f"({floor} AND {_not_retired_by(a, at)} AND {world})", axes
     # With `retired` wanted, the "still believed" guard on the other half is redundant:
     # the two are exact complements, so `retired OR (believed AND in_force)` is just
     # `retired OR in_force`. The retired disjunct is written first so its belief marker
@@ -292,6 +309,33 @@ def live_predicate(at: str = "?", *, include_invalidated: bool = False,
     return state_predicate(
         at, states=resolve_states(include_invalidated=include_invalidated), alias=alias,
     )[0]
+
+
+def unended_predicate(at: str = "?", *, alias: str = "") -> tuple[str, tuple[str, ...]]:
+    """SQL for "believed at `at` and not ended by it", plus the axis each marker reads.
+
+    The claims `Memvara.forget` closes: those in force at `at`, and those stored to begin
+    later, which are recorded and believed but not in force yet. No subset of
+    `state_predicate`'s states names the second group (see "The three states do not tile
+    the store" there), so this is its own predicate: the live clause without its
+    valid-time floor. Its clauses are the live clause's, from the same three helpers, so
+    the two cannot drift apart. `Claim.is_unended` is the same test in Python and
+    `Store.unended_claims` is the lookup that runs it.
+
+    `at` is substituted at every marker, as in `state_predicate`, and the markers read
+    belief before world: `("known", "known", "valid")`.
+
+    >>> sql, axes = unended_predicate("now()")
+    >>> print(sql.replace(" AND ", "\\n AND "))
+    (recorded_at <= now()
+     AND (invalidated_at IS NULL OR invalidated_at > now())
+     AND (valid_to IS NULL OR valid_to > now()))
+    >>> axes
+    ('known', 'known', 'valid')
+    """
+    a = f"{alias}." if alias else ""
+    return (f"({_recorded_by(a, at)} AND {_not_retired_by(a, at)} "
+            f"AND {_not_ended_by(a, at)})", ("known", "known", "valid"))
 
 
 def unexpired_predicate(at: str = "?", *, alias: str = "") -> str:
@@ -411,6 +455,10 @@ OMITTABLE: dict[str, str] = {
     "occupied_slots": "read-side shadowing falls back to one count_competing per slot, "
                       "and without that too, a read bound to a project returns a "
                       "user-wide value beside the project's own.",
+    "unended_claims": "forget() reads the slot's whole history with slot_history and "
+                      "picks the values to close with Claim.is_unended, so its cost grows "
+                      "with every value the slot has held rather than with the few it "
+                      "closes. It closes the same values.",
 }
 
 
@@ -541,6 +589,22 @@ class Store(Protocol):
 
     def slot_history(self, tenant: str, fact_key: str) -> list[Claim]:
         """Every claim ever recorded in one slot, oldest first — the audit trail."""
+        ...
+
+    def unended_claims(self, tenant: str, fact_key: str, *,
+                       valid_at: datetime | None = None,
+                       known_at: datetime | None = None) -> list[Claim]:
+        """Claims in one slot believed at `known_at` and not ended by `valid_at`.
+
+        The values in force, and the values stored to begin later: what `Memvara.forget`
+        closes. Selected by `unended_predicate` inside the store's own query, because a
+        slot restated many times holds few such values and many that have ended, and
+        reading all of them to keep a few makes every `forget()` pay for the slot's whole
+        history. A claim whose expiry has passed is left out, as every read leaves it out.
+        Oldest first, on `slot_history`'s `(recorded_at, id)` order.
+
+        Optional; see `OMITTABLE`.
+        """
         ...
 
     def adjacent(self, tenant: str, keys: Sequence[str], *,
