@@ -1,0 +1,48 @@
+{
+  "id": "profile-session-start",
+  "description": "memory_profile at the start of a session: the standing preferences, what arrived recently, what is relevant to the session's topic, and buckets the caller names. The buckets here name predicates the store already uses, so the profile reads the same on Python 3.10, where the default buckets cannot be read because they come from predicate packs. A bucket that names a predicate nothing uses is reported as ignored. After the user withdraws a preference, the next profile no longer lists it, and a since instant limits the recent section to what arrived after it.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "seed": [
+    {"op": "remember", "predicate": "prefers", "object": "short answers", "memory_type": "procedural"},
+    {"op": "remember", "predicate": "prefers", "object": "metric units", "memory_type": "procedural"},
+    {"op": "remember", "subject": "billing-service", "predicate": "depends_on", "object": "Postgres"},
+    {"op": "remember", "predicate": "decided", "object": "move billing to Postgres 16"}
+  ],
+  "sessions": [
+    {"turns": [
+      {"id": "opens", "user": "Let's pick up the billing work.",
+       "script": [{"tool": "memory_profile", "args": {"query": "billing database", "buckets": {"stack": ["depends_on"], "decisions": ["decided"]}}}]},
+      {"id": "unknown-bucket", "user": "Group what you know about our regions too.",
+       "script": [{"tool": "memory_profile", "args": {"buckets": {"regions": ["runs_in_region"]}}}]},
+      {"user": "Metric units was never my preference. Please drop it. Today I'm on the invoicing rewrite.",
+       "script": [
+         {"mark": "session_began"},
+         {"tool": "memory_search", "args": {"query": "metric units", "memory_types": ["procedural"]}, "capture": {"metric_id": "id=(cl_[0-9a-f]+) [^\\]]*\\] user prefers metric units"}},
+         {"tool": "memory_forget", "args": {"claim_id": "{metric_id}", "reason": "the user never preferred metric units"}},
+         {"tool": "memory_remember", "args": {"predicate": "working_on", "object": "the invoicing rewrite"}}
+       ]},
+      {"id": "after", "user": "What's the picture now?",
+       "script": [{"tool": "memory_profile", "args": {"since": "{session_began}", "buckets": {}}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "metric-retired", "text": "user prefers metric units", "state": "retired", "count": 1},
+    {"id": "short-answers-kept", "text": "user prefers short answers", "state": "live", "count": 1, "memory_type": "procedural"}
+  ],
+  "answer_gold": [
+    {"id": "two-standing-preferences", "turn": "opens", "must_contain": "Standing preferences (2)"},
+    {"id": "standing-lists-short-answers", "turn": "opens", "must_contain": "user prefers short answers"},
+    {"id": "relevant-section-for-the-topic", "turn": "opens", "must_contain": "Relevant to 'billing database'"},
+    {"id": "stack-bucket", "turn": "opens", "must_contain": "Bucket 'stack' (1)"},
+    {"id": "decisions-bucket", "turn": "opens", "must_contain": "Bucket 'decisions' (1)"},
+    {"id": "unknown-predicate-is-reported", "turn": "unknown-bucket", "must_contain": "names 'runs_in_region', which nothing declares or uses, so it was ignored"},
+    {"id": "one-standing-preference-left", "turn": "after", "must_contain": "Standing preferences (1)"},
+    {"id": "withdrawn-preference-gone", "turn": "after", "must_not_contain": "metric units"},
+    {"id": "recent-shows-todays-work", "turn": "after", "must_contain": "user working on the invoicing rewrite"},
+    {"id": "recent-leaves-out-older-facts", "turn": "after", "must_not_contain": "billing-service"}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}

@@ -1,0 +1,55 @@
+{
+  "id": "expiry-off-and-read-only",
+  "description": "What a server may erase. First a server with expiry erasure switched off stores a door code with expires_at, says that nothing will erase it, and still answers with it after the instant passes. An expires_at in the past, and an expire_reason with no expires_at, are both refused and write nothing. Then a read-only server opens the same store with expiry erasure on. Its reads and the session-start and recall hooks hide the expired code, but it erases nothing, because erasing is a write (sweep_expired in memvara/server/config.py). It refuses a write by name and reports that writes are disabled. At the end the code is still on disk.",
+  "tier": "fast",
+  "surfaces": ["stdio", "hooks"],
+  "env": {"user": "tester"},
+  "seed": [
+    {"op": "remember", "predicate": "prefers", "object": "short answers", "memory_type": "procedural"}
+  ],
+  "sessions": [
+    {"env": {"features": {"expiry_erasure": false}}, "turns": [
+      {"id": "tell", "user": "The door code for the holiday flat is 7731. Only keep it until we leave.",
+       "script": [
+         {"mark": "leaving", "offset_seconds": 4},
+         {"tool": "memory_remember", "args": {"predicate": "rental_door_code", "object": "7731", "expires_at": "{leaving}", "expire_reason": "temporary door code for the holiday flat"}}
+       ]},
+      {"id": "refused", "user": "Also keep the wifi password, guest-1234, but only until last week.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "wifi_password", "object": "guest-1234", "expires_at": "2020-01-01"}, "expect_error": true},
+         {"tool": "memory_remember", "args": {"predicate": "wifi_password", "object": "guest-1234", "expire_reason": "only for the stay"}, "expect_error": true}
+       ]},
+      {"user": "We've left the flat now.",
+       "script": [{"wait_until": "leaving"}]},
+      {"id": "switched-off", "user": "What was the door code?",
+       "script": [{"tool": "memory_recall", "args": {"query": "rental door code"}}]}
+    ]},
+    {"env": {"read_only": true}, "turns": [
+      {"id": "opens", "user": "Hi. Let's get started.",
+       "script": [{"hook": "session_start"}, {"hook": "recall"}]},
+      {"id": "asks-code", "user": "What's the rental door code?",
+       "script": [{"hook": "recall"}, {"tool": "memory_recall", "args": {"query": "rental door code"}}]},
+      {"id": "write", "user": "Forget that door code now.",
+       "script": [{"tool": "memory_forget", "args": {"predicate": "rental_door_code"}, "expect_error": true}]},
+      {"id": "stats", "user": "Can you change anything here?",
+       "script": [{"tool": "memory_stats"}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "code-still-on-disk", "text": "user rental door code 7731", "state": "live", "count": 1},
+    {"id": "past-expiry-wrote-nothing", "text": "user wifi password guest-1234", "state": "absent"}
+  ],
+  "answer_gold": [
+    {"id": "receipt-says-nothing-will-erase-it", "turn": "tell", "must_contain": "so nothing will erase this fact"},
+    {"id": "past-expiry-refused", "turn": "refused", "must_contain": "is not in the future"},
+    {"id": "reason-without-expiry-refused", "turn": "refused", "must_contain": "no expires_at was sent"},
+    {"id": "still-answered-with-the-switch-off", "turn": "switched-off", "must_contain": "7731"},
+    {"id": "read-only-hooks-still-read", "turn": "opens", "must_contain": "user prefers short answers"},
+    {"id": "read-only-session-start-hides-it", "turn": "opens", "must_not_contain": "7731"},
+    {"id": "read-only-reads-hide-it", "turn": "asks-code", "must_not_contain": "7731"},
+    {"id": "write-refused-by-name", "turn": "write", "must_contain": "memory_forget is unavailable: this memory server is read-only"},
+    {"id": "stats-say-writes-are-disabled", "turn": "stats", "must_contain": "writes: disabled"}
+  ],
+  "requires": ["tools", "hooks.session_start", "hooks.recall"],
+  "negative_control": true
+}

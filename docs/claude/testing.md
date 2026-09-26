@@ -723,5 +723,7 @@ Ten scenarios cover the workflows the design lists for this workstream. Each fil
 | `document-lifecycle` | Getting, updating in place, listing by folder and deleting a document |
 | `bulk-end-tokens` | `memory_end_matching`, and a stale, a wrong, a reused, an expired and a foreign confirmation token |
 | `graph-walk` | `memory_neighborhood`, `memory_paths` and `memory_link`, over a vocabulary whose relations the walk can follow |
+| `profile-session-start` | `memory_profile`, with buckets that read the same on Python 3.10 |
+| `expiry-off-and-read-only` | Expiry erasure switched off, and a read-only server and its hooks that hide an expired fact without erasing it |
 
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
