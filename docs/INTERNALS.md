@@ -2140,8 +2140,9 @@ design, and a Postgres implementation that uses `LIKE` must escape `%` and `_`.
 
 Two settings, covering two different halves, and neither is SQLite's default.
 
-`PRAGMA secure_delete=ON` (in `SCHEMA`, so it applies to every writer connection) covers
-ordinary tables: without it a deleted row's bytes sit in a free page, readable in the file.
+`PRAGMA secure_delete=ON` (in `_CONNECTION_PRAGMAS`, which every open applies to its writer
+connection, whether or not it runs the schema step) covers ordinary tables: without it a
+deleted row's bytes sit in a free page, readable in the file.
 
 FTS5's own `secure-delete` option (set once in `_migrate_to_v7`, persistent in the table's
 config) covers the text indexes, and this is the half that is easy to miss.
@@ -2239,8 +2240,21 @@ to `_PRESENCE_WAIT` (60 seconds), and then finds the file finished, so its own s
 changes nothing. The reserved lock leaves every open store's shared lock alone, so a store
 that is merely open delays nobody. `_creating` lets go by closing its connection, which
 rolls back: on the empty lock file, `BEGIN IMMEDIATE` starts a first page in memory, and a
-commit would have to write it, which needs every shared lock gone. Every process that opens
-a store must now be able to write `<db>.lock`, where before only a clear needed to.
+commit would have to write it, which needs every shared lock gone. A process that runs the
+schema step must be able to write `<db>.lock`.
+
+**An established store skips the step.** `_needs_schema_step` reads three things before the
+step: the version stamp, the journal mode, and the names of the indexes. A file whose stamp
+is this version's, which is in WAL mode, and which has every index `_LATE_INDEXES` creates,
+has nothing left to create or upgrade. Its open runs only `_CONNECTION_PRAGMAS`, the two
+settings that belong to a connection rather than to the file, and takes no creation lock,
+so the opens of an established store never wait for one another. Its opener needs only to
+read `<db>.lock`, as before this change. Every other file takes the step under the lock: a
+new one, one an older version wrote, one a tool switched out of WAL mode, and one missing
+an index that `_LATE_INDEXES` gained without a version bump, which is how `ep_cover` reached
+older files. The stamp is committed before the late indexes are built, so a store that
+opens in between sees an index missing, takes the step, and waits for the store building
+it.
 
 The retry described next was not enough on its own. With it, a store could still fail
 inside `_migrate_to_v3` with "vtable constructor failed: episodes_fts" when it opened the

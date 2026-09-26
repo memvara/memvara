@@ -57,6 +57,7 @@ import gc
 import json
 import math
 import os
+import re
 import sqlite3
 import struct
 import threading
@@ -316,8 +317,10 @@ CREATE TABLE IF NOT EXISTS predicates (
 );
 """
 
-SCHEMA = """
-PRAGMA journal_mode=WAL;
+# Settings of a connection rather than of the file. Every open applies them to its writer
+# connection: through `SCHEMA` when it runs the schema step, and on their own when it
+# skips the step (`_needs_schema_step`).
+_CONNECTION_PRAGMAS = """
 PRAGMA synchronous=NORMAL;
 -- Overwrite the content of a deleted row rather than merely marking its space free.
 -- `erase()` and `purge()` promise the text is gone, and without this it is still sitting
@@ -326,7 +329,11 @@ PRAGMA synchronous=NORMAL;
 -- run and +9% on `erase_claim`, which is the right side of that trade for the one
 -- operation in this library whose entire purpose is that the data stops existing.
 PRAGMA secure_delete=ON;
+"""
 
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+""" + _CONNECTION_PRAGMAS + """
 CREATE TABLE IF NOT EXISTS episodes (
     id       TEXT PRIMARY KEY,
     tenant   TEXT NOT NULL,
@@ -602,6 +609,12 @@ CREATE INDEX IF NOT EXISTS ep_cover ON episodes(tenant, usr, project, agent, ses
 -- for 100,000 claims. Down here because `expires_at` does not exist on a pre-v15 file
 -- until `_migrate_to_v15` adds it.
 """ + f"CREATE INDEX IF NOT EXISTS cl_last_change ON claims(tenant, {_LAST_CHANGE});\n"
+
+# The names of the indexes `_LATE_INDEXES` creates. An open skips the schema step only
+# when every one of them exists (`_needs_schema_step`), because an index added there
+# without a version bump reaches an older file only through that step.
+_LATE_INDEX_NAMES = frozenset(
+    re.findall(r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)\s+ON\s", _LATE_INDEXES))
 
 _CLAIM_FIELDS = (
     "id", "tenant", "usr", "agent", "session", "subject", "predicate", "object", "text",
@@ -1779,11 +1792,14 @@ class SQLiteStore:
         self._presence = self._hold_presence()
         try:
             with self._lock:
-                with self._creating():
-                    self._run_schema()
-                    self._migrate()
-                    self._db.executescript(_LATE_INDEXES)
-                    self._db.commit()
+                if self._needs_schema_step():
+                    with self._creating():
+                        self._run_schema()
+                        self._migrate()
+                        self._db.executescript(_LATE_INDEXES)
+                        self._db.commit()
+                else:
+                    self._db.executescript(_CONNECTION_PRAGMAS)
                 if sealer is not None:
                     # Read after the first commit: a new database has no salt on disk
                     # until its first page is written, and this is the value every other
@@ -2088,6 +2104,25 @@ class SQLiteStore:
                 self._readers.append(conn)
             self._local.db = conn
         return conn
+
+    def _needs_schema_step(self) -> bool:
+        """Whether this open must run the schema step, which creates or upgrades the file.
+
+        A file this version has finished with needs none: its version stamp is this
+        version's, it is in WAL mode, and every index in `_LATE_INDEXES` exists. Its open
+        skips the step and the creation lock (`_creating`), so opens of an established
+        store never wait for one another. Every other file takes the step under the lock:
+        a new file, one an older version wrote, one a tool switched out of WAL mode, and
+        one that lacks an index `_LATE_INDEXES` gained without a version bump. So does a
+        file a newer version wrote, and `_migrate` refuses it.
+        """
+        if int(self._db.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+            return True
+        if self._db.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+            return True
+        indexes = {r[0] for r in self._db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'")}
+        return not _LATE_INDEX_NAMES <= indexes
 
     def _run_schema(self) -> None:
         """Run `SCHEMA`, waiting for another connection's write lock as every write does.
@@ -3717,12 +3752,13 @@ class SQLiteStore:
         where the claim was, because that is what erasure means.
 
         **The text is overwritten, not merely unlinked**, and neither half of that is
-        automatic in SQLite. `PRAGMA secure_delete=ON` (see `SCHEMA`) covers the ordinary
-        rows, whose bytes would otherwise sit in a free page; FTS5's `secure-delete` (see
-        `_migrate_to_v7`) covers the text indexes, where a delete writes a marker and
-        keeps the terms as live rows that no `VACUUM` reclaims. Without both, this method
-        returned a count of what it had deleted while the words were still greppable in
-        the file. `tests/test_erasure_residue.py` checks the file rather than the store.
+        automatic in SQLite. `PRAGMA secure_delete=ON` (see `_CONNECTION_PRAGMAS`) covers
+        the ordinary rows, whose bytes would otherwise sit in a free page; FTS5's
+        `secure-delete` (see `_migrate_to_v7`) covers the text indexes, where a delete
+        writes a marker and keeps the terms as live rows that no `VACUUM` reclaims.
+        Without both, this method returned a count of what it had deleted while the words
+        were still greppable in the file. `tests/test_erasure_residue.py` checks the file
+        rather than the store.
 
         What *is* recorded is that it happened: one row in `erasures`, written before the
         delete and in the same transaction, holding no text, subject, predicate or object.

@@ -2044,6 +2044,74 @@ def test_a_store_that_is_open_does_not_hold_up_the_next_open(tmp_path, monkeypat
         SQLiteStore(path).close()
 
 
+def test_an_established_store_opens_without_the_creation_lock(tmp_path, monkeypatch):
+    """A file this version has finished with needs no schema step, so its open does not
+    take the creation lock, and established stores never queue behind one another. Here
+    another store holds that lock throughout, and the wait is too short to outlast it, so
+    an open that asked for the lock would fail. The writer connection still gets the two
+    settings that belong to a connection rather than to the file: SQLite's defaults are
+    secure_delete 0 and synchronous 2 (FULL), and the store sets 1 and 1 (NORMAL)."""
+    monkeypatch.setattr(sqlite_store, "_PRESENCE_WAIT", 0.05)
+    path = tmp_path / "c.db"
+    SQLiteStore(str(path)).close()
+    other = _creating_elsewhere(path)
+    try:
+        with SQLiteStore(str(path)) as store:
+            assert store._db.execute("PRAGMA secure_delete").fetchone()[0] == 1
+            assert store._db.execute("PRAGMA synchronous").fetchone()[0] == 1
+    finally:
+        other.close()
+
+
+@pytest.mark.parametrize("why", ["behind", "rollback journal", "missing late index"])
+def test_a_store_that_needs_its_schema_step_waits_for_the_creation_lock(tmp_path, why):
+    """Only a file this version has finished with skips the schema step. One an older
+    version wrote, one a tool switched out of WAL mode, and one that lacks an index
+    `_LATE_INDEXES` adds without a version bump all take the step under the lock, so each
+    waits for another store's step to finish, and each is finished afterwards."""
+    path = tmp_path / "c.db"
+    SQLiteStore(str(path)).close()
+    raw = sqlite3.connect(path)
+    if why == "behind":
+        raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+    elif why == "rollback journal":
+        raw.execute("PRAGMA journal_mode=DELETE")
+    else:
+        raw.execute("DROP INDEX cl_last_change")
+    raw.commit()
+    raw.close()
+    other = _creating_elsewhere(path)
+    started = time.monotonic()
+    release = threading.Timer(0.3, lambda: other.execute("ROLLBACK"))
+    release.start()
+    try:
+        with SQLiteStore(str(path)) as store:
+            took = time.monotonic() - started
+            version = store._db.execute("PRAGMA user_version").fetchone()[0]
+            mode = store._db.execute("PRAGMA journal_mode").fetchone()[0]
+            indexes = {r[0] for r in store._db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    finally:
+        release.join()
+        other.close()
+    assert took >= 0.3, f"the open took {took:.3f} s, so it did not wait for the lock"
+    assert (version, mode) == (SCHEMA_VERSION, "wal")
+    assert "cl_last_change" in indexes
+
+
+def test_the_fast_path_checks_every_index_the_late_indexes_create():
+    """An open skips the schema step only when every late index exists, so the list it
+    checks must be every statement in `_LATE_INDEXES`. A statement of another kind would be
+    skipped on every established store."""
+    body = "\n".join(line for line in sqlite_store._LATE_INDEXES.splitlines()
+                     if not line.lstrip().startswith("--"))
+    statements = [s.strip() for s in body.split(";") if s.strip()]
+    names = [re.match(r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)\s+ON\s", s)
+             for s in statements]
+    assert all(names), [s for s, n in zip(statements, names) if not n]
+    assert {n.group(1) for n in names if n} == sqlite_store._LATE_INDEX_NAMES
+
+
 # --- Cross-process coherence for episode vectors ----------------------------
 #
 # Claim vectors get this from `PRAGMA data_version` plus a monotonic `seq`: a reader

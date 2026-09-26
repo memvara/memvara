@@ -222,10 +222,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   started at once; when the server was the one that failed, the agent had no memory tools
   for that session. Now one store at a time runs the schema and the migrations, so a store
   that opens while another is creating the file waits for it, for up to 60 seconds, and
-  then opens the finished store. Every process that opens a store therefore needs to be
-  able to write `<db>.lock`, which before only `reembed()` needed. The switch to WAL mode is
-  also tried again for up to five seconds, for a connection from outside memvara that holds
-  the write lock. #281.
+  then opens the finished store. Only an open that creates or upgrades the store does
+  this. The open of a store this version has already finished with takes no such lock,
+  so established stores never wait for one another. The switch to WAL mode is also tried
+  again for up to five seconds, for a connection from outside memvara that holds the write
+  lock. #281.
 
 ## [0.16.0] — 2026-09-25
 
