@@ -126,6 +126,9 @@ HOOKS = ("session_start", "recall", "capture", "approve")
 #: Why a capture test skips on Windows. It has a rule in tests/harness/skips.py.
 NO_FAKES = "the fake agent CLIs are POSIX shell scripts"
 
+#: Why a test of the recall daemon skips on Windows. It has a rule there too.
+NO_UNIX_SOCKETS = "the recall daemon listens on a unix socket, which Windows lacks"
+
 #: Invalid UTF-8 inside an otherwise ordinary payload.
 _INVALID_UTF8 = (b'{"session_id": "s", "prompt": "user lives in \xff\xfe Lisbon", '
                  b'"tool_name": "mcp__memvara__memory_search\xc3"}')

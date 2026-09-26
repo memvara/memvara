@@ -32,6 +32,27 @@ _STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}
 #: The line run.py writes to hooks.log when it hands capture to a child in a new session.
 _DETACHED = re.compile(r"^detached hook=capture host=\S+ pid=(\d+)")
 
+#: The environment variable that names the file a daemon records its pid in.
+_DAEMONS_VAR = "HOOK_TEST_DAEMONS"
+
+#: The `sitecustomize` module that a runner allowing the daemon puts first on the hook's
+#: PYTHONPATH. Python imports `sitecustomize` when it starts, in every process that
+#: inherits that path, so each recall daemon the hooks start records its pid. `close()`
+#: can then stop every one, including a daemon that no socket path leads to any more.
+#: A `sitecustomize` it shadows, such as a Linux distribution's, still runs after it.
+_DAEMON_SPY = f"""\
+import importlib.machinery, importlib.util, os, sys
+_log = os.environ.get("{_DAEMONS_VAR}")
+if _log and sys.orig_argv[1:2] and sys.orig_argv[1].endswith("daemon.py"):
+    with open(_log, "a", encoding="utf-8") as _fh:
+        _fh.write(str(os.getpid()) + "\\n")
+_here = os.path.dirname(os.path.abspath(__file__))
+_spec = importlib.machinery.PathFinder.find_spec(
+    "sitecustomize", [p for p in sys.path if os.path.abspath(p or os.curdir) != _here])
+if _spec is not None and _spec.loader is not None:
+    _spec.loader.exec_module(importlib.util.module_from_spec(_spec))
+"""
+
 #: The environment variable that carries `HookRunner.patches` to the launcher below.
 _PATCHES_VAR = "HOOK_TEST_PATCHES"
 
@@ -302,6 +323,25 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _runs_the_daemon(pid: int) -> bool:
+    """Whether process `pid` is running this checkout's plugin/hooks/daemon.py, which
+    `close()` checks before it kills a recorded pid, so a pid the system has since given
+    to another process is left alone."""
+    daemon = str(HOOKS_DIR / "daemon.py")
+    if sys.platform.startswith("linux"):
+        try:
+            argv = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        except OSError:
+            return False
+        return daemon.encode() in argv
+    try:
+        done = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True,
+                              text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return daemon in done.stdout
+
+
 def _wait_for_exit(pid: int, timeout: float) -> bool:
     """Wait until process `pid` has ended. False when it still runs after `timeout`."""
     deadline = time.monotonic() + timeout
@@ -371,8 +411,18 @@ class HookRunner:
         environment = child_env(self.home, env)
         rest = path_without_agent_clis(environment.get("PATH", ""))
         environment["PATH"] = stubs.path(rest) if stubs is not None else rest
+        #: Where each daemon the hooks start records its pid, or None when the daemon is
+        #: not allowed.
+        self._daemon_log: pathlib.Path | None = None
         if daemon:
             environment.pop("MEMVARA_DAEMON", None)
+            spy = self.home / ".hookrunner"
+            spy.mkdir(parents=True, exist_ok=True)
+            (spy / "sitecustomize.py").write_text(_DAEMON_SPY, encoding="utf-8")
+            environment["PYTHONPATH"] = os.pathsep.join(
+                part for part in (str(spy), environment.get("PYTHONPATH", "")) if part)
+            self._daemon_log = spy / "daemons"
+            environment[_DAEMONS_VAR] = str(self._daemon_log)
         self._env = environment
         #: Captures handed to a child that `run` was told not to wait for. `close` kills
         #: each one with everything it started.
@@ -514,15 +564,26 @@ class HookRunner:
                                   f"connection within {timeout}s")
             time.sleep(0.05)
 
+    def daemon_pids(self) -> list[int]:
+        """The pid of every recall daemon the hooks started under this runner, in the
+        order they started, whether or not each still runs."""
+        if self._daemon_log is None or not self._daemon_log.exists():
+            return []
+        return [int(line) for line in self._daemon_log.read_text().split()]
+
     def close(self) -> None:
-        """Kill every recall daemon listening under this runner's home, and every capture
-        child it did not wait for, each with everything it started. Safe to call more
-        than once."""
-        for path in self.daemon_sockets():
-            pid = socket_peer_pid(path)
-            if pid is not None:
+        """Kill every recall daemon the hooks started under this runner or that listens
+        under its home, and every capture child it did not wait for, each with everything
+        it started. Safe to call more than once."""
+        for pid in self.daemon_pids():
+            if _runs_the_daemon(pid):
                 _kill_group(pid)
                 _wait_for_exit(pid, 5.0)
+        for path in self.daemon_sockets():
+            listener = socket_peer_pid(path)
+            if listener is not None:
+                _kill_group(listener)
+                _wait_for_exit(listener, 5.0)
             try:
                 path.unlink()
             except OSError:

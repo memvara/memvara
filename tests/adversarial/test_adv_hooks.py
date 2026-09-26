@@ -214,23 +214,50 @@ def test_the_daemon_option_is_refused_where_there_are_no_unix_sockets(
         hook_runner("claude", daemon=True)
 
 
+def _daemon_runner(tmp_path: pathlib.Path, home: pathlib.Path) -> HookRunner:
+    """A runner that allows the daemon, over a store whose one memory the prompt
+    "user lives in Lisbon" matches, so one recall reads the store once."""
+    db = tmp_path / "memory.db"
+    with stores.file(db) as mem:
+        mem.scope(user="tester").remember("user", "lives_in", "Lisbon")
+    return HookRunner("claude", home=home, cwd=tmp_path, daemon=True,
+                      env={"MEMVARA_DB": str(db), "MEMVARA_USER": "tester"})
+
+
 def test_close_stops_the_daemon_a_recall_started(tmp_path: pathlib.Path) -> None:
     if sys.platform == "win32":
         pytest.skip(NO_UNIX_SOCKETS)
-    db = tmp_path / "memory.db"
-    stores.file(db).close()
     home = _short_dir()
-    runner = HookRunner("claude", home=home, cwd=tmp_path, daemon=True,
-                        env={"MEMVARA_DB": str(db), "MEMVARA_USER": "tester"})
+    runner = _daemon_runner(tmp_path, home)
     try:
-        runner.run("recall", prompt="where does the user live")
+        runner.run("recall", prompt="user lives in Lisbon")
         sock, pid = runner.wait_for_daemon()
         assert runner.daemon_sockets() == [sock]
+        assert runner.daemon_pids() == [pid]
     finally:
         runner.close()
         shutil.rmtree(home, ignore_errors=True)
     assert socket_peer_pid(sock) is None
     assert not sock.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_close_stops_a_daemon_that_no_socket_path_leads_to(tmp_path: pathlib.Path) -> None:
+    """A daemon can keep running on a socket whose path was removed, where close() cannot
+    find it by its socket. The runner records every daemon the hooks start, so close()
+    stops that one too."""
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    home = _short_dir()
+    runner = _daemon_runner(tmp_path, home)
+    try:
+        runner.run("recall", prompt="user lives in Lisbon")
+        sock, pid = runner.wait_for_daemon()
+        sock.unlink()
+    finally:
+        runner.close()
+        shutil.rmtree(home, ignore_errors=True)
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
 
