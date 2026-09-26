@@ -462,15 +462,19 @@ token, and no `/v1` request parameter names one, so a narrowing cannot widen. Er
 as the exception types in `memvara.remote.errors` — `AuthError`, `ScopeError`, `NotFound`,
 `Conflict`, `QuotaExhausted`, `RateLimited`, `LegalHold`, `ReadOnly`, `InvalidRequest` and
 `ServerError`, all `RemoteError` — and writes carry an `Idempotency-Key` that is held
-constant across their own retries.
+constant across their own retries. A missing or unknown key raises `AuthError`.
 
 Three attempts per call. A call is retried on an error the deployment marked retryable, on
 a 429 — including one an edge proxy returned with no envelope, which is classified from the
-status — and on a connect-phase failure that never reached the server. A `Retry-After` is
-waited for as asked, up to thirty seconds; a longer one raises `RateLimited` straight away
-with the server's own number on `retry_after`, rather than blocking the call (or the event
-loop) for as long as the header says. Waiting an hour is a decision for the caller, who
-knows whether an hour is acceptable.
+status — and on a connect-phase failure that never reached the server. memvara-cloud marks
+an error retryable in the envelope's `detail`, as it does for a write still running under
+the same `Idempotency-Key`, or by the code `unavailable`, which it sends when the store is
+unreachable or overloaded. A 429's `Retry-After` is waited for as asked, up to thirty
+seconds; a longer one raises `RateLimited` straight away with the server's own number on
+`retry_after`, rather than blocking the call (or the event loop) for as long as the header
+says. Waiting an hour is a decision for the caller, who knows whether an hour is
+acceptable. Every other retry waits a short exponential backoff with jitter, starting at
+about a quarter of a second.
 
 **`memvara.remote.aio.AsyncRemoteMemvara` is the same client, awaited.**
 

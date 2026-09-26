@@ -18,6 +18,7 @@ def _envelope(code, message="nope"):
 
 @pytest.mark.parametrize("status, code, expected", [
     (401, "unauthorized", AuthError),
+    (401, "unauthenticated", AuthError),
     (403, "forbidden_scope", ScopeError),
     (403, "forbidden_privilege", ScopeError),
     (400, "bad_scope", ScopeError),
@@ -29,6 +30,7 @@ def _envelope(code, message="nope"):
     (403, "read_only", ReadOnly),
     (422, "invalid_request", InvalidRequest),
     (500, "internal", ServerError),
+    (503, "unavailable", ServerError),
 ])
 def test_each_code_maps_to_its_own_class(status, code, expected):
     err = error_from_response(status, _envelope(code), None)
@@ -151,3 +153,71 @@ def test_an_envelope_that_says_not_retryable_wins_over_the_status():
 def test_an_envelope_that_says_retryable_wins_for_a_status_not_in_the_table():
     body = {"error": {"code": "internal", "message": "deadlock", "retryable": True}}
     assert error_from_response(503, body, None).retryable is True
+
+
+# --- the envelope memvara-cloud actually sends ------------------------------------
+#
+# memvara-cloud's `/v1` plane sends every failure as {"error": {"code", "message",
+# "detail"}} (`memvara_cloud/rest/errors.py`, `error_payload`). Two things in it did not
+# match what this module read. The 401 code is `unauthenticated`, not `unauthorized`. And
+# `retryable`, where the server states it at all, is inside `detail`, never beside `code`.
+# The bodies below are copied from the routes that send them.
+
+
+def _hosted(code, message, detail=None):
+    return {"error": {"code": code, "message": message, "detail": detail}}
+
+
+@pytest.mark.parametrize("message", [
+    "this endpoint needs an API token: send 'Authorization: Bearer <token>'.",
+    "token not recognised",
+])
+def test_the_hosted_401_is_an_auth_error(message):
+    """`rest/deps.py::_principal` answers a missing key and an unknown one with 401 and the
+    code `unauthenticated`. With only `unauthorized` mapped, a bad key arrived as a bare
+    `RemoteError`, and a caller catching `AuthError` never caught it."""
+    err = error_from_response(401, _hosted("unauthenticated", message), None)
+    assert isinstance(err, AuthError)
+    assert err.code == "unauthenticated"
+    assert err.retryable is False
+
+
+def test_a_write_still_running_under_its_idempotency_key_is_retryable():
+    """`rest/idempotency.py`: a write whose Idempotency-Key is still running answers 409
+    `conflict` with `detail.retryable` true and `Retry-After: 1`. The retry is what returns
+    the first request's response, so raising instead reported a write that succeeded as a
+    failure."""
+    body = _hosted("conflict",
+                   "another request carrying Idempotency-Key: 'k' is still running.",
+                   {"retryable": True})
+    err = error_from_response(409, body, "1")
+    assert isinstance(err, Conflict)
+    assert err.retryable is True
+
+
+def test_an_idempotency_key_reused_for_a_different_write_is_not_retryable():
+    body = _hosted("conflict",
+                   "Idempotency-Key: 'k' has already been used for a different request.",
+                   {"retryable": False})
+    assert error_from_response(409, body, None).retryable is False
+
+
+@pytest.mark.parametrize("detail", [
+    {"sqlstate": "40001"},   # a lost serialization race (rest/errors.py::classify_db_error)
+    {"sqlstate": None},      # a store that did not answer at all
+    {"source": "quota"},     # an allowance store that could not be read (rest/limits.py)
+])
+def test_the_hosted_service_unavailable_is_retryable(detail):
+    """memvara-cloud documents `unavailable` as a store that is unreachable, overloaded or
+    lost a concurrency race, "retryable, and carries Retry-After", and sends it with no
+    `retryable` field. Read as unstated, it was never retried."""
+    body = _hosted("unavailable", "the memory store is not reachable right now.", detail)
+    err = error_from_response(503, body, "1")
+    assert isinstance(err, ServerError)
+    assert err.retryable is True
+
+
+def test_a_retryable_stated_in_detail_wins_over_what_the_code_implies():
+    """An explicit statement always wins, wherever in the envelope the server puts it."""
+    body = _hosted("unavailable", "down for maintenance", {"retryable": False})
+    assert error_from_response(503, body, None).retryable is False

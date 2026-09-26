@@ -79,6 +79,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   attribute 'value'` when the claim was stored. `remember()` now accepts a `MemoryType` or
   its value as a string, and refuses any other string with a `ValueError` that names the
   argument, before anything is written. #270.
+- **The hosted Python client raises `AuthError` for a bad key, and retries what
+  memvara-cloud marks retryable.** memvara-cloud answers a missing or unknown key with 401
+  and the code `unauthenticated`, and the client mapped only `unauthorized`, so a bad key
+  raised a plain `RemoteError`. The client also read `retryable` beside `code`, where
+  memvara-cloud never puts it. The server sends it inside `detail`, for a write still
+  running under the same `Idempotency-Key` (409 `conflict`), or not at all, for
+  `unavailable` (503), which it documents as retryable. So neither was retried, and a
+  retried write whose first attempt was still running raised instead of returning that
+  attempt's response. `unauthenticated` now maps to `AuthError`, `retryable` is read from
+  `detail` as well, and `unavailable` is a retryable `ServerError`. A bare 503 with no
+  envelope is still not retried.
 
 ## [0.16.0] — 2026-09-25
 

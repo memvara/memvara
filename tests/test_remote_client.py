@@ -85,6 +85,54 @@ def test_a_non_retryable_server_error_is_not_retried():
     assert len(calls) == 1
 
 
+def _hosted(status, code, message, detail=None, headers=None):
+    """A failure exactly as memvara-cloud's `/v1` plane sends it (`rest/errors.py`)."""
+    return httpx.Response(status, headers=headers, json={
+        "error": {"code": code, "message": message, "detail": detail}})
+
+
+def test_a_hosted_401_is_an_auth_error_and_is_not_retried():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return _hosted(401, "unauthenticated", "token not recognised",
+                       headers={"WWW-Authenticate": 'Bearer realm="memvara"'})
+
+    with pytest.raises(AuthError):
+        _client(handler).request("GET", "/v1/stats")
+    assert len(calls) == 1
+
+
+def test_a_write_still_running_under_its_key_is_retried_and_answers():
+    calls = []
+
+    def handler(request):
+        calls.append(request.headers.get("idempotency-key"))
+        if len(calls) == 1:
+            return _hosted(409, "conflict", "another request is still running.",
+                           {"retryable": True}, headers={"Retry-After": "1"})
+        return httpx.Response(200, json={"ok": True})
+
+    assert _client(handler).request("POST", "/v1/memories", json={}, write=True) == {"ok": True}
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+
+
+def test_a_hosted_service_unavailable_is_retried_and_then_succeeds():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            return _hosted(503, "unavailable", "the memory store is not reachable right now.",
+                           {"sqlstate": None}, headers={"Retry-After": "1"})
+        return httpx.Response(200, json={"ok": True})
+
+    assert _client(handler).request("GET", "/v1/stats") == {"ok": True}
+    assert len(calls) == 2
+
+
 def test_attempts_are_bounded_and_the_last_error_is_raised():
     calls = []
 
@@ -337,6 +385,49 @@ def test_async_a_non_retryable_server_error_is_not_retried():
     with pytest.raises(ServerError):
         run(_aclient(handler).request("GET", "/v1/stats"))
     assert len(calls) == 1
+
+
+def test_async_a_hosted_401_is_an_auth_error_and_is_not_retried():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return _hosted(401, "unauthenticated", "token not recognised",
+                       headers={"WWW-Authenticate": 'Bearer realm="memvara"'})
+
+    with pytest.raises(AuthError):
+        run(_aclient(handler).request("GET", "/v1/stats"))
+    assert len(calls) == 1
+
+
+def test_async_a_write_still_running_under_its_key_is_retried_and_answers():
+    calls = []
+
+    def handler(request):
+        calls.append(request.headers.get("idempotency-key"))
+        if len(calls) == 1:
+            return _hosted(409, "conflict", "another request is still running.",
+                           {"retryable": True}, headers={"Retry-After": "1"})
+        return httpx.Response(200, json={"ok": True})
+
+    assert run(_aclient(handler).request("POST", "/v1/memories", json={},
+                                         write=True)) == {"ok": True}
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+
+
+def test_async_a_hosted_service_unavailable_is_retried_and_then_succeeds():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            return _hosted(503, "unavailable", "the memory store is not reachable right now.",
+                           {"sqlstate": None}, headers={"Retry-After": "1"})
+        return httpx.Response(200, json={"ok": True})
+
+    assert run(_aclient(handler).request("GET", "/v1/stats")) == {"ok": True}
+    assert len(calls) == 2
 
 
 def test_async_attempts_are_bounded_and_the_last_error_is_raised():
