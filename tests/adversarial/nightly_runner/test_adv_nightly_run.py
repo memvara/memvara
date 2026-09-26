@@ -350,6 +350,20 @@ def test_the_reports_first_line_never_calls_a_night_with_a_failed_step_quiet() -
     assert "Nothing broke" in render.markdown(quiet).splitlines()[2]
 
 
+def test_the_report_never_says_a_checkout_it_was_given_will_be_removed() -> None:
+    """The run removes only the worktrees it created. A report that said the next night
+    would remove a checkout somebody passed with --worktree would be wrong, and alarming."""
+    report = {"night": "2026-09-26", "status": "finished", "commit": "c" * 40,
+              "worktree": "/work/memvara", "given": {"worktree": True, "python": True},
+              "steps": [_step("preflight", "passed")], "failures": []}
+    given = render.markdown(report)
+    assert "removed by the next night" not in given
+    assert "never removes" in given
+    fresh = render.markdown(dict(report, worktree="/work/memvara/local/nightly/2026-09-26/"
+                                                  "worktree", given={"worktree": False}))
+    assert "removed by the next night" in fresh
+
+
 def test_a_test_run_that_dies_before_writing_a_result_is_a_failure_for_a_person(
         repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
     """pytest can die before it records anything, for example on an import error in a

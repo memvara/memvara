@@ -111,12 +111,19 @@ def markdown(report: Mapping[str, Any]) -> str:
     if report.get("error"):
         lines += ["", "## The error that stopped the run", "", "```", report["error"].rstrip(),
                   "```"]
+    worktree = report.get("worktree")
+    if not worktree:
+        tested = "No worktree was created."
+    elif report.get("given", {}).get("worktree"):
+        tested = (f"The checkout that was tested, `{worktree}`, was given to the run, which "
+                  "never removes it.")
+    else:
+        tested = (f"The worktree that was tested is `{worktree}`. It is removed by the next "
+                  "night's run once it has no uncommitted changes.")
     lines += ["", "## Files", "",
               "Everything is in this folder: report.json holds this report for a program, "
               "findings.jsonl every break the night saw, and each step's folder its output. "
-              f"The worktree that was tested is `{report.get('worktree') or 'not created'}`, "
-              "and it is removed by the next night's run once it has no uncommitted changes.",
-              ""]
+              + tested, ""]
     return "\n".join(lines)
 
 
