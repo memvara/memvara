@@ -102,6 +102,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     within its limit on hostile payloads: empty or invalid input, 8 MB, and nesting
     100,000 levels deep. Twelve bugs it found are pinned as strict expected failures,
     #337 to #348.
+  - **Parity across surfaces.** `tests/adversarial/parity/` runs one program through
+    `Memvara`, `AsyncMemvara`, `RemoteMemvara` and `AsyncRemoteMemvara`, and one session
+    of tool calls through the in-process MCP server and the stdio server in local and in
+    cloud mode, and compares every answer exactly. It sets aside only random ids, clock
+    readings and the order of ids, and every difference a surface is allowed has a test of
+    its own that names where the code documents it. Three differences that nothing
+    documents are pinned as strict expected failures: #334, #335 and #336.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 - **`Store.unended_claims`, `store.unended_predicate()` and `Claim.is_unended()`.**
   `forget()` closes every value in a slot that the store believes and that has not ended

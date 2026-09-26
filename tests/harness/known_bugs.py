@@ -99,6 +99,11 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
     KnownBug("B65", 347, "half a surrogate pair in a prompt makes recall fail"),
     KnownBug("B66", 348, "a prompt of a few megabytes runs past recall's 10-second limit"),
+    KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
+             "and retyped, so cloud-mode memory_remember leaves out four notes"),
+    KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
+    KnownBug("B54", 336, "the documentation does not list end(), health(), whoami(), bind() "
+             "or merge_predicate() among the methods only one client has"),
 )}
 
 
