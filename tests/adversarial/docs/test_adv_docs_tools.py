@@ -231,6 +231,7 @@ def test_every_identifier_in_the_descriptions_resolves() -> None:
                 for label, where, text in _every_text()
                 for word in unresolved_identifiers(text, table())]
     assert not problems, "\n".join(problems)
+    assert any(mentions(text, ()) for _, _, text in _every_text()), "no identifier was read"
 
 
 def test_a_tool_named_with_an_argument_takes_it() -> None:
