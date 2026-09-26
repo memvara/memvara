@@ -281,9 +281,10 @@ class ReferenceStore:
         """A retraction: a row closed on both clocks at the reconciler's clock, then the
         matching live rows ended at the retraction's own start.
 
-        The world clock closes at the clock or at the row's own start, whichever is later,
-        the clamp `close_out` gives every closure. So a retraction dated in the future
-        leaves a row whose interval is empty rather than inverted (#275)."""
+        The world clock closes at the clock or at the row's own start, whichever is later.
+        That is the rule every closure follows (`types.not_before_start`), so a retraction
+        dated in the future leaves a row whose interval is empty rather than inverted
+        (#275)."""
         e = Expect()
         row = self._new_row(op, valid_from, clock_start, t, e)
         row.valid_to = None

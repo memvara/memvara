@@ -549,10 +549,11 @@ claim:
    reports the same outcome from its own path.
 3. **Retraction** — candidate has `polarity == -1`: close out matching live claims and
    store the negative claim as a tombstone (invalidated *and* ended at `now`, so it can
-   never be live) rather than as a live fact. The ending gets the clamp `close_out` gives
-   every closure: a tombstone never ends before its own `valid_from`, so a retraction
-   dated in the future leaves one whose interval is empty rather than inverted, while its
-   belief clock still closes at `now`. The matches are **ended**, not retired:
+   never be live) rather than as a live fact. Like every other closure
+   (`types.not_before_start`), the tombstone's world clock never closes before its own
+   `valid_from`. So a retraction dated in the future leaves a tombstone whose interval is
+   empty rather than inverted, and its belief clock still closes at `now`. The matches
+   are **ended**, not retired:
    every negative form the write path produces is "no longer" / "used to" / "not any
    more", which is the world moving on. `close="retired"` is the caller saying the
    original was never true.
