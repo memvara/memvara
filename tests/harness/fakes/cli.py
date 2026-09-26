@@ -25,8 +25,12 @@ A run reads its stdin to the end before it answers, unless stdin is a terminal. 
 caller that starts a fake with stdin left open, and never closes it, holds the run until
 its own timeout.
 
+`HangingClis(directory)` writes a `claude` and a `codex` that never answer, for a test of
+what the capture hook does when its extractor hangs. It has the same `path()`.
+
 POSIX only. The executables are shell scripts, and on Windows a program that another
-starts without a shell is found on `PATH` only as an `.exe`.
+starts without a shell is found on `PATH` only as an `.exe`. A test that needs them skips
+there with the reason `NO_FAKES`, which has a rule in tests/harness/skips.py.
 """
 
 from __future__ import annotations
@@ -48,6 +52,10 @@ USAGE: Mapping[str, int] = {"input_tokens": 10, "output_tokens": 5}
 
 #: Exit status of a run that found no scripted reply left.
 EXHAUSTED = 3
+
+#: Why a test that needs these executables skips on Windows. The rule for it in
+#: tests/harness/skips.py matches these words exactly.
+NO_FAKES = "the fake agent CLIs are POSIX shell scripts"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -78,17 +86,43 @@ class CliCall:
     stdin: str
 
 
-class FakeClis:
-    """A `claude` and a `codex` in one directory, each with its own script and log."""
+class _Executables:
+    """Executables written into one directory, for a child process to find first on
+    `PATH`. They are shell scripts, so they are refused on Windows."""
 
     def __init__(self, directory: pathlib.Path) -> None:
         if sys.platform == "win32":
             raise NotImplementedError(
-                "the fake agent CLIs are POSIX shell scripts, and on Windows a program "
-                "started without a shell is found on PATH only as an .exe")
+                f"{NO_FAKES}, and on Windows a program started without a shell is found on "
+                "PATH only as an .exe")
         #: The directory to put first on `PATH`.
         self.bin = pathlib.Path(directory)
         self.bin.mkdir(parents=True, exist_ok=True)
+
+    def path(self, rest: str | None = None) -> str:
+        """A `PATH` value with these executables first. `rest` follows them, and defaults
+        to this process's own `PATH`, so a child still finds everything else it runs."""
+        rest = os.environ.get("PATH", "") if rest is None else rest
+        return os.pathsep.join(part for part in (str(self.bin), rest) if part)
+
+
+class HangingClis(_Executables):
+    """A `claude` and a `codex` that never answer: each sleeps until it is killed, or for
+    two minutes."""
+
+    def __init__(self, directory: pathlib.Path) -> None:
+        super().__init__(directory)
+        for name in NAMES:
+            script = self.bin / name
+            script.write_text("#!/bin/sh\nexec sleep 120\n", encoding="utf-8")
+            script.chmod(0o755)
+
+
+class FakeClis(_Executables):
+    """A `claude` and a `codex` in one directory, each with its own script and log."""
+
+    def __init__(self, directory: pathlib.Path) -> None:
+        super().__init__(directory)
         runner = self.bin / "_fake_cli.py"
         runner.write_text(_RUNNER, encoding="utf-8")
         for name in NAMES:
@@ -120,12 +154,6 @@ class FakeClis:
             return []
         return [CliCall(**json.loads(line))
                 for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
-
-    def path(self, rest: str | None = None) -> str:
-        """A `PATH` value with the fakes first. `rest` follows them, and defaults to this
-        process's own `PATH`, so a child still finds everything else it runs."""
-        rest = os.environ.get("PATH", "") if rest is None else rest
-        return os.pathsep.join(part for part in (str(self.bin), rest) if part)
 
     def _check(self, name: str) -> None:
         if name not in NAMES:
@@ -211,4 +239,5 @@ sys.stderr.write(reply["stderr"])
 sys.exit(reply["exit_code"])
 '''
 
-__all__ = ["CliCall", "CliReply", "EXHAUSTED", "FakeClis", "NAMES", "USAGE"]
+__all__ = ["CliCall", "CliReply", "EXHAUSTED", "FakeClis", "HangingClis", "NAMES",
+           "NO_FAKES", "USAGE"]

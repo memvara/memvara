@@ -45,8 +45,9 @@ SCHEMA = SCENARIOS / "schema.json"
 SCRIPTED = SCENARIOS / "scripted"
 
 #: What the scripted layer can give a scenario. `hooks.capture` is left out on purpose:
-#: HookRunner refuses capture until stub agent CLIs exist, because capture can start the
-#: real agent CLI. A scenario that needs it belongs to the real-agent layer.
+#: capture starts an agent CLI to mine the turn, HookRunner refuses it unless it is given
+#: stub CLIs, and the scripted layer gives it none. A scenario that needs it belongs to
+#: the real-agent layer.
 PROVIDES = frozenset({"tools", "hooks.session_start", "hooks.recall", "hooks.approve"})
 
 #: The tiers a scripted scenario can belong to. The scenario tests live in a fast-tier
@@ -737,8 +738,16 @@ class _Session:
         """Play every turn, then close the server as a client does when the session ends.
 
         When a step raises, the server is killed before the error goes on, so no process
-        outlives a failed run.
+        outlives a failed run. Either way, every hook runner the session made is closed,
+        which stops any recall daemon or capture child its hooks left running.
         """
+        try:
+            self._play(turns)
+        finally:
+            for runner in self.hooks.values():
+                runner.close()
+
+    def _play(self, turns: Sequence[Mapping[str, Any]]) -> None:
         try:
             agreed = self.server.initialize(self.env["protocol"]).get("protocolVersion")
             if agreed != self.env["protocol"]:

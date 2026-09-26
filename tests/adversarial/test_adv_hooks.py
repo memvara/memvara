@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import json
+import os
 import pathlib
+import shutil
+import socket
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
-from typing import Callable
+from typing import Callable, Iterator
 
 import pytest
 
-from harness import stores
-from harness.hooks import HookOutputError, HookRunner, HookTimeout, host_record, parse_reply
+from harness import hooks as hooks_module
+from harness import skips, stores
+from harness.fakes.cli import NO_FAKES, FakeClis, HangingClis
+from harness.hooks import (NO_UNIX_SOCKETS, HookOutputError, HookRunner, HookTimeout,
+                           agent_clis, host_ids, host_record, parse_reply, process_alive,
+                           short_dir, socket_peer_pid)
 from memvara import MemoryType
 
 Make = Callable[..., HookRunner]
@@ -68,11 +79,49 @@ def test_output_that_is_not_json_is_reported_with_its_text() -> None:
     assert parse_reply("", what="recall on claude") is None
 
 
-def test_a_toml_client_config_is_refused_with_the_reason(hook_runner: Make) -> None:
-    """Codex keeps its client config in TOML, and HookRunner writes JSON only. The
-    refusal is deliberate and must say so, so nobody mistakes it for a harness bug."""
-    with pytest.raises(NotImplementedError, match="writes JSON client configs only"):
-        hook_runner("codex", server_env={"MEMVARA_DB": "unused.db"})
+def test_a_codex_client_config_is_written_as_toml(hook_runner: Make) -> None:
+    """Codex keeps its MCP servers in ~/.codex/config.toml, one `[mcp_servers.<name>]`
+    table each. A value with a backslash and a quote must survive the round trip."""
+    if sys.version_info < (3, 11):
+        pytest.skip("tomllib arrives in 3.11")
+    import tomllib  # noqa: PLC0415 - Python 3.11 and later
+
+    store = 'C:\\stores\\a "quoted" name.db'
+    runner = hook_runner("codex", server_env={"MEMVARA_DB": store, "MEMVARA_USER": "tester"})
+    config = tomllib.loads((runner.home / ".codex" / "config.toml").read_text())
+    block = config["mcp_servers"]["memvara"]
+    assert block["args"] == ["-m", "memvara.server"]
+    assert block["env"] == {"MEMVARA_DB": store, "MEMVARA_USER": "tester"}
+
+
+def test_a_host_whose_mcp_config_the_runner_does_not_know_is_refused(
+        hook_runner: Make, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = hook_runner("claude")
+    monkeypatch.setattr(runner, "host", SimpleNamespace(id="nohost"))
+    with pytest.raises(NotImplementedError, match="nohost"):
+        runner.write_client_config({"MEMVARA_DB": "unused.db"})
+
+
+#: Where and how each host keeps its MCP servers, written out by hand.
+MCP_CONFIGS = {
+    "claude": (".claude.json", lambda data: data["mcpServers"]["memvara"]["env"]),
+    "copilot": (".copilot/mcp-config.json",
+                lambda data: data["mcpServers"]["memvara"]["env"]),
+    "cursor": (".cursor/mcp.json", lambda data: data["mcpServers"]["memvara"]["env"]),
+    "opencode": (".config/opencode/opencode.json",
+                 lambda data: data["mcp"]["memvara"]["environment"]),
+}
+
+
+@pytest.mark.parametrize("host", sorted(MCP_CONFIGS))
+def test_the_store_is_written_where_and_how_the_host_keeps_its_mcp_servers(
+        hook_runner: Make, host: str) -> None:
+    """Where a user who runs a local store configures it, so a test can check that the
+    hooks look there too. Codex's TOML is checked above."""
+    server_env = {"MEMVARA_DB": "store.db", "MEMVARA_USER": "tester"}
+    runner = hook_runner(host, server_env=server_env)
+    relative, env_of = MCP_CONFIGS[host]
+    assert env_of(json.loads((runner.home / relative).read_text())) == server_env
 
 
 def test_a_hook_that_runs_past_its_limit_is_reported_as_a_timeout(hook_runner: Make) -> None:
@@ -80,11 +129,235 @@ def test_a_hook_that_runs_past_its_limit_is_reported_as_a_timeout(hook_runner: M
         hook_runner("claude").run("session_start", timeout=0.001)
 
 
-def test_capture_is_refused_until_the_agent_clis_are_stubbed(hook_runner: Make) -> None:
-    """capture can start the real agent CLI, which would reach the network and spend
-    money. HookRunner refuses it until the hook-conformance tests put stubs on PATH."""
+def test_capture_is_refused_without_stub_agent_clis(hook_runner: Make) -> None:
+    """capture starts an agent CLI to mine the turn, which would reach the network and
+    spend money. HookRunner refuses it unless the test gives it stub CLIs."""
     with pytest.raises(NotImplementedError, match="stub"):
         hook_runner("claude").run("capture")
+
+
+def test_the_host_ids_are_the_records_in_the_hosts_folder() -> None:
+    assert host_ids() == HOSTS
+
+
+def test_every_extractor_a_host_names_counts_as_an_agent_cli() -> None:
+    assert {"claude", "codex", "cursor-agent", "copilot", "opencode"} <= agent_clis()
+
+
+def test_no_directory_that_holds_a_real_agent_cli_is_on_the_hooks_path(
+        hook_runner: Make, tmp_path: pathlib.Path) -> None:
+    """The stubs stand in for claude and codex only. A real cursor-agent, copilot or
+    opencode further along PATH would still be found, so its whole directory goes."""
+    real = tmp_path / "real-bin"
+    real.mkdir()
+    (real / "cursor-agent").write_text("#!/bin/sh\nexit 0\n")
+    plain = tmp_path / "plain-bin"
+    plain.mkdir()
+    runner = hook_runner("claude", env={"PATH": os.pathsep.join([str(real), str(plain)])})
+    assert runner.environment["PATH"].split(os.pathsep) == [str(plain)]
+
+
+def test_a_run_reports_the_log_lines_it_added_without_their_timestamps(
+        hook_runner: Make) -> None:
+    runner = hook_runner("cursor")
+    first = runner.run("recall", stdin="{}", timeout=10)
+    assert first.log("hooks") == ("skipped=cursor has no event for recall",)
+    again = runner.run("recall", stdin="{}", timeout=10)
+    assert again.log("hooks") == ("skipped=cursor has no event for recall",)
+    assert again.log("capture") == ()
+
+
+def test_capture_runs_against_the_stub_clis(hook_runner: Make, clis: FakeClis,
+                                            tmp_path: pathlib.Path) -> None:
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"type": "user", "message": {"content": "ok"}}) + "\n")
+    result = hook_runner("claude", stubs=clis).run("capture", transcript_path=str(transcript))
+    assert result.exit_code == 0
+    assert result.detached_pid is None
+    assert result.log("capture") == ("turn=8c skipped=continuation",)
+
+
+def test_a_detached_capture_is_waited_for(hook_runner: Make, clis: FakeClis,
+                                          tmp_path: pathlib.Path) -> None:
+    """Codex hands capture to a child in a new session and returns at once. The runner
+    waits for that child, so the logs hold what the capture did."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"type": "response_item", "payload": {
+        "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "ok"}]}}) + "\n")
+    result = hook_runner("codex", stubs=clis).run("capture", transcript_path=str(transcript))
+    assert result.exit_code == 0
+    assert result.detached_pid is not None
+    assert result.log("capture") == ("turn=8c skipped=continuation",)
+
+
+def test_the_peer_pid_of_a_socket_is_the_process_listening_on_it() -> None:
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    directory = short_dir("hooks")
+    path = directory / "s.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(str(path))
+        server.listen(1)
+        assert socket_peer_pid(path) == os.getpid()
+    finally:
+        server.close()
+        shutil.rmtree(directory, ignore_errors=True)
+    assert socket_peer_pid(path) is None
+
+
+def test_the_daemon_option_lets_the_recall_hook_start_its_daemon(hook_runner: Make) -> None:
+    """child_env forbids the daemon, because it outlives the hook. daemon=True lifts that."""
+    assert hook_runner("claude").environment["MEMVARA_DAEMON"] == "1"
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    assert "MEMVARA_DAEMON" not in hook_runner("claude", daemon=True).environment
+
+
+def test_the_daemon_option_is_refused_where_there_are_no_unix_sockets(
+        hook_runner: Make, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal uses the words of the skip ledger's rule for that reason, so a test that
+    skips with those words is explained on Windows."""
+    monkeypatch.delattr(socket, "AF_UNIX", raising=False)
+    with pytest.raises(NotImplementedError, match="unix socket") as refused:
+        hook_runner("claude", daemon=True)
+    assert skips.explained(str(refused.value), platform="win32")
+
+
+def _daemon_runner(tmp_path: pathlib.Path, home: pathlib.Path) -> HookRunner:
+    """A runner that allows the daemon, over a store whose one memory the prompt
+    "user lives in Lisbon" matches, so one recall reads the store once."""
+    db = tmp_path / "memory.db"
+    with stores.file(db) as mem:
+        mem.scope(user="tester").remember("user", "lives_in", "Lisbon")
+    return HookRunner("claude", home=home, cwd=tmp_path, daemon=True,
+                      env={"MEMVARA_DB": str(db), "MEMVARA_USER": "tester"})
+
+
+def test_close_stops_the_daemon_a_recall_started(tmp_path: pathlib.Path) -> None:
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    home = short_dir("hooks")
+    runner = _daemon_runner(tmp_path, home)
+    try:
+        runner.run("recall", prompt="user lives in Lisbon")
+        sock, pid = runner.wait_for_daemon()
+        assert runner.daemon_sockets() == [sock]
+        assert runner.daemon_pids() == [pid]
+    finally:
+        runner.close()
+        shutil.rmtree(home, ignore_errors=True)
+    assert socket_peer_pid(sock) is None
+    assert not sock.exists()
+    assert not process_alive(pid)
+
+
+def test_close_stops_a_daemon_that_no_socket_path_leads_to(tmp_path: pathlib.Path) -> None:
+    """A daemon can keep running on a socket whose path was removed, where close() cannot
+    find it by its socket. The runner records every daemon the hooks start, so close()
+    stops that one too."""
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    home = short_dir("hooks")
+    runner = _daemon_runner(tmp_path, home)
+    try:
+        runner.run("recall", prompt="user lives in Lisbon")
+        sock, pid = runner.wait_for_daemon()
+        sock.unlink()
+    finally:
+        runner.close()
+        shutil.rmtree(home, ignore_errors=True)
+    assert not process_alive(pid)
+
+
+@pytest.fixture
+def stopped_by_teardown() -> Iterator[list[int]]:
+    """Pids that must have stopped once the other fixtures are torn down. Requested before
+    them, this fixture is set up first and so torn down last, after them."""
+    pids: list[int] = []
+    yield pids
+    assert [pid for pid in pids if process_alive(pid)] == []
+
+
+def test_the_hook_runner_fixture_closes_the_runners_it_made(
+        stopped_by_teardown: list[int], hook_runner: Make, tmp_path: pathlib.Path) -> None:
+    """A capture handed to a child and not waited for keeps running after its hook
+    returns, here with a codex that never answers. The fixture closes its runners when
+    the test ends, and closing kills the child and the stub it started."""
+    if sys.platform == "win32":
+        pytest.skip(NO_FAKES)
+    stubs = HangingClis(tmp_path / "hanging")
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"type": "response_item", "payload": {
+        "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "Please remember that I live in Lisbon."}]}})
+        + "\n")
+    db = tmp_path / "memory.db"
+    stores.file(db).close()
+    runner = hook_runner("codex", stubs=stubs,
+                         env={"MEMVARA_DB": str(db), "MEMVARA_USER": "tester"})
+    result = runner.run("capture", transcript_path=str(transcript), wait_detached=False)
+    assert result.detached_pid is not None and process_alive(result.detached_pid)
+    stopped_by_teardown.append(result.detached_pid)
+
+
+def test_a_process_that_has_ended_but_is_not_reaped_counts_as_ended() -> None:
+    """A killed daemon or capture child is reaped by whatever adopted it, which can be
+    slow, or never happen when the test runs as process 1 in a container. Until then it
+    is a zombie, which still answers signal 0, so the harness reads its state instead."""
+    if sys.platform == "win32":
+        pytest.skip(NO_UNIX_SOCKETS)
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 10
+        while "Z" not in subprocess.run(["ps", "-o", "stat=", "-p", str(child.pid)],
+                                        capture_output=True, text=True).stdout:
+            assert time.monotonic() < deadline, "the child never became a zombie"
+            time.sleep(0.02)
+        assert not process_alive(child.pid)
+        assert process_alive(os.getpid())
+    finally:
+        child.wait()
+
+
+def test_a_patch_reaches_the_hook_process(hook_runner: Make) -> None:
+    """With recall's budget for optional work patched to nothing, the hook skips that work
+    and says so, which shows the patch was in place before the hook ran."""
+    runner = hook_runner("claude", patches={"recall.OVERALL_BUDGET_SEC": 0.0})
+    result = runner.run("recall", prompt="where does the user live")
+    assert result.exit_code == 0
+    assert "skipped=standing refresh, budget exhausted" in result.log("recall")
+
+
+def test_a_patch_that_names_nothing_the_hooks_have_is_refused(hook_runner: Make) -> None:
+    """A limit that was renamed would otherwise leave a test waiting out the real one,
+    or passing without having shrunk anything."""
+    runner = hook_runner("claude", patches={"recall.NO_SUCH_LIMIT": 1.0})
+    with pytest.raises(ValueError, match="NO_SUCH_LIMIT"):
+        runner.run("recall", prompt="where does the user live")
+
+
+def test_patches_are_refused_for_a_capture_the_host_hands_to_a_child(
+        hook_runner: Make, clis: FakeClis, tmp_path: pathlib.Path) -> None:
+    """run.py starts that child afresh, so a patch would not reach the capture."""
+    runner = hook_runner("codex", stubs=clis, patches={"lib.extract.TIMEOUT_SEC": 1.0})
+    with pytest.raises(ValueError, match="child"):
+        runner.run("capture", transcript_path=str(tmp_path / "t.jsonl"))
+
+
+def test_output_that_is_not_utf8_is_reported(hook_runner: Make,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client decodes a hook's stdout as UTF-8, so bytes that are not UTF-8 are a
+    failure in their own right, like output that is not JSON."""
+    import subprocess  # noqa: PLC0415 - only this test replaces it
+
+    class Done:
+        returncode, stdout, stderr = 0, b"\xff\xfe{}", b""
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: Done())
+    with pytest.raises(HookOutputError, match="not UTF-8"):
+        hook_runner("claude").run("approve", tool_name="mcp__memvara__memory_search")
 
 
 def test_json_that_is_not_an_object_is_reported_with_stderr() -> None:
@@ -95,7 +368,7 @@ def test_json_that_is_not_an_object_is_reported_with_stderr() -> None:
 def test_a_client_config_outside_the_home_directory_is_refused(
         hook_runner: Make, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = hook_runner("claude")
-    monkeypatch.setattr(runner, "host", SimpleNamespace(
-        id="claude", config_format="json", client_configs=("/etc/memvara.json",)))
+    monkeypatch.setitem(hooks_module.CLIENT_CONFIGS, "claude",
+                        ("/etc/memvara.json", "mcpServers"))
     with pytest.raises(ValueError, match="outside the test's home"):
         runner.write_client_config({"MEMVARA_DB": "unused.db"})
