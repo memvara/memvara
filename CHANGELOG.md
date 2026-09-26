@@ -296,8 +296,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   use wrote the vectors, and that `mem.reembed()` rebuilds them if it did not. If the open
   goes on, it then records the embedder in use, so the next change is noticed; a warning
   turned into an error stops the open before anything is recorded. Where the record cannot
-  be written, a second warning says so, and the first comes back on every open. The
-  record itself is now
+  be written, a second warning says so, and the first comes back on every open. A record
+  that names another width than the stored vectors have is treated as damaged in the same
+  way, where before only its name was compared. The record itself is now
   written to a temporary file and renamed into place, so a crash or a full disk during the
   write leaves the old record or the new one, never half of one. #280.
 

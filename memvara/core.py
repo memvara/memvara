@@ -1245,6 +1245,11 @@ class Memvara:
         record = sidecar_path(self.store)
         recorded = read_fingerprint(self.store)
         actual = stored_dim(self.store)
+        if recorded is not None and actual is not None and recorded.dim != actual:
+            # A record that names another width than the stored vectors have is wrong
+            # about them, whatever name it gives, so it is treated as damaged: the open
+            # warns below that it cannot tell, and writes the record again.
+            recorded = None
 
         if actual is None:
             # No vectors yet, so nothing to be incompatible with: this embedder owns the

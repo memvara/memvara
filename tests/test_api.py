@@ -410,6 +410,21 @@ def test_a_store_whose_record_is_damaged_warns_that_it_cannot_tell(tmp_path, dam
     assert json.loads(record.read_text()) == {"embedder": "hashing:128:2-4", "dim": 128}
 
 
+def test_a_record_that_names_another_width_is_treated_as_damaged(tmp_path):
+    """A record names an embedder and a width. One whose width is not the width of the
+    vectors the store holds is wrong about them, whatever name it gives, and was never
+    checked, because only the name was compared. It is treated as damaged now: the open
+    warns that it cannot tell, and writes the record again with the true width."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    record = tmp_path / "m.db.embedder.json"
+    record.write_text(json.dumps({"embedder": "hashing:128:3-5", "dim": 64}))
+    with pytest.warns(EmbedderChangedWarning, match="cannot tell whether hashing:128:3-5"):
+        Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()).close()
+    assert json.loads(record.read_text()) == {"embedder": "hashing:128:3-5", "dim": 128}
+
+
 @pytest.mark.parametrize("damage", ["torn", "deleted"])
 def test_a_warning_turned_into_an_error_leaves_the_record_as_it_was(tmp_path, damage):
     """The owner, X, lost its record, and an open with the wrong embedder, Y, raised the

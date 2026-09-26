@@ -158,8 +158,9 @@ JSON, under a header that names the text as data rather than instruction.
   embedder, and the MCP server's bare `local`, load the local model the store's fingerprint
   names, because the default model changed after 0.15 to one of the same width.
 - **A store whose record is lost says so, and records the embedder again.** When
-  `<db>.embedder.json` is missing or unreadable on a store that holds vectors, the width
-  still has to match, but nothing can tell whether the embedder in use wrote them. So
+  `<db>.embedder.json` is missing or unreadable on a store that holds vectors, or names
+  another width than those vectors have, the width still has to match, but nothing can
+  tell whether the embedder in use wrote them. So
   `_check_embedder` warns with `EmbedderChangedWarning`, and then, if the open goes on,
   writes the record naming that embedder, so the next change is caught (#280). The warning
   comes first so that, raised as an error, it stops the open before the record names an
