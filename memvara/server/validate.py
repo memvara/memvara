@@ -42,11 +42,16 @@ memvara.server.validate.ToolError: demo.raw must be a boolean, got a string ('fa
 Traceback (most recent call last):
     ...
 memvara.server.validate.ToolError: demo.v must be a string or a number, got an array ([2])
+>>> validate({"c": {"type": "number", "maximum": 1.0}}, (), {"c": float("nan")}, tool="demo")
+Traceback (most recent call last):
+    ...
+memvara.server.validate.ToolError: demo.c must be a number, got NaN
 """
 
 from __future__ import annotations
 
 import difflib
+import math
 import re
 from typing import Any, Collection, Mapping, Sequence
 
@@ -151,6 +156,12 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
         if isinstance(value, bool) or not ok:
             raise ToolError(
                 f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
+        # The server's JSON parser accepts the bare token NaN. Every comparison with NaN
+        # is false, so the bounds below would let it through, and a NaN min_score then
+        # acts as no floor at all. It is refused here, whether or not the argument has
+        # bounds, because no caller means it as a number.
+        if isinstance(value, float) and math.isnan(value):
+            raise ToolError(f"{label} must be a number, got NaN")
         low, high = spec.get("minimum"), spec.get("maximum")
         if low is not None and value < low:
             raise ToolError(f"{label} must be >= {low}, got {value!r}")

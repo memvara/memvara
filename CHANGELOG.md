@@ -169,6 +169,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The MCP server refuses NaN for a number argument.** The server's JSON parser accepts
+  the bare token `NaN`, and the validator let it through the bounds on `confidence` and
+  `min_score`, because every comparison with NaN is false. A NaN `min_score` then acted as
+  no floor at all. The validator now refuses NaN for every number argument, with
+  `<tool>.<argument> must be a number, got NaN`, before anything is read or written.
+  #312.
 - **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
   decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
   interpreter's stack allows, and the server let it escape, so a single such line ended
