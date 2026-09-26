@@ -10,10 +10,11 @@ fresh child processes, and the session-start and recall hooks through
 is 200 calls in one. Each series reports p50, p90, p95 and p99 with a bootstrap interval,
 and every record carries the fingerprint of the machine that measured it.
 
-The design of the adversarial suite (`docs/superpowers/specs/2026-09-25-adversarial-test-
-suite-design.md`, "Phase 4") fixes the budget decision rule before any number is
+The design of the adversarial suite fixes the budget decision rule before any number is
 measured, so that a budget cannot be fitted to whatever the first night happened to show.
-This module holds that rule as plain functions:
+The rule is in the section "Phase 4" of
+`docs/superpowers/specs/2026-09-25-adversarial-test-suite-design.md`, and this module holds
+it as plain functions:
 
 * **Hard ceilings from the hook contract.** The recall hook's p95 may not pass 7.5 s at
   any store size, cold or warm, and no recall may take longer than 10 s. Session start's
@@ -678,10 +679,13 @@ class _Bench:
             return time_hook(self.stores[size], operation.removeprefix("hook."), runs,
                              cold=cold, workdir=self.workdir, names=self.names[size],
                              runner_factory=self.runner_factory)
+        # Only as many queries as a series makes calls: they travel on the child's command
+        # line, which macOS caps at 1 MB, and a 100,000-claim store names 25,000 people.
+        wanted = max(self.config.cold, self.config.warm + WARMUP_CALLS)
         spec: dict[str, Any] = {
             "db": str(self.copies[size] if operation == "remember" else self.stores[size]),
             "operation": operation,
-            "queries": [f"tell me where {name} lives" for name in self.names[size]]}
+            "queries": [f"tell me where {name} lives" for name in self.names[size][:wanted]]}
         samples: list[float] = []
         for run in range(runs if cold else 1):
             self.blocks += 1
@@ -831,6 +835,12 @@ def write_budgets(runs: Sequence[Mapping[str, Any]], fingerprint: Mapping[str, A
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return payload
+
+
+def skip_reason(record: Mapping[str, Any]) -> str:
+    """Why the nightly test skips an invalid run, in the words the skip ledger's rule for
+    it matches (tests/harness/skips.py)."""
+    return "the performance run is invalid: " + "; ".join(record["invalid_reasons"])
 
 
 def exit_code(record: Mapping[str, Any]) -> int:

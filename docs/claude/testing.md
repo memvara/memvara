@@ -375,4 +375,12 @@ PYTHONPATH=$PWD python bench/perf_budget.py --out local/perf/$(date +%F).json --
 
 It prints a table and exits with 0 for a valid run that passes, 1 for a valid run that breaches a ceiling, regresses or goes over a budget, and 3 for an invalid run. `--sizes 1000 --cold 5 --warm 20` gives a quick look.
 
+### The tiers they run in
+
+- **Fast**, on every pull request: the statistics and the rules, the detectors on hand-built observations, the fault tests, a 200-turn soak through the command line, and a timing run at 40 claims with one cold process and two warm calls per series. They assert how the scripts behave and never how long anything took.
+- **Nightly** (`tests/adversarial/soak/nightly/`): the 10,000-turn soak, and the full timing run at the three sizes. An invalid timing run skips with "the performance run is invalid: " and its reasons, which the skip ledger explains.
+- **Weekly** (`tests/adversarial/soak/weekly/`): the 100,000-turn soak.
+
+The long runs write their records before they assert anything, so a failing night still leaves its evidence, and they read their history from the same folder: `$NIGHTLY_RECORDS_DIR`, or `local/nightly/records` in the checkout when it is unset. The nightly run starts each night in a clean worktree, so it must set the variable to a folder outside the worktree; otherwise every night starts with no history, and neither the regression rule nor the budgets can ever apply.
+
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
