@@ -381,6 +381,23 @@ def test_a_test_run_that_dies_before_writing_a_result_is_a_failure_for_a_person(
     assert {step["name"]: step["status"] for step in report["steps"]}["regressions"] == "failed"
 
 
+def test_the_drift_warning_covers_the_harness_the_run_imports(tmp_path: pathlib.Path) -> None:
+    """The run computes fingerprints with tests/harness/report.py from its own checkout,
+    not from origin/main. If that copy differs, the fingerprints can differ from the ones
+    origin/main's tests expect, so the warning must name it, not only scripts/nightly."""
+    own, tested = tmp_path / "own", tmp_path / "tested"
+    for root in (own, tested):
+        for relative in ("scripts/nightly/run.py", "tests/harness/report.py",
+                         "tests/harness/fakes/cli.py"):
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text(f"# {relative}\n")
+    assert run._differs(own, tested) == []
+    (tested / "tests/harness/report.py").write_text("SIGNATURE_VERSION = 2\n")
+    (tested / "tests/harness/fakes/cli.py").unlink()
+    assert run._differs(own, tested) == ["tests/harness/fakes/cli.py",
+                                         "tests/harness/report.py"]
+
+
 def test_a_failed_test_is_rerun_in_the_tier_the_night_ran(
         repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
     """A rerun in another tier could leave out the very test it reruns, or run it under

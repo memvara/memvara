@@ -397,6 +397,8 @@ The nightly run turns what the slow tiers find into a report and, for each new b
 
 A step that is not built appears in every report with its reason. When the file it waits for lands on `main`, the report says so, and the step's command still has to be added to `STEPS` in `scripts/nightly/run.py`. The caps of the unbuilt steps are placeholders for the work that builds them. A full `pytest --tier nightly` run took 16 minutes 37 seconds on a laptop on 2026-09-26, with other test suites running beside it, so the regressions cap leaves room.
 
+The code under test always comes from the fresh worktree, but the run's own code comes from the checkout it was started in: the nightly scripts, and the harness they import, including `tests/harness/report.py`, which computes every fingerprint. When any of those files differs from the worktree's copy, the report warns and names the files, because the night was then run, and its breaks fingerprinted, by code that is not on `main`.
+
 The run writes these files in `local/nightly/<date>/` in the main checkout, however it was started:
 
 - `report.md` for a person and `report.json` for a program. The first line of `report.md` counts the breaks and names every step that did not pass, so a night whose preflight failed never reads as a quiet one. The reports list every step with its result, time and cap, every new, recurred and known break with what filing it still needs and the exact commands, the failures that need a person, the flakes, the flake rate of each layer, the canary, the dependencies and the notifications sent.

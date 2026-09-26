@@ -135,12 +135,12 @@ def preflight(context: Night, deadline: float) -> steps.Outcome:
                                  "preflight/output.log says why.")
         context.worktree, context.commit = target, commit
         notes.append(f"A clean worktree of origin/main at {commit[:12]} was added at {target}.")
-        differ = _differs(HERE, target / "scripts" / "nightly")
+        differ = _differs(HERE.parents[1], target)
         if differ:
             context.warnings.append(
-                f"The nightly run's own code differs from origin/main's in {', '.join(differ)}. "
-                "The steps tested origin/main, but the code that ran them came from "
-                f"{HERE}.")
+                "The code the nightly run imports from its own checkout differs from "
+                f"origin/main's in {', '.join(differ)}. The steps tested origin/main, but "
+                f"the code that ran them, fingerprints included, came from {HERE.parents[1]}.")
     assert context.worktree is not None
     context.tmp = pathlib.Path(tempfile.mkdtemp(prefix="memvara-nightly-"))
     home = context.layout.home
@@ -214,12 +214,25 @@ def _build_venv(context: Night, log: pathlib.Path, deadline: float) -> str | Non
     return str(python) if installed.returncode == 0 else None
 
 
-def _differs(here: pathlib.Path, tested: pathlib.Path) -> list[str]:
-    """The files of this folder that origin/main does not have, or has with other text."""
-    names = sorted(path.name for path in here.iterdir()
-                   if path.is_file() and path.suffix in (".py", ".md", ".template"))
-    return [name for name in names if not (tested / name).is_file()
-            or not filecmp.cmp(here / name, tested / name, shallow=False)]
+#: The folders the run imports its own code from, relative to its checkout: the nightly
+#: scripts, and the harness they import, whose report.py computes every fingerprint.
+OWN_CODE = ("scripts/nightly", "tests/harness")
+
+
+def _differs(own: pathlib.Path, tested: pathlib.Path) -> list[str]:
+    """The files the run takes from its own checkout, `own`, that the tested checkout
+    lacks or holds with other text, as paths relative to the checkout."""
+    differ = []
+    for folder in OWN_CODE:
+        for path in sorted((own / folder).rglob("*")):
+            if (not path.is_file() or "__pycache__" in path.parts
+                    or path.suffix not in (".py", ".md", ".template")):
+                continue
+            relative = path.relative_to(own)
+            other = tested / relative
+            if not other.is_file() or not filecmp.cmp(path, other, shallow=False):
+                differ.append(relative.as_posix())
+    return sorted(differ)
 
 
 def regressions_step(*, command: Callable[[str, pathlib.Path], list[str]] = regressions.command,
