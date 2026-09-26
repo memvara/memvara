@@ -102,9 +102,11 @@ Failures are loud and quick:
 
 - **In a test,** use the `hook_runner` fixture: `hook_runner("claude").run("approve", tool_name="mcp__memvara__memory_search")`.
 - **Giving the hooks a store.** Pass `server_env={"MEMVARA_DB": ..., "MEMVARA_USER": ...}` and the runner writes the host's client config, which is where the hooks look for the store. Without it, the hooks report "not configured". The runner writes client configs as JSON only. Codex keeps its config in TOML, so a Codex run with a store is refused, with that reason, until the hook-conformance tests add a TOML writer.
-- **What a run returns:** the exit code, the parsed reply and the elapsed time. A hook that runs past its host's time limit raises `HookTimeout`, with what it had printed so far.
-- **`capture` is refused for now.** It can start the real agent CLI to extract facts, which would reach the network and spend money. The hook-conformance tests will put stub CLIs first on `PATH`, and until then `run("capture")` raises `NotImplementedError`.
-- **Non-JSON output fails the test.** A hook that prints something other than JSON raises `HookOutputError`, because on a real client that output would desynchronise the conversation.
+- **What a run returns:** the exit code, the parsed reply, the elapsed time, and the lines the run added to each log in `~/.memvara/.hooks/`, without their timestamps: `result.log("recall")` gives the new lines of `recall.log`. A hook that runs past its host's time limit raises `HookTimeout`, with what it had printed so far.
+- **`capture` needs stub agent CLIs.** It starts an agent CLI to extract facts, which would reach the network and spend money, so `run("capture")` raises `NotImplementedError` unless the runner was given `stubs=`, such as `FakeClis` (see "Fakes" below), which go first on `PATH`.
+- **No real agent CLI is ever reachable.** The runner leaves out of `PATH` every directory that holds a program any host's capture could start (`claude`, `codex`, `cursor-agent`, `copilot`, `opencode`), whether or not the test gave it stubs. The fakes stand in for `claude` and `codex` only, so a real `cursor-agent` further along `PATH` would otherwise still be found.
+- **A detached capture is waited for.** Codex, Copilot and Cursor hand capture to a child in a new session, and the hook returns at once. `run` waits for that child within the same limit, so the result's logs hold what the capture did, and `detached_pid` names it. `elapsed` is still what the host waited. With `wait_detached=False` it does not wait, and `close()` kills the child with everything it started.
+- **Non-JSON output fails the test.** A hook that prints something other than JSON raises `HookOutputError`, because on a real client that output would desynchronise the conversation. So do bytes that are not UTF-8.
 
 ## Stores in the test process
 
@@ -261,7 +263,7 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 
 - Each fake prints its reply in the format its arguments ask for: the single JSON object of `claude --output-format json`, the event stream of `claude --output-format stream-json` that the agentic capture run reads, or the event stream of `codex exec --json`. `CliReply(stdout=...)` prints exactly what it is given instead, for output the hook cannot parse.
 - A run that finds no reply left says so on stderr and exits with status 3.
-- `HookRunner` still refuses `run("capture")`. The fakes' own tests call the capture hook's extraction code directly instead. The hook-conformance workstream, A2 in [the test-suite design](../superpowers/specs/2026-09-25-adversarial-test-suite-design.md), will lift the refusal and run the whole hook against these fakes.
+- `HookRunner(..., stubs=fakes)` runs the whole capture hook against these fakes. The fakes' own tests call the capture hook's extraction code directly instead.
 - The fakes are POSIX shell scripts. On Windows a program that another starts without a shell is found on `PATH` only as an `.exe`, so their tests skip there.
 
 ## Documentation that must match the code

@@ -45,8 +45,9 @@ SCHEMA = SCENARIOS / "schema.json"
 SCRIPTED = SCENARIOS / "scripted"
 
 #: What the scripted layer can give a scenario. `hooks.capture` is left out on purpose:
-#: HookRunner refuses capture until stub agent CLIs exist, because capture can start the
-#: real agent CLI. A scenario that needs it belongs to the real-agent layer.
+#: capture starts an agent CLI to mine the turn, HookRunner refuses it unless it is given
+#: stub CLIs, and the scripted layer gives it none. A scenario that needs it belongs to
+#: the real-agent layer.
 PROVIDES = frozenset({"tools", "hooks.session_start", "hooks.recall", "hooks.approve"})
 
 #: The tiers a scripted scenario can belong to. The scenario tests live in a fast-tier

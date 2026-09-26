@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import json
+import os
 import pathlib
+import sys
 from types import SimpleNamespace
 from typing import Callable
 
 import pytest
 
 from harness import stores
-from harness.hooks import HookOutputError, HookRunner, HookTimeout, host_record, parse_reply
+from harness.fakes.cli import FakeClis
+from harness.hooks import (HookOutputError, HookRunner, HookTimeout, agent_clis, host_ids,
+                           host_record, parse_reply)
 from memvara import MemoryType
 
 Make = Callable[..., HookRunner]
@@ -80,11 +85,86 @@ def test_a_hook_that_runs_past_its_limit_is_reported_as_a_timeout(hook_runner: M
         hook_runner("claude").run("session_start", timeout=0.001)
 
 
-def test_capture_is_refused_until_the_agent_clis_are_stubbed(hook_runner: Make) -> None:
-    """capture can start the real agent CLI, which would reach the network and spend
-    money. HookRunner refuses it until the hook-conformance tests put stubs on PATH."""
+def test_capture_is_refused_without_stub_agent_clis(hook_runner: Make) -> None:
+    """capture starts an agent CLI to mine the turn, which would reach the network and
+    spend money. HookRunner refuses it unless the test gives it stub CLIs."""
     with pytest.raises(NotImplementedError, match="stub"):
         hook_runner("claude").run("capture")
+
+
+def test_the_host_ids_are_the_records_in_the_hosts_folder() -> None:
+    assert host_ids() == HOSTS
+
+
+def test_every_extractor_a_host_names_counts_as_an_agent_cli() -> None:
+    assert {"claude", "codex", "cursor-agent", "copilot", "opencode"} <= agent_clis()
+
+
+def test_no_directory_that_holds_a_real_agent_cli_is_on_the_hooks_path(
+        hook_runner: Make, tmp_path: pathlib.Path) -> None:
+    """The stubs stand in for claude and codex only. A real cursor-agent, copilot or
+    opencode further along PATH would still be found, so its whole directory goes."""
+    real = tmp_path / "real-bin"
+    real.mkdir()
+    (real / "cursor-agent").write_text("#!/bin/sh\nexit 0\n")
+    plain = tmp_path / "plain-bin"
+    plain.mkdir()
+    runner = hook_runner("claude", env={"PATH": os.pathsep.join([str(real), str(plain)])})
+    assert runner.environment["PATH"].split(os.pathsep) == [str(plain)]
+
+
+def test_a_run_reports_the_log_lines_it_added_without_their_timestamps(
+        hook_runner: Make) -> None:
+    runner = hook_runner("cursor")
+    first = runner.run("recall", stdin="{}", timeout=10)
+    assert first.log("hooks") == ("skipped=cursor has no event for recall",)
+    again = runner.run("recall", stdin="{}", timeout=10)
+    assert again.log("hooks") == ("skipped=cursor has no event for recall",)
+    assert again.log("capture") == ()
+
+
+def _clis(tmp_path: pathlib.Path) -> FakeClis:
+    if sys.platform == "win32":
+        pytest.skip("the fake agent CLIs are POSIX shell scripts")
+    return FakeClis(tmp_path / "clis")
+
+
+def test_capture_runs_against_the_stub_clis(hook_runner: Make, tmp_path: pathlib.Path) -> None:
+    clis = _clis(tmp_path)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"type": "user", "message": {"content": "ok"}}) + "\n")
+    result = hook_runner("claude", stubs=clis).run("capture", transcript_path=str(transcript))
+    assert result.exit_code == 0
+    assert result.detached_pid is None
+    assert result.log("capture") == ("turn=8c skipped=continuation",)
+
+
+def test_a_detached_capture_is_waited_for(hook_runner: Make, tmp_path: pathlib.Path) -> None:
+    """Codex hands capture to a child in a new session and returns at once. The runner
+    waits for that child, so the logs hold what the capture did."""
+    clis = _clis(tmp_path)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"type": "response_item", "payload": {
+        "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "ok"}]}}) + "\n")
+    result = hook_runner("codex", stubs=clis).run("capture", transcript_path=str(transcript))
+    assert result.exit_code == 0
+    assert result.detached_pid is not None
+    assert result.log("capture") == ("turn=8c skipped=continuation",)
+
+
+def test_output_that_is_not_utf8_is_reported(hook_runner: Make,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client decodes a hook's stdout as UTF-8, so bytes that are not UTF-8 are a
+    failure in their own right, like output that is not JSON."""
+    import subprocess  # noqa: PLC0415 - only this test replaces it
+
+    class Done:
+        returncode, stdout, stderr = 0, b"\xff\xfe{}", b""
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: Done())
+    with pytest.raises(HookOutputError, match="not UTF-8"):
+        hook_runner("claude").run("approve", tool_name="mcp__memvara__memory_search")
 
 
 def test_json_that_is_not_an_object_is_reported_with_stderr() -> None:
