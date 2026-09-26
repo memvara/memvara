@@ -1,0 +1,27 @@
+{
+  "about": "What gh 2.98 prints for each command the nightly filing code runs, and what git prints for the two git commands it runs. The outputs are written in gh's documented output formats; none of them came from a call to GitHub, because nothing in this suite calls GitHub. FINGERPRINT stands for the fingerprint a test substitutes.",
+  "issue_list_empty": {"returncode": 0, "stdout": "[]\n", "stderr": ""},
+  "issue_list_known": {
+    "returncode": 0,
+    "stdout": "[{\"body\":\"The nightly run found this break on 2026-09-20.\\n\\n<!-- memvara-nightly-fingerprint: FINGERPRINT -->\\n\",\"number\":301,\"state\":\"CLOSED\",\"url\":\"https://github.com/memvara/memvara/issues/301\"},{\"body\":\"An issue somebody filed by hand, with no marker.\",\"number\":299,\"state\":\"OPEN\",\"url\":\"https://github.com/memvara/memvara/issues/299\"}]\n",
+    "stderr": ""
+  },
+  "issue_create": {"returncode": 0, "stdout": "https://github.com/memvara/memvara/issues/302\n", "stderr": ""},
+  "issue_create_missing_label": {"returncode": 1, "stdout": "", "stderr": "could not add label: 'nightly-break' not found\n"},
+  "issue_reopen": {"returncode": 0, "stdout": "", "stderr": ""},
+  "git_status_clean": {"returncode": 0, "stdout": "", "stderr": ""},
+  "git_status_dirty": {"returncode": 0, "stdout": " M tests/harness/known_bugs.py\n?? tests/adversarial/regressions/test_adv_nightly_pin.py\n", "stderr": ""},
+  "git_push": {"returncode": 0, "stdout": "", "stderr": "To github.com:memvara/memvara.git\n * [new branch]      HEAD -> test/nightly-0123456789ab\n"},
+  "pr_create": {"returncode": 0, "stdout": "https://github.com/memvara/memvara/pull/303\n", "stderr": ""},
+  "advisory_list_empty": {"returncode": 0, "stdout": "[]\n", "stderr": ""},
+  "advisory_list_known": {
+    "returncode": 0,
+    "stdout": "[{\"ghsa_id\":\"GHSA-2c4f-8h7m-q9vw\",\"cve_id\":null,\"url\":\"https://api.github.com/repos/memvara/memvara/security-advisories/GHSA-2c4f-8h7m-q9vw\",\"html_url\":\"https://github.com/memvara/memvara/security/advisories/GHSA-2c4f-8h7m-q9vw\",\"summary\":\"Nightly break\",\"description\":\"Found by the nightly run.\\n\\n<!-- memvara-nightly-fingerprint: FINGERPRINT -->\\n\",\"severity\":null,\"state\":\"draft\"}]\n",
+    "stderr": ""
+  },
+  "advisory_create": {
+    "returncode": 0,
+    "stdout": "{\"ghsa_id\":\"GHSA-7x3r-p5vq-m2jw\",\"cve_id\":null,\"url\":\"https://api.github.com/repos/memvara/memvara/security-advisories/GHSA-7x3r-p5vq-m2jw\",\"html_url\":\"https://github.com/memvara/memvara/security/advisories/GHSA-7x3r-p5vq-m2jw\",\"summary\":\"Nightly break\",\"description\":\"\",\"severity\":null,\"state\":\"draft\",\"author\":null,\"publisher\":null,\"identifiers\":[{\"value\":\"GHSA-7x3r-p5vq-m2jw\",\"type\":\"GHSA\"}],\"vulnerabilities\":[{\"package\":{\"ecosystem\":\"pip\",\"name\":\"memvara\"},\"vulnerable_version_range\":null,\"patched_versions\":null,\"vulnerable_functions\":[]}]}\n",
+    "stderr": ""
+  }
+}

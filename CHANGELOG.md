@@ -86,6 +86,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     turn must still be stored, nothing may be retired or erased on the model's word
     alone, a read stage that fails must serve the read a store with no model serves, and
     each operation must make the number of model calls `docs/INTERNALS.md` states.
+  - **A nightly run.** `scripts/nightly/run.py` runs the slow tiers once a night in a clean
+    worktree of `main`, with a time limit on every step, and writes a report that says
+    what ran, what broke and what is new. It gives each break a fingerprint, so a break
+    seen again is not reported as new. A new break whose severity a step declared gets
+    one public issue, or a private security advisory when its class is security. An
+    unclassified break waits for the scheduled session that follows the run, which
+    classifies it. A watchdog started by launchd writes a "did not run" report when a
+    night is missed. Nothing in the run merges anything.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 - **`Store.unended_claims`, `store.unended_predicate()` and `Claim.is_unended()`.**
   `forget()` closes every value in a slot that the store believes and that has not ended

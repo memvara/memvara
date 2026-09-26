@@ -374,6 +374,75 @@ These two checks keep the baseline equal to today's gaps, in both directions. Th
 **Adding a line to the baseline excuses a gap instead of closing it.** The tests check only that the baseline and today's gaps hold the same items. So a pull request could add a tool with no test and, in the same diff, a baseline line for it, and the fast tier would pass. A pull request that adds a line to the baseline must therefore give the reason in its body, and the code review checks the baseline's diff for added lines.
 
 **Exempt items.** Four invariant bullets are rules for people rather than behaviour of memvara, so no test can check them: `TB1` ("verify" means comparing an output), `TB2` (a number is reported with its caveat), `RC5` (this repository does not implement the hosted server) and `RP1` (a published version is final; the release process is outside the suite's scope). `EXEMPT` in `tests/harness/checklist.py` lists each with its reason. An exempt item stays on the checklist, so a reworded rule is still noticed, but it is never a gap. The fast tier fails if an exemption names an item that no longer exists, or an item that a test covers. Add an exemption only for a rule that no test could ever check, and give the reason.
+## The nightly run
+
+The nightly run turns what the slow tiers find into a report and, for each new break, one issue. The plan is `docs/superpowers/plans/2026-09-26-adversarial-nightly.md`.
+
+### Running a night
+
+`scripts/nightly/run.py` runs one night. Its first act is to write the night's heartbeat. Its preflight step then hashes the operator's protected files for the isolation canary, removes the worktrees earlier nights left (unless one holds uncommitted work), fetches `origin`, adds a clean, detached worktree of `origin/main` at `local/nightly/<date>/worktree`, and builds a virtual environment inside it with `.[dev,cloud,ingest,encrypt]`, as CI does. After that it runs the design's steps in order, each within its own cap:
+
+| Step | Cap | Built |
+|---|---|---|
+| preflight | 20 minutes | yes |
+| regressions | 75 minutes: the test run may use 60, and the reruns of failed tests get the rest | yes |
+| agents | 20 minutes | no: waits for `tests/live/agents` |
+| red team | 25 minutes | no: waits for `tests/live/redteam` |
+| hosted | 15 minutes | no: waits for `tests/live/stack.py` |
+| production smoke | 5 minutes | no: waits for `tests/live/prod_smoke.py` |
+| performance | 15 minutes | no: waits for `bench/perf_budget.py` |
+| soak | 20 minutes | no: waits for `bench/soak.py` |
+| mutation | 15 minutes | no: waits for `bench/mutation.py` |
+| replay | 10 minutes | no: waits for `tests/live/replay.py` |
+
+A step that is not built appears in every report with its reason. When the file it waits for lands on `main`, the report says so, and the step's command still has to be added to `STEPS` in `scripts/nightly/run.py`. The caps of the unbuilt steps are placeholders for the work that builds them. A full `pytest --tier nightly` run took 16 minutes 37 seconds on a laptop on 2026-09-26, with other test suites running beside it, so the regressions cap leaves room.
+
+The code under test always comes from the fresh worktree, but the run's own code comes from the checkout it was started in: the nightly scripts, and the harness they import, including `tests/harness/report.py`, which computes every fingerprint. When any of those files differs from the worktree's copy, the report warns and names the files, because the night was then run, and its breaks fingerprinted, by code that is not on `main`.
+
+The run writes these files in `local/nightly/<date>/` in the main checkout, however it was started:
+
+- `report.md` for a person and `report.json` for a program. The first line of `report.md` counts the breaks and names every step that did not pass, so a night whose preflight failed never reads as a quiet one. It also says how many steps are not built yet, and on a quiet night how many ran, for example "Nothing broke in the 2 steps that ran. 8 steps are not built yet.", so a quiet night never reads as if every step had checked the code. The reports list every step with its result, time and cap, every new, recurred and known break with what filing it still needs and the exact commands, the failures that need a person, the flakes, the flake rate of each layer, the canary, the dependencies and the notifications sent.
+- `findings.jsonl`, every break the night saw, one `Finding` per line.
+- One folder per step with its output; `regressions/results.jsonl` holds one line per test.
+- `heartbeat.json`, which the watchdog reads.
+
+It also adds one record per night to `local/nightly/history.jsonl`: the commit, each step's result, each layer's tests, failures and flaky tests, the fingerprints of the confirmed breaks, the dependencies and the canary. A later night reads it to recognise a break it has seen, to measure flake rates, and to notice a dependency that stays down. A step that raises costs only that step. If the run's own code crashes, it still compares the canary and writes the report, marked as crashed, and it leaves the heartbeat without a finish, so the watchdog reports the night too.
+
+A step can report findings of its own by writing `findings.jsonl` into its folder. The run counts each as a confirmed break, because the step confirms a finding before it writes it, as the red team will by replaying it three times. Only a finding its step has classified can be filed without a person: with `--file`, a security-class one goes to a private draft advisory and any other one to an issue.
+
+To run a night by hand, from the main checkout:
+
+```bash
+python3 scripts/nightly/run.py                      # tonight, filing as a dry run
+python3 scripts/nightly/run.py --date 2026-09-27    # a named night, such as one the watchdog reported
+python3 scripts/nightly/run.py --worktree <checkout> --python <interpreter> --no-notify
+```
+
+A night's name must be a real date written `YYYY-MM-DD`, because that is the folder the watchdog looks for. The run refuses any other form before it writes anything, and `filing.py` refuses it too. The last form tests an existing checkout with an existing interpreter, and sends no notification. It is for a supervised run, and the report says the checkout was given rather than fresh. `--canary PATH` adds a file to the canary, and `--file` turns filing on.
+
+Notifications go out only for a new or recurred break, for an isolation breach (a file the canary watches changed during the night), and for a dependency such as `origin` that is down for the second night in a row. The canary watches `~/.memvara/credentials.json` and `~/.memvara/db.key` by default. It keeps only their hashes, never their contents.
+
+### Findings
+
+A finding is the record of one break. `tests/harness/report.py` defines it as `Finding`, and a file of findings holds one JSON line per finding. A finding has these fields:
+
+| Field | What it holds |
+|---|---|
+| `layer` | The part of the suite that found the break, such as `model` or `concurrency`. |
+| `surface` | What the break was seen through, such as `library` or `server`. |
+| `invariant` | The property that failed: an invariant's name, or the node id of a failed test. |
+| `severity` | Where the break may be filed; see below. |
+| `ops` | The operations that replay the break, as JSON values. |
+| `seed` | What reproduces a random search, such as the `@reproduce_failure(...)` call Hypothesis prints. |
+| `artifacts` | Files kept with the finding, by name, as paths inside the night's folder. |
+| `commit` | The commit that was tested. |
+| `title`, `detail` | A one-line summary and the failure's text, for a person to read. |
+
+**The fingerprint.** `Finding.signature()` is a SHA-256 hash of the layer, the surface, the invariant and the operations. The nightly run uses it to recognise a break it has seen before, so a break that fails on two nights becomes one issue. The seed, the commit, the artifacts, the title and the failure text are left out because they change from night to night, and the severity is left out because triage can change it. So a producer must give the operations in a minimal, deterministic form: a temporary path or a wall-clock time in them would give the same break a new fingerprint every night. A test pins the exact text the hash is taken over, because changing it would make every known break look new and be filed again.
+
+**What the fingerprint cannot tell apart.** A failed test whose failure carries no replay program is fingerprinted by its layer, its surface and its node id alone. So when the same test later fails for a different reason, the second failure gets the first one's fingerprint. While the first break's issue is open, the second failure is counted as that known break, and nothing new is filed or notified. Once that issue is closed, a run with `--file` reports the second failure as recurred and notifies it, so it reaches a person. That person has to read the failure to see that it is a different bug. A dry run cannot tell, because only GitHub says whether an issue is closed.
+
+**The severity decides where a break may go.** `unclassified` means nobody has checked the break against the "In scope" section of `SECURITY.md` yet, and the nightly run never files an unclassified break in public. `security` means it is in scope, so it goes to a private draft advisory. `data-loss`, `wrong-result` and `crash` mean someone checked and found it out of scope, so it can be filed as a public issue.
 
 ## A model that misbehaves
 
@@ -399,5 +468,77 @@ The fast tier of this folder has 207 tests, 19 of them strict expected failures,
 ```bash
 PYTHONPATH=$PWD python -m pytest -q -p no:cacheprovider tests/adversarial/model_faults --tier nightly
 ```
+### Steps and time caps
+
+A night is a list of steps, run one after another by `scripts/nightly/steps.py`, and each step has a time cap. The commands a step runs start in a process group of their own. At the cap the whole group is stopped, so a stuck step cannot use up the night or leave a server running into the morning; on POSIX, whatever a command leaves running in its group is stopped when the command exits, too. Each step runs even when the step before it failed, with one exception: when an essential step does not pass, every later step is reported as "not run", with the name of the step that failed. Preflight is essential, because it builds the worktree and the virtual environment the other steps use. A step whose code has not landed is reported as "not built yet", with the reason and the file it waits for. A step that raises is reported as an "error", and a step that returns after its cap as "timed out".
+
+The steps run with the environment `night.step_env` builds. It is the run's own environment without the variables the harness keeps from every child process, with `HOME` pointed at `local/nightly/home/`, a private temporary folder, and the tested worktree on `PYTHONPATH`. The home folder is kept from night to night, because the nightly Hypothesis profile keeps the examples it finds under the home directory. No `MEMVARA_` variable is set, so the suite runs with the same defaults as in CI.
+
+### Flakes
+
+A test that fails during the night is run twice more by `scripts/nightly/flakes.py`, in the same tier, and the majority of the three runs decides what the failure was:
+
+| Reruns | Verdict | What happens |
+|---|---|---|
+| both pass | flake | The majority passed, so nothing is filed. |
+| both fail | confirmed | A break that may be filed, because its strict expected failure will fail every time too. |
+| one passes, one fails | intermittent | It counts as a failure, but it is not filed: a strict expected failure on a test that sometimes passes would make the suite flaky. A person looks at it. |
+| a rerun could not run the test, or it was never rerun | unconfirmed | It counts as a failure, and a person looks at it. |
+
+A test that passed after failing counts as flaky whatever its verdict. The flake rate of a layer is its flaky tests over the tests it ran in the last fourteen nights, and the design's budget is 0.5% per layer. A test's layer is the first folder under `tests/adversarial/` that is not a tier folder, so a nightly concurrency test counts as `concurrency`; the rest of `tests/` is `unit`, and the doctests are `doctest`. To see the rates, or to rerun tests by hand:
+
+```bash
+python3 scripts/nightly/flakes.py rates
+python3 scripts/nightly/flakes.py rerun --worktree <checkout> --python <interpreter> <node id>
+```
+
+### The regressions step
+
+The regressions step runs `pytest --tier nightly` in the tested worktree through `scripts/nightly/pytest_results.py`, which records one JSON line per test in `regressions/results.jsonl` and pytest's exit status on the last line. The step passes `--continue-on-collection-errors`, so one test file that fails to import is recorded as an error and cannot stop every other test from running. A line of `results.jsonl` that cannot be read, such as one a stopped run left half written, is named in the report's warnings, because the test it recorded is missing from the report. Each failed test is rerun in the step's own tier, which one constant in `regressions.py` holds.
+
+Each failed test becomes a finding (`scripts/nightly/regressions.py`). Its invariant is the test's node id, its layer comes from the test's folder, and its severity is `unclassified`, because nobody has checked it against `SECURITY.md` yet. When the failure's text holds a `drive.replay([...])` program, as a failure of the reference model's state machine does, the program becomes the finding's operations and the `@reproduce_failure(...)` call becomes its seed. So two different breaks that the same test finds get two fingerprints. Two kinds of failure are reported for a person and never filed: a strict expected failure that passes, which usually means its bug was fixed, and a run that exits with an error but reports no failed test, which means something outside the tests failed, such as the skip ledger or a credential guard. When pytest dies before it records anything, for example on an import error in a conftest file, the process's own exit status stands in for pytest's, so that night is reported the same way. At most 20 failed tests are rerun; the rest are reported as unconfirmed.
+
+### Filing a break
+
+`scripts/nightly/filing.py` files a confirmed break, and it is a dry run unless `--file` is given: a dry run calls nothing, and prints the exact commands a real run would send. Nothing in the suite calls GitHub; the tests replay the output of `gh` and `git` from `tests/adversarial/nightly_runner/gh_recorded.json`.
+
+- **A public break** gets one issue with the label `nightly-break`. The issue's body ends with a hidden marker, `<!-- memvara-nightly-fingerprint: <fingerprint> -->`. Before filing, `filing.py` reads every issue with the label and compares their markers, so a break that was filed before is not filed again, even when the local history is lost. A break whose issue is closed but which fails again is reported as recurred and notified, and it is never planned as filed and finished: with `--file` the run reopens the issue, with a comment that carries the marker, and the break then needs a new strict-xfail test and draft pull request, because the fix removed the old pin. A reopening therefore clears the old pull request from what counts as filed. The run only knows an issue is closed by reading GitHub, so a dry run cannot see a break recur. Then a branch named `test/nightly-<first 12 characters of the fingerprint>` is pushed with the strict-xfail test, by an explicit refspec that cannot reach `main`, and a draft pull request is opened. Nothing is merged.
+- **A security-class break** gets a private draft advisory whose description carries the marker, and nothing else: no issue, no branch and no pull request, because its failing test lands together with its fix.
+- **An unclassified break** is filed nowhere public. A failed test from the regressions step is always unclassified, so the scheduled session checks it against the "In scope" section of `SECURITY.md` first, and then files it with the class it chose:
+
+```bash
+python3 scripts/nightly/filing.py issue --night <date> --fingerprint <fingerprint> --severity wrong-result --file
+python3 scripts/nightly/filing.py pr --night <date> --fingerprint <fingerprint> --worktree <worktree with the pin committed> --file
+python3 scripts/nightly/filing.py advisory --night <date> --fingerprint <fingerprint> --file
+```
+
+A dry run calls nothing at all, git included, so a dry run of `pr` does not check the worktree for uncommitted changes; a real run does, before it pushes. Before a break's issue exists, a dry run of `pr` uses the break's own severity, so it refuses an unclassified or security-class break, just as a real run would.
+
+Every filing with `--file` is recorded in `local/nightly/history.jsonl`, so a later night knows the break is filed. Before anything goes to GitHub, the operator's paths are removed from the failure's text: the checkout, the home folder, the temporary folder, and the user name in pytest's temporary folders. The label has to exist before the first real filing; create it once with `gh label create nightly-break --repo memvara/memvara --description "Found by the nightly run"`.
+
+### The watchdog
+
+A night that did not run leaves no report, so nothing would say it was missed. `scripts/nightly/watchdog.py` says so. The nightly run writes `heartbeat.json` in the night's folder before it does anything else, and writes it again with a finish time when it ends. launchd runs the watchdog once a day at a deadline, and the watchdog checks the latest night whose deadline has passed:
+
+- With no heartbeat, the night did not run. It writes `DID-NOT-RUN.md` and `DID-NOT-RUN.json` in the night's folder and sends one macOS notification.
+- With a heartbeat that has no finish, the run started and was stopped partway, or is still running past every step's cap. It writes `DID-NOT-FINISH.md` and `DID-NOT-FINISH.json` and sends one notification.
+- With a finished heartbeat, it does nothing.
+
+A night is named by the day its run starts, so a run scheduled for 23:30 is checked the next morning. The watchdog writes the `.md` report first, then the `.json` record with `"notified": false`, then sends the notification, then sets `"notified"` to true. Only the record says whether the night was reported. So a check that was stopped anywhere before the notification went out sends it when it runs again, and every check after that sends nothing. Only a stop in the moment between the notification going out and the record saying so could send it twice. The watchdog reports only the latest night whose deadline has passed; a night missed before that one is not reported on its own. The watchdog uses no model, does nothing else, and imports nothing from the nightly package, so launchd can run it with any Python 3.10 or later. It sends the notification through `osascript`, passing the title and the message as arguments to a fixed script, so no text is ever read as AppleScript. `scripts/nightly/com.memvara.nightly-watchdog.plist.template` is its launchd job; nothing installs it, and its comment says how to fill it in and load it. To check a night by hand:
+
+```bash
+python3 scripts/nightly/watchdog.py --checkout <main checkout> --start 01:30 --deadline 06:30 --no-notify
+```
+
+### The scheduled session, and what the operator installs
+
+`scripts/nightly/task.md` is the prompt for the scheduled session that runs each night. The session runs `run.py`, reads the report, and classifies each new break against the "In scope" section of `SECURITY.md`, treating a break it is unsure about as security-class. A security-class break goes to a private advisory and nowhere else. Any other break gets its issue, then a strict-xfail test in a worktree of its own, then a draft pull request, which gets the code review every pull request needs. Nothing merges, nothing is pushed to `main`, and no text that reaches GitHub carries an attribution. The session writes its classifications into `local/nightly/<date>/triage.md`. A test parses every command the prompt names with its script's own parser, so the prompt cannot drift from the scripts.
+
+Nothing in this repository installs the schedule, the watchdog or anything else. The operator does it once, by hand:
+
+1. Create the scheduled task with `task.md` as its prompt, with the checkout filled in and Filing left at `dry-run`.
+2. Fill in `com.memvara.nightly-watchdog.plist.template` and load it, as its comment describes, with the watchdog's deadline a few hours after the task's start.
+3. Create the `nightly-break` label.
+4. Watch one night as a supervised dry run: the report, the DID NOT RUN path (run the watchdog by hand for a night with no heartbeat), the canary, and filing against a test label (`filing.py issue --label <a test label> --file`). Only then change Filing to `file`.
 
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.
