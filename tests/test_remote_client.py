@@ -96,7 +96,7 @@ def test_a_hosted_401_is_an_auth_error_and_is_not_retried():
 
     def handler(request):
         calls.append(1)
-        return _hosted(401, "unauthenticated", "token not recognised",
+        return _hosted(401, "unauthenticated", "the bearer token is not recognised",
                        headers={"WWW-Authenticate": 'Bearer realm="memvara"'})
 
     with pytest.raises(AuthError):
@@ -392,7 +392,7 @@ def test_async_a_hosted_401_is_an_auth_error_and_is_not_retried():
 
     def handler(request):
         calls.append(1)
-        return _hosted(401, "unauthenticated", "token not recognised",
+        return _hosted(401, "unauthenticated", "the bearer token is not recognised",
                        headers={"WWW-Authenticate": 'Bearer realm="memvara"'})
 
     with pytest.raises(AuthError):

@@ -170,7 +170,7 @@ def _hosted(code, message, detail=None):
 
 @pytest.mark.parametrize("message", [
     "this endpoint needs an API token: send 'Authorization: Bearer <token>'.",
-    "token not recognised",
+    "the bearer token is not recognised",
 ])
 def test_the_hosted_401_is_an_auth_error(message):
     """`rest/deps.py::_principal` answers a missing key and an unknown one with 401 and the
