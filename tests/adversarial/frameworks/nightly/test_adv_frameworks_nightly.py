@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 import pytest
 from packaging.utils import canonicalize_name
@@ -154,14 +154,32 @@ PINNED: dict[tuple[str, str, str], tuple[pytest.MarkDecorator, Symptom]] = {
 }
 
 
+#: Checks that tests of their own report, because each covers an item on the coverage
+#: checklist and a covers mark applies to every case of the test that carries it.
+ONE_CLOCK = (("langgraph", "a_replaced_field_ends_and_a_dropped_field_is_retired"),
+             ("crewai", "update_ends_the_old_text_and_delete_retires_it"))
+FRAMED = (("llamaindex", "the_prompt_frames_memory_as_reference_data"),)
+
+
+def _param(name: str, pin: str, short: str) -> Any:
+    pinned = PINNED.get((name, pin, short))
+    return pytest.param(name, pin, short, id=f"{name}-{pin}-{short}",
+                        marks=[pinned[0]] if pinned else [])
+
+
 def _check_params() -> Iterator[Any]:
+    """Every check not reported by a test of its own, at both pins."""
+    reported_elsewhere = set(ONE_CLOCK) | set(FRAMED)
     for name, module in CHECKS.items():
         for pin in environments.PINS:
             for check, _ in probe.checks(module):
                 short = check.removeprefix("check_")
-                pinned = PINNED.get((name, pin, short))
-                yield pytest.param(name, pin, short, id=f"{name}-{pin}-{short}",
-                                   marks=[pinned[0]] if pinned else [])
+                if (name, short) not in reported_elsewhere:
+                    yield _param(name, pin, short)
+
+
+def _own_params(checks: Iterable[tuple[str, str]]) -> list[Any]:
+    return [_param(name, pin, short) for name, short in checks for pin in environments.PINS]
 
 
 def _verify(frameworks: environments.Session, name: str, pin: str, check: str) -> None:
@@ -215,12 +233,17 @@ def test_the_environment_runs_the_memvara_in_this_checkout(
         start["memvara"])
 
 
+@pytest.mark.covers("inv:I5")
 @pytest.mark.parametrize("name, pin", ENVIRONMENTS)
 def test_nothing_in_the_environment_reached_the_network(
         frameworks: environments.Session, name: str, pin: str) -> None:
     """No check may reach the network, and neither may anything else in the probe's
     process, including a framework's background thread or exit handler. The probe must
-    have finished, or it did not see every phase of the run."""
+    have finished, or it did not see every phase of the run.
+
+    The probe runs with no credential in its environment, so this is invariant 5 of
+    docs/INTERNALS.md, "the library must run with no API key and no network", for every
+    adapter and the mem0 shim, under the real framework."""
     probed = frameworks.probe(name, pin)
     assert probed.run.finished, (f"the probe stopped early, so it did not see every "
                                  f"phase:\n{probed.output}")
@@ -234,4 +257,24 @@ def test_nothing_in_the_environment_reached_the_network(
 def test_the_adapter_keeps_its_promise(
         frameworks: environments.Session, name: str, pin: str, check: str) -> None:
     """One check, which states the promise it tests in its docstring."""
+    _verify(frameworks, name, pin, check)
+
+
+@pytest.mark.covers("inv:I3")
+@pytest.mark.parametrize("name, pin, check", _own_params(ONE_CLOCK))
+def test_ending_a_value_through_an_adapter_moves_exactly_one_clock(
+        frameworks: environments.Session, name: str, pin: str, check: str) -> None:
+    """Invariant 3 of docs/INTERNALS.md, through the two adapters that end values: a value
+    that is replaced has its world clock closed and its belief clock left open, a value
+    that is deleted has its belief clock closed and its world clock left open, and
+    neither loses its row."""
+    _verify(frameworks, name, pin, check)
+
+
+@pytest.mark.covers("inv:RT3")
+@pytest.mark.parametrize("name, pin, check", _own_params(FRAMED))
+def test_the_prompt_an_adapter_builds_frames_memory_as_data(
+        frameworks: environments.Session, name: str, pin: str, check: str) -> None:
+    """The recall header names the text as data, and a stored sentence cannot forge
+    structure around itself, in the prompt LlamaIndex builds from the memory block."""
     _verify(frameworks, name, pin, check)
