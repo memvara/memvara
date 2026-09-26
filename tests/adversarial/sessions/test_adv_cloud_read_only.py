@@ -36,9 +36,11 @@ def test_a_read_only_key_lists_only_read_tools_and_refuses_every_write_by_name(
         found = server.call("memory_search", query="where does the user live")
         stats = server.call("memory_stats").text
         assert server.close() == 0
+    # First, because it names the likely cause of the failures below: when the startup
+    # probe of the credential times out, the server treats the key as one that may write.
+    assert "writes: disabled — this server is read-only" in stats
     assert problems == []
     assert not found.is_error, found.text
-    assert "writes: disabled — this server is read-only" in stats
     routes = {request.route for request in fake.requests}
     assert {"GET /v1/stats", "POST /v1/search"} <= routes
     assert [request.route for request in fake.requests if request.status != 200] == []

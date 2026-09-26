@@ -2373,3 +2373,14 @@ $PY -m mypy tests/harness --ignore-missing-imports
 Expected: "Success" from each.
 
 - [ ] **Step 5: The report.** The branch name, each commit's short sha and subject, the files added or changed, the pass counts, the 20-run results, the gate's result line and coverage total, the mypy results, every bug found with its classification and reproduction, and every departure from the design with its reason.
+
+---
+
+## After the branch review
+
+A review of the whole branch found checks that could pass while the thing they guard was broken. These changes were made after it, so the code differs from the tasks above where this list says so:
+
+- **The read-only store check compares everything.** `switches.store_dump` reads every row of every table with `sqlite3` alone and hashes the vector file and the embedder record. It replaced `read_rows`, which compared only claims and documents and could not see a link or a turn being written. The template now also holds a fact whose expiry has passed before any server starts, so a read-only server that erases it fails the check. New tests show the dump sees a link write and a writable open's erasure.
+- **The refusal and call checks have planted faults of their own.** A hidden tool that still runs, and a `filepath_prefix` ignored instead of refused, are found only by the refusal check. A handler that reads a removed argument is found only by the call check. A real server started writable while the check expects read-only mode must be reported for its list, its refusals and its store. The refusal check now sends `filepath_prefix` as well as `filters`, one per call, and the call check does the same when filters are on.
+- **Gold that could pass on an empty answer.** `stale-confirm-closed-nothing` checked only the preview's count, which a preview fills with any live fact, so it was replaced by `stale-confirm-left-the-status-live` and `stale-confirm-left-the-testers-live`. The turns that had only "must not contain" items each gained a "must contain" item, and the repeated question in `session-recall-every-prompt` now also asks about work, so the recall hook has something new to bring. `correction-erased-with-sources` gained a turn in which the anchored search finds the passport number before the erase.
+- **Smaller corrections.** The predicate test in `test_adv_runner.py` gained its control without the vocabulary. The cloud test checks the "writes: disabled" line first, because a timed-out credential probe is the likely cause of the failures after it. The prose now says five tools, not four, need an argument their schema leaves optional, and gives the weekly run's measured time.

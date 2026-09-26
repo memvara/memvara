@@ -697,11 +697,17 @@ def test_the_confirm_secret_reaches_the_server_on_a_real_server(
 @pytest.mark.skipif(sys.version_info < (3, 11), reason=runner.TOMLLIB_SKIP)
 def test_predicates_reach_the_server_on_a_real_server(tmp_path: pathlib.Path) -> None:
     """With the engineering vocabulary, runs_on is another spelling of current_host, and
-    the receipt says so. With the built-in predicates alone, runs_on is a new predicate."""
-    scenario = sample(env={"user": "tester", "predicates": "engineering"})
-    del scenario["sessions"][0]
-    script(scenario)[:] = [{"tool": "memory_remember", "args": {
-        "subject": "payments-api", "predicate": "runs_on", "object": "host-7"}}]
-    outcome = runner.run(scenario, tmp_path)
-    assert outcome.problems == []
-    assert "'runs_on' is another spelling of 'current_host'" in outcome.turn().answer
+    the receipt says so. With the built-in predicates alone, runs_on is a new predicate,
+    and nothing is folded."""
+    def answer(env: dict[str, Any], where: str) -> str:
+        scenario = sample(env=env)
+        del scenario["sessions"][0]
+        script(scenario)[:] = [{"tool": "memory_remember", "args": {
+            "subject": "payments-api", "predicate": "runs_on", "object": "host-7"}}]
+        outcome = runner.run(scenario, tmp_path / where)
+        assert outcome.problems == []
+        return outcome.turn().answer
+
+    fold = "'runs_on' is another spelling of 'current_host'"
+    assert fold in answer({"user": "tester", "predicates": "engineering"}, "with")
+    assert fold not in answer({"user": "tester"}, "without")

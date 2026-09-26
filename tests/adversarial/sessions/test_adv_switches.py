@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
-from typing import Any, Callable
+from datetime import datetime, timezone
+from typing import Any, Callable, Mapping
 
 import pytest
 
@@ -18,7 +19,8 @@ from harness import stores
 from memvara.server import mcp
 from memvara.server.config import FEATURES, FEATURES_OFF_BY_DEFAULT
 from memvara.server.mcp import MemvaraMCPServer
-from memvara.server.tools import BY_NAME, FEATURE_ARGUMENTS, TOOLS, without_filters
+from memvara.server.tools import (BY_NAME, FEATURE_ARGUMENTS, TOOLS, ToolContext, ToolError,
+                                  without_filters)
 from memvara.server.validate import validate
 
 from . import switches
@@ -128,6 +130,123 @@ def test_the_check_finds_a_planted_fault_on_exactly_the_servers_it_affects(
     runs = switches.every_combination()
     found = set(switches.in_process_failures(runs, base, refusals=False))
     assert found == {combination for combination in runs if affected(combination)}
+
+
+def _runs_hidden_tools(patch: pytest.MonkeyPatch) -> None:
+    """A tool the server does not list still runs when it is called by name, so hiding it
+    only changes the list."""
+    original = MemvaraMCPServer._call_tool
+
+    def call_tool(self: MemvaraMCPServer, params: Mapping[str, Any]) -> dict[str, Any]:
+        tool = BY_NAME.get(str(params.get("name")))
+        if tool is None or tool.name in self._tools:
+            return original(self, params)
+        try:
+            return mcp._text(tool.run(self._ctx, params.get("arguments", {})))
+        except ToolError as exc:
+            return mcp._text(str(exc), is_error=True)
+
+    patch.setattr(MemvaraMCPServer, "_call_tool", call_tool)
+
+
+def _ignores_filepath_prefix(patch: pytest.MonkeyPatch) -> None:
+    """With metadata filters off, memory_search drops filepath_prefix and answers without
+    the filter, instead of refusing the call."""
+    search = BY_NAME["memory_search"]
+
+    def unfiltered(ctx: ToolContext, args: dict[str, Any]) -> str:
+        return search.handler(ctx, {**args, "filepath_prefix": None})
+
+    patch.setattr(mcp, "TOOLS", tuple(dataclasses.replace(tool, handler=unfiltered)
+                                      if tool.name == "memory_search" else tool
+                                      for tool in TOOLS))
+
+
+REFUSAL_FAULTS: dict[str, tuple[Callable[[pytest.MonkeyPatch], None],
+                                Callable[[Combination], bool]]] = {
+    "a-hidden-tool-still-runs": (
+        _runs_hidden_tools,
+        lambda c: any(switches.unavailable(tool, c) is not None for tool in TOOLS)),
+    "filepath-prefix-ignored-without-filters": (
+        _ignores_filepath_prefix, lambda c: not c.feature_on("metadata_filters")),
+}
+
+
+@pytest.mark.parametrize("fault", sorted(REFUSAL_FAULTS))
+def test_the_refusal_check_finds_a_planted_fault_on_exactly_the_servers_it_affects(
+        fault: str, base: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neither fault changes the list, so only the refusal check can see them."""
+    plant, affected = REFUSAL_FAULTS[fault]
+    plant(monkeypatch)
+    runs = switches.every_combination()
+    assert switches.in_process_failures(runs, base, refusals=False) == {}
+    found = set(switches.in_process_failures(runs, base))
+    assert found == {combination for combination in runs if affected(combination)}
+
+
+def test_the_call_check_finds_a_handler_that_needs_an_argument_a_switch_removed(
+        base: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """memory_recall's handler is made to read query_rewrite with args[...]. A server that
+    removed that argument then fails the call with a KeyError. The list and the refusals
+    stay the same, so only the call check can see it."""
+    recall = BY_NAME["memory_recall"]
+
+    def strict(ctx: ToolContext, args: dict[str, Any]) -> str:
+        _ = args["query_rewrite"]
+        return recall.handler(ctx, args)
+
+    monkeypatch.setattr(mcp, "TOOLS", tuple(dataclasses.replace(tool, handler=strict)
+                                            if tool.name == "memory_recall" else tool
+                                            for tool in TOOLS))
+    calls = switches.minimal_calls(switches.NOWHERE)
+    memory = stores.memory()
+    try:
+        removed = Combination.of("query_rewrite")
+        found = switches.call_problems(switches.in_process(memory, removed, base), removed,
+                                       calls)
+        default = Combination.of()
+        assert switches.call_problems(switches.in_process(memory, default, base), default,
+                                      calls) == []
+    finally:
+        memory.close()
+    assert found and all(problem.startswith("memory_recall ") for problem in found)
+    assert "KeyError" in found[0]
+
+
+# -- the store a real server starts on -------------------------------------------------
+
+def test_the_store_check_sees_a_write_that_changes_no_claim(
+        surface_template: switches.Template, tmp_path: pathlib.Path) -> None:
+    """A link changes no claim and no document, so only a check of every row can see it.
+    A copy that nothing touched must compare equal, or every read-only run would fail."""
+    untouched = surface_template.copy(tmp_path / "untouched")
+    assert switches.store_dump(untouched) == surface_template.dump
+    linked = surface_template.copy(tmp_path / "linked")
+    with stores.file(linked, expiry_erasure=False, sweep_expired=False) as memory:
+        memory.scope(user=switches.USER).link(
+            surface_template.ids.linked_from, surface_template.ids.linked_to, "extends")
+    assert switches.store_dump(linked) != surface_template.dump
+
+
+def test_the_template_holds_an_expired_fact_that_only_a_writable_open_erases(
+        surface_template: switches.Template, tmp_path: pathlib.Path) -> None:
+    """Every server starts on a store that holds a fact whose expiry has passed. A read-only
+    server must hide it and keep it, so the store check also sees a read-only server that
+    erases. A writable open erases it, which changes the dump."""
+    [expired] = [claim for claim in switches.read_claims(surface_template.directory
+                                                         / switches.STORE)
+                 if claim.object == "4417"]
+    assert expired.expires_at is not None and expired.expires_at < datetime.now(timezone.utc)
+    copy = surface_template.copy(tmp_path / "copy")
+    with stores.file(copy):
+        pass  # opening a store for writing erases every fact whose expiry has passed
+    assert [claim for claim in switches.read_claims(copy) if claim.object == "4417"] == []
+    assert switches.store_dump(copy) != surface_template.dump
+
+
+def test_the_filter_probes_are_the_arguments_metadata_filters_governs() -> None:
+    [rule] = [rule for rule in switches.REDESCRIBED if rule.feature == "metadata_filters"]
+    assert set(switches.FILTER_PROBES) == set(rule.arguments)
 
 
 # -- the minimal calls -----------------------------------------------------------------

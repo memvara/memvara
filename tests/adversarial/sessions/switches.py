@@ -18,11 +18,15 @@ Importing this module starts nothing and opens nothing.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import pathlib
 import shutil
+import sqlite3
+import time
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from harness import stores
@@ -33,6 +37,7 @@ from memvara.server import tools as server_tools
 from memvara.server.config import FEATURE_DEFAULTS, ServerConfig
 from memvara.server.mcp import MemvaraMCPServer
 from memvara.server.tools import FEATURE_ARGUMENTS, TOOLS, Tool
+from memvara.types import Claim
 
 # -- the settings ----------------------------------------------------------------------
 
@@ -45,10 +50,11 @@ ARGUMENT_FEATURES: tuple[str, ...] = tuple(sorted(FEATURE_ARGUMENTS))
 
 @dataclass(frozen=True)
 class Redescribed:
-    """A feature that keeps its arguments when switched off and rewrites their descriptions.
+    """A feature that, when it is switched off, keeps its arguments and changes their
+    descriptions to `description`.
 
-    `arguments` are rewritten only on a tool that takes `marker`, because taking it is what
-    makes a tool one the feature governs.
+    Only a tool that takes the argument named `marker` has its `arguments` changed. Taking
+    that argument is what shows that the feature applies to the tool.
     """
 
     feature: str
@@ -210,10 +216,10 @@ NOWHERE = Ids("cl_00000000000000000000", "cl_00000000000000000001",
 def minimal_calls(ids: Ids) -> dict[str, dict[str, Any]]:
     """For every tool, the least a caller must send for the call to run.
 
-    That is the tool's required arguments, plus one more for the four tools whose schema
+    That is the tool's required arguments, plus one more for the five tools whose schema
     requires nothing that a call can run without: memory_forget and memory_end need a claim
-    to close, the two matching tools need a query for their preview, and
-    memory_add_document needs its content.
+    to close, memory_end_matching and memory_forget_matching need a query for their
+    preview, and memory_add_document needs its content.
     """
     return {
         "memory_recall": {"query": "where does the user live"},
@@ -246,9 +252,11 @@ def minimal_calls(ids: Ids) -> dict[str, dict[str, Any]]:
 PROBES: Mapping[str, Any] = {"reason": "a reason", "until_reason": "a reason",
                              "query_rewrite": False, "synthesize": False}
 
-#: The tools that take a metadata filter, and the filter they are sent.
+#: The tools that take a metadata filter, and the value each filter argument is sent with.
+#: Each argument is sent on its own call, because metadata_filters governs both.
 FILTERING: tuple[str, ...] = tuple(tool.name for tool in TOOLS if "filters" in tool.properties)
-FILTER: Mapping[str, str] = {"team": "support"}
+FILTER_PROBES: Mapping[str, Any] = {"filters": {"team": "support"},
+                                    "filepath_prefix": "policies/"}
 
 
 # -- talking to a server ---------------------------------------------------------------
@@ -361,9 +369,9 @@ def refusal_problems(client: Client, combination: Combination,
 
     A tool it does not list must be refused by name, with the reason: the feature and its
     variable for a switched-off tool, or read-only mode for a write tool. An argument a
-    switch removed must be refused as unknown. A filtered read on a server without
-    metadata filters must be refused, naming the switch. None of these calls reaches the
-    store, because each is refused before anything runs.
+    switch removed must be refused as unknown. On a server without metadata filters, a
+    read that carries either filter argument must be refused, naming the switch. None of
+    these calls reaches the store, because each is refused before anything runs.
     """
     problems = []
     for tool in TOOLS:
@@ -389,17 +397,19 @@ def refusal_problems(client: Client, combination: Combination,
                                 f"server answered: {result.text[:200]!r}")
     if not combination.feature_on("metadata_filters"):
         for name in FILTERING:
-            result = client.call(name, **{**calls[name], "filters": dict(FILTER)})
-            if not (result.is_error and "MEMVARA_FEATURE_METADATA_FILTERS=0" in result.text):
-                problems.append(f"{name} should refuse a filter, naming the switch, and the "
-                                f"server answered: {result.text[:200]!r}")
+            for argument, value in FILTER_PROBES.items():
+                result = client.call(name, **{**calls[name], argument: value})
+                if not (result.is_error
+                        and "MEMVARA_FEATURE_METADATA_FILTERS=0" in result.text):
+                    problems.append(f"{name} should refuse {argument!r}, naming the switch, "
+                                    f"and the server answered: {result.text[:200]!r}")
     return problems
 
 
 def call_problems(client: Client, combination: Combination,
                   calls: Mapping[str, Mapping[str, Any]]) -> list[str]:
     """Each tool a server lists must run with its minimal call, and with metadata filters
-    on, a filtered read must run too."""
+    on, a read with each filter argument must run too."""
     problems = []
     for tool in TOOLS:
         if unavailable(tool, combination) is not None:
@@ -410,9 +420,11 @@ def call_problems(client: Client, combination: Combination,
                             f"{result.text[:300]!r}")
     if combination.feature_on("metadata_filters"):
         for name in FILTERING:
-            result = client.call(name, **{**calls[name], "filters": dict(FILTER)})
-            if result.is_error:
-                problems.append(f"{name} with a filter failed: {result.text[:300]!r}")
+            for argument, value in FILTER_PROBES.items():
+                result = client.call(name, **{**calls[name], argument: value})
+                if result.is_error:
+                    problems.append(f"{name} with {argument!r} failed: "
+                                    f"{result.text[:300]!r}")
     return problems
 
 
@@ -493,45 +505,73 @@ def interaction_counts(runs: Sequence[Combination],
 
 # -- real servers ----------------------------------------------------------------------
 
-Rows = list[tuple[str, str]]
+#: How long after it is written the template's door code expires. The template waits for
+#: it, so every server starts on a store that holds an expired fact, which a read-only
+#: server must hide and must not erase.
+EXPIRES_AFTER = timedelta(seconds=1)
+
+#: Everything a store holds: every row of every table as SQL, then a SHA-256 of the vector
+#: file and one of the embedder record.
+Dump = tuple[tuple[str, ...], str, str]
 
 
-def read_rows(path: pathlib.Path) -> Rows:
-    """Every claim the user has, in every state, and every document, as stored on disk.
-    Read with expiry off, so the read changes nothing."""
+def _digest(path: pathlib.Path) -> str:
+    """The SHA-256 of the file at `path`, or "absent" when there is no such file."""
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "absent"
+
+
+def store_dump(path: pathlib.Path) -> Dump:
+    """Everything the store at `path` holds, to tell whether anything wrote to it.
+
+    The database is read with sqlite3 alone, opened read-only, so reading it changes
+    nothing. Every row of every table is compared, including rows no read returns, such as
+    links, turns and the records of erasures. The two files beside the database are
+    compared by their hashes.
+    """
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        lines = tuple(sorted(connection.iterdump()))
+    finally:
+        connection.close()
+    return (lines, _digest(path.with_name(path.name + ".vecs")),
+            _digest(path.with_name(path.name + ".embedder.json")))
+
+
+def read_claims(path: pathlib.Path) -> list[Claim]:
+    """Every claim the user has, in every state, read with expiry off, so the read neither
+    erases nor hides a fact whose expiry has passed."""
     with stores.file(path, expiry_erasure=False, sweep_expired=False) as memory:
-        scoped = memory.scope(user=USER)
-        claims = sorted((c.text, c.state)
-                        for c in scoped.get_all(states=("live", "ended", "retired")))
-        documents = sorted(("document", str(d.custom_id))
-                           for d in scoped.list_documents(limit=100).items)
-    return claims + documents
+        return list(memory.scope(user=USER).get_all(states=("live", "ended", "retired")))
 
 
 @dataclass(frozen=True)
 class Template:
     """A seeded store in `directory`, copied for each server so that every run starts from
-    the same memory, and the rows it holds."""
+    the same memory, and a dump of what it holds."""
 
     directory: pathlib.Path
     ids: Ids
-    rows: Rows
+    dump: Dump
 
     @classmethod
     def build(cls, directory: pathlib.Path) -> Template:
-        """Store four facts and a document for the minimal calls to name."""
+        """Store four facts and a document for the minimal calls to name, and a door code
+        that has expired by the time this returns."""
         directory.mkdir(parents=True, exist_ok=True)
+        expires = datetime.now(timezone.utc) + EXPIRES_AFTER
         with stores.file(directory / STORE) as memory:
             scoped = memory.scope(user=USER)
             home = scoped.remember("user", "lives_in", "Oslo").added[0]
             work = scoped.remember("user", "works_at", "Contoso").added[0]
             hobby = scoped.remember("user", "likes", "chess").added[0]
             language = scoped.remember("user", "speaks", "Norwegian").added[0]
+            scoped.remember("user", "door_code", "4417", expires_at=expires)
             document = scoped.add_document("Notes about the office move to Oslo.",
                                            custom_id="notes/office.md")
+        time.sleep(max(0.0, (expires - datetime.now(timezone.utc)).total_seconds()) + 0.05)
         ids = Ids(linked_from=work.id, linked_to=home.id, forgettable=hobby.id,
                   endable=language.id, document=str(document.custom_id))
-        return cls(directory, ids, read_rows(directory / STORE))
+        return cls(directory, ids, store_dump(directory / STORE))
 
     def copy(self, target: pathlib.Path) -> pathlib.Path:
         """The store copied into `target`, with every file beside it whose name starts
@@ -547,7 +587,8 @@ def over_the_pipe(start: Callable[..., McpProcess], combination: Combination,
     """Start a real server this way on a copy of the template store, and check it end to
     end: the list it gives, how it refuses what it does not offer, every listed tool
     called once with its minimal call, a clean exit, and, on a read-only server, a store
-    left exactly as it was. `start` is the `mcp` fixture's function."""
+    left exactly as it was, down to every row and both files beside it. `start` is the
+    `mcp` fixture's function."""
     db = template.copy(workdir)
     server = start(db, user=USER, env=combination.env())
     server.initialize()
@@ -559,6 +600,11 @@ def over_the_pipe(start: Callable[..., McpProcess], combination: Combination,
     if code != 0:
         problems.append(f"the server exited with code {code}; its stderr ends: "
                         f"{server.stderr_text()[-300:]!r}")
-    if combination.read_only and read_rows(db) != template.rows:
-        problems.append("a read-only server changed the store")
+    if combination.read_only:
+        after = store_dump(db)
+        if after != template.dump:
+            rows = sorted(set(after[0]) ^ set(template.dump[0]))[:3]
+            problems.append(f"a read-only server changed the store; the first rows that "
+                            f"differ are {rows}, and the files beside it match: "
+                            f"{after[1:] == template.dump[1:]}")
     return problems

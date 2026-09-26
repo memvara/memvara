@@ -46,6 +46,7 @@
     {"id": "still-answered-with-the-switch-off", "turn": "switched-off", "must_contain": "7731"},
     {"id": "read-only-hooks-still-read", "turn": "opens", "must_contain": "user prefers short answers"},
     {"id": "read-only-session-start-hides-it", "turn": "opens", "must_not_contain": "7731"},
+    {"id": "read-only-reads-still-answer", "turn": "asks-code", "must_contain": "user prefers short answers"},
     {"id": "read-only-reads-hide-it", "turn": "asks-code", "must_not_contain": "7731"},
     {"id": "write-refused-by-name", "turn": "write", "must_contain": "memory_forget is unavailable: this memory server is read-only"},
     {"id": "stats-say-writes-are-disabled", "turn": "stats", "must_contain": "writes: disabled"}

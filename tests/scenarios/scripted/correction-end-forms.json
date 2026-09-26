@@ -75,6 +75,7 @@
     {"id": "future-end-is-explained", "turn": "planned", "must_contain": "end at an instant still in the future"},
     {"id": "contract-holds-today", "turn": "now", "must_contain": "Fabrikam"},
     {"id": "gym-holds-today", "turn": "now", "must_contain": "FitHub gym"},
+    {"id": "a-pet-still-holds-later", "turn": "later", "must_contain": "user owns pet Miso the cat"},
     {"id": "contract-over-later", "turn": "later", "must_not_contain": "Fabrikam"},
     {"id": "gym-over-later", "turn": "later", "must_not_contain": "FitHub"},
     {"id": "pepper-reason-kept", "turn": "history", "must_contain": "ended because: Pepper died"},

@@ -1,6 +1,6 @@
 """The weekly tier's real servers: every one of the 2,048 combinations
-(`switches.every_combination`). A run takes about a quarter of a second on a laptop, so
-the file takes about nine minutes."""
+(`switches.every_combination`). The whole file took 7 minutes 54 seconds on a laptop that
+was running other tests at the same time."""
 
 from __future__ import annotations
 

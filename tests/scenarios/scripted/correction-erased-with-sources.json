@@ -1,6 +1,6 @@
 {
   "id": "correction-erased-with-sources",
-  "description": "The user asks for their passport number to be deleted outright, including the sentence they gave it in. Unlike correction-erased, this fact has a source turn: memory_add stored the sentence, and memory_remember cited it. No tool can erase a memory, so the operator erases the claim with its source turns. From then on no read shows the number or the sentence, in the same session or the next one, an anchored search finds nothing, and memory_why cannot find the claim. A locker code the user gave in another turn, with a source turn of its own, is untouched.",
+  "description": "The user asks for their passport number to be deleted outright, including the sentence they gave it in. Unlike correction-erased, this fact has a source turn: memory_add stored the sentence, and memory_remember cited it. No tool can erase a memory, so the operator erases the claim with its source turns. From then on no read shows the number or the sentence, in the same session or the next one, an anchored search that found the claim before the erase finds nothing, and memory_why cannot find the claim. A locker code the user gave in another turn, with a source turn of its own, is untouched.",
   "tier": "fast",
   "surfaces": ["stdio"],
   "env": {"user": "tester"},
@@ -17,7 +17,9 @@
          {"tool": "memory_remember", "args": {"predicate": "locker_code", "object": "5521", "sources": ["{locker_turn}"]}, "capture": {"locker_id": "\\[(cl_[0-9a-f]+)\\] user locker code 5521"}}
        ]},
       {"id": "before", "user": "Where did my passport number come from?",
-       "script": [{"tool": "memory_why", "args": {"claim_id": "{passport_id}"}}]}
+       "script": [{"tool": "memory_why", "args": {"claim_id": "{passport_id}"}}]},
+      {"id": "before-anchored", "user": "Is my passport number stored?",
+       "script": [{"tool": "memory_search", "args": {"query": "passport number K4471902", "anchored": true}}]}
     ]},
     {"turns": [
       {"user": "The visa is done. Delete my passport number completely, including what I said when I gave it to you.",
@@ -48,9 +50,12 @@
   ],
   "answer_gold": [
     {"id": "source-shown-before", "turn": "before", "must_contain": "For the visa form: my passport number is K4471902"},
+    {"id": "anchored-search-finds-it-before", "turn": "before-anchored", "must_contain": "user passport number K4471902"},
+    {"id": "locker-still-found-in-the-same-session", "turn": "same-session", "must_contain": "user locker code 5521"},
     {"id": "number-gone-in-the-same-session", "turn": "same-session", "must_not_contain": "K4471902"},
     {"id": "sentence-gone-in-the-same-session", "turn": "same-session", "must_not_contain": "visa form"},
     {"id": "anchored-search-finds-nothing", "turn": "same-session-anchored", "abstain": true},
+    {"id": "locker-still-found-in-the-next-session", "turn": "next-session", "must_contain": "user locker code 5521"},
     {"id": "number-gone-in-the-next-session", "turn": "next-session", "must_not_contain": "K4471902"},
     {"id": "sentence-gone-in-the-next-session", "turn": "next-session", "must_not_contain": "visa form"},
     {"id": "why-finds-nothing", "turn": "why", "must_contain": "is not visible here"},

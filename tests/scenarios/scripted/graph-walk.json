@@ -47,6 +47,7 @@
     {"id": "one-hop-chain", "turn": "around", "must_contain": "checkout-web -depends_on-> payments-api"},
     {"id": "two-hop-chain-to-the-owner", "turn": "around", "must_contain": "checkout-web -depends_on-> payments-api -owner-> Payments team"},
     {"id": "no-chain-to-the-old-host-today", "turn": "around", "must_not_contain": "host-2"},
+    {"id": "min-hops-keeps-the-two-hop-chains", "turn": "two-hops", "must_contain": "checkout-web -depends_on-> payments-api -owner-> Payments team"},
     {"id": "min-hops-drops-the-one-hop-chain", "turn": "two-hops", "must_not_match": "\\[1 hop\\(s\\)"},
     {"id": "route-to-todays-host", "turn": "route-now", "must_contain": "checkout-web -depends_on-> payments-api -current_host-> host-7"},
     {"id": "route-to-last-years-host-then", "turn": "route-then", "must_contain": "checkout-web -depends_on-> payments-api -current_host-> host-2"},

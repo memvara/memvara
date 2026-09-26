@@ -1,1 +1,1 @@
-"""Tool-surface runs too many for every pull request. See docs/claude/testing.md."""
+"""The nightly tier's tool-surface tests. They start more real servers than a pull request can wait for. See docs/claude/testing.md."""

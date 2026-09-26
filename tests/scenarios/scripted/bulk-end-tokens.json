@@ -1,6 +1,6 @@
 {
   "id": "bulk-end-tokens",
-  "description": "memory_end_matching closes a group of facts in two calls, and every way its confirmation token can be wrong is refused with nothing changed. A token whose listed facts changed after the preview is refused, and the next preview lists only what is still live. A token that memory_forget_matching issued is refused by memory_end_matching. A token used a second time is refused. A token that expired last month is refused; it was minted with memvara.confirm.Confirmer under this scenario's confirm_secret for an instant in August 2026, so only its expiry is wrong. The first two servers share that secret, so a preview from one session is confirmed in the next. The third server has a new secret, so a token from before the change is refused as not issued by this server. The ended facts still answer about the time before they ended. The previews name k, because a preview has no relevance floor and fills k with loose matches (see the tool's description).",
+  "description": "memory_end_matching closes a group of facts in two calls, and every way its confirmation token can be wrong is refused with nothing changed. A token whose listed facts changed after the preview is refused, and the next preview still lists the two facts that stayed live, which shows that the refused confirm closed nothing. A token that memory_forget_matching issued is refused by memory_end_matching. A token used a second time is refused. A token that expired last month is refused; it was minted with memvara.confirm.Confirmer under this scenario's confirm_secret for an instant in August 2026, so only its expiry is wrong. The first two servers share that secret, so a preview from one session is confirmed in the next. The third server has a new secret, so a token from before the change is refused as not issued by this server. The ended facts still answer about the time before they ended. The previews name k, because a preview has no relevance floor and fills k with loose matches (see the tool's description).",
   "tier": "fast",
   "surfaces": ["stdio"],
   "env": {"user": "tester", "confirm_secret": "scenario-confirm-secret-not-for-production"},
@@ -76,7 +76,8 @@
     {"id": "preview-leaves-out-the-home", "turn": "preview", "must_not_contain": "Lisbon"},
     {"id": "preview-leaves-out-nightjar", "turn": "preview", "must_not_contain": "Nightjar"},
     {"id": "stale-token-refused", "turn": "stale", "must_contain": "is now ended. Nothing was changed"},
-    {"id": "stale-confirm-closed-nothing", "turn": "fresh-preview", "must_contain": "Preview: 2 live match(es)"},
+    {"id": "stale-confirm-left-the-status-live", "turn": "fresh-preview", "must_contain": "Project Kestrel status in beta"},
+    {"id": "stale-confirm-left-the-testers-live", "turn": "fresh-preview", "must_contain": "Project Kestrel beta testers 40"},
     {"id": "wrong-closure-refused", "turn": "confirm", "must_contain": "this token was issued to retire memories"},
     {"id": "confirmed-after-a-restart", "turn": "confirm", "must_contain": "Ended 2 value(s), with the reason 'Kestrel shipped'"},
     {"id": "reused-token-refused", "turn": "reused", "must_contain": "is now ended. Nothing was changed"},
