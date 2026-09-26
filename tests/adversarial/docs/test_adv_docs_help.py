@@ -206,6 +206,22 @@ def test_a_claim_that_a_feature_hides_what_it_does_not_is_reported() -> None:
     assert false_claims(PLANTED_HELP, listed, taken) == [("links", "memory_why")]
 
 
+def test_a_claim_about_a_feature_off_by_default_is_checked_with_it_switched_on() -> None:
+    """A feature that is off by default has no server with it switched off, only one with it
+    switched on. Its claim holds when that server has the name and the default does not."""
+    help = ("  MEMVARA_FEATURE_<NAME>\n"
+            "                     AGENTIC_EXTRACTION=0 hides memory_think, and NOPE=0 hides\n"
+            "                     memory_recall.\n")
+    listed = {"default": {"memory_recall"},
+              "agentic_extraction on": {"memory_recall", "memory_think"}}
+    taken = {"default": {"k"}, "agentic_extraction on": {"k"}}
+    assert false_claims(help, listed, taken) == [("nope", "memory_recall")]
+    both = {"default": {"memory_recall", "memory_think"},
+            "agentic_extraction on": {"memory_recall", "memory_think"}}
+    assert false_claims(help, both, taken) == [("agentic_extraction", "memory_think"),
+                                               ("nope", "memory_recall")]
+
+
 def test_the_defaults_a_help_states_are_read() -> None:
     assert variable_defaults(PLANTED_HELP) == [("MEMVARA_MODE", "local"),
                                                ("MEMVARA_TENANT", "default"),

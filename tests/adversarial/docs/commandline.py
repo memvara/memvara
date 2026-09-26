@@ -244,16 +244,29 @@ def false_claims(help: str, listed: Mapping[str, Collection[str]],
     a tool or removes an argument, where the servers say otherwise.
 
     `listed` maps a configuration's label to the tools it lists, and `taken` to the
-    arguments its tools take. A claim holds when the default server has the name and the
-    server with that feature off does not.
+    arguments its tools take. A claim holds when the server with that feature switched on
+    has the name and the server with it switched off does not. A claim about a feature
+    that has neither server does not hold.
     """
     wrong = []
     for claims, present in ((hides(help), listed), (removes(help), taken)):
         for feature, names in claims:
-            off = present.get(f"{feature} off")
+            on, off = _on_and_off(feature, present)
             wrong += [(feature, name) for name in names
-                      if off is None or name not in present["default"] or name in off]
+                      if on is None or off is None or name not in on or name in off]
     return wrong
+
+
+def _on_and_off(feature: str, present: Mapping[str, Collection[str]]
+                ) -> tuple[Collection[str] | None, Collection[str] | None]:
+    """What the server with `feature` switched on has, and what the one with it switched
+    off has. For a feature that is on by default those are the default server and
+    "<feature> off"; for one that is off by default, "<feature> on" and the default."""
+    if f"{feature} off" in present:
+        return present.get("default"), present[f"{feature} off"]
+    if f"{feature} on" in present:
+        return present[f"{feature} on"], present.get("default")
+    return None, None
 
 
 def variable_defaults(help: str) -> list[tuple[str, str]]:
