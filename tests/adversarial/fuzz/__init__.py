@@ -254,7 +254,10 @@ def violating(spec: Mapping[str, Any]) -> st.SearchStrategy[Any]:
     integer goes. For a string: a lone surrogate, a value outside `enum`, one that
     `pattern` does not match, and one longer than `maxLength`. For a number: one outside
     `minimum` or `maximum`, the infinities included. An array breaks its schema through
-    one bad item, and an object through one bad value or one bad key.
+    one bad item, and an object through one bad value or one bad key. When the schema
+    allows several types, each allowed type's own rules are broken as well, and a near
+    miss is left out when another allowed type accepts it, such as "false" where a string
+    is also allowed.
     """
     kinds = _types(spec)
     allowed = set(kinds) | ({"integer"} if "number" in kinds else set())
@@ -265,11 +268,11 @@ def violating(spec: Mapping[str, Any]) -> st.SearchStrategy[Any]:
     # are drawn often, not as one wrong type among six.
     if kinds == ["boolean"]:
         options.append(st.sampled_from(["false", "true", "False", "0", "1", 0, 1]))
-    if kinds in (["integer"], ["number"]):
+    if ("integer" in kinds or "number" in kinds) and "string" not in kinds:
         options.append(st.integers(-10, 100).map(str))
     if "integer" in kinds and "number" not in kinds:
         options.append(st.sampled_from([math.nan, math.inf, -math.inf]))
-    if kinds == ["string"]:
+    if "string" in kinds:
         options.append(st.tuples(TEXT, st.characters(categories=["Cs"]), TEXT).map("".join))
         if "enum" in spec:
             options.append(TEXT.filter(lambda text: text not in spec["enum"]))
@@ -280,21 +283,21 @@ def violating(spec: Mapping[str, Any]) -> st.SearchStrategy[Any]:
             options.append(st.text(st.characters(exclude_categories=["Cs"]),
                                    min_size=longest + 1, max_size=longest + 8))
     low, high = spec.get("minimum"), spec.get("maximum")
-    if kinds == ["integer"]:
+    if "integer" in kinds:
         if low is not None:
             options.append(st.integers(max_value=low - 1))
         if high is not None:
             options.append(st.integers(min_value=high + 1))
-    if kinds == ["number"]:
+    if "number" in kinds:
         if low is not None:
             options.append(st.floats(max_value=low, exclude_max=True, allow_nan=False))
         if high is not None:
             options.append(st.floats(min_value=high, exclude_min=True, allow_nan=False))
-    if kinds == ["array"]:
+    if "array" in kinds:
         options.append(st.tuples(st.lists(conforming(spec["items"]), max_size=3),
                                  violating(spec["items"]), st.integers(0, 3)).map(
             lambda drawn: [*drawn[0][:drawn[2]], drawn[1], *drawn[0][drawn[2]:]]))
-    if kinds == ["object"]:
+    if "object" in kinds:
         good = st.dictionaries(_keys(spec), conforming(spec["additionalProperties"]),
                                max_size=3)
         options.append(st.tuples(good, TEXT, violating(spec["additionalProperties"])).map(

@@ -12,13 +12,16 @@ import pathlib
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import find, given, settings
 
 from harness import stores
 from harness.stdio import McpProcessError
 from memvara.server.tools import TOOLS
 
-from . import SCHEMA_KEYWORDS, arguments, changed, conforming, exchange, request_line, rows
+from memvara.server.validate import ToolError, validate
+
+from . import (SCHEMA_KEYWORDS, arguments, changed, conforming, exchange, request_line, rows,
+               violating)
 
 
 class Scripted:
@@ -111,4 +114,25 @@ def test_an_argument_that_must_not_be_sent_cannot_also_be_required() -> None:
     always drawn, so asking for both is a mistake in the test and is refused."""
     with pytest.raises(ValueError, match="url"):
         arguments({"url": {"type": "string"}}, ["url"], leave_out={"url"})
+
+
+#: A value may be a short string or a list of strings and numbers, like the value of a
+#: metadata filter.
+SEVERAL = {"type": ["string", "array"], "maxLength": 3,
+           "items": {"type": ["string", "number"]}}
+
+
+def test_a_schema_with_several_types_still_breaks_each_type_s_own_rules() -> None:
+    """Besides a value of a type the schema does not allow, the strategy must draw a
+    value of an allowed type that breaks that type's own rule: a list with a bad item,
+    and a string that is too long."""
+    assert isinstance(find(violating(SEVERAL), lambda value: isinstance(value, list)), list)
+    assert find(violating(SEVERAL), lambda value: isinstance(value, str) and len(value) > 3)
+
+
+@settings(max_examples=200, database=None, derandomize=True)
+@given(violating(SEVERAL))
+def test_every_value_drawn_for_a_schema_with_several_types_is_refused(value: Any) -> None:
+    with pytest.raises(ToolError):
+        validate({"x": SEVERAL}, ["x"], {"x": value}, tool="t")
 
