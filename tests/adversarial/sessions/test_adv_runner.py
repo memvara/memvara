@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sys
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
 import pytest
 
-from harness import known_bugs
+from harness import known_bugs, skips
 from harness.env import REPO
+from memvara.confirm import Confirmer
 
 from . import runner
 
@@ -633,3 +635,73 @@ def test_the_sample_scenarios_gold_holds_on_a_real_server(tmp_path: pathlib.Path
     outcome = runner.run(sample(), tmp_path)
     for gold in runner.gold_items(sample()):
         runner.judge(gold, outcome)
+
+
+# -- the confirmation key and the predicate vocabularies ---------------------------------
+
+def test_a_confirm_secret_and_predicates_can_be_set_and_must_not_be_empty() -> None:
+    scenario = sample(env={"user": "tester", "confirm_secret": "k", "predicates": "engineering"})
+    assert errors(scenario) == []
+    scenario["sessions"][1]["env"] = {"confirm_secret": ""}
+    assert ("$.sessions[1].env.confirm_secret: must be at least 1 character(s) long"
+            in errors(scenario))
+
+
+def test_the_two_fields_become_server_variables() -> None:
+    env = {**runner.DEFAULT_ENV, "confirm_secret": "k", "predicates": "engineering"}
+    assert runner.variables(env) == {"MEMVARA_CONFIRM_SECRET": "k",
+                                     "MEMVARA_PREDICATES": "engineering"}
+    assert runner.variables(runner.DEFAULT_ENV) == {}
+
+
+def test_a_scenario_that_loads_predicates_skips_below_python_3_11() -> None:
+    """A session's env counts as much as the scenario's. The reason must be one the skip
+    ledger explains below Python 3.11 and nowhere else, or the skip would fail the run."""
+    assert runner.marks(sample()) == []
+    in_a_session = sample()
+    in_a_session["sessions"][1]["env"] = {"predicates": "engineering"}
+    for scenario in (sample(env={"user": "tester", "predicates": "engineering"}),
+                     in_a_session):
+        [mark] = runner.marks(scenario)
+        assert mark.name == "skipif" and mark.args == (sys.version_info < (3, 11),)
+        assert mark.kwargs["reason"] == runner.TOMLLIB_SKIP
+    assert skips.explained(runner.TOMLLIB_SKIP, version=(3, 10))
+    assert not skips.explained(runner.TOMLLIB_SKIP, version=(3, 11))
+
+
+def expired_token(secret: str) -> str:
+    """A token that `secret` signed correctly and that expired in August 2026."""
+    token, _ = Confirmer(secret).issue(["cl_0f0f0f0f0f0f0f0f0f0f"], "ended",
+                                       now=datetime(2026, 8, 20, 9, tzinfo=timezone.utc))
+    return token
+
+
+def test_the_confirm_secret_reaches_the_server_on_a_real_server(
+        tmp_path: pathlib.Path) -> None:
+    """With the secret, the server holds the key that signed the token, so it checks the
+    token as far as its expiry. Without it, the server's own key refuses the signature."""
+    def answer(env: dict[str, Any], where: str) -> str:
+        scenario = sample(env=env)
+        del scenario["sessions"][0]
+        script(scenario)[:] = [{"tool": "memory_end_matching", "expect_error": True,
+                                "args": {"confirm": expired_token("k")}}]
+        outcome = runner.run(scenario, tmp_path / where)
+        assert outcome.problems == []
+        return outcome.turn().answer
+
+    assert "this confirmation token expired at" in answer(
+        {"user": "tester", "confirm_secret": "k"}, "with")
+    assert "was not issued by this memory server" in answer({"user": "tester"}, "without")
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason=runner.TOMLLIB_SKIP)
+def test_predicates_reach_the_server_on_a_real_server(tmp_path: pathlib.Path) -> None:
+    """With the engineering vocabulary, runs_on is another spelling of current_host, and
+    the receipt says so. With the built-in predicates alone, runs_on is a new predicate."""
+    scenario = sample(env={"user": "tester", "predicates": "engineering"})
+    del scenario["sessions"][0]
+    script(scenario)[:] = [{"tool": "memory_remember", "args": {
+        "subject": "payments-api", "predicate": "runs_on", "object": "host-7"}}]
+    outcome = runner.run(scenario, tmp_path)
+    assert outcome.problems == []
+    assert "'runs_on' is another spelling of 'current_host'" in outcome.turn().answer

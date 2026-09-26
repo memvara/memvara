@@ -194,7 +194,7 @@ The runner writes the `seed` through the library first. The seed stands for memo
 
 A tool or hook step can `capture` part of its output with a regular expression, and a later step can use it. An argument that is exactly `{name}` is replaced by the captured text or the marked instant, and one that is exactly `{file:path}` by that workspace file's contents. Nothing else in an argument changes, so text with braces in it is safe.
 
-`env` sets how the server starts: the user, the project, the feature switches, read-only mode and the protocol version. A session can override any of them except the user with its own `env`, which is how a scenario moves the user from one project to another. The user stays the same in every session, because store gold reads every claim at the scenario's user.
+`env` sets how the server starts: the user, the project, the feature switches, read-only mode, the protocol version, the confirmation key and the predicate vocabularies. The last two are described in "Scripted sessions and the tool surface" below. A session can override any of them except the user with its own `env`, which is how a scenario moves the user from one project to another. The user stays the same in every session, because store gold reads every claim at the scenario's user.
 
 After the last session the store is read once more with expiry switched off, so the read neither erases an expired claim nor hides one. The store gold therefore sees exactly what the server left on disk.
 
@@ -684,5 +684,18 @@ It prints a table and exits with 0 for a valid run that passes, 1 for a valid ru
 Measured once on a laptop that other work kept busy, which made the timing run invalid: the full timing run took 22 minutes, the 10,000-turn soak 15 seconds, and the 100,000-turn soak 8 minutes. The fast tier of this section takes about 10 seconds.
 
 The long runs write their records before they assert anything, so a failing night still leaves its evidence, and they read their history from the same folder: `$NIGHTLY_RECORDS_DIR`, or `local/nightly/records` in the checkout when it is unset. The nightly run starts each night in a clean worktree, so it must set the variable to a folder outside the worktree; otherwise every night starts with no history, and neither the regression rule nor the budgets can ever apply.
+
+## Scripted sessions and the tool surface
+
+This section covers workstream A1 of the design: more scripted scenarios, and tests of the tool list, the input schemas and the refusals the server gives under every combination of the settings that change them. The plan is `docs/superpowers/plans/2026-09-26-adversarial-sessions.md`.
+
+### Two more fields in a scenario's env
+
+`env` can also set two server variables, because two workflows cannot be written without them:
+
+- `confirm_secret` sets `MEMVARA_CONFIRM_SECRET`, the key that signs the confirmation tokens of `memory_end_matching` and `memory_forget_matching`. Servers that share it accept each other's tokens, so a preview from one session can be confirmed in the next. It also lets a scenario hold a token that was signed correctly and has expired; the only other way to get one is to wait ten minutes.
+- `predicates` sets `MEMVARA_PREDICATES`, the predicate vocabularies the server loads. The graph tools walk only relations a vocabulary declares as graph edges, and no built-in predicate is one, so without a vocabulary `memory_neighborhood` and `memory_paths` can only answer that nothing is connected. Loading a vocabulary needs Python 3.11, where `tomllib` arrives. So every test that plays such a scenario skips on Python 3.10, with a reason the skip ledger's `tomllib` rule explains.
+
+The runner passes both to each session's server, and writes them into the client config the hooks read, like the other env fields.
 
 Next: [how work is done here](working-here.md), including the review every pull request gets before it merges.

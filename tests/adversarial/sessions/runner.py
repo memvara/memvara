@@ -428,6 +428,24 @@ def selected(scenarios: Iterable[Mapping[str, Any]], tier: str) -> list[Mapping[
     return [scenario for scenario in scenarios if scenario["tier"] in wanted]
 
 
+#: Why a scenario that loads a predicate vocabulary does not play on Python 3.10. It is
+#: worded to match the skip ledger's rule for tomllib in tests/harness/skips.py.
+TOMLLIB_SKIP = "tomllib arrives in 3.11, and this scenario loads a predicate vocabulary with it"
+
+
+def marks(scenario: Mapping[str, Any]) -> list[pytest.MarkDecorator]:
+    """The marks every test that plays `scenario` carries.
+
+    A scenario whose env, or any session's env, names `predicates` skips on Python 3.10,
+    because loading a vocabulary needs `tomllib` and the server would refuse to start.
+    Any other scenario carries none.
+    """
+    envs = [scenario["env"], *(session.get("env", {}) for session in scenario["sessions"])]
+    if any(env.get("predicates") for env in envs):
+        return [pytest.mark.skipif(sys.version_info < (3, 11), reason=TOMLLIB_SKIP)]
+    return []
+
+
 # -- running -----------------------------------------------------------------------------
 
 class RunError(RuntimeError):
@@ -438,7 +456,22 @@ class RunError(RuntimeError):
 #: The server settings a scenario gets for anything its `env` leaves out.
 DEFAULT_ENV: Mapping[str, Any] = {
     "user": "tester", "project": None, "features": {}, "read_only": False,
-    "protocol": PROTOCOL}
+    "protocol": PROTOCOL, "confirm_secret": None, "predicates": None}
+
+#: The env fields that each set one server variable, for the server and for the client
+#: config the hooks read.
+VARIABLES: Mapping[str, str] = {"confirm_secret": "MEMVARA_CONFIRM_SECRET",
+                                "predicates": "MEMVARA_PREDICATES"}
+
+
+def variables(env: Mapping[str, Any]) -> dict[str, str]:
+    """The variables an env's `confirm_secret` and `predicates` fields set, for the
+    fields that have a value.
+
+    >>> variables({"confirm_secret": "k", "predicates": None})
+    {'MEMVARA_CONFIRM_SECRET': 'k'}
+    """
+    return {name: str(env[field]) for field, name in VARIABLES.items() if env.get(field)}
 
 #: The three states a stored claim can be in. A snapshot reads all of them.
 STATES = ("live", "ended", "retired")
@@ -731,7 +764,7 @@ class _Session:
         self.hooks: dict[str, HookRunner] = {}
         self.server = McpProcess(
             db, home=home, user=env["user"], features=env["features"],
-            read_only=env["read_only"], cwd=work,
+            read_only=env["read_only"], cwd=work, env=variables(env),
             scope={"project": env["project"]} if env["project"] else None)
 
     def play(self, turns: Sequence[Mapping[str, Any]]) -> None:
@@ -846,6 +879,7 @@ class _Session:
             env["MEMVARA_PROJECT"] = self.env["project"]
         if self.env["read_only"]:
             env["MEMVARA_READ_ONLY"] = "1"
+        env.update(variables(self.env))
         env.update(feature_env(self.env["features"]))
         return env
 
@@ -889,10 +923,12 @@ def gold_items(scenario: Mapping[str, Any]) -> list[Gold]:
 
 def gold_params(scenarios: Iterable[Mapping[str, Any]]) -> list[Any]:
     """One pytest parameter per gold item. An item that a known bug breaks carries that
-    bug's strict expected-failure marker, and no other item does."""
+    bug's strict expected-failure marker, and no other item does. Every item also carries
+    its scenario's `marks`."""
     return [pytest.param(gold, id=gold.test_id,
-                         marks=[known_bugs.xfail(gold.known_bug["bug"])] if gold.known_bug
-                         else [])
+                         marks=[*marks(scenario),
+                                *([known_bugs.xfail(gold.known_bug["bug"])]
+                                  if gold.known_bug else [])])
             for scenario in scenarios for gold in gold_items(scenario)]
 
 

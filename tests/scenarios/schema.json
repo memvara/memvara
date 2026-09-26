@@ -32,13 +32,15 @@
     "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "The name of a captured value or a marked instant, as a placeholder uses it: {name}."},
     "env": {
       "type": "object", "additionalProperties": false,
-      "description": "How the server starts. A field left out takes its default: user tester, no project, every feature at its default, writes enabled, protocol 2025-06-18. A session's own env overrides the scenario's, field by field, except the user: a session cannot change it, because store gold reads every claim at the scenario's user.",
+      "description": "How the server starts. A field left out takes its default: user tester, no project, every feature at its default, writes enabled, protocol 2025-06-18, a confirmation key each server makes for itself, and the built-in predicates alone. A session's own env overrides the scenario's, field by field, except the user: a session cannot change it, because store gold reads every claim at the scenario's user.",
       "properties": {
         "user": {"type": "string", "minLength": 1, "description": "MEMVARA_USER."},
         "project": {"type": "string", "minLength": 1, "description": "MEMVARA_PROJECT, as host/owner/repo."},
         "features": {"type": "object", "additionalProperties": {"type": "boolean"}, "description": "Feature name to on or off, as MEMVARA_FEATURE_<NAME>."},
         "read_only": {"type": "boolean", "description": "MEMVARA_READ_ONLY."},
-        "protocol": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "The MCP protocol version the client asks for."}
+        "protocol": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "The MCP protocol version the client asks for."},
+        "confirm_secret": {"type": "string", "minLength": 1, "description": "MEMVARA_CONFIRM_SECRET: the key that signs the confirmation tokens of memory_end_matching and memory_forget_matching. Servers that share it accept each other's tokens."},
+        "predicates": {"type": "string", "minLength": 1, "description": "MEMVARA_PREDICATES: the predicate vocabularies to load, such as engineering. Loading one needs Python 3.11 or later, so every test that plays the scenario skips on Python 3.10."}
       }
     },
     "session": {
