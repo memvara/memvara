@@ -109,6 +109,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     readings and the order of ids, and every difference a surface is allowed has a test of
     its own that names where the code documents it. Three differences that nothing
     documents are pinned as strict expected failures: #334, #335 and #336.
+  - **A soak and a timing run.** `bench/soak.py` drives a store through thousands of
+    seeded turns and has one detector for each failure that raises no error, the ones
+    `memvara/telemetry.py` lists, such as a restatement that refreshes nothing or
+    redaction that stops matching. It runs 10,000 turns nightly and 100,000 weekly.
+    `bench/perf_budget.py` times `search`, `recall`, `remember` and the two hooks that
+    read the store, at 1,000, 10,000 and 100,000 claims. It records the machine it ran
+    on, and a run made on battery or under load is reported as invalid rather than as a
+    failure. The hooks' time limits apply from the first run. The library budgets are set
+    from 14 valid nights by a rule fixed before any number was measured. Two bugs the soak
+    found are pinned as strict expected failures: #332 and #333.
   - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`.
 - **`Store.unended_claims`, `store.unended_predicate()` and `Claim.is_unended()`.**
   `forget()` closes every value in a slot that the store believes and that has not ended
