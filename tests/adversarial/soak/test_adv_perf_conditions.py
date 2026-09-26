@@ -56,13 +56,15 @@ def test_a_load_average_that_cannot_be_read_is_not_measured(
     def unreadable() -> tuple[float, float, float]:
         raise OSError("no load average here")
 
-    monkeypatch.setattr(pb.os, "getloadavg", unreadable)
+    # `raising=False`: Windows has no `os.getloadavg` to replace.
+    monkeypatch.setattr(pb.os, "getloadavg", unreadable, raising=False)
     assert pb.read_conditions().load_per_cpu is None
 
 
 def test_a_platform_with_no_load_average_is_not_measured(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delattr(pb.os, "getloadavg")
+    # `raising=False`: on Windows there is no `os.getloadavg` to remove.
+    monkeypatch.delattr(pb.os, "getloadavg", raising=False)
     assert pb.read_conditions().load_per_cpu is None
 
 
@@ -75,7 +77,12 @@ def test_a_run_whose_load_could_not_be_read_is_invalid_rather_than_idle() -> Non
 
 def test_the_conditions_of_this_machine_can_be_read() -> None:
     now = pb.read_conditions()
-    assert isinstance(now.load_per_cpu, float) and now.load_per_cpu >= 0.0
+    if hasattr(pb.os, "getloadavg"):
+        assert isinstance(now.load_per_cpu, float) and now.load_per_cpu >= 0.0
+    else:
+        # Windows has no load average, so its load is not measured, and a timing run
+        # there is reported as invalid rather than judged.
+        assert now.load_per_cpu is None
     assert now.on_battery in (True, False, None)
 
 
