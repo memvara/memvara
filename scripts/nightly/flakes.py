@@ -120,11 +120,13 @@ def rerun_command(python: str, nodeid: str, tier: str = "nightly") -> list[str]:
 
 
 def rerun(nodeid: str, run: Callable[[list[str]], int | None], *, python: str,
-          tier: str = "nightly", times: int = RERUNS) -> Rerun:
-    """Run one test `times` more times. `run` runs a command and returns its exit code,
-    or None when it was stopped at its cap."""
-    command = rerun_command(python, nodeid, tier)
-    return Rerun(nodeid, tuple(outcome_of(run(command)) for _ in range(times)))
+          tier: str = "nightly", times: int = RERUNS,
+          command: Callable[[str, str, str], list[str]] = rerun_command) -> Rerun:
+    """Run one test `times` more times, in `tier`. `run` runs a command and returns its
+    exit code, or None when it was stopped at its cap. `command` builds the command from
+    the interpreter, the node id and the tier; tests pass one that fakes the test."""
+    argv = command(python, nodeid, tier)
+    return Rerun(nodeid, tuple(outcome_of(run(argv)) for _ in range(times)))
 
 
 @dataclass(frozen=True)

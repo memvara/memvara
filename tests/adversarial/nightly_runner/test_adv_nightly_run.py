@@ -27,7 +27,8 @@ from harness.report import write as write_findings
 
 if str(REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO / "scripts"))
-from nightly import filing, flakes, night, render, run, steps, watchdog  # noqa: E402
+from nightly import (filing, flakes, night, regressions, render, run, steps,  # noqa: E402
+                     watchdog)
 
 ZONE = timezone(timedelta(hours=2))
 NODEID = "tests/adversarial/model/test_adv_model_machine.py::test_random_operations"
@@ -378,6 +379,49 @@ def test_a_test_run_that_dies_before_writing_a_result_is_a_failure_for_a_person(
     assert [(entry["kind"], entry["finding"]["invariant"]) for entry in report["failures"]] == [
         ("session", "exit status 3")]
     assert {step["name"]: step["status"] for step in report["steps"]}["regressions"] == "failed"
+
+
+def test_a_failed_test_is_rerun_in_the_tier_the_night_ran(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """A rerun in another tier could leave out the very test it reruns, or run it under
+    another Hypothesis profile, so the reruns get the test run's own tier, explicitly."""
+    command = regressions.command(sys.executable, tmp_path / "results.jsonl")
+    tier = command[command.index("--tier") + 1]
+    runs = tmp_path / "reruns.txt"
+    asked: list[tuple[str, str]] = []
+
+    def rerun_command(python: str, nodeid: str, tier: str = "not passed") -> list[str]:
+        asked.append((nodeid, tier))
+        return [python, "-c", "import sys; open(sys.argv[1], 'a').write('ran\\n'); "
+                "raise SystemExit(1)", str(runs)]
+
+    regression = steps.Step("regressions", 600.0, run.regressions_step(
+        command=_pytest_result(tmp_path, [FAILED], 1), rerun_command=rerun_command))
+    table = tuple(regression if step.name == "regressions" else step for step in run.STEPS)
+    _night(repo, "2026-09-27", table, notify=Notifications())
+    assert asked == [(NODEID, tier)]
+    assert runs.read_text().splitlines() == ["ran", "ran"]
+    [entry] = _report(repo, "2026-09-27")["failures"]
+    assert (entry["reruns"], entry["verdict"]) == (["failed", "failed"], "confirmed")
+
+
+def test_a_torn_line_in_the_test_results_is_a_warning_in_the_report(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """A result the run could not read is a test the report would otherwise leave out
+    without a word, so it is named, as a torn line of the history is."""
+    canned = tmp_path / "torn.jsonl"
+    canned.write_text(json.dumps(PASSED) + "\n" + '{"nodeid": "tests/test_api.py::t", "ou\n'
+                      + json.dumps({"exitstatus": 0}) + "\n")
+
+    def torn(python: str, results: pathlib.Path) -> list[str]:
+        return [python, "-c", "import shutil, sys; shutil.copyfile(sys.argv[1], sys.argv[2])",
+                str(canned), str(results)]
+
+    table = tuple(steps.Step("regressions", 600.0, run.regressions_step(command=torn))
+                  if step.name == "regressions" else step for step in run.STEPS)
+    _night(repo, "2026-09-27", table, notify=Notifications())
+    warnings = _report(repo, "2026-09-27")["warnings"]
+    assert any("results.jsonl" in warning and "2" in warning for warning in warnings), warnings
 
 
 def test_a_breach_during_a_night_that_crashed_is_still_recorded(

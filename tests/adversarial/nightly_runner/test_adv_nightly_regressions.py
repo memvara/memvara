@@ -168,6 +168,21 @@ def test_the_replay_program_is_the_last_complete_one(text: str,
     assert regressions.program_of(text) == program
 
 
+def test_a_results_line_that_cannot_be_read_is_counted_not_dropped(
+        tmp_path: pathlib.Path) -> None:
+    """A test run stopped while it wrote a line leaves half of it. The tests on the good
+    lines still count, and the bad line's number is kept, so the report can say that a
+    test's result is missing instead of silently counting one test fewer."""
+    path = tmp_path / "results.jsonl"
+    path.write_text('{"nodeid": "t.py::a", "outcome": "passed", "when": "call", '
+                    '"message": "", "longrepr": ""}\n'
+                    '{"nodeid": "t.py::b", "outc\n'
+                    '{"exitstatus": 1}\n')
+    results = regressions.read_results(path)
+    assert [test["nodeid"] for test in results.tests] == ["t.py::a"]
+    assert (results.exitstatus, results.bad) == (1, [2])
+
+
 def test_there_is_no_seed_when_hypothesis_printed_none() -> None:
     assert regressions.seed_of("AssertionError: one is not two") is None
 

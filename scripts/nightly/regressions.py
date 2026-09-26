@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pathlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 from nightly import flakes, night
@@ -30,6 +30,9 @@ FOLDER = "regressions"
 OUTPUT = "output.log"
 RESULTS = "results.jsonl"
 ARTIFACTS = {"log": f"{FOLDER}/{OUTPUT}", "results": f"{FOLDER}/{RESULTS}"}
+
+#: The tier the step runs, and the tier each failed test is rerun in.
+TIER = "nightly"
 
 #: The outcomes that make a run fail.
 FAILING = ("failed", "error", "xpass-strict")
@@ -50,23 +53,25 @@ def command(python: str, results: pathlib.Path) -> list[str]:
     plain pytest does not, so one bad import cannot blank the night."""
     return [python, str(pathlib.Path(__file__).with_name("pytest_results.py")),
             "--results", str(results), "--", "-q", "-p", "no:cacheprovider",
-            "--tier", "nightly", "--continue-on-collection-errors", "--durations=25"]
+            "--tier", TIER, "--continue-on-collection-errors", "--durations=25"]
 
 
 @dataclass(frozen=True)
 class Results:
     """What pytest_results.py wrote: one record per test, and pytest's exit status, which
-    is None when the run was stopped before it finished."""
+    is None when the run was stopped before it finished. `bad` holds the numbers of the
+    lines that could not be read, such as one a stopped run left half written."""
 
     tests: list[dict[str, Any]]
     exitstatus: int | None
+    bad: list[int] = field(default_factory=list)
 
 
 def read_results(path: pathlib.Path) -> Results:
-    records, _ = night.read_jsonl(path)
+    records, bad = night.read_jsonl(path)
     tests = [record for record in records if "nodeid" in record]
     statuses = [record["exitstatus"] for record in records if "exitstatus" in record]
-    return Results(tests, statuses[-1] if statuses else None)
+    return Results(tests, statuses[-1] if statuses else None, bad)
 
 
 def layers(results: Results) -> dict[str, dict[str, int]]:

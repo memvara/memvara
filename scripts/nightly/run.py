@@ -243,19 +243,23 @@ def regressions_step(*, command: Callable[[str, pathlib.Path], list[str]] = regr
             # pytest died before it recorded its own exit status, for example on an import
             # error in a conftest file. The process's status is the next best thing, and
             # without it the night would have no failure to show.
-            results = regressions.Results(results.tests, ran.returncode)
+            results = regressions.Results(results.tests, ran.returncode, results.bad)
+        if results.bad:
+            context.warnings.append(
+                f"Lines {', '.join(map(str, results.bad))} of regressions/results.jsonl could "
+                "not be read, so the tests they recorded are missing from this report.")
+
+        def one_run(argv: list[str]) -> int | None:
+            return steps.run_command(argv, cwd=worktree, env=context.env,
+                                     log=folder / "reruns.log",
+                                     deadline=min(deadline, time.monotonic() + RERUN_CAP)
+                                     ).returncode
 
         def rerun(nodeid: str) -> tuple[str, ...] | None:
             if time.monotonic() >= deadline:
                 return None
-            argv = rerun_command(python, nodeid)
-            said = []
-            for _ in range(flakes.RERUNS):
-                done = steps.run_command(
-                    argv, cwd=worktree, env=context.env, log=folder / "reruns.log",
-                    deadline=min(deadline, time.monotonic() + RERUN_CAP))
-                said.append(flakes.outcome_of(done.returncode))
-            return tuple(said)
+            return flakes.rerun(nodeid, one_run, python=python, tier=regressions.TIER,
+                                command=rerun_command).results
 
         context.failures = regressions.failures(results, commit=context.commit, rerun=rerun,
                                                 log_tail=_tail(log))
