@@ -7,6 +7,59 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `forget()` also closes a value stored to begin later
+
+### What changed
+
+`forget(subject, predicate)` closes every value in the slot that the store believes and
+that has not ended. Before this release it closed only the values in force at the moment
+of the call, so a value stored with a `valid_from` in the future was left alone and began
+answering when its start arrived, in a slot the caller had just forgotten. That value is
+now closed with the others and returned with them. `forget()` returns the values in the
+order they were recorded.
+
+Under `close="ended"`, a value that has not begun by `at` is ended at its own start, so it
+is true at no instant and never begins. `memory_forget` and `memory_end` given a
+`predicate` call `forget()`, so on a local server they do the same. Closing one value by
+its id, with `delete()` or with the tools' `claim_id`, is unchanged.
+
+### Who this changes
+
+**If you store a value ahead of time and then close its slot,** the value you stored
+ahead is now closed too. For example, you record that someone starts at Globex next month
+with `valid_from` set to that date, and later call `forget("user", "works_at")` or
+`memory_end` with `predicate` to close the current employer. Before this release, Globex
+survived and started answering next month. Now `forget()` retires it, and
+`close="ended"` or `memory_end` ends it at its own start, so it never answers. To close
+only the current value, close it by id instead: `delete(claim_id)`,
+`delete(claim_id, close="ended")`, or `memory_forget` or `memory_end` with `claim_id`.
+
+**If you read the list `forget()` returns,** it now includes the values stored to begin
+later, in recorded order.
+
+**`RemoteMemvara` does not change with your client.** A hosted deployment runs its own
+`forget()`, so this reaches a hosted store when the deployment moves to this release. A
+server started with `MEMVARA_MODE=cloud` therefore describes `memory_forget` and
+`memory_end` as closing every current value and does not promise the rest.
+
+### How to find it in your code
+
+Search for `forget(` and for `memory_forget` and `memory_end` calls that pass a
+`predicate`, and check whether the slot can hold a value stored to begin later: one
+written by `remember(..., valid_from=<a future instant>)`, or by `memory_remember` with a
+`true_since` in the future. This lists the values stored to begin later that a store holds
+now, each of which would be closed by a `forget()` of its slot:
+
+```python
+from memvara import Memvara
+from memvara.types import utcnow
+
+mem = Memvara("memory.db")
+now = utcnow()
+for c in mem.store.iter_claims():
+    if c.valid_from > now and (c.valid_to is None or c.valid_to > c.valid_from):
+        print(c.id, c.subject, c.predicate, repr(c.object), "begins", c.valid_from)
+```
 ## A restatement with an earlier start is added, not reinforced
 
 ### What changed
