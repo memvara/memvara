@@ -207,6 +207,21 @@ def unserved_arguments(text: str, own: Collection[str],
                    if mention.word in own and mention.word not in served)
 
 
+def unserved_by_any_tool(text: str, table: Mapping[str, Collection[str]],
+                         served: Mapping[str, Collection[str]]) -> list[str]:
+    """Arguments a text that belongs to no one tool names, where a switch has removed them
+    from every tool this server lists.
+
+    `table` is every tool with every argument it can take on some server, and `served`
+    maps each tool this server lists to the arguments it takes here. An argument only a
+    hidden tool takes is left alone, because the server refuses a call to a hidden tool
+    with a message that names the switch.
+    """
+    own = {argument for name in served for argument in table.get(name, ())}
+    here = {argument for arguments in served.values() for argument in arguments}
+    return unserved_arguments(text, own, here)
+
+
 def _arguments(table: Mapping[str, Collection[str]]) -> frozenset[str]:
     return frozenset(argument for arguments in table.values() for argument in arguments)
 

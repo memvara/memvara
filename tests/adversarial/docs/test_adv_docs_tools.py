@@ -16,7 +16,8 @@ from memvara.server.mcp import INSTRUCTIONS
 from memvara.server.tools import FEATURE_ARGUMENTS, TOOLS
 
 from .mentions import (mentions, predicates, ties, tool_names, unknown_tools,
-                       unresolved_identifiers, unserved_arguments, wrong_ties)
+                       unresolved_identifiers, unserved_arguments, unserved_by_any_tool,
+                       wrong_ties)
 from .surface import configurations, served, table, texts
 
 #: A small tool table for the planted cases, so each expected answer can be read off by
@@ -119,6 +120,18 @@ def test_an_english_word_that_is_also_an_argument_is_not_a_mention() -> None:
             "is that the query and the text are records.")
     own = PLANTED["memory_end"] | {"query", "text"}
     assert unserved_arguments(text, own, own - {"reason", "query", "text"}) == []
+
+
+def test_text_owned_by_no_tool_naming_an_argument_a_switch_removed_is_reported() -> None:
+    """The instructions a client receives on connect belong to no one tool. An argument
+    they name is removed when no tool the server lists still takes it, and an argument of a
+    tool the server hides is left alone, because a call to that tool is refused by name."""
+    text = ("A fact written with memory_remember's true_until ends then; pass valid_at to "
+            "read it.")
+    served_here = {"memory_remember": PLANTED["memory_remember"] - {"true_until"},
+                   "memory_search": PLANTED["memory_search"]}
+    assert unserved_by_any_tool(text, PLANTED, served_here) == ["true_until"]
+    assert unserved_by_any_tool(text, PLANTED, {"memory_search": PLANTED["memory_search"]}) == []
 
 
 def test_every_switch_has_a_configuration() -> None:
@@ -252,3 +265,16 @@ def test_a_tools_own_argument_named_in_its_text_is_served(configuration) -> None
     if found and found == REMOVED_BUT_NAMED.get(configuration.label):
         raise known_bugs.Reproduced("\n".join(problems))
     assert not problems, "\n".join(problems)
+
+
+@pytest.mark.parametrize("configuration", configurations(),
+                         ids=[configuration.label for configuration in configurations()])
+def test_the_connection_instructions_name_no_argument_a_switch_removed(configuration) -> None:
+    """The instructions a client receives on connect are the same on every server, and a
+    switch can remove an argument they name, so each server checks them as it checks its
+    tool descriptions."""
+    served_here = {tool["name"]: set(tool["inputSchema"]["properties"])
+                   for tool in served(configuration)}
+    removed = unserved_by_any_tool(INSTRUCTIONS, table(), served_here)
+    assert not removed, (f"the instructions name {removed}, which no tool this server "
+                         "lists takes")
