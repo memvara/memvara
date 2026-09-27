@@ -232,10 +232,13 @@ def test_every_step_of_every_night_keeps_the_long_runs_records_in_one_folder(
 
 
 def _long_step(tmp_path: pathlib.Path, name: str, test: dict[str, Any], exitstatus: int,
-               cap: float = 600.0, *, env_to: pathlib.Path | None = None) -> steps.Step:
+               cap: float = 600.0, *, others: tuple[dict[str, Any], ...] = (),
+               env_to: pathlib.Path | None = None) -> steps.Step:
+    """A long-run step whose test file records `test`, over a passed test's fields, and
+    then each of `others` as it is."""
     return steps.Step(name, cap, run.long_run_step(
-        name, command=_pytest_result(tmp_path, [{**_long_passed(name), **test}], exitstatus,
-                                     env_to=env_to)))
+        name, command=_pytest_result(tmp_path, [{**_long_passed(name), **test}, *others],
+                                     exitstatus, env_to=env_to)))
 
 
 def test_a_timing_run_on_battery_or_under_load_is_invalid_not_failed(
@@ -263,9 +266,8 @@ def test_a_long_run_is_invalid_when_any_of_its_tests_skipped_as_an_invalid_run(
     skipped = {**_long_passed("performance"),
                "nodeid": f"{regressions.LONG_RUNS['performance']}::test_other",
                "outcome": "skipped", "message": reason}
-    table = _table(tmp_path, [PASSED], 0, performance=steps.Step(
-        "performance", 600.0, run.long_run_step("performance", command=_pytest_result(
-            tmp_path, [_long_passed("performance"), skipped], 0))))
+    table = _table(tmp_path, [PASSED], 0, performance=_long_step(
+        tmp_path, "performance", {}, 0, others=(skipped,)))
     assert _night(repo, "2026-09-27", table, notify=Notifications()) == 0
     [step] = [step for step in _report(repo, "2026-09-27")["steps"]
               if step["name"] == "performance"]
