@@ -188,7 +188,7 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 ### Fixed
 
 - **The hosted client's `recall()` takes `valid_at`.** `RemoteMemvara.recall(valid_at=...)`
-  and the async client's refused the argument with `ValueError`, saying that
+  and `AsyncRemoteMemvara.recall(valid_at=...)` raised `ValueError`, saying that
   `POST /v1/recall` has no time axis. The route takes `valid_at` now, the world clock alone,
   so both clients send it, and `memory_recall` with `valid_at` works in cloud mode. A
   deployment from before the field refuses a dated read with a 422 rather than answering it
