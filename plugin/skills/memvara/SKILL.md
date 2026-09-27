@@ -209,6 +209,27 @@ nothing can bring it back. When a fact will only stop being true, end it at that
 instead, so its history stays. An expiry is set when the fact is written; it cannot be
 added later to erase a fact that is already stored.
 
+**A ranked read.** A ranked recall makes a model call whenever it has turns to rank,
+on a key the deployment holds, which may be the person's own. So an ordinary recall
+comes first. Ask for a ranked one only when two things are true: the ordinary recall
+found the right conversation but the turn that answers is buried under others, and the
+answer rests on what somebody said rather than on a stored fact. Do not set it on every
+turn to be safe.
+
+Read the last line of a ranked block before you rely on the order. If it says the
+ranking was not applied, the block is an ordinary read, and the word at the end of the
+line says why:
+
+- `unconfigured` means this deployment has no model set up to choose turns.
+- `disabled` means its operator switched ranked reads off.
+- Both of those last for the whole session, so stop asking for a ranked read.
+- `key_rejected` means the provider refused the key. Only the person can fix that, so
+  tell them.
+- `fallback` means the model call failed this once. Answer from what came back rather
+  than repeating the read in the same turn.
+
+A block without that line was ranked, or had no turns to rank.
+
 A summary at the top of a recall block is there because you asked for one. It
 is a model's reading of the notes under it, not a note. When the two differ,
 answer from the notes. Never store the summary with `memory_remember`: that

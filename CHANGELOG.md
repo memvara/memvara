@@ -11,6 +11,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **The packaged skill says when a ranked read is worth its model call.** A ranked recall
+  makes a model call whenever it has turns to rank, so the skill tells an agent to try an
+  ordinary recall first and to ask for a ranked one only when the right conversation came back with the
+  answering turn buried and the answer rests on what somebody said. It also says what to
+  do after each outcome the last line of an unranked block can name: stop asking after
+  `unconfigured` or `disabled`, tell the person after `key_rejected`, and answer from the
+  ordinary read after `fallback`. Both copies of `SKILL.md` change together, and
+  `tests/test_init.py` checks that the guidance stays. Each of the seven plugin
+  repositories gets a pull request with the change at its next sync, and the change
+  reaches that repository when the pull request is merged. #171.
 - **`scripts/test_changed.py` runs the tests a change can affect, before you push.** It
   runs the changed test files, the tests that import or name a changed file, and the tests
   that failed last time, and it runs the full suite when a change touches something it
