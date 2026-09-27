@@ -169,6 +169,43 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The MCP server refuses NaN for a number argument.** The server's JSON parser accepts
+  the bare token `NaN`, and the validator let it through the bounds on `confidence` and
+  `min_score`, because every comparison with NaN is false. A NaN `min_score` then acted as
+  no floor at all. The validator now refuses NaN for every number argument, with
+  `<tool>.<argument> must be a number, got NaN`, before anything is read or written.
+  #312.
+- **A metadata filter key that ends in a newline is refused.** The key pattern
+  `^[A-Za-z0-9_.-]{1,64}$` was checked with Python's `re.search`, where `$` also matches
+  just before a newline at the end of the value, so `memory_search` and `memory_recall`
+  accepted the filter key `"team\n"`. The validator now matches a pattern against the
+  whole value, which is what `$` means in a JSON Schema pattern. #314.
+- **A lone surrogate in the key of an object argument is refused.** The validator checked
+  a key only when the argument's schema declared a pattern for its keys, and
+  `memory_add_document.metadata` declares none, so a metadata key holding half of a
+  character, such as `"a\ud800b"`, was stored. Every key of every object argument is now
+  checked like a string argument, and a lone surrogate in one is refused with the same
+  "unpaired surrogate" message a string value gets. #315.
+- **The command-line help names everything the command line and the server's
+  configuration accept.** `memvara --help` and `memvara-mcp --help` now name `--version`.
+  The server's help now lists `'openai'` among the `MEMVARA_LLM` backends, describes all
+  22 feature switches instead of 12, and describes the twelve variables it left out:
+  `MEMVARA_SERVER_URL`, `MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_CLAIMS`,
+  `MEMVARA_LLM_MAX_TOKENS`, `MEMVARA_LLM_TIMEOUT`, `MEMVARA_LLM_EXTRA_BODY`,
+  `MEMVARA_LLM_EXTRACT_SYSTEM`, `MEMVARA_LLM_TERSE_CLAIMS`, `MEMVARA_EXTRACT_GUIDANCE`,
+  `MEMVARA_ADVISE_REPLACEMENTS`, `MEMVARA_CLOSED_VOCABULARY` and
+  `MEMVARA_NAT64_PREFIXES`. New tests fail when the help leaves out a variable the
+  configuration reads, a feature, or a model backend. #297.
+- **The stdio MCP server reads UTF-8, whatever the locale says.** The server read its
+  requests in the locale's encoding, but the MCP stdio transport is UTF-8. Under a strict
+  UTF-8 locale, one byte that was not UTF-8 ended the server, so the agent had no memory
+  for the rest of its session. Under another encoding, such as cp1252 on a Windows pipe,
+  UTF-8 text was decoded wrongly, so "Zürich" was stored as "ZÃ¼rich". The server now
+  reads standard input as UTF-8. A line with a byte that is not UTF-8 gets a JSON-RPC
+  parse error (`-32700`) that points at the first such byte, and the server carries on.
+  Standard error, where the server writes its startup refusals, is now written as UTF-8
+  too, and so is standard output, where `--help` prints a usage that holds em dashes.
+  #311.
 - **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
   decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
   interpreter's stack allows, and the server let it escape, so a single such line ended

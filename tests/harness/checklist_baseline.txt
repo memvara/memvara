@@ -54,17 +54,3 @@ inv:RP4
 inv:RP5
 inv:RP6
 inv:RP7
-switch:agentic_capture
-switch:agentic_extraction
-switch:extraction_chunks
-switch:extraction_guidance
-switch:index_command
-switch:ingest_media
-switch:ingest_urls
-switch:project_scope
-switch:recall_mark
-switch:research_agent
-switch:retrieval_chunks
-switch:status_line
-tool:memory_ask
-tool:memory_paths
