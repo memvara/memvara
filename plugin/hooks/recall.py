@@ -971,7 +971,6 @@ def _main() -> int:
     return 0
 
 
-
 def main() -> int:
     """Run the hook, then clear the deadline it set, for a caller that runs it in this
     process and goes on to make hosted calls of its own."""
