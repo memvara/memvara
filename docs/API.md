@@ -127,8 +127,10 @@ mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False,
            query_rewrite=True, synthesize=False, header=None, include_episodes=False,
            episode_header=None, include_history=False, history_header=None,
            budget=None, counter=<internal>, valid_at=None, filters=None,
-           filepath_prefix=None, with_ids=False)
+           filepath_prefix=None, memory_types=None, with_ids=False)
                                                   -> str | RecallResult
+#   memory_types= keeps only claims of those types, as on search(), and refuses an
+#     unknown name with ValueError before anything is read.
 #   filters= and filepath_prefix= narrow the facts and the turns as they do on search().
 #     The include_history tail is the past values of the facts that were kept, and is
 #     not filtered again.
