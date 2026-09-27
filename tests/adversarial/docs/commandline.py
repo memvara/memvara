@@ -235,7 +235,7 @@ def unread_variables(help: str, reads: Collection[str]) -> list[str]:
 
 def features(help: str) -> set[str]:
     """The feature names the `MEMVARA_FEATURE_<NAME>` paragraph of a help text gives."""
-    paragraph = "\n".join(text for name, text in _paragraphs(help)
+    paragraph = "\n".join(text for name, text in paragraphs(help)
                           if name == "MEMVARA_FEATURE_")
     return {name for name in _FEATURE.findall(paragraph) if not name.startswith("MEMVARA_")}
 
@@ -293,7 +293,7 @@ def variable_defaults(help: str) -> list[tuple[str, str]]:
     """`(variable, value)` for each default a help text states for a variable: "'V'
     (default", "Default 'V'" or "Unset means N"."""
     found = []
-    for name, text in _paragraphs(help):
+    for name, text in paragraphs(help):
         if name.endswith("_"):
             continue
         stated = sorted((match.start(), match.group(1))
@@ -312,7 +312,7 @@ def default_off(help: str) -> frozenset[str] | None:
                      for name in re.findall(r"[A-Z][A-Z0-9_]*[A-Z0-9]", match.group(1)))
 
 
-def _paragraphs(help: str) -> list[tuple[str, str]]:
+def paragraphs(help: str) -> list[tuple[str, str]]:
     """`(variable, text)` for each variable's paragraph in a help text: a line that starts
     with two spaces and the name, and the more deeply indented lines after it."""
     found: list[list[str]] = []
