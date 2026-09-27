@@ -173,6 +173,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Recall answers a prompt of any size within its limit.** The recall hook sent the whole
+  prompt to the store as its query, and the store's time grows with the query, about 2
+  to 3 seconds a megabyte on a laptop. So a pasted log file of about 4 MB or more ran
+  past the 10-second limit every host gives recall, and the turn got no memories and no
+  status line. The hook now reads at most 8,000 characters of a prompt: a longer one
+  keeps its first and last 4,000, where a question usually is. A 16 MB prompt is now
+  answered in under a second. #348.
 - **The MCP server refuses NaN for a number argument.** The server's JSON parser accepts
   the bare token `NaN`, and the validator let it through the bounds on `confidence` and
   `min_score`, because every comparison with NaN is false. A NaN `min_score` then acted as

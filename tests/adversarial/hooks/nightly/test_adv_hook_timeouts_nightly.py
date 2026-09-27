@@ -81,7 +81,6 @@ def test_a_hosted_store_that_never_answers_costs_a_hook_no_more_than_its_limit(
     assert support.status_of("claude", result.reply)
 
 
-@known_bugs.xfail("B66")
 def test_recall_answers_a_sixteen_megabyte_prompt_within_its_limit(
         hooks: Make, store_env: dict[str, str]) -> None:
     """The recall hook sends the whole prompt to the store as its query, and the store's

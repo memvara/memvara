@@ -303,6 +303,21 @@ MIN_SUBSTANTIVE_CHARS = 12
 #: not crowd out the words the user actually typed this turn.
 MAX_CARRY_CHARS = 300
 
+#: The longest prompt recall reads. A longer one keeps its first and last half of this
+#: many characters. The store's time grows with the query, about 2 to 3 seconds a
+#: megabyte on a laptop, so a pasted log file of a few megabytes ran past the host's
+#: 10-second limit and the turn got no memories at all (#348). A question is at the start
+#: or the end of what someone pastes, and retrieval gains nothing from the middle.
+MAX_PROMPT_CHARS = 8000
+
+
+def _bounded(prompt: str) -> str:
+    """`prompt`, or its first and last `MAX_PROMPT_CHARS // 2` characters when longer."""
+    if len(prompt) <= MAX_PROMPT_CHARS:
+        return prompt
+    half = MAX_PROMPT_CHARS // 2
+    return f"{prompt[:half]}\n{prompt[-half:]}"
+
 #: The leading clause is load-bearing beyond its wording: `transcript.RECALL_MARKERS`
 #: matches on it to keep an injected block out of the text that gets mined. Change the
 #: clause and the block starts being read back as conversation -- see
@@ -779,7 +794,7 @@ def main() -> int:
     # matters because the miss is silent: the dedup file is keyed on session, so a renamed
     # key re-injects every memory on every turn while every banner still reads healthy.
     event = read_event(HOST, "recall", payload())
-    prompt = event.prompt.strip()
+    prompt = _bounded(event.prompt.strip())
     session = event.session
 
     if not prompt or prompt.startswith(SKIP_PREFIXES):
