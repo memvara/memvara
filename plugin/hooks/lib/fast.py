@@ -275,8 +275,8 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
     abandoned for the plain one after `rewrite_wait` seconds. See the module docstring.
 
     `min_score` is the floor for a store read through the library, directly or through the
-    daemon. `hosted_min_score` is the floor for the hosted client, and `None` means the
-    same as `min_score`. They are separate because the two routes usually score with
+    daemon. `hosted_min_score` is the floor for the hosted client, directly or through a
+    daemon that serves it, and `None` means the same as `min_score`. They are separate because the two routes usually score with
     different embedders, and a floor measured on one embedder's scores is wrong for the
     other's; `recall.py` explains the values it passes.
     """
@@ -307,6 +307,11 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
             # floor. A daemon is an optimisation and never a dependency: the two routes
             # returning different text for one query is the failure that rule exists for.
             request["min_score"] = min_score
+        if hosted_min_score is not None:
+            # The daemon may be serving the hosted client, on an install with no local
+            # store, and then it applies this floor instead. It is sent even when it is 0,
+            # so that a floor of 0 on the hosted route is not replaced by `min_score`.
+            request["hosted_min_score"] = hosted_min_score
         if header:
             request["header"] = header
         if include_episodes:

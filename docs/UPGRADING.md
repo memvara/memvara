@@ -24,7 +24,11 @@ injects less. Prompts the store knows nothing about stop getting unrelated memor
 weakly matching memory that scored from 0.29 up to 0.35 is no longer injected. To keep the
 old behaviour, set `MEMVARA_RECALL_MIN_SCORE=0.29`.
 
-**If you use a local store**, nothing changes.
+**If you use a local store**, nothing changes: the floor is still 0.29. That value was
+measured on the hashing embedder, a local store's default. If your store embeds with
+`BAAI/bge-small-en-v1.5` (installed by `memvara[local-embed]`), 0.29 filters nothing, and
+if it embeds with `all-MiniLM-L6-v2`, 0.35 suits it better. Measure it and set
+`MEMVARA_RECALL_MIN_SCORE`; #400 tracks choosing the floor from the store's embedder.
 
 **If you set `MEMVARA_RECALL_MIN_SCORE`**, nothing changes; your value applies to both
 routes.

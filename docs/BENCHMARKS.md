@@ -1888,7 +1888,8 @@ scores, and the two routes usually use different embedders:
   directly or through its daemon. A local store embeds with the hashing embedder
   unless `memvara[local-embed]` is installed.
 - `HOSTED_MIN_SCORE`, 0.35, applies when the hook reads the hosted service
-  through its own client. The service embeds with `all-MiniLM-L6-v2`.
+  through its own client, directly or through the daemon that serves that client.
+  The service embeds with `all-MiniLM-L6-v2`.
 
 `MEMVARA_RECALL_MIN_SCORE` overrides both. Both constants are in
 `plugin/hooks/recall.py`, and `bench/hosted.py` uses the one for the route it
@@ -1926,8 +1927,11 @@ and scored 0.33, and its question still gets its first-ranked result.
 `BAAI/bge-small-en-v1.5` is the model a local store uses once
 `memvara[local-embed]` is installed. Its scores run higher, so the local floor of
 0.29 filters nothing on it, and its two classes on the seeded store are only
-0.0157 apart. Neither default suits that embedder. Measure your own store and set
-`MEMVARA_RECALL_MIN_SCORE`.
+0.0157 apart. Neither default suits that embedder. A local store written with
+`all-MiniLM-L6-v2` also gets the local floor, because the floor follows the route
+and not the store's embedder. Measure your own store and set
+`MEMVARA_RECALL_MIN_SCORE`; issue #400 tracks choosing the floor from the
+embedder.
 
 The samples are small, and the hosted probes were written by hand. Treat both
 defaults as starting points. To measure a hosted store, run

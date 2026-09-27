@@ -51,7 +51,7 @@ ENV_MIN_SCORE = "MEMVARA_RECALL_MIN_SCORE"
 CLASSES = ("hit", "abstain", "verbatim", "ambiguous")
 
 
-def default_min_score(hosted: bool = True) -> float:
+def default_min_score(*, hosted: bool) -> float:
     """The floor the recall hook would actually apply on this machine.
 
     `hosted` says which route is measured: the hosted store, which is this

@@ -193,14 +193,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   embedder. The hosted service embeds with `all-MiniLM-L6-v2`, whose scores run higher:
   on a real hosted store of 2,407 claims, six of eight questions the store could not
   answer scored above 0.29 and got memories injected. The hook now applies
-  `HOSTED_MIN_SCORE = 0.35` when it reads the hosted service through its own client, which
-  silences all eight, and keeps `MIN_SCORE = 0.29` when it reads a store through the
-  library. One floor could not serve both: on the hashing embedder a scripted session's
+  `HOSTED_MIN_SCORE = 0.35` when it reads the hosted service through its own client,
+  directly or through the daemon that serves that client, which silences all eight. It
+  keeps `MIN_SCORE = 0.29` when it reads a store through the library. One floor could not serve both: on the hashing embedder a scripted session's
   correct answer scores 0.2997, which 0.35 would drop. `MEMVARA_RECALL_MIN_SCORE` still
   overrides both. `lib.fast.recall` takes the new `hosted_min_score` argument, and
   `bench/hosted.py` uses the floor of the route it measures. `docs/BENCHMARKS.md` has the
-  measurements, including one for `BAAI/bge-small-en-v1.5`, on which neither default
-  filters anything. The seven plugin repositories pick the change up at their next sync.
+  measurements. The floor follows the route rather than the store's embedder, so a local
+  store on `BAAI/bge-small-en-v1.5`, on which 0.29 filters nothing, or on
+  `all-MiniLM-L6-v2`, still gets 0.29; #400 tracks choosing it from the embedder. The seven plugin repositories pick the change up at their next sync.
   #154.
 - **One prompt starts at most one recall daemon, and a daemon that loses the race cannot
   strand the winner.** When no daemon was running and a prompt's first read found nothing

@@ -6,6 +6,7 @@ of this change and was found reviewing it, not to a behaviour anyone designed tw
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 
@@ -246,6 +247,34 @@ def test_a_local_store_gets_the_local_floor(monkeypatch, tmp_path):
                            spawn=False)
     assert ok is True
     assert store.floors == [0.29]
+
+
+@pytest.mark.parametrize("hosted, applied", [(True, 0.35), (False, 0.29)])
+def test_a_daemon_applies_the_floor_for_the_backend_it_serves(hosted, applied):
+    """On an install with no local store, the daemon serves the hosted client, so every
+    prompt after the first reaches the hosted service through it. It must apply the hosted
+    floor then, or only the first prompt of a session would get it."""
+    import daemon as daemon_hook
+
+    backend = _Asked()
+    served = daemon_hook.Daemon("/tmp/unused-floor.sock", backend, hosted=hosted)
+    reply = served._answer({"q": "who owns billing", "k": 2, "budget": 100,
+                            "min_score": 0.29, "hosted_min_score": 0.35})
+    assert reply.get("ok") is True, reply
+    assert backend.floors == [applied]
+
+
+def test_the_daemon_request_carries_the_hosted_floor(monkeypatch, tmp_path):
+    from lib import fast
+
+    sent = []
+    monkeypatch.setattr(fast, "socket_path", lambda *a, **k: str(tmp_path / "d.sock"))
+    monkeypatch.setattr(fast, "send", lambda path, request, timeout: sent.append(request)
+                        or json.dumps({"ok": True, "text": ""}))
+    _, ok, _ = fast.recall("who owns billing", min_score=0.29, hosted_min_score=0.35,
+                           spawn=False)
+    assert ok is True
+    assert (sent[0]["min_score"], sent[0]["hosted_min_score"]) == (0.29, 0.35)
 
 
 class OlderBackend:

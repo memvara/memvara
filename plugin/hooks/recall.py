@@ -547,7 +547,8 @@ def _sample(prompt: str, memories: "list[str]", *, anaphoric: bool) -> None:
 #: 0.2997, and 0.29 is.
 #:
 #: `HOSTED_MIN_SCORE` is the floor for the hosted service, which the hook reaches through
-#: its own client (`lib.hosted`) and which embeds with `all-MiniLM-L6-v2`. With that
+#: its own client (`lib.hosted`), directly or through a daemon that serves that client, and
+#: which embeds with `all-MiniLM-L6-v2`. With that
 #: embedder the seeded store's answerable questions scored 0.4704 or more and its
 #: unanswerable ones 0.2977 or less. A real hosted store of 2,407 claims, probed with 20
 #: answerable and 8 unanswerable questions, gave 0.3713 or more and 0.3468 or less. So the
@@ -562,7 +563,9 @@ def _sample(prompt: str, memories: "list[str]", *, anaphoric: bool) -> None:
 #: embedder it was measured with and is only a starting point for any other. With
 #: `memvara[local-embed]` installed, a local store embeds with `BAAI/bge-small-en-v1.5`,
 #: whose scores run higher: on the seeded store its unanswerable questions reached 0.5584,
-#: so 0.29 filters nothing there. Recalibrate against your own store and set
+#: so 0.29 filters nothing there. A local store written with `all-MiniLM-L6-v2`, which was
+#: the local default before bge-small, also gets 0.29, although 0.35 suits that model. The
+#: floor follows the route and not the store's own embedder; #400 tracks that. Recalibrate against your own store and set
 #: `MEMVARA_RECALL_MIN_SCORE`, which overrides both defaults. For a local store:
 #:
 #:     python -m benchmarks.plugin_recall.calibrate --db ~/.memvara/store.db
@@ -887,6 +890,10 @@ def _main() -> int:
     # of blindness for another. The carried text goes first because it is the topic.
     query = f"{carried} {prompt}".strip() if (anaphoric and carried) else prompt
 
+    # Both floors are passed on every read, because which route answers is decided inside
+    # `fast_recall`.
+    floor, hosted_floor = _min_score(), _min_score(HOSTED_MIN_SCORE)
+
     # A rewrite is started only when the hook can afford to wait for it: the model call may
     # take `REWRITE_WAIT_SEC` before the plain read is served, and the harness kills the
     # hook at 10 seconds with nothing printed. The clock is compared first: it is free,
@@ -895,8 +902,7 @@ def _main() -> int:
                and rewrite_allowed())
     try:
         block, ok, why = fast_recall(query, k=K, budget=BUDGET, header=HEADER,
-                                     min_score=_min_score(),
-                                     hosted_min_score=_min_score(HOSTED_MIN_SCORE),
+                                     min_score=floor, hosted_min_score=hosted_floor,
                                      query_rewrite=rewrite,
                                      rewrite_wait=REWRITE_WAIT_SEC)
     except Exception:
@@ -943,9 +949,8 @@ def _main() -> int:
                 # for the same store (#344).
                 wider, wider_ok, _ = fast_recall(query, k=EPISODE_K, budget=EPISODE_BUDGET,
                                                  header=HEADER, include_episodes=True,
-                                                 min_score=_min_score(),
-                                                 hosted_min_score=_min_score(
-                                                     HOSTED_MIN_SCORE),
+                                                 min_score=floor,
+                                                 hosted_min_score=hosted_floor,
                                                  query_rewrite=False, spawn=False)
             except Exception:
                 wider, wider_ok = "", False
