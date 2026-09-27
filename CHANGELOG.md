@@ -187,6 +187,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`search()` and `recall()` refuse a memory type that does not exist.** A misspelled name
+  in `memory_types`, such as `"procedurel"`, kept no claim, so the call returned nothing
+  and raised no error, which a caller could not tell from a store with nothing relevant.
+  Both now raise `ValueError: memory_type must be one of episodic, semantic, procedural,
+  not 'procedurel'` before reading anything, the words `remember()` uses (#288). The check
+  is in `HybridRetriever.search`, so the async classes refuse too, and the hosted clients
+  refuse before sending the request rather than leaving it to the server's 422. #289.
 - **A ranked read whose model call fails now serves the plain read.** On a retriever with
   a `read_selector`, `search(ranked=True)` gathers up to `rerank_top_n` turns for the
   selector. When the selector failed (outcome `fallback`, `key_rejected` or `disabled`),

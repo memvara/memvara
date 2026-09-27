@@ -7,6 +7,28 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## search() and recall() refuse a memory type that does not exist
+
+### What changed
+
+A name in `memory_types` that is not `episodic`, `semantic` or `procedural` used to keep
+no claim, so `search()` and `recall()` returned nothing and raised nothing. They now raise
+`ValueError` before reading anything. So do the async classes and the hosted clients.
+
+### Who this changes
+
+**If you pass `memory_types` from configuration or from user input**, a wrong name that
+used to return an empty result now raises. That empty result was never an answer about
+the store: fix the name.
+
+### How to find your own instances
+
+```bash
+grep -rn "memory_types=" --include="*.py" .
+```
+
+---
+
 ## import_mem0 dates mem0's updates and deletes by when they happened
 
 ### What changed
