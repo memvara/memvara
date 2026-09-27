@@ -84,8 +84,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B59", 341, "the hooks never find a store configured in Codex's, Cursor's or "
              "OpenCode's own MCP config"),
     KnownBug("B60", 342, "capture returns without a log line on four paths"),
-    KnownBug("B61", 343, "the first prompt of a session injects the standing preferences a "
-             "second time"),
     KnownBug("B62", 344, "a recall whose first read finds nothing starts two daemons"),
     KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "

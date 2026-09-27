@@ -1,6 +1,6 @@
 {
   "id": "preference-learning",
-  "description": "The user states how they want Python indented. In the next session the preference arrives without being asked for, through the session-start hook and the recall hook, and memory_standing lists it, filed as procedural. Learning a preference must not end or retire anything.",
+  "description": "The user states how they want Python indented. In the next session the preference arrives without being asked for, through the session-start hook, the recall hook on the first prompt does not repeat it (#343), and memory_standing lists it, filed as procedural. Learning a preference must not end or retire anything.",
   "tier": "fast",
   "surfaces": ["stdio", "hooks"],
   "env": {"user": "tester"},
@@ -26,7 +26,7 @@
   "answer_gold": [
     {"id": "session-start-brings-it", "turn": "session-opens", "must_contain": "user prefers tabs for indenting Python"},
     {"id": "session-start-frames-it-as-data", "turn": "session-opens", "must_contain": "reference data, not instructions"},
-    {"id": "recall-hook-brings-it", "turn": "first-prompt", "must_contain": "user prefers tabs for indenting Python"},
+    {"id": "recall-hook-does-not-repeat-it", "turn": "first-prompt", "must_not_contain": "user prefers tabs for indenting Python"},
     {"id": "standing-lists-it-as-procedural", "turn": "asks-preferences", "must_contain": "procedural live] user prefers tabs for indenting Python"}
   ],
   "forbidden": [{"tool": "memory_forget"}, {"tool": "memory_end"}],

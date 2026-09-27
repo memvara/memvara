@@ -30,6 +30,7 @@ opening brief is the other case: narrative background is exactly what it is for.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -46,7 +47,7 @@ from lib.mark import count as count_memories  # noqa: E402
 from lib.mark import mark_block  # noqa: E402
 from lib.mark import on as mark_on  # noqa: E402
 from lib.project import bind as bind_project  # noqa: E402
-from lib.standing import standing_block  # noqa: E402
+from lib.standing import record_injected, standing_block  # noqa: E402
 from lib.write import open_writer  # noqa: E402
 
 #: Wider than the per-prompt hook: this runs once per session, not once per turn.
@@ -197,7 +198,8 @@ def _main() -> int:
     # checkout, and `cwd` is how the second half is known. An unreadable payload gives "",
     # which `_mine` treats as "user notes only" -- the safe direction, since the failure it
     # avoids is carrying another project's instructions into this one.
-    cwd = read_event(host, "session_start", payload()).cwd
+    event = read_event(host, "session_start", payload())
+    cwd = event.cwd
     # Before the store is opened: the hosted client sends this project with every call.
     bind_project(cwd)
     # Once per session rather than on every write: the per-session counters and the
@@ -243,7 +245,14 @@ def _main() -> int:
         if binding:
             parts.append(binding)
 
+        #: Whether the standing block came from the ranked read below. Recall's refresh
+        #: never uses that read, so its digest would differ from the full block the next
+        #: refresh builds, and that refresh would inject the block again as "updated".
+        legacy = False
+
         def _legacy_standing() -> str:
+            nonlocal legacy
+            legacy = True
             return str(store.recall(QUERY, k=STANDING_K,
                                     budget=STANDING_FALLBACK_TOKENS,
                                     header=STANDING_HEADER,
@@ -292,6 +301,12 @@ def _main() -> int:
     _emit(Reply("session_start",
                 status=status(f"{opened} · {missing}" if missing else opened),
                 context="\n\n".join(parts)))
+    if standing.strip() and not legacy and "recall" in host.events:
+        # After the reply is written, so only a block that was delivered is recorded. The
+        # recall hook reads this, and without it the first prompt injected the same block
+        # again (#343). Not on a host that runs no recall, such as Cursor: nothing there
+        # would read the record, and recall is what prunes these files.
+        record_injected(event.session, standing, time.time())
     return 0
 
 
