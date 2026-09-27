@@ -230,11 +230,9 @@ conftest imports, because pytest imports those files before the test, so a helpe
 only a conftest imports still reaches the tests below it. For strings, it also looks in a
 conftest whose fixtures the test uses, or that has an autouse fixture: that is how a test
 that starts a plugin hook finds the `plugin` folder, through a fixture in
-`tests/adversarial/conftest.py`. A string that is a glob pattern, such as the `"*.md"` in
-`ROOT.rglob("*.md")`, counts as naming every file that is not Python and whose name it
-matches. This is coarse for the library itself. Almost every test imports `memvara`,
-and `memvara/__init__.py` imports most of the package, so a change to a module under
-`memvara/` usually selects most of the suite. That is correct, because those tests do run
+`tests/adversarial/conftest.py`. This is coarse for the library itself. Almost every test
+imports `memvara`, and `memvara/__init__.py` imports most of the package, so a change to a
+module under `memvara/` usually selects most of the suite. That is correct, because those tests do run
 that code, and it is still faster than the old gate because it measures no coverage and runs
 no type checks. It is much narrower for scripts, benchmarks, tests and documents.
 
@@ -246,27 +244,42 @@ the change reaches, such as `tests/harness/known_bugs.py` or
 `tests/adversarial/parity/compare.py`, as well as the tests that import it. The same holds
 for every module under `memvara/`.
 
-**One test reads the whole tree.** `tests/adversarial/test_adv_tiers.py` runs
-`pytest --collect-only` over the repository in a child process, once for every tier, so it
-imports every test module there is, nightly and weekly ones included. A Python file that
-fails to import fails it, and no import or string connects it to that file. The selection
-therefore runs it whenever a Python file changes; it takes about two seconds. It is listed
-in `WHOLE_TREE_READERS` at the top of `scripts/test_changed.py`, and a new test that reads
-the tree the same way has to be added there.
+**Three routes reach many tests at once, and each is found by its shape.** None of them
+is a list somebody has to remember to extend, and each has a guard test in
+`tests/test_test_changed.py` that scans the real tree.
+
+1. **A plugin registered by a conftest sees every test in the run.** Any `conftest.py`
+   that calls `config.pluginmanager.register(...)` registers a plugin for the whole run,
+   wherever the conftest sits; `tests/conftest.py` registers the skip ledger this way. A
+   change to a file outside the library that such a conftest imports runs the full suite.
+2. **A test that collects the whole tree is reached by every Python file.** A module under
+   `tests/` whose strings include both `"pytest"` and `"--collect-only"` runs
+   `pytest --collect-only` in a child process, which imports every test module of every
+   tier, so a Python file that fails to import fails it. Every test that imports such a
+   module runs whenever a Python file changes. Today that is
+   `tests/adversarial/test_adv_tiers.py`, which takes about two seconds.
+3. **A pattern reaches every file it matches.** A string holding `*` or `?`, such as the
+   `"*.md"` in `ROOT.rglob("*.md")`, counts as naming every file whose name it matches,
+   read both as a glob and as a regular expression, because a regular expression can miss
+   a file when read as a glob. For a Python file, only the patterns of `.glob()` and
+   `.rglob()` calls whose folder no string names count, such as the `root.rglob("*.py")`
+   with which `tests/harness/checklist.py` reads every test file; other Python files are
+   followed through imports. A bare `"*"` or `"**"` would match every file, so it is not
+   tried. Instead, every such glob under `tests/` must name its folder as a string, such
+   as `ROOT / "docs"`, or be listed with its reason in `BARE_GLOB_EXCEPTIONS`; a new test
+   that builds its folder from `__file__` and globs everything fails that guard.
 
 **When it runs the full suite instead.** The rule is that a changed file runs the full fast
 suite unless the selection can show what reads it. That happens in three ways. A file named
 in `FULL_SUITE` or `DATA_FOLDERS` at the top of `scripts/test_changed.py` reaches the tests
 by a route the import graph cannot see, such as a `conftest.py` file or
-`tests/harness/tiers.py`, which the root `conftest.py` loads from its path. A module outside
-the library that `tests/conftest.py` imports, such as the skip ledger in
-`tests/harness/skips.py`, is registered as a plugin that sees every test in the run, so it
-runs everything too. Any other changed file
-that no test imports or names also runs the full suite, unless it is prose as
-`PROSE_EXTENSIONS` and `NOT_PROSE_FOLDERS` define it: a new tool's configuration file is read by
-something the selection cannot see, while a document that no test names can fail nothing.
-Those constants are the one list, each entry with its reason. The command prints which mode
-it chose and which file decided it. If you find a file it should have followed and did not,
+`tests/harness/tiers.py`, which the root `conftest.py` loads from its path. A file that a
+plugin-registering conftest imports runs everything too, as the first of the three routes
+above says. Any other changed file that no test imports or names also runs the full
+suite, unless it is prose as `PROSE_EXTENSIONS` and `NOT_PROSE_FOLDERS` define it: a new
+tool's configuration file is read by something the selection cannot see, while a document
+that no test names can fail nothing. Those constants are the one list, each entry with its
+reason. The command prints which mode it chose and which file decided it. If you find a file it should have followed and did not,
 add it there rather than working around it.
 
 **How the selection was checked against reality, on 2026-09-27.** Eleven files were broken
@@ -279,9 +292,14 @@ not select `tests/test_docs.py` for the new release note, which that test reads 
 helper. The rule described above misses none of the eleven. It also no longer runs the
 full suite for every change to the test harness or the plugin, which had sent 15 of the 19
 most recently merged pull requests to the full suite. Eleven breaks are evidence and not
-proof, so
-`tests/test_test_changed.py` keeps one test for each route, and a test that reads files in
-a way none of these routes describe needs a route of its own.
+proof, so `tests/test_test_changed.py` keeps one test for each route, and a test that
+reads files in a way none of these routes describe needs a route of its own. A review of
+the same change found three more ways a test could have been missed: a second collector
+of the tree, a plugin registered from a conftest other than `tests/conftest.py`, and a
+regular expression read as a glob. Fixing those found a fourth: `tests/harness/checklist.py`
+reads the source of every test file through `root.rglob("*.py")`, so a changed test file
+could fail `tests/adversarial/test_adv_checklist.py` without selecting it. The three routes
+above cover all four.
 
 **Why it follows imports rather than recorded coverage.** `pytest-testmon` records which
 tests execute which code and selects more precisely. It was not chosen, for four reasons.

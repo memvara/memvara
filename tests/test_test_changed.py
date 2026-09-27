@@ -12,6 +12,7 @@ tier rules copied into it, and replace pytest with a runner that records its com
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -279,6 +280,34 @@ def test_a_file_a_test_reads_through_a_glob_pattern_reaches_that_test() -> None:
     assert set(tc.affected(_graph(files), ["release/notes.yaml"])) == set()
 
 
+def test_a_pattern_is_also_read_as_a_regular_expression() -> None:
+    """A regular expression that holds `*` or `?` looks like a glob, and as a glob it can
+    miss the file it selects: fnmatch reads the `.` and the `\\d` literally. It is tried
+    both ways, and a match either way selects the test."""
+    files = {"tests/test_notes.py": "NOTES = re.compile(r'notes-\\d+.*\\.yaml')\n",
+             "tests/test_other.py": "import json\n"}
+    changed = "release/notes-2026-09.yaml"
+    assert not tc.fnmatch.fnmatchcase(changed.rsplit("/", 1)[-1], r"notes-\d+.*\.yaml")
+    assert set(tc.affected(_graph(files), [changed])) == {"tests/test_notes.py"}
+    assert set(tc.affected(_graph(files), ["release/notes.json"])) == set()
+
+
+def test_a_glob_over_a_folder_no_literal_names_reaches_python_files_too() -> None:
+    """tests/harness/checklist.py reads the source of every test file through
+    `root.rglob("*.py")` and imports none of them, so a changed test file can fail the
+    checklist's tests. A glob whose folder a string names, such as the plugin's host
+    list, is followed through that folder's name instead, and any other string is not
+    tried against a Python file at all."""
+    files = {"tests/harness/__init__.py": "",
+             "tests/harness/checklist.py": "def scan(root):\n    return root.rglob('*.py')\n",
+             "tests/test_checklist.py": "from harness import checklist\n",
+             "tests/harness/hosts.py": "HOSTS = (ROOT / 'plugin' / 'hosts').glob('*.py')\n",
+             "tests/test_hosts.py": "from harness import hosts\n",
+             "tests/test_strings.py": "PATTERN = '*.py'\n"}
+    reached = set(tc.affected(_graph(files), ["tests/test_login.py"]))
+    assert reached == {"tests/harness/checklist.py", "tests/test_checklist.py"}
+
+
 def test_a_module_only_a_conftest_imports_reaches_every_test_below_that_conftest() -> None:
     """pytest imports a conftest file before the tests below it, so a module that fails to
     import there fails all of them, whether or not they use its fixtures. This is the
@@ -323,18 +352,45 @@ def test_a_string_in_a_conftest_reaches_the_tests_that_use_its_fixtures(
     assert set(tc.affected(_graph(files), ["plugin/hooks/recall.py"])) == reached
 
 
-def test_what_the_tests_conftest_imports_outside_the_library_is_session_wide() -> None:
+REGISTERS = """{imports}
+
+def pytest_configure(config):
+    config.pluginmanager.register(skips.SkipLedger(), "skip-ledger")
+"""
+
+
+def test_what_a_plugin_registering_conftest_imports_is_session_wide() -> None:
     """tests/conftest.py registers the skip ledger as a plugin that sees every test in a
-    run, so a change to the ledger, or to anything it imports, runs the full suite."""
+    run, so a change to the ledger, or to anything it imports, runs the full suite. A
+    conftest that only imports a module registers nothing, and its imports are followed
+    like any other."""
     files = {"memvara/__init__.py": "",
-             "tests/conftest.py": "import memvara\nfrom harness import skips\n",
+             "tests/conftest.py": REGISTERS.format(
+                 imports="import memvara\nfrom harness import skips"),
              "tests/harness/__init__.py": "",
              "tests/harness/skips.py": "from . import rules\n",
              "tests/harness/rules.py": "",
-             "tests/harness/other.py": ""}
+             "tests/harness/other.py": "",
+             "tests/other/conftest.py": "from harness import other\n"}
     assert tc.session_wide(_graph(files)) == {
-        "tests/harness/__init__.py", "tests/harness/skips.py", "tests/harness/rules.py"}
-    assert tc.session_wide(_graph({"tests/test_a.py": ""})) == set()
+        "tests/harness/__init__.py": "tests/conftest.py",
+        "tests/harness/skips.py": "tests/conftest.py",
+        "tests/harness/rules.py": "tests/conftest.py"}
+    assert tc.session_wide(_graph({"tests/test_a.py": ""})) == {}
+
+
+def test_a_nested_conftest_that_registers_a_plugin_is_session_wide_too() -> None:
+    """A plugin registered from any conftest sees every test in the run, not only the
+    tests below that conftest."""
+    files = {"tests/harness/__init__.py": "",
+             "tests/harness/skips.py": "",
+             "tests/adversarial/__init__.py": "",
+             "tests/adversarial/deep/__init__.py": "",
+             "tests/adversarial/deep/conftest.py": REGISTERS.format(
+                 imports="from harness import skips")}
+    assert tc.session_wide(_graph(files)) == {
+        "tests/harness/__init__.py": "tests/adversarial/deep/conftest.py",
+        "tests/harness/skips.py": "tests/adversarial/deep/conftest.py"}
 
 
 @pytest.fixture(scope="module")
@@ -357,10 +413,128 @@ def test_the_two_misses_and_the_plugin_route_hold_in_this_repository(
     assert reader in tc.affected(this_repository, [changed])
 
 
-def test_every_whole_tree_reader_exists() -> None:
-    """A renamed or removed reader would stop being selected without any message."""
-    for path in tc.WHOLE_TREE_READERS:
-        assert (ROOT / path).is_file(), path
+def _registers_a_plugin(path: pathlib.Path) -> bool:
+    """Read independently of the script: whether a file calls `...pluginmanager.register`."""
+    return any(isinstance(node, ast.Call) and ast.unparse(node.func).endswith(
+                   "pluginmanager.register")
+               for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))))
+
+
+def test_every_conftest_in_this_repository_that_registers_a_plugin_is_session_wide(
+        this_repository: object) -> None:
+    wide = tc.session_wide(this_repository)
+    registering = [path.relative_to(ROOT).as_posix()
+                   for path in (ROOT / "tests").rglob("conftest.py") if _registers_a_plugin(path)]
+    assert "tests/conftest.py" in registering
+    for conftest in registering:
+        imported = {path for path in this_repository.closure(conftest)
+                    if not path.startswith(tc.LIBRARY) and path != conftest}
+        assert imported <= set(wide), (conftest, imported - set(wide))
+    assert "tests/harness/skips.py" in wide
+
+
+#: A module that collects the tree the way tests/adversarial/test_adv_tiers.py does.
+COLLECTOR = """import subprocess
+import sys
+
+def collect(*args):
+    return subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", *args])
+"""
+
+
+def test_a_second_module_that_collects_the_tree_is_a_reader_and_so_are_its_importers() -> None:
+    """The shape is recognised wherever it is, so a new test of this kind needs no list
+    entry. A test that imports a helper of that shape collects the tree as well."""
+    files = {"tests/adversarial/__init__.py": "",
+             "tests/adversarial/test_adv_tiers.py": COLLECTOR,
+             "tests/harness/__init__.py": "",
+             "tests/harness/collect.py": COLLECTOR,
+             "tests/test_uses_it.py": "from harness import collect\n",
+             "tests/test_runs_pytest.py": "ARGS = ['-m', 'pytest', '-q']\n",
+             "scripts/runner.py": COLLECTOR,
+             "tests/test_runner.py": "import runner\n"}
+    assert tc.whole_tree_readers(_graph(files)) == [
+        "tests/adversarial/test_adv_tiers.py", "tests/harness/collect.py",
+        "tests/test_uses_it.py"]
+
+
+def _collects_the_tree(path: pathlib.Path) -> bool:
+    """Read independently of the script: whether a module holds both strings as literals."""
+    literals = {node.value for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    return tc.COLLECTS_THE_TREE <= literals
+
+
+def test_every_module_in_this_repository_that_collects_the_tree_is_a_reader(
+        this_repository: object) -> None:
+    readers = set(tc.whole_tree_readers(this_repository))
+    shaped = {path.relative_to(ROOT).as_posix() for path in (ROOT / "tests").rglob("*.py")
+              if _collects_the_tree(path)}
+    assert "tests/adversarial/test_adv_tiers.py" in shaped
+    assert {path for path in shaped if tc.is_target(path)} <= readers
+
+
+#: The calls under tests/ that glob every file, "*" or "**", below a folder that no string
+#: in the call names as a top-level folder of the repository. A bare pattern is not tried
+#: against changed files (it would tie every test that makes one to every change), so each
+#: of these needs a reason why a change below its folder still reaches its test.
+BARE_GLOB_EXCEPTIONS = {
+    "tests/adversarial/test_adv_tiers.py":
+        "walks folders under tests/adversarial. It collects the whole tree, so it runs "
+        "for every Python change, and a non-Python file under tests/ runs the full suite.",
+    "tests/harness/tiers.py":
+        "walks folders under tests/ for tests/adversarial/test_adv_tiers.py, which "
+        "collects the whole tree; a non-Python file under tests/ runs the full suite.",
+    "tests/test_packaging.py":
+        "walks the packaged skill under memvara/skills. A non-Python file under memvara/ "
+        "runs the full suite, and the one Python file there, memvara_auth.py, is named "
+        "in this file.",
+    "tests/test_plugin.py":
+        "walks the packaged skill and plugin/skills/memvara. A non-Python file under "
+        "memvara/ runs the full suite, and this file names the plugin folder.",
+    "tests/adversarial/coverage/test_adv_cover_inv_core_release.py":
+        "walks the packaged skill and plugin/skills/memvara. A non-Python file under "
+        "memvara/ runs the full suite, and this file names the plugin folder.",
+}
+
+
+def _bare_globs(path: pathlib.Path) -> list[ast.Call]:
+    return [node for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("glob", "rglob") and node.args
+            and isinstance(node.args[0], ast.Constant) and node.args[0].value in ("*", "**")]
+
+
+def _names_a_top_level_folder(call: ast.Call) -> bool:
+    """Whether a string in the call's receiver names a top-level folder of the repository
+    that the folder-name route follows, as `(ROOT / "docs").rglob("*")` does."""
+    assert isinstance(call.func, ast.Attribute)
+    for node in ast.walk(call.func.value):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            top = node.value.split("/", 1)[0]
+            if (ROOT / top).is_dir() and f"{top}/" not in tc.NAMED_THROUGH_IMPORTS:
+                return True
+    return False
+
+
+def test_every_bare_glob_under_tests_names_its_folder_or_has_a_reason() -> None:
+    """A future test that builds its folder from __file__ and globs everything under it
+    would be selected for no change below that folder. This makes it fail here instead,
+    until its folder is spelled out or its reason is written down above."""
+    unexplained, stale = [], []
+    for path in sorted((ROOT / "tests").rglob("*.py")):
+        name = path.relative_to(ROOT).as_posix()
+        calls = [call for call in _bare_globs(path) if not _names_a_top_level_folder(call)]
+        if calls and name not in BARE_GLOB_EXCEPTIONS:
+            unexplained += [f"{name}:{call.lineno}" for call in calls]
+        if not calls and name in BARE_GLOB_EXCEPTIONS:
+            stale.append(name)
+    assert unexplained == [], (
+        "These glob every file under a folder that no string names, so no change under that "
+        "folder selects their test. Spell the folder as a string, such as "
+        "ROOT / \"docs\", or add the file to BARE_GLOB_EXCEPTIONS with the reason a change "
+        f"there still reaches it: {unexplained}")
+    assert stale == [], f"These no longer glob everything; remove their exception: {stale}"
 
 
 # -- The last run's failures ---------------------------------------------------------------
@@ -584,7 +758,7 @@ def test_a_python_change_runs_the_test_that_collects_the_whole_tree(
     """The second miss: tests/adversarial/test_adv_tiers.py collects every tier in a child
     process, so a nightly test that cannot be imported fails it, and nothing else in the
     fast tier. A change to a document does not select it."""
-    _write(repo, "tests/adversarial/test_adv_tiers.py", "import subprocess\n")
+    _write(repo, "tests/adversarial/test_adv_tiers.py", COLLECTOR)
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "add the whole-tree reader")
     _git(repo, "branch", "-f", "main", "HEAD")
@@ -608,7 +782,7 @@ def test_a_python_change_runs_the_test_that_collects_the_whole_tree(
 
 def test_a_change_to_what_the_tests_conftest_registers_runs_the_full_suite(
         repo: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
-    _write(repo, "tests/conftest.py", "from harness import skips\n")
+    _write(repo, "tests/conftest.py", REGISTERS.format(imports="from harness import skips"))
     _write(repo, "tests/harness/skips.py", "RULES = ()\n")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "add the ledger")
@@ -618,8 +792,8 @@ def test_a_change_to_what_the_tests_conftest_registers_runs_the_full_suite(
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
     [(command, _, _)] = runner.calls
     assert _given(command) == []
-    assert ("tests/harness/skips.py changed: tests/conftest.py imports it and registers it "
-            "as a plugin that sees every test in the run.") in capsys.readouterr().out
+    assert ("tests/harness/skips.py changed: tests/conftest.py imports it and registers a "
+            "plugin that sees every test in the run.") in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("installed, passed, workers", [
