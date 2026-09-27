@@ -254,6 +254,13 @@ def pytest_configure(config: Any) -> None:
         "markers",
         "derives_project: let ServerConfig.from_env() derive the project from a git "
         "remote, which tests/conftest.py otherwise switches off")
+    # The adversarial suite's conftest registers this mark too, but a covers mark can sit
+    # on any test under tests/, and a run that never loads that conftest would otherwise
+    # warn that the mark is unknown. Registering a mark twice is harmless.
+    config.addinivalue_line(
+        "markers",
+        "covers(*items): the checklist items this test covers, such as "
+        "'tool:memory_recall' or 'inv:I3'. See docs/claude/testing.md.")
     config.pluginmanager.register(skips_module.SkipLedger(), "memvara-skip-ledger")
 
 

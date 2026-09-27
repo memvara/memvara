@@ -503,6 +503,7 @@ def test_the_state_filter_is_in_the_sql_not_applied_after_the_page(mem):
     lambda m, **kw: m.store.candidate_ids([SCOPE], **kw),
     lambda m, **kw: list(m.store.iter_claims("acme", **kw)),
 ])
+@pytest.mark.covers("inv:MM1")
 def test_states_and_include_invalidated_together_raise_rather_than_pick_one(mem, call):
     """There is no reading of `states=["retired"], include_invalidated=False` in which one
     of the two is not being ignored. Silently honouring either answers a question the
