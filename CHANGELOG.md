@@ -86,7 +86,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     `@pytest.mark.covers(...)`. `tests/harness/checklist_baseline.txt` lists today's gaps,
     and the fast tier fails whenever the baseline and today's gaps differ, for example
     when a tool is added with no test. A change can still add a line to the baseline, so
-    review, not a test, keeps the baseline from growing.
+    review, not a test, keeps the baseline from growing. The baseline is empty: every
+    item on the checklist has a test that covers it, apart from four rules for people and
+    two switches that only the plugin repositories act on, which are exempt with a reason.
   - **A model that misbehaves.** `tests/adversarial/model_faults/` drives the write and
     read paths with a scripted model that answers badly: malformed or cut-off output,
     invented predicates, thousands of claims in one reply, timeouts, rate limits, a
