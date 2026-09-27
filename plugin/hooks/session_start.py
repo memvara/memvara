@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.envelope import read_event, write  # noqa: E402
 from core.host import Reply, active  # noqa: E402
 from lib.ipc import (  # noqa: E402
-    due_capture_alert, payload, plural, status, under_extraction, with_alert,
+    due_capture_alert, log_line, payload, plural, status, under_extraction, with_alert,
 )
 from lib import counts, project  # noqa: E402
 from lib.agentic import sweep_configs as sweep_capture_configs  # noqa: E402
@@ -127,12 +127,10 @@ def _hosted_binding(store: object) -> str:
     """The binding line from the hosted endpoint's own `memory_stats` report.
 
     The server already formats the scope and the count, so this reads them back rather than
-    deriving a second version that could disagree with the first.
+    deriving a second version that could disagree with the first. A failed call raises, so
+    that `main` can say the store did not answer rather than that it is empty.
     """
-    try:
-        report = str(store.stats() or "")  # type: ignore[attr-defined]
-    except Exception:
-        return ""
+    report = str(store.stats() or "")  # type: ignore[attr-defined]
     scope, visible = "", ""
     for line in report.splitlines():
         line = line.strip()
@@ -223,10 +221,18 @@ def main() -> int:
     #: What a section could not be fetched for, in words. Set before the `try` so that
     #: every path to the banner below has it, including the ones that leave early.
     missing = ""
+    #: `(section, exception)` for each section the store did not answer for. A store that
+    #: did not answer is not an empty one, and before this list the hook said "nothing
+    #: stored yet" of an endpoint it could not reach, and logged nothing (#339).
+    failed: "list[tuple[str, BaseException]]" = []
     mark = mark_on()
     try:
         parts = []
-        binding = _hosted_binding(store) if hosted else _local_binding(store)
+        try:
+            binding = _hosted_binding(store) if hosted else _local_binding(store)
+        except Exception as exc:
+            binding = ""
+            failed.append(("binding", exc))
         if binding:
             parts.append(binding)
 
@@ -240,8 +246,9 @@ def main() -> int:
             standing = standing_block(store, hosted=hosted, budget=STANDING_BUDGET,
                                       header=STANDING_HEADER, fallback=_legacy_standing,
                                       cwd=cwd)
-        except Exception:
+        except Exception as exc:
             standing = ""
+            failed.append(("standing", exc))
         if standing.strip():
             # Marked here as well as in `render`, because the legacy fallback returns the
             # server's own block, whose bullets carry no mark. Marking twice is harmless.
@@ -258,18 +265,26 @@ def main() -> int:
             # memory. Measured on a spent quota: three sections and 15,324 characters
             # became two and 13,541, with the banner unchanged.
             notes, missing = "", _why(exc)
+            failed.append(("notes", exc))
         if notes.strip():
             parts.append(mark_block(notes.rstrip(), mark))
     finally:
         if close is not None:
             close()
 
+    for section, exc in failed:
+        # On every host, as recall logs its failures, because most hosts show no status
+        # line and the log is the only account there is.
+        log_line("session_start", f"failed section={section} "
+                                  f"reason={getattr(exc, 'code', '') or type(exc).__name__}")
+
     if not parts:
         # "Nothing stored yet" is a claim about the store's contents. Only make it when
         # every section came back empty rather than unavailable -- otherwise a store that
         # is merely unreachable is reported as one that is empty, and nobody investigates
         # an empty store.
-        _emit(Reply("session_start", status=status(missing or "nothing stored yet")))
+        empty = "recall failed" if failed else "nothing stored yet"
+        _emit(Reply("session_start", status=status(missing or empty)))
         return 0
 
     count = count_memories("\n\n".join(parts))

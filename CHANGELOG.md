@@ -173,6 +173,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Session start says so when the store did not answer, instead of "nothing stored
+  yet".** Session start swallowed each section's failure: the scope line, the standing
+  block and the notes each became empty, and with every section empty it reported
+  "nothing stored yet", a claim about the store's contents it had no basis for, and
+  logged nothing. On a host that shows no status line, an unreachable store looked
+  exactly like no store configured. Session start now keeps each section that failed,
+  logs `failed section=<section> reason=<code or exception class>` to
+  `session_start.log` on every host, and reports "recall failed" when nothing arrived
+  because a section failed. "Nothing stored yet" now means every section answered and
+  was empty. #339.
 - **The LlamaIndex retriever's docstring shows an example that runs.** It showed
   `index_or_engine.as_query_engine(retriever=MemvaraRetriever(mem, user="alice"))`, which
   raises `TypeError` in llama-index-core at both memvara's floor, 0.13.0, and 0.14.25:

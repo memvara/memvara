@@ -92,7 +92,6 @@ def test_nothing_matching_is_told_apart_from_nothing_configured_without_a_status
 
 
 @pytest.mark.parametrize("host", FAST_HOSTS)
-@known_bugs.xfail("B57")
 def test_session_start_says_so_when_it_could_not_reach_the_store(
         outcomes: support.Runs, host: str) -> None:
     """session_start.py names only a spent quota among the reasons a section is missing,

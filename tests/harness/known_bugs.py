@@ -76,7 +76,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              'configured"'),
     KnownBug("B56", 338, 'on Codex, Copilot and OpenCode, "not configured" and "no matching '
              'memories" look identical'),
-    KnownBug("B57", 339, "session start reports an unreachable hosted store wrongly"),
     KnownBug("B58", 340, 'the "_" approve separator never recovers a tool name on Cursor and '
              "OpenCode"),
     KnownBug("B59", 341, "the hooks never find a store configured in Codex's, Cursor's or "
