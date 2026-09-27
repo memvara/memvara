@@ -116,8 +116,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "cannot save through MemvaraStorage, which has no write_lock"),
     KnownBug("B85", 364, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "
              "consolidation threshold of 0.85, so a repeated memory is stored twice"),
-    KnownBug("B86", 365, "import_mem0 dates mem0's UPDATE and DELETE rows by created_at, "
-             "which mem0 fills with the memory's creation time, and orders them by it"),
 )}
 
 
