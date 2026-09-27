@@ -318,6 +318,12 @@ _LEG_THREADS = MAX_QUERIES
 
 _T = TypeVar("_T")
 
+#: The ranked-read outcomes that spend nothing on the final reranker pass. `applied`
+#: already reranked its turns inside the ranked stage. `disabled` is the operator's switch
+#: for shedding load, and the design spec says it spends nothing on the cross-encoder.
+#: Every other outcome serves the plain read, with the plain read's reranker pass.
+_NO_RERANK = frozenset({"applied", "disabled"})
+
 
 class HybridRetriever:
     """Scope-aware, time-travelling hybrid search over the claim store."""
@@ -762,12 +768,10 @@ class HybridRetriever:
                         rerank_final=False, qvec=vectors[0])
             kept, fused = self._fuse(main, [f.result() for f in pending])
             # The reranker runs once, on the fused list, rather than once per phrasing.
-            # A ranked read the model ranked reranked its turns inside the ranked stage
-            # and never runs it here, exactly as without a rewrite, and a `disabled` one
-            # spends nothing on the cross-encoder. Any other outcome served the plain
-            # read, and gets the plain read's reranker pass.
-            skip = (main.selection is not None
-                    and main.selection.outcome in ("applied", "disabled"))
+            # A ranked read whose outcome is in `_NO_RERANK` never runs it here, exactly
+            # as without a rewrite. Any other outcome served the plain read, and gets the
+            # plain read's reranker pass.
+            skip = main.selection is not None and main.selection.outcome in _NO_RERANK
             reranker = (None if skip
                         else None if self.rerank_ranked_only else self.reranker)
             if reranker is not None:
@@ -1027,18 +1031,18 @@ class HybridRetriever:
                     # `rerank_top_n` turns and a depth widened to match, so interleaving
                     # it here returned more turns than a plain read takes, and they
                     # pushed out facts the plain read shows (#308). The plain read runs
-                    # again, from the same query vector, and is timed from `t0`, because
-                    # the caller waited through the failed stage as well. `disabled` is
-                    # the operator's switch for shedding load, and the design spec says
-                    # it spends nothing on the cross-encoder, so it skips the plain
-                    # read's reranker pass.
+                    # again and is timed from `t0`, because the caller waited through the
+                    # failed stage as well. It calls `_retrieve` rather than
+                    # `_search_once`, which would reset this pass's cached query vector
+                    # and embed the query a second time. `disabled` skips the plain
+                    # read's reranker pass; see `_NO_RERANK`.
                     plain = list(self._retrieve(
                         query, scope=scope, k=k, valid_at=valid_at, known_at=known_at,
                         wanted_states=wanted_states, memory_types=memory_types,
                         min_score=min_score, anchored=anchored,
                         include_episodes=include_episodes, now=now, ranked=False,
                         observe=False,
-                        rerank_final=rerank_final and selection.outcome != "disabled",
+                        rerank_final=rerank_final and selection.outcome not in _NO_RERANK,
                         where=where))
                     if rec is not None and observe:
                         self._observe(rec, query, plain, (perf_counter() - t0) * 1000.0)
