@@ -1327,6 +1327,7 @@ def test_the_offline_run_is_identical_twice():
     assert [vars(r) for r in first.scored] == [vars(r) for r in second.scored]
 
 
+@pytest.mark.covers("inv:TB4")
 def test_two_ingest_orders_produce_the_same_context():
     """Same turns, opposite insertion order, byte-identical prompt.
 

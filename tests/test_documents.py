@@ -157,7 +157,7 @@ def test_a_line_break_ends_a_sentence_without_punctuation():
 # --- adding ---------------------------------------------------------------------
 
 
-@pytest.mark.covers("inv:RT6", "inv:WP1")
+@pytest.mark.covers("inv:RT6")
 def test_a_document_is_stored_as_system_episodes_that_search_finds():
     m = mem()
     text = "\n\n".join(prose(12))
