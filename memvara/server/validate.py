@@ -12,8 +12,9 @@ The validated subset of JSON Schema is exactly what the tools in this package de
 be any of several), `enum`, `minimum`, `maximum`, `maxLength`, `pattern` on a string
 (anchored at both ends, as every declared one is), `default`, `required`,
 `additionalProperties` (`false` on a tool's own arguments, and a schema for every value of
-an `object` argument), and `propertyNames` for the keys of an `object` argument. Anything wider would be untested code in a validator, which is the one
-place that is not acceptable.
+an `object` argument), and `propertyNames` for the keys of an `object` argument. Anything
+wider would be untested code in a validator, which is the one place that is not
+acceptable.
 
 That sentence is load-bearing, and `boolean` was missing from it for as long as it was
 missing from the code. `memory_recall` grew an `include_episodes` argument, declared it

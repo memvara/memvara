@@ -182,12 +182,14 @@ def test_every_pattern_a_tool_declares_is_anchored_at_both_ends() -> None:
     the schema's own pattern only when the pattern is written ^...$. An unanchored
     pattern added later would be applied more strictly than a client reading the schema
     expects, so this test names it."""
-    patterns = {f"{tool.name}.{name}": pattern for tool in TOOLS
-                for name, spec in tool.properties.items() for pattern in _patterns(spec)}
+    # A list of pairs rather than a dict keyed by argument, because one argument's
+    # schema can declare more than one pattern, and a dict would keep only the last.
+    patterns = [(f"{tool.name}.{name}", pattern) for tool in TOOLS
+                for name, spec in tool.properties.items() for pattern in _patterns(spec)]
     assert patterns, "no tool declares a pattern, so this test checks nothing"
-    loose = {label: pattern for label, pattern in patterns.items()
-             if not (pattern.startswith("^") and pattern.endswith("$"))}
-    assert loose == {}, loose
+    loose = [(label, pattern) for label, pattern in patterns
+             if not (pattern.startswith("^") and pattern.endswith("$"))]
+    assert loose == [], loose
 
 
 # -- B38: a lone surrogate in an object key is stored ------------------------------------
