@@ -39,6 +39,11 @@ from typing import Any, Sequence
 DEFAULT_K = 4
 DEFAULT_MIN_SCORE = 0.29
 
+#: The hook's `HOSTED_MIN_SCORE`, the floor it applies on the hosted route. The
+#: two routes have their own floors because they usually score with different
+#: embedders; the hook's comment above `MIN_SCORE` has the measurements.
+DEFAULT_HOSTED_MIN_SCORE = 0.35
+
 #: The environment variable the recall hook's own `_min_score()` reads, mirrored
 #: for the same reason the constants above are.
 ENV_MIN_SCORE = "MEMVARA_RECALL_MIN_SCORE"
@@ -46,13 +51,17 @@ ENV_MIN_SCORE = "MEMVARA_RECALL_MIN_SCORE"
 CLASSES = ("hit", "abstain", "verbatim", "ambiguous")
 
 
-def default_min_score() -> float:
+def default_min_score(*, hosted: bool) -> float:
     """The floor the recall hook would actually apply on this machine.
+
+    `hosted` says which route is measured: the hosted store, which is this
+    bench's default, or a local store file named with `--db`. The hook uses
+    `HOSTED_MIN_SCORE` for the first and `MIN_SCORE` for the second.
 
     `MIN_SCORE` is the hook's *constant*; `_min_score()` is its effective value,
     and the hook's own comment above `MIN_SCORE` tells a store owner to
     recalibrate and set `MEMVARA_RECALL_MIN_SCORE`. Mirroring only the constant
-    would mean that anyone who followed that advice measured 0.29 rather than
+    would mean that anyone who followed that advice measured the constant rather than
     their shipped configuration — the bench would be describing a deployment
     they do not have while claiming to measure what the hook injects.
 
@@ -64,13 +73,14 @@ def default_min_score() -> float:
     unset, set, both clamps, unparseable — so the two resolutions cannot drift
     apart in silence.
     """
+    default = DEFAULT_HOSTED_MIN_SCORE if hosted else DEFAULT_MIN_SCORE
     raw = os.environ.get(ENV_MIN_SCORE)
     if raw is None:
-        return DEFAULT_MIN_SCORE
+        return default
     try:
         return min(1.0, max(0.0, float(raw)))
     except ValueError:
-        return DEFAULT_MIN_SCORE
+        return default
 
 
 def _class_label(cls: str) -> str:
@@ -735,13 +745,14 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
     parser.add_argument("--probes", default=str(Path.home() / ".memvara" / "probes.jsonl"))
     parser.add_argument("--k", type=int, default=DEFAULT_K,
                         help="results per probe; 4 is the recall hook's own K")
-    parser.add_argument("--min-score", type=float, default=default_min_score(),
+    parser.add_argument("--min-score", type=float, default=None,
                         help="relevance floor on both read surfaces; the default "
                              "resolves exactly as the recall hook's own "
                              "_min_score() does (MEMVARA_RECALL_MIN_SCORE if set, "
-                             "else MIN_SCORE), so the run measures what the hook "
-                             "actually injects on this machine. Pass 0 to measure "
-                             "the unfloored read path.")
+                             "else HOSTED_MIN_SCORE for the hosted store and "
+                             "MIN_SCORE for a --db file), so the run measures what "
+                             "the hook actually injects on this machine. Pass 0 to "
+                             "measure the unfloored read path.")
     parser.add_argument("--db", default="", help="local store path; omit for hosted")
     parser.add_argument("--tenant", default="default",
                         help="tenant to read at; --db only, because the hosted "
@@ -761,6 +772,10 @@ def main(argv: "Sequence[str] | None" = None, *, mem: Any = None) -> int:
     parser.add_argument("--seed", type=int, default=20260901)
     parser.add_argument("--judged", default="", metavar="YYYY-MM-DD")
     args = parser.parse_args(argv)
+    if args.min_score is None:
+        # Resolved after parsing, because the route decides the default and `--db`
+        # can come after `--min-score` on the command line.
+        args.min_score = default_min_score(hosted=not args.db)
 
     # --compare needs no store — two result files, read and diffed.
     if args.compare:

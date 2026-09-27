@@ -169,7 +169,7 @@ def test_run_probes_passes_the_floor_to_both_read_surfaces(planted):
     An earlier draft of this harness left `min_score` at the library default of
     0.0 on both calls and the surrounding documents called the resulting 100%
     false-injection rate a baseline. It was an artefact: `plugin/hooks/recall.py`
-    has shipped `MIN_SCORE = 0.29` at both of its call sites since before this
+    has shipped a `MIN_SCORE` floor at both of its call sites since before this
     branch was cut, so an unfloored run measured a configuration no surface uses.
 
     "haiku about rain" scores 0.0 against this planted store, so the two floors
@@ -196,7 +196,7 @@ def test_run_probes_passes_the_floor_to_both_read_surfaces(planted):
 def test_bench_defaults_equal_the_hook_constants():
     """The mirrored constants, checked against the hook rather than themselves.
 
-    `bench/hosted.py` copies `K` and `MIN_SCORE` instead of importing
+    `bench/hosted.py` copies `K` and both floors instead of importing
     `plugin/hooks/recall.py`, because that module inserts its own directory at
     `sys.path[0]` on import and would put `core`/`lib` on the path of anything
     that merely runs the bench. A copy is only safe with a guard that reads the
@@ -210,10 +210,13 @@ def test_bench_defaults_equal_the_hook_constants():
 
     assert hosted.DEFAULT_MIN_SCORE == recall_hook.MIN_SCORE, (
         "bench/hosted.py mirrors the recall hook's MIN_SCORE; they have drifted")
+    assert hosted.DEFAULT_HOSTED_MIN_SCORE == recall_hook.HOSTED_MIN_SCORE, (
+        "bench/hosted.py mirrors the recall hook's HOSTED_MIN_SCORE; they have drifted")
     assert hosted.DEFAULT_K == recall_hook.K, (
         "bench/hosted.py mirrors the recall hook's K; they have drifted")
 
 
+@pytest.mark.parametrize("route", ["hosted", "local"])
 @pytest.mark.parametrize("raw, description", [
     (None, "unset — the constant stands"),
     ("0.45", "a recalibrated floor"),
@@ -223,7 +226,7 @@ def test_bench_defaults_equal_the_hook_constants():
     ("banana", "unparseable — the constant stands"),
 ])
 def test_bench_default_floor_resolves_as_the_hook_resolves_it(monkeypatch, raw,
-                                                              description):
+                                                              description, route):
     """The *effective* floor, not just the constant, compared to the referent.
 
     The hook's shipped value is `_min_score()`, which honours
@@ -244,7 +247,10 @@ def test_bench_default_floor_resolves_as_the_hook_resolves_it(monkeypatch, raw,
         monkeypatch.delenv(hosted.ENV_MIN_SCORE, raising=False)
     else:
         monkeypatch.setenv(hosted.ENV_MIN_SCORE, raw)
-    assert hosted.default_min_score() == recall_hook._min_score(), description
+    default = (recall_hook.HOSTED_MIN_SCORE if route == "hosted"
+               else recall_hook.MIN_SCORE)
+    assert (hosted.default_min_score(hosted=route == "hosted")
+            == recall_hook._min_score(default)), description
 
 
 def test_main_takes_its_default_floor_from_the_environment(tmp_path, planted,

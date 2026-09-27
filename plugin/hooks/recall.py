@@ -532,24 +532,56 @@ def _sample(prompt: str, memories: "list[str]", *, anaphoric: bool) -> None:
 #: "where should this helper live" answered with where the user lives, "start Plan B"
 #: answered with the billing plan catalogue.
 #:
-#: Measured, not chosen. `memvara.calibrate_min_score` separates questions a store should
-#: answer from plausible questions it should not, and on the plugin-recall benchmark's
-#: seeded store the two classes were fully separable with the floor at 0.2975 -- 15 of 15
-#: answerable kept, 22 of 22 unanswerable silenced. Rounded down to 0.29, because the
-#: calibrator places the floor midway between the best wrong answer and the weakest right
-#: one and rounding toward recall is the cheaper error: a missed memory costs one prompt,
-#: a wrong one can steer a whole turn.
+#: Measured, not chosen, and measured separately for each route, because a floor is a
+#: property of the embedder that produced the scores. `memvara.calibrate_min_score` takes
+#: questions a store should answer and plausible questions it should not, and finds the
+#: score that separates the two. Each question is scored by its top result.
 #:
-#: **Scores are not comparable between embedders**, so this default is right for the
-#: configuration it was measured on and is a starting point everywhere else. Recalibrate
-#: against your own store and set `MEMVARA_RECALL_MIN_SCORE`:
+#: `MIN_SCORE` is the floor for a store the hook reads through the library, directly or
+#: through a daemon that serves that store. A local store embeds with the hashing embedder unless
+#: `memvara[local-embed]` is installed. On the plugin-recall benchmark's seeded store, with
+#: that embedder, the 15 answerable questions scored 0.3603 or more and the 22
+#: unanswerable ones 0.2346 or less. A scripted session in the adversarial suite
+#: (`session-recall-every-prompt`) asks two questions in one prompt, and the memory that
+#: answers the second scores 0.2997. So the floor has to be above 0.2346 and at or below
+#: 0.2997, and 0.29 is.
+#:
+#: `HOSTED_MIN_SCORE` is the floor for the hosted service, which the hook reaches through
+#: its own client (`lib.hosted`), directly or through a daemon that serves that client, and
+#: which embeds with `all-MiniLM-L6-v2`. With that
+#: embedder the seeded store's answerable questions scored 0.4704 or more and its
+#: unanswerable ones 0.2977 or less. A real hosted store of 2,407 claims, probed with 20
+#: answerable and 8 unanswerable questions, gave 0.3713 or more and 0.3468 or less. So the
+#: floor has to be above 0.3468 and at or below 0.3713, and 0.35 is. The hosted route used
+#: `MIN_SCORE` too until 2026-09-27, and on that store it let six of the eight
+#: unanswerable questions inject memories (#154).
+#:
+#: `tests/test_hook_recall_floor.py` records these numbers and fails if either constant
+#: leaves its range.
+#:
+#: **Scores are not comparable between embedders**, so each default is right for the
+#: embedder it was measured with and is only a starting point for any other. With
+#: `memvara[local-embed]` installed, a local store embeds with `BAAI/bge-small-en-v1.5`,
+#: whose scores run higher: on the seeded store its unanswerable questions reached 0.5584,
+#: so 0.29 filters nothing there. A local store written with `all-MiniLM-L6-v2`, which was
+#: the local default before bge-small, also gets 0.29, although 0.35 suits that model. The
+#: floor follows the route and not the store's own embedder; #400 tracks that. Recalibrate against your own store and set
+#: `MEMVARA_RECALL_MIN_SCORE`, which overrides both defaults. For a local store:
 #:
 #:     python -m benchmarks.plugin_recall.calibrate --db ~/.memvara/store.db
+#:
+#: For a hosted store, run `bench/hosted.py --min-score 0` with your own probe file and
+#: compare the top scores it records; docs/BENCHMARKS.md describes both.
 MIN_SCORE = 0.29
+HOSTED_MIN_SCORE = 0.35
 
 
-def _min_score() -> float:
+def _min_score(default: float = MIN_SCORE) -> float:
     """The configured floor. A bad value disables filtering rather than the hook.
+
+    `default` is the route's own floor, `MIN_SCORE` or `HOSTED_MIN_SCORE`. It applies when
+    `MEMVARA_RECALL_MIN_SCORE` is unset or is not a number; a set value applies to both
+    routes.
 
     `0` is a legitimate setting -- it restores the old unfiltered behaviour for anyone who
     wants it -- so it is honoured rather than treated as unset.
@@ -563,11 +595,11 @@ def _min_score() -> float:
     """
     raw = os.environ.get("MEMVARA_RECALL_MIN_SCORE")
     if raw is None:
-        return MIN_SCORE
+        return default
     try:
         return min(1.0, max(0.0, float(raw)))
     except ValueError:
-        return MIN_SCORE
+        return default
 
 
 #: How often a running session re-checks whether its standing preferences have changed.
@@ -858,6 +890,10 @@ def _main() -> int:
     # of blindness for another. The carried text goes first because it is the topic.
     query = f"{carried} {prompt}".strip() if (anaphoric and carried) else prompt
 
+    # Both floors are passed on every read, because which route answers is decided inside
+    # `fast_recall`.
+    floor, hosted_floor = _min_score(), _min_score(HOSTED_MIN_SCORE)
+
     # A rewrite is started only when the hook can afford to wait for it: the model call may
     # take `REWRITE_WAIT_SEC` before the plain read is served, and the harness kills the
     # hook at 10 seconds with nothing printed. The clock is compared first: it is free,
@@ -866,7 +902,8 @@ def _main() -> int:
                and rewrite_allowed())
     try:
         block, ok, why = fast_recall(query, k=K, budget=BUDGET, header=HEADER,
-                                     min_score=_min_score(), query_rewrite=rewrite,
+                                     min_score=floor, hosted_min_score=hosted_floor,
+                                     query_rewrite=rewrite,
                                      rewrite_wait=REWRITE_WAIT_SEC)
     except Exception:
         # A retrieval failure must not become a failed prompt.
@@ -912,7 +949,8 @@ def _main() -> int:
                 # for the same store (#344).
                 wider, wider_ok, _ = fast_recall(query, k=EPISODE_K, budget=EPISODE_BUDGET,
                                                  header=HEADER, include_episodes=True,
-                                                 min_score=_min_score(),
+                                                 min_score=floor,
+                                                 hosted_min_score=hosted_floor,
                                                  query_rewrite=False, spawn=False)
             except Exception:
                 wider, wider_ok = "", False

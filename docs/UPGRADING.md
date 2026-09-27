@@ -7,6 +7,43 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## The recall hook's floor on the hosted route is 0.35
+
+### What changed
+
+The recall hook injects no memory that scores under its floor. It used 0.29 on every
+route. It now uses 0.35 when it reads the hosted service through its own client, and
+still 0.29 when it reads a store through the library. On a real hosted store, 0.29 let
+most questions the store could not answer get memories injected. `docs/BENCHMARKS.md` has
+the measurement.
+
+### Who this changes
+
+**If you use the hosted service and never set `MEMVARA_RECALL_MIN_SCORE`**, the hook
+injects less. Prompts the store knows nothing about stop getting unrelated memories, and a
+weakly matching memory that scored from 0.29 up to 0.35 is no longer injected. To keep the
+old behaviour, set `MEMVARA_RECALL_MIN_SCORE=0.29`.
+
+**If you use a local store**, nothing changes: the floor is still 0.29. That value was
+measured on the hashing embedder, a local store's default. If your store embeds with
+`BAAI/bge-small-en-v1.5` (installed by `memvara[local-embed]`), 0.29 filters nothing, and
+if it embeds with `all-MiniLM-L6-v2`, 0.35 suits it better. Measure it and set
+`MEMVARA_RECALL_MIN_SCORE`; #400 tracks choosing the floor from the store's embedder.
+
+**If you set `MEMVARA_RECALL_MIN_SCORE`**, nothing changes; your value applies to both
+routes.
+
+**If you call `lib.fast.recall` from your own hook**, it takes a new `hosted_min_score`
+argument. Leaving it out keeps the old behaviour: the hosted client gets `min_score`.
+
+### How to find your own instances
+
+Run `bench/hosted.py --min-score 0` against your hosted store with your own probe file and
+compare the scores with 0.35. For a local store, `python -m benchmarks.plugin_recall.calibrate
+--db <store>` reports the floor that suits it.
+
+---
+
 ## The hosted client's recall() takes valid_at
 
 ### What changed
