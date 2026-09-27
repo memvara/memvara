@@ -66,10 +66,11 @@ The same rule decides which *arguments* exist. `recall()` takes no `with_ids` an
 drops an unknown query parameter in silence, so the caller would get an unfiltered page with
 nothing saying the filter was ignored.
 
-`budget` and `valid_at` are the two exceptions, and each is a refusal rather than an
-omission. Both are in the signature so that `None` — what every current caller passes —
-works, and a value raises. A budget silently ignored is an oversized prompt with no signal,
-and a day silently ignored is a block about the present handed to a question about the past.
+`budget` is the one exception, and it is a refusal rather than an omission. It is in the
+signature so that `None` — what every current caller passes — works, and a value raises,
+because a budget silently ignored is an oversized prompt with no signal. `valid_at` used to
+be refused the same way; `POST /v1/recall` takes it now, and the client sends it, only when
+set (#298).
 
 Two write divergences are real and documented rather than hidden. `consolidate()` returns a
 job handle rather than per-operation counts, because the endpoint answers 202 before the pass
