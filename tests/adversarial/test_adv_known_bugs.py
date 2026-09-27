@@ -49,6 +49,18 @@ def test_a_known_bug_marker_accepts_only_the_bugs_own_symptom() -> None:
     assert mark.kwargs["raises"] is known_bugs.Reproduced
 
 
+def test_a_known_bug_marker_cites_the_repository_its_issue_is_in(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The nightly run files its issues in memvara/build-health, and the entries filed by
+    hand before that are in memvara/memvara. A marker citing a bare number in the wrong
+    repository would send its reader to an unrelated issue."""
+    assert known_bugs.xfail("B2").mark.kwargs["reason"].startswith("B2, memvara/memvara#266:")
+    monkeypatch.setitem(known_bugs.KNOWN_BUGS, "B999", known_bugs.KnownBug(
+        "B999", 12, "a break the nightly run pinned", repo="memvara/build-health"))
+    assert known_bugs.xfail("B999").mark.kwargs["reason"] == (
+        "B999, memvara/build-health#12: a break the nightly run pinned")
+
+
 # -- B2: a bound write ends the user-wide value --------------------------------------
 
 @pytest.mark.parametrize("level", LEVELS)

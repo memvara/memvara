@@ -23,6 +23,21 @@ python3 -m coverage run -m pytest && python3 -m coverage report    # gated at 10
 python3 -m mypy -p memvara                                         # must be clean
 ```
 
+**Before you push, run the tests your change can affect, not the three commands above:**
+
+```bash
+python3 scripts/test_changed.py            # compares with origin/main; --base <ref> for another
+python3 scripts/test_changed.py --dry-run  # prints what it would run, and runs nothing
+```
+
+It runs the test files you changed, the tests that import a changed Python file or name a
+changed file in a string, and the tests that failed on your last run. When you change
+something it cannot follow, such as a `conftest.py`, `pyproject.toml`, the test harness,
+test data, or any file that is not documentation and that no test imports or names, it runs
+the full suite instead and prints which file made it do so. It measures
+no coverage. The full suite, coverage and mypy run in CI on your pull request, on every
+interpreter, so a green local run is a quick check and not the gate.
+
 **Pass `embedder=` at every `Memvara()` you construct in a test.** `tests/conftest.py`
 fails the run otherwise, naming the file and line. `default_embedder()` returns a
 sentence-transformers model as soon as that package is importable — and it is importable
@@ -80,6 +95,10 @@ CI runs 3.10–3.13 on Linux plus 3.13 on macOS and Windows, a separate coverage
 mypy job, and a fourth that installs the package with **no extras** and imports every
 module — a top-level `import anthropic` anywhere in the tree fails that job, which is the
 whole reason it exists.
+
+The same CI runs again on every push to `main`. When it fails there, it opens an issue in
+the maintainers' private repository, memvara/build-health, and the fix goes in through an
+ordinary pull request rather than a revert.
 
 It also runs LOCOMO retrieval and fails when a published figure moves, in either
 direction, by more than 0.1 points overall or 1.1 in a category, which is one question's

@@ -14,9 +14,9 @@ no vector-store dump required, and `memories=` is there only to recover the enti
 
 **Phase 1 is lossless and costs zero tokens.** Each memory becomes a note (see
 `_notes`) written at its original timestamp on *both* axes, and the log is then replayed
-in `created_at` order: an UPDATE *ends* the old value through the same slot and asserts
-the new one with an `invalidated_by` pointer, and a DELETE closes transaction time at the
-instant mem0 stopped believing it.
+in the order its events happened: an UPDATE *ends* the old value through the same slot
+and asserts the new one with an `invalidated_by` pointer, and a DELETE closes
+transaction time at the instant mem0 stopped believing it.
 
 Those are two different clocks on purpose. An UPDATE says the memory's text changed, not
 that the previous text had been a mistake, so the old value keeps its interval and stays
@@ -96,6 +96,26 @@ class HistoryRow:
     actor_id: str | None = None
     role: str | None = None
 
+    @property
+    def at(self) -> datetime:
+        """When the event this row records happened.
+
+        mem0 writes an UPDATE or DELETE row with the memory's creation time in
+        `created_at` and the time of the event itself in `updated_at` (`_update_memory`
+        and `_delete_memory` in mem0/memory/main.py). Reading `created_at` for those
+        dated every update and delete at the day its memory was created (#365). An ADD
+        happens when its memory is created, and a row with no `updated_at`, which older
+        schemas lack, has nothing better than `created_at`.
+        """
+        if self.event == "ADD" or self.updated_at is None:
+            return self.created_at
+        return self.updated_at
+
+
+#: Replay order for events recorded at the same instant: a memory is added before it is
+#: changed, and changed before it is deleted.
+_EVENT_ORDER = {"ADD": 0, "UPDATE": 1, "DELETE": 2}
+
 
 def _parse_ts(value: Any, *, where: str) -> datetime:
     """mem0 timestamps, as something two time axes can be compared on.
@@ -117,6 +137,17 @@ def _parse_ts(value: Any, *, where: str) -> datetime:
     else:
         raise ValueError(f"{where}: cannot read timestamp {value!r}")
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _optional_ts(value: Any, *, where: str) -> datetime | None:
+    """A timestamp that may be absent: `None` for no value or a blank string.
+
+    Checked by what the value is rather than by truthiness, because `_parse_ts` reads a
+    number as seconds since the epoch, and 0 is a time, not a missing one.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return _parse_ts(value, where=where)
 
 
 def _column(row: sqlite3.Row, name: str) -> Any:
@@ -176,7 +207,8 @@ def read_history_db(path: str | os.PathLike[str]) -> list[HistoryRow]:
             created_at=_parse_ts(r["created_at"], where=f"history row {r['id']}"),
             old_memory=_column(r, "old_memory"),
             new_memory=_column(r, "new_memory"),
-            updated_at=_column(r, "updated_at"),
+            updated_at=_optional_ts(_column(r, "updated_at"),
+                                    where=f"history row {r['id']}"),
             is_deleted=int(_column(r, "is_deleted") or 0),
             actor_id=_column(r, "actor_id"),
             role=_column(r, "role"),
@@ -184,9 +216,11 @@ def read_history_db(path: str | os.PathLike[str]) -> list[HistoryRow]:
         for r in raw
     ]
     # Replay order is causal, so it follows mem0's clock rather than its rowids: a log
-    # merged from two processes can have ids that do not agree with time. The id breaks
-    # ties so two runs of the same import produce the same store.
-    rows.sort(key=lambda r: (r.created_at, r.id))
+    # merged from two processes can have ids that do not agree with time, and mem0's ids
+    # are random. At one instant, an ADD goes before the UPDATE or DELETE that changes
+    # it. The id breaks the remaining ties so two runs of the same import produce the
+    # same store.
+    rows.sort(key=lambda r: (r.at, _EVENT_ORDER.get(r.event, 3), r.id))
     return rows
 
 
@@ -358,7 +392,7 @@ def _events(memories: Iterable[Mapping[str, Any]] | None,
         out.append(_Event(
             memory_id=row.memory_id, event=row.event,
             # A DELETE carries no new text; `old_memory` is what is going away.
-            text=str(row.new_memory or ""), ts=row.created_at, scope=scope,
+            text=str(row.new_memory or ""), ts=row.at, scope=scope,
             meta=_clean({"source": "mem0", "mem0_id": row.memory_id,
                          "mem0_event": row.event, "mem0_history_id": row.id,
                          "actor_id": row.actor_id, "role": row.role,

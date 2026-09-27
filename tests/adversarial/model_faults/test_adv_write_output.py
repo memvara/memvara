@@ -221,6 +221,7 @@ def test_a_model_cannot_end_the_users_value_by_renaming_a_slot(scripted: Make) -
     assert receipt.llm_calls == model.count() == 2
 
 
+@pytest.mark.covers("inv:WP3")
 def test_a_closed_vocabulary_pays_nothing_for_invented_predicates(scripted: Make) -> None:
     """INTERNALS, `closed_vocabulary`: a predicate the registry cannot resolve is refused,
     counted on `receipt.unregistered`, and "costs no model call"."""

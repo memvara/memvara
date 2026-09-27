@@ -5,11 +5,11 @@ Recall starts no optional work after 7.5 seconds (plugin/hooks/recall.py,
 slowly enough to use that budget up, and the recall must skip its wider second read, say
 so, and still answer inside its 10 seconds.
 
-One known bug is pinned here, because it takes a real limit to show: a prompt of a few
-megabytes keeps recall past its limit (B66, #348). A hosted endpoint that never answers
-used to keep session start and recall past their limits too (B63, #345); every hosted
-call now stops at the hook's deadline (`plugin/hooks/lib/deadline.py`), and the test for
-it stays here as a normal test, since it still takes real seconds.
+Two bugs these tests found are fixed, and their tests stay here as normal tests, because
+each still takes real seconds to check. A hosted endpoint that never answered kept
+session start and recall past their limits (B63, #345); every hosted call now stops at the
+hook's deadline (`plugin/hooks/lib/deadline.py`). A prompt of a few megabytes kept recall
+past its limit (B66, #348); the hook now reads at most `MAX_PROMPT_CHARS` of a prompt.
 """
 
 from __future__ import annotations
@@ -82,14 +82,14 @@ def test_a_hosted_store_that_never_answers_costs_a_hook_no_more_than_its_limit(
     assert support.status_of("claude", result.reply)
 
 
-@known_bugs.xfail("B66")
 def test_recall_answers_a_sixteen_megabyte_prompt_within_its_limit(
         hooks: Make, store_env: dict[str, str]) -> None:
-    """The recall hook sends the whole prompt to the store as its query, and the store's
-    time grows with the query: about 2.2 seconds a megabyte on a laptop, so a prompt of
-    about 4.5 MB already runs past the 10-second limit. This one is 16 MB, so that a
-    machine several times faster still shows the bug. The same hook first answers an
-    ordinary prompt, so a timeout here comes from the prompt's size."""
+    """The store's time grows with the query: about 2.2 seconds a megabyte on a laptop,
+    so when the recall hook sent the whole prompt, a prompt of about 4.5 MB already ran
+    past the 10-second limit (#348). The hook now reads at most `MAX_PROMPT_CHARS` of a
+    prompt. This one is 16 MB, so that the old behaviour would show even on a machine
+    several times faster. The same hook first answers an ordinary prompt, so a timeout
+    here comes from the prompt's size."""
     runner = hooks("claude", env=store_env)
     ordinary = runner.run("recall", session="ordinary", prompt=support.PROMPT)
     assert support.MEMORY in support.context_of("claude", ordinary.reply)

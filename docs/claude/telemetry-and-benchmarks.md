@@ -99,7 +99,13 @@ contributor guide and a CLI rather than a script per corpus.
   weather.
 - **The benchmark harnesses do not exercise ingestion.** The retrieval corpora run against
   structured data with no extraction model, so a regression that broke extraction would not
-  show up there. `demo/harness.py` is the run that would catch "zero claims extracted".
+  show up there. `demo/harness.py` does not catch it either. On the real demo corpus, the
+  plain `memvara` arm extracts no claims by design, because it has no model and the corpus
+  is not written in the first-person sentences the rule extractor reads. So a run with zero
+  claims is normal, and the report only prints its "extraction ran degraded" note. What
+  fails when extraction stops producing claims is the demo's tests on its small fixture
+  corpus, such as `test_extraction_can_end_a_claim_but_can_never_retire_one` and
+  `test_two_ingest_orders_produce_the_same_context` in `tests/test_demo.py`.
 - **Telemetry adds no required dependency and no background thread.** `MemoryRecorder` keeps
   series in memory for a deployment to scrape; the protocol is what a real backend
   implements.
@@ -110,9 +116,15 @@ contributor guide and a CLI rather than a script per corpus.
   `retrieval.rewrite_ms` and `retrieval.synthesis_ms` (`memvara.select.stages.run_stage`).
   A quota that sums `retrieval.model_query` by name therefore meters every answered call.
 - **Benchmark reads are plain.** Every `search()` and `recall()` in `bench/` and `demo/`
-  passes `**PLAIN_READ` or an explicit `query_rewrite=`, and the harnesses' `Memvara`
-  builders pass `**PLAIN_READ`, so an extraction model that can chat does not also rewrite
-  the questions a benchmark asks. A run that measures the rewrite says so with
+  passes `**PLAIN_READ` or an explicit `query_rewrite=`, so an extraction model that can
+  chat does not also rewrite the questions a benchmark asks. The scan in
+  `tests/test_read_stages.py` fails when a call does neither. Three `Memvara` builders also
+  pass `**PLAIN_READ`, which switches the rewrite off for every read of that store: the
+  LOCOMO builder, the LongMemEval builder and the demo's (`build_memory` in
+  `bench/locomo.py`, `bench/longmemeval.py` and `demo/baselines.py`). `bench/compare.py`
+  and `bench/mem0_real.py` hand a model to `Memvara` without it, so there it is their
+  `search()` calls, which pass `**PLAIN_READ` and are checked by the same scan, that keep
+  the reads plain. A run that measures the rewrite says so with
   `query_rewrite=True` (`bench/evalkit.py`'s `retrieve()` and `retrieval_pass()`).
 - **A graph harness declares its corpus's relations, or it measures a store with no edges.**
   A relation nobody has declared takes values, and a value carries no edge, so

@@ -75,6 +75,7 @@ def test_multi_valued_predicates_accumulate(rec, store):
     assert live_objects(store, a.claim) == ["coffee", "tea"]
 
 
+@pytest.mark.covers("inv:CG6")
 def test_unknown_predicates_default_to_many(rec, store, registry):
     assert not registry.known("collects")
     a = rec.apply(claim("collects", "vinyl"))
@@ -613,6 +614,7 @@ def test_a_correcting_caller_can_say_so_and_gets_the_other_axis(rec, store):
     ("ended", ("valid_to", "invalidated_at")),
     ("retired", ("invalidated_at", "valid_to")),
 ])
+@pytest.mark.covers("inv:I3")
 def test_each_closure_moves_exactly_one_clock(rec, store, close, axes):
     """Stated as the general rule, because it is the invariant and not two behaviours.
 
