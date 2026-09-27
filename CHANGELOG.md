@@ -11,6 +11,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`bench/mutation.py` measures how many deliberate bugs in a module the tests catch.**
+  It runs mutmut 3.8.0 in a throwaway clone of the checkout, selects the tests that import
+  the module or a public name it defines, and reports a score per module with the diff of
+  every mutant the tests missed. `bench/mutation_equivalents.toml` lists the mutants no
+  test can catch, each with a reason, and they are left out of the score. The first run,
+  on `memvara/write/reconcile.py`, caught 904 of 1,160 counted mutants, 77.9%, which is
+  under the design's floor of 80%. `docs/claude/testing.md` describes the tool and where
+  the missing tests are. mutmut is not a dependency of the package; install it to run the
+  tool. The nightly step that runs it is not written yet.
 - **`scripts/test_changed.py` runs the tests a change can affect, before you push.** It
   runs the changed test files, the tests that import or name a changed file, and the tests
   that failed last time, and it runs the full suite when a change touches something it

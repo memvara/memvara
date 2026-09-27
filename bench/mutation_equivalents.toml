@@ -14,3 +14,11 @@
 #     [[equivalent]]
 #     mutant = "memvara.write.reconcile.x_example__mutmut_1"
 #     reason = "..."
+
+[[equivalent]]
+mutant = "memvara.write.reconcile.xǁReconcilerǁ_observed_at__mutmut_5"
+reason = """\
+`began if began < t else t` becomes `began if began <= t else t`. The two differ only \
+when `began` equals `t`, and then both branches return the same instant: `began` is \
+`as_utc(...)`, and both callers pass the `t` that `apply` set with `as_utc(now)` or \
+`utcnow()`, so both are UTC and equal."""

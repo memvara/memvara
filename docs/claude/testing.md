@@ -403,7 +403,7 @@ The nightly run turns what the slow tiers find into a report and, for each new b
 | production smoke | 5 minutes | no: waits for `tests/live/prod_smoke.py` |
 | performance | 30 minutes | yes: the timing run, `tests/adversarial/soak/nightly/test_adv_perf_nightly.py` |
 | soak | 20 minutes | yes: the 10,000-turn soak, `tests/adversarial/soak/nightly/test_adv_soak_nightly.py` |
-| mutation | 15 minutes | no: waits for `bench/mutation.py` |
+| mutation | 15 minutes | no: `bench/mutation.py` exists, and the nightly step that runs it is not written yet |
 | replay | 10 minutes | no: waits for `tests/live/replay.py` |
 
 A step that is not built appears in every report with its reason. When the file it waits for lands on `main`, the report says so, and the step's command still has to be added to `STEPS` in `scripts/nightly/run.py`. The caps of the unbuilt steps are placeholders for the work that builds them. The design's placeholder for the timing run was 15 minutes; its cap is 30, because the run once took 22 minutes on a laptop that other work kept busy. A full `pytest --tier nightly` run took 16 minutes 37 seconds on a laptop on 2026-09-26, with other test suites running beside it, so the regressions cap leaves room.
@@ -692,6 +692,34 @@ It prints a table and exits with 0 for a valid run that passes, 1 for a valid ru
 Measured once on a laptop that other work kept busy, which made the timing run invalid: the full timing run took 22 minutes, the 10,000-turn soak 15 seconds, and the 100,000-turn soak 8 minutes. The fast tier of this section takes about 10 seconds.
 
 The long runs write their records before they assert anything, so a failing night still leaves its evidence, and they read their history from the same folder: `$NIGHTLY_RECORDS_DIR`, or `local/nightly/records` in the checkout when it is unset. The nightly run starts each night in a clean worktree, so it sets the variable to `local/nightly/records/` in the main checkout, which is kept from night to night; otherwise every night would start with no history, and neither the regression rule nor the budgets could ever apply.
+
+## Mutation testing
+
+`bench/mutation.py` measures how many small, deliberate bugs in a module the tests catch. It is section "S2: mutation testing" of the design. Each mutant is a copy of the module with one small change, such as `<` made `<=`, `and` made `or`, or a string wrapped in `XX`. A mutant the tests fail on is killed. A mutant they pass on survived, which means no test would notice that bug.
+
+```bash
+python3 -m pip install 'mutmut==3.8.0'                        # not a dependency of the package
+PYTHONPATH=. python3 bench/mutation.py run memvara/write/reconcile.py --max-children 6
+PYTHONPATH=. python3 bench/mutation.py report local/mutation/<run>/report.json --survivors
+```
+
+**It runs in a throwaway clone.** mutmut writes a `mutants/` folder and its configuration beside the code, so the script clones the checkout's committed `HEAD` into a temporary folder, runs mutmut there, reads the results and deletes the clone. Uncommitted changes are not measured. `--keep` leaves the clone, so `python -m mutmut show <mutant>` can be run in it. The report goes to `local/mutation/<time>/report.json`, with every undetected mutant's diff, and `mutmut.log` beside it.
+
+**Which tests run.** By default, every test file that imports the module, or a public function or class the module defines, by name. A package such as `memvara.write` re-exports what its modules define, so `from memvara.write import Reconciler` counts. `--tests` replaces the default. mutmut first runs the selection once to learn which tests reach which function, then runs only those tests against each mutant. A mutant that only some broader test would catch counts as undetected, so a score is a lower bound.
+
+**The score.** For each module, caught divided by counted. Caught is killed, timed out or caught by the type check. Counted is every mutant except the equivalents and those mutmut skipped or did not check. Survived, no tests and suspicious all count as not caught. `--floor 80` fails the run when a module scores under 80%, which is the design's floor.
+
+**Equivalent mutants** are mutants no test can catch, because the change does not change behaviour. They are listed in `bench/mutation_equivalents.toml`, one table per mutant, each with a reason a reviewer can check against the code. A survivor that a test could catch is a missing test, not an equivalent. A run reports an entry whose mutant it did not produce as stale, because mutmut numbers a function's mutants in order and an edit renames them. The design allows at most ten entries; past that, the tool should be replaced with cosmic-ray.
+
+**The calibration run**, on 2026-09-27, mutated `memvara/write/reconcile.py` with mutmut 3.8.0 and 6 test files, 6 mutants at a time, in 3 minutes 19 seconds. It made 1,161 mutants: 901 killed, 3 timed out and 257 survived, so 904 were caught, a score of 77.9%. That is under the floor of 80%. One survivor is an equivalent and is listed: `_observed_at` changed from `<` to `<=` returns an equal instant when the two are equal. Leaving it out gives 904 of 1,160, still 77.9%. The others are missing tests, and they cluster:
+
+- `Reconciler.apply`: 55 survivors.
+- `split_entity`: 22.
+- `Reconciler.file_by_subject`: 20.
+- `_bounds`: 19. Nothing checks the end of a `month` or `year` period, so the arithmetic that computes it can change freely.
+- `Reconciler._retract`: 18.
+
+The nightly step that runs this over the changed functions each night, and the weekly baseline, are not written yet. `scripts/nightly/run.py` reports the step as not started.
 
 ## Scripted sessions and the tool surface
 
