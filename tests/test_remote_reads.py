@@ -189,15 +189,28 @@ def test_recall_reaches_the_recall_endpoint_and_returns_the_rendered_text(record
     assert isinstance(text, str) and "Berlin" in text
 
 
-def test_recall_refuses_valid_at_rather_than_answering_with_the_present(recorded):
-    """`POST /v1/recall` has no time axis. The MCP server passes `valid_at` on every
-    `memory_recall` call, so a value must raise: a dated read silently answered with the
-    present is a wrong prompt with nothing to notice it by."""
+def test_recall_sends_valid_at_to_the_recall_route(recorded):
+    """`POST /v1/recall` takes `valid_at`, the world clock alone (memvara-cloud's
+    `RecallRequest`), so the client sends it rather than refusing it (#298). A read with
+    no `valid_at` sends none, so a deployment from before the field sees the request it
+    always saw."""
     from datetime import datetime, timezone
     mem = recorded({"text": "x", "empty": False})
-    with pytest.raises(ValueError) as caught:
-        mem.recall("q", valid_at=datetime(2020, 6, 1, tzinfo=timezone.utc))
-    assert "valid_at" in str(caught.value)
+    mem.recall("q", valid_at=datetime(2020, 6, 1, tzinfo=timezone.utc))
+    assert json.loads(recorded.calls[-1].content)["valid_at"] == "2020-06-01T00:00:00+00:00"
+    mem.recall("q")
+    assert "valid_at" not in json.loads(recorded.calls[-1].content)
+
+
+def test_a_memory_type_that_does_not_exist_is_refused_before_anything_is_sent(recorded):
+    """The service refuses an unknown memory type with a 422. The client refuses it first,
+    in the words the library uses (#289), so the error does not depend on the server."""
+    mem = recorded({"text": "x", "empty": False})
+    for read in (lambda: mem.search("q", memory_types=["procedurel"]),
+                 lambda: mem.recall("q", memory_types=["procedurel"])):
+        with pytest.raises(ValueError, match="memory_type must be one of episodic, "
+                                             "semantic, procedural, not 'procedurel'"):
+            read()
     assert not recorded.calls, "refused before any request was sent"
 
 

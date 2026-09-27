@@ -22,9 +22,8 @@ checks that it is real, so the day it goes away the test says so:
   `explanation`);
 * `stats()` also carries the two join counts, which `connectivity()` reads back out
   (`memvara/remote/api.py`, `RemoteMemvara.connectivity`);
-* `recall(budget=...)` and `recall(valid_at=...)` are refused (`memvara/remote/api.py`,
-  the module docstring and `RemoteMemvara.recall`, and docs/API.md); memvara/memvara#298
-  tracks giving the hosted recall a time axis;
+* `recall(budget=...)` is refused (`memvara/remote/api.py`, the module docstring and
+  `RemoteMemvara.recall`, and docs/API.md);
 * the status of a document the caller cannot see is a `KeyError` on both sides, and
   each side words its own message (`Memvara.document_status` and
   `RemoteMemvara.document_status`).
@@ -309,7 +308,7 @@ NOT_RANKED_ON_THE_WIRE = ("graph_rank", "graph_score", "temporal_rank", "tempora
 
 #: The steps whose hosted answer a documented rule of its own describes, each checked by
 #: its own test below rather than by the step-by-step comparison.
-HOSTED_BY_OWN_TEST = frozenset({"recall.budget", "recall.past", "stats", "stats.after",
+HOSTED_BY_OWN_TEST = frozenset({"recall.budget", "stats", "stats.after",
                                 "document.status.missing"})
 
 
@@ -452,21 +451,6 @@ def test_a_hosted_client_refuses_a_recall_budget(
     assert hosted["__type__"] == "Raised" and hosted["kind"] == "ValueError"
     assert hosted["message"].startswith(
         "recall(budget=...) is not available against a hosted deployment")
-
-
-@pytest.mark.parametrize("client", HOSTED)
-def test_a_hosted_client_refuses_a_dated_recall(
-        played: dict[str, dict[str, Any]], client: str) -> None:
-    """`memvara/remote/api.py`, the module docstring and `RemoteMemvara.recall`, and
-    docs/API.md: `POST /v1/recall` has no time axis, so `valid_at` is refused rather than
-    answered with the present. memvara/memvara#298 tracks giving it one; when that lands,
-    this test fails, and the dated recall joins the step-by-step comparison."""
-    local = played["Memvara"]["recall.past"]
-    hosted = played[client]["recall.past"]
-    assert isinstance(local, str) and "as things were on 31 January 2024" in local
-    assert hosted["__type__"] == "Raised" and hosted["kind"] == "ValueError"
-    assert hosted["message"].startswith(
-        "recall(valid_at=...) is not available against a hosted deployment")
 
 
 @pytest.mark.parametrize("client", HOSTED)

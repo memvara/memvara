@@ -7,6 +7,55 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## The hosted client's recall() takes valid_at
+
+### What changed
+
+`RemoteMemvara.recall(valid_at=...)` and `AsyncRemoteMemvara.recall(valid_at=...)` used to
+raise `ValueError` before sending anything, because `POST /v1/recall` had no time axis. The
+route takes `valid_at` now, and both clients send it. The block is what we believe today
+was true on that day, and its header names the day, as with the local `Memvara.recall`.
+Through the MCP server in cloud mode, `memory_recall` with `valid_at` works the same way.
+
+### Who this changes
+
+**If you caught that `ValueError`** and fell back to `search(valid_at=...)`, the fallback no
+longer runs, and you get the dated block from the service instead.
+
+**If your deployment runs a release from before the route took `valid_at`**, it refuses a
+dated read with a 422, which the client raises as `InvalidRequest`, rather than answering
+it with the present. Reads without `valid_at` send the request they always sent.
+
+### How to find your own instances
+
+```bash
+grep -rn "recall(.*valid_at" --include="*.py" .
+```
+
+---
+
+## search() and recall() refuse a memory type that does not exist
+
+### What changed
+
+A name in `memory_types` that is not `episodic`, `semantic` or `procedural` used to keep
+no claim, so `search()` and `recall()` returned nothing and raised nothing. They now raise
+`ValueError` before reading anything. So do the async classes and the hosted clients.
+
+### Who this changes
+
+**If you pass `memory_types` from configuration or from user input**, a wrong name that
+used to return an empty result now raises. That empty result was never an answer about
+the store: fix the name.
+
+### How to find your own instances
+
+```bash
+grep -rn "memory_types=" --include="*.py" .
+```
+
+---
+
 ## import_mem0 dates mem0's updates and deletes by when they happened
 
 ### What changed
@@ -1694,8 +1743,8 @@ implementation written against the previous protocol raises `TypeError: unexpect
 keyword argument 'valid_at'` on the first `memory_recall` call. Accept the keyword. If
 your backend cannot read at a past day, raise `ValueError` when the value is not `None`
 rather than ignoring it: a block about the present returned for a question about the
-past is wrong with nothing in the output that says so. `RemoteMemvara.recall` does
-exactly that, because `POST /v1/recall` has no time axis.
+past is wrong with nothing in the output that says so. `RemoteMemvara.recall` did
+exactly that until `POST /v1/recall` took `valid_at` (memvara/memvara#298).
 
 ### How to find your own instances
 

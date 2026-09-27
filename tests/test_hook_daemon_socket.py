@@ -23,9 +23,11 @@ if str(HOOKS) not in sys.path:
     sys.path.insert(0, str(HOOKS))
 
 import daemon  # noqa: E402
+from harness.hooks import NO_UNIX_SOCKETS  # noqa: E402
 
-pytestmark = pytest.mark.skipif(not hasattr(socket, "AF_UNIX"),
-                                reason="unix sockets are unavailable on this platform")
+# The reason the skip ledger (tests/harness/skips.py) knows for a test that needs unix
+# sockets, which Windows does not offer the hooks.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason=NO_UNIX_SOCKETS)
 
 
 @pytest.fixture

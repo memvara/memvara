@@ -189,14 +189,21 @@ def test_a_cloud_server_lists_the_same_tools_a_local_one_does(deployment):
         server.close()
 
 
-def test_a_dated_recall_against_a_hosted_deployment_is_refused_as_a_tool_error(deployment):
+def test_a_dated_recall_against_a_hosted_deployment_sends_the_day(deployment, monkeypatch):
     """End to end through the real client: `memory_recall` with `valid_at` on a cloud
-    server reaches `RemoteMemvara.recall`, which raises because `POST /v1/recall` has no
-    time axis. The model has to see that as this tool's error, with the reason, and not
-    as a dropped keyword answered with the present. No request leaves the process: the
-    refusal is before the transport."""
+    server reaches `RemoteMemvara.recall`, which sends the day to `POST /v1/recall`
+    (#298), and the tool answers with the block the deployment rendered. Only the
+    transport is replaced, so the request is the one the client builds."""
     import json
 
+    sent = []
+
+    def read(self, path, *, body=None, **kw):
+        sent.append((path, body))
+        return {"text": "Known about the user as things were on 1 March 2026:\n- a plan",
+                "empty": False}
+
+    monkeypatch.setattr(RemoteMemvara, "_read", read)
     server = MemvaraMCPServer(build_memvara(_cloud()), user="alice")
     try:
         line = server.handle_line(json.dumps({
@@ -204,11 +211,12 @@ def test_a_dated_recall_against_a_hosted_deployment_is_refused_as_a_tool_error(d
             "params": {"name": "memory_recall",
                        "arguments": {"query": "what plan", "valid_at": "2026-03-01"}}}))
         body = json.loads(line)["result"]
-        assert body["isError"] is True
-        text = body["content"][0]["text"]
-        assert "valid_at" in text and "time axis" in text
+        assert body.get("isError") is not True, body
+        assert "as things were on 1 March 2026" in body["content"][0]["text"]
     finally:
         server.close()
+    [(path, request)] = [call for call in sent if call[0] == "/v1/recall"]
+    assert request["valid_at"].startswith("2026-03-01"), request
 
 
 def test_cloud_mode_without_httpx_fails_where_the_configuration_was_made(monkeypatch):

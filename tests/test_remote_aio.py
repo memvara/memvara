@@ -413,17 +413,23 @@ def test_ranked_reaches_the_wire_only_when_asked_for(recorded):
     assert ranked.selection is not None and ranked.selection.outcome == "applied"
 
 
-def test_recall_refuses_valid_at_rather_than_answering_with_the_present(recorded):
-    """The async twin of the sync refusal: `POST /v1/recall` has no time axis."""
+def test_recall_sends_valid_at_to_the_recall_route(recorded):
+    """The async twin of the sync client: `POST /v1/recall` takes `valid_at` (#298), and a
+    read with none sends none."""
     from datetime import datetime, timezone
     mem = recorded({"text": "x", "empty": False})
 
     async def main():
-        with pytest.raises(ValueError, match="valid_at"):
-            await mem.recall("q", valid_at=datetime(2020, 6, 1, tzinfo=timezone.utc))
+        await mem.recall("q", valid_at=datetime(2020, 6, 1, tzinfo=timezone.utc))
+        dated = json.loads(recorded.calls[-1].content)
+        await mem.recall("q")
+        plain = json.loads(recorded.calls[-1].content)
         await mem.aclose()
+        return dated, plain
 
-    run(main())
+    dated, plain = run(main())
+    assert dated["valid_at"] == "2020-06-01T00:00:00+00:00"
+    assert "valid_at" not in plain
 
 
 def test_recall_refuses_a_budget_rather_than_dropping_it(recorded):

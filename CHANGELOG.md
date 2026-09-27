@@ -198,6 +198,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   removes the socket file only if the path still names its own socket. The fix is in
   `plugin/hooks/daemon.py` and `plugin/hooks/recall.py`; the seven plugin repositories
   pick it up at their next sync. #344.
+- **The hosted client's `recall()` takes `valid_at`.** `RemoteMemvara.recall(valid_at=...)`
+  and `AsyncRemoteMemvara.recall(valid_at=...)` raised `ValueError`, saying that
+  `POST /v1/recall` has no time axis. The route takes `valid_at` now, the world clock alone,
+  so both clients send it, and `memory_recall` with `valid_at` works in cloud mode. A
+  deployment from before the field refuses a dated read with a 422 rather than answering it
+  with the present. `docs/UPGRADING.md` has the details. #298.
+- **`search()` and `recall()` refuse a memory type that does not exist.** A misspelled name
+  in `memory_types`, such as `"procedurel"`, kept no claim, so the call returned nothing
+  and raised no error, which a caller could not tell from a store with nothing relevant.
+  Both now raise `ValueError: memory_type must be one of episodic, semantic, procedural,
+  not 'procedurel'` before reading anything, the words `remember()` uses (#288). The check
+  is in `HybridRetriever.search`, so the async classes refuse too, and the hosted clients
+  refuse before sending the request rather than leaving it to the server's 422. #289.
 - **A ranked read whose model call fails now serves the plain read.** On a retriever with
   a `read_selector`, `search(ranked=True)` gathers up to `rerank_top_n` turns for the
   selector. When the selector failed (outcome `fallback`, `key_rejected` or `disabled`),
