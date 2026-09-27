@@ -5,10 +5,11 @@ Recall starts no optional work after 7.5 seconds (plugin/hooks/recall.py,
 slowly enough to use that budget up, and the recall must skip its wider second read, say
 so, and still answer inside its 10 seconds.
 
-Two known bugs are pinned here, because each takes a real limit to show: a hosted endpoint
-that never answers keeps session start and recall past their limits (B63, #345), and a
-prompt of a few megabytes keeps recall past its limit (B66, #348). With both present, the
-pins wait out about 70 seconds of limits between them.
+One known bug is pinned here, because it takes a real limit to show: a prompt of a few
+megabytes keeps recall past its limit (B66, #348). A hosted endpoint that never answers
+used to keep session start and recall past their limits too (B63, #345); every hosted
+call now stops at the hook's deadline (`plugin/hooks/lib/deadline.py`), and the test for
+it stays here as a normal test, since it still takes real seconds.
 """
 
 from __future__ import annotations
@@ -52,15 +53,15 @@ def test_capture_frees_the_turn_while_its_extractor_hangs(
 
 @pytest.mark.parametrize("hook", ("session_start", "recall"))
 @pytest.mark.parametrize("route", ("initialize", "tools/call memory_recall"))
-@known_bugs.xfail("B63")
 def test_a_hosted_store_that_never_answers_costs_a_hook_no_more_than_its_limit(
         hooks: Make, hook: str, route: str) -> None:
     """The hosted client waits 6 seconds for each call and retries a call that got no
-    answer once (plugin/hooks/lib/hosted.py, TIMEOUT_SEC and `_rpc`), and nothing bounds
-    how many calls one hook makes. Measured on a laptop against an endpoint that never
-    answers: with the handshake hung, session start ran 60 seconds and recall 36; with
-    memory_recall hung, session start ran 24 and recall 12. The host kills the hook at its
-    limit, so the turn gets nothing, not even the status line.
+    answer once (plugin/hooks/lib/hosted.py, TIMEOUT_SEC and `_rpc`), and nothing used to
+    bound how many calls one hook makes. Measured on a laptop against an endpoint that
+    never answers: with the handshake hung, session start ran 60 seconds and recall 36;
+    with memory_recall hung, session start ran 24 and recall 12. The host kills the hook at
+    its limit, so the turn got nothing, not even the status line (#345). Every hosted call
+    now stops at the hook's deadline.
 
     The same hook, with a home of its own, first answers against the same endpoint while
     it still answers, so a timeout here comes from the hung call."""

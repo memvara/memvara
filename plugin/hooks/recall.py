@@ -72,7 +72,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.envelope import read_event, write  # noqa: E402
 from core.host import Reply, active  # noqa: E402
-from lib import counts, state_file  # noqa: E402
+from lib import counts, deadline, state_file  # noqa: E402
 from lib.fast import REWRITE_WAIT_SEC  # noqa: E402
 from lib.fast import recall as fast_recall  # noqa: E402
 from lib.ipc import (  # noqa: E402
@@ -753,7 +753,7 @@ def _belongs_here(bullet: str, cwd: str) -> bool:
         node = parent
 
 
-def main() -> int:
+def _main() -> int:
     # The clock the optional hosted work below is measured against -- see
     # OVERALL_BUDGET_SEC. `monotonic`, not `time.time()`: this is an ELAPSED-time budget,
     # and `daemon.py` already uses `time.monotonic()` for its own idle-timeout for the same
@@ -764,6 +764,9 @@ def main() -> int:
     # them so it covers the whole invocation, even though nothing before the first hosted
     # call is expensive enough to matter in practice.
     start = time.monotonic()
+    # Before any hosted call: every one of them stops at this, so the hook answers inside
+    # its host's limit however the endpoint behaves (#345).
+    deadline.set_from_limit(HOST.timeouts.get("recall", 10))
 
     if under_extraction():
         # The prompt in front of us is `capture.py`'s own extraction request, not a
@@ -966,6 +969,16 @@ def main() -> int:
     _emit(Reply("recall", status=label, context=block_text))
     _count_recalled(session, count_memories(block_text))
     return 0
+
+
+
+def main() -> int:
+    """Run the hook, then clear the deadline it set, for a caller that runs it in this
+    process and goes on to make hosted calls of its own."""
+    try:
+        return _main()
+    finally:
+        deadline.clear()
 
 
 if __name__ == "__main__":

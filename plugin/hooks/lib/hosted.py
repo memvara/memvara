@@ -38,6 +38,7 @@ import os
 import os.path
 import ssl
 
+from . import deadline
 from .ipc import log_line
 from .project import ENV as PROJECT_ENV
 
@@ -243,9 +244,25 @@ class HostedRecall:
         if project:
             headers[PROJECT_HEADER] = project
 
+        # The hook's deadline, when one is set (see `lib.deadline`): no call starts once it
+        # has passed, and none waits longer than the time left. A call not made is the
+        # same as a call not answered, so the caller reports the store as not answering.
+        wait = TIMEOUT_SEC
+        left = deadline.left()
+        if left is not None:
+            if left <= 0:
+                return None
+            wait = min(wait, left)
+
         try:
             if self._conn is None:
                 self._conn = self._connect()
+            # A kept-alive connection has its timeout from when it was made; the time left
+            # is shorter now.
+            self._conn.timeout = wait
+            sock = getattr(self._conn, "sock", None)
+            if sock is not None:
+                sock.settimeout(wait)
             self._conn.request("POST", MCP_PATH, json.dumps(body), headers)
             response = self._conn.getresponse()
             raw = response.read()
