@@ -28,8 +28,8 @@ it afterwards.
 
 ## Which tests run
 
-By default, every test file under `tests/` that imports the module by name, found the way
-`scripts/test_changed.py` reads imports. That is narrower than every test the module can
+By default, every test file under `tests/` that imports the module, or a public function or
+class the module defines, by name, found the way `scripts/test_changed.py` reads imports. That is narrower than every test the module can
 affect, which for a module under `memvara/` is most of the suite, and it is what keeps a
 run to minutes. A mutant that only a broader test would catch then counts as undetected,
 so the score is a lower bound. `--tests` replaces the default with a list you give.
@@ -226,10 +226,31 @@ def _test_changed() -> Any:
     return loaded
 
 
+def public_names(module: str, repo: pathlib.Path = REPO) -> set[str]:
+    """The names a test can import the module's code by: the module itself, and each public
+    function and class it defines, under the module and under every package above it,
+    since a package such as `memvara.write` re-exports what its modules define.
+
+    >>> sorted(n for n in public_names("memvara/write/reconcile.py") if n.endswith("Reconciler"))
+    ['memvara.Reconciler', 'memvara.write.Reconciler', 'memvara.write.reconcile.Reconciler']
+    """
+    import ast
+
+    name = dotted(module)
+    tree = ast.parse((repo / module).read_text(encoding="utf-8"))
+    symbols = [node.name for node in tree.body
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+               and not node.name.startswith("_")]
+    parts = name.split(".")
+    packages = [".".join(parts[:end]) for end in range(1, len(parts) + 1)]
+    return {name} | {f"{package}.{symbol}" for package in packages for symbol in symbols}
+
+
 def default_tests(modules: Sequence[str], repo: pathlib.Path = REPO) -> list[str]:
-    """Every test file under tests/ that imports one of `modules` by name."""
+    """Every test file under tests/ that imports one of `modules`, or a public name one of
+    them defines, by name (`public_names`)."""
     reader = _test_changed()
-    wanted = {dotted(m) for m in modules}
+    wanted = set().union(*(public_names(m, repo) for m in modules))
     found = []
     for path in sorted((repo / "tests").rglob("test_*.py")):
         relative = path.relative_to(repo).as_posix()
