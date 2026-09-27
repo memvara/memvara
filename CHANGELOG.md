@@ -196,7 +196,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `recall()` block. Every outcome but `applied` now returns exactly the plain read, as
   `docs/INTERNALS.md` already said. `disabled` still spends nothing on the cross-encoder,
   so it skips the plain read's reranker pass. A rewritten read follows the same rule for
-  its reranker pass over the fused list. #308.
+  its reranker pass over the fused list. A failed ranked read now costs one more local
+  retrieval, from the query vector it already has. On `fallback` or `key_rejected`, where
+  plain reads use a reranker, it also costs the plain read's reranker pass, after the one
+  the ranked stage spent ordering the turns for the selector. #308.
 - **The MCP server refuses a store from a newer version in one line.** Started on a store
   written by a newer version of memvara, `memvara-mcp` and `python -m memvara.server`
   exited with status 1 and a full Python traceback. The store's refusal was already clear;
