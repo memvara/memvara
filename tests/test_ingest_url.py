@@ -482,6 +482,7 @@ def test_a_prefix_that_cannot_carry_an_ipv4_address_is_refused(prefix, problem):
 _ENV = {"MEMVARA_DB": ":memory:", "MEMVARA_FEATURE_PROJECT_SCOPE": "0"}
 
 
+@pytest.mark.covers("env:MEMVARA_NAT64_PREFIXES")
 def test_the_server_reads_operator_prefixes_from_the_environment():
     from memvara.server.config import ServerConfig
 
@@ -501,6 +502,7 @@ def test_the_server_has_no_operator_prefixes_by_default():
     assert config.url_fetcher().refusal(HIDDEN_PRIVATE) is None
 
 
+@pytest.mark.covers("env:MEMVARA_NAT64_PREFIXES")
 def test_a_bad_prefix_in_the_environment_is_refused_at_startup():
     from memvara.server.config import ConfigError, ServerConfig
 

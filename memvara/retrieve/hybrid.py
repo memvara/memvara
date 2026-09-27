@@ -1882,6 +1882,13 @@ class HybridRetriever:
         diversifies the wrong axis. Slot identity is what it was trying to approximate,
         and the store already knows it exactly: capping on it gives 7.04 with the
         ranking otherwise untouched.
+
+        The demoted claims go behind the other results that match, and never behind a
+        result that scores 0, which does not match at all. They used to go to the very
+        end, so a user who knows C, C# and C++ got "C" last, behind eight facts that do
+        not mention a language, and one more such candidate pushed it out of the top `k`
+        (#327). So the list is in score order except in one place: a slot's third and
+        later claims come after the other matching results, even ones that score lower.
         """
         # `value_key` before `id`, and the difference is the whole promise in this
         # module's docstring. A claim id is `uuid4`, minted fresh at ingest — so breaking
@@ -1907,7 +1914,8 @@ class HybridRetriever:
                 head.append(r)
             else:
                 overflow.append(r)
-        return (head + overflow)[:k]
+        matching = next((i for i, r in enumerate(head) if r.score <= 0), len(head))
+        return (head[:matching] + overflow + head[matching:])[:k]
 
     def _vector_search(
         self,

@@ -38,6 +38,93 @@ the store was imported before this fix.
 
 ---
 
+## search() no longer puts a matching claim behind claims that do not match
+
+### What changed
+
+`search()`, and `memory_search` and `recall()` through it, keep at most two claims of one
+fact slot (the same owner, subject and predicate) in the head of the results, and demote
+the rest. The demoted claims used to go to the very end of the list, behind results that
+score 0. They now go behind the other matching results and ahead of every result that
+scores 0. So a slot that holds three or more matching values, such as three languages a
+user knows, now returns all of them ahead of facts that do not match the query.
+
+### Who this changes
+
+**If you read the top `k` of a search over a slot with three or more values**, the third
+value can now be in your results where it was not before, and a result that scores 0 can
+drop out of them instead.
+
+**If you rely on the results being in score order**, they still are not in one case: a
+slot's third and later claims come after the other matching results, even ones that
+score lower. That was true before, too.
+
+### How to find your own instances
+
+Look for searches whose results used to end with a claim that has a higher `score` than
+the ones before it. That claim now appears earlier.
+
+---
+
+## The stdio MCP server reads its input as UTF-8
+
+### What changed
+
+`memvara-mcp` and `python -m memvara.server` used to read requests in the encoding of the
+locale they ran in. They now read UTF-8 always, which is what the MCP stdio transport
+specifies. A line that holds a byte that is not UTF-8 gets a JSON-RPC parse error
+(`-32700`), and the server carries on with the next line. The server's standard error,
+and the usage `--help` prints to standard output, are written as UTF-8 too.
+
+### Who this changes
+
+**A client that writes non-ASCII text in an encoding other than UTF-8**, for example
+cp1252 on Windows. Its requests used to be decoded in the locale's encoding, and now get a
+parse error at the first byte that is not UTF-8. MCP clients write UTF-8, and a client that
+escapes non-ASCII characters as `\uXXXX`, as Python's `json.dumps` does by default, is not
+affected at all.
+
+**On Windows**, UTF-8 text from a client that does not escape it, such as a Node client, is
+now stored as sent. Before, it was decoded as cp1252 and stored wrongly.
+
+### How to find your own instances
+
+Look for replies with `"code":-32700` whose message reads `invalid JSON: Invalid control
+character at: line 1 column N`. The server puts a NUL character in place of each run of
+bytes that is not UTF-8, so that the line cannot parse, and column N is where the first
+one was.
+
+---
+
+## The MCP server refuses argument values it used to accept by mistake
+
+### What changed
+
+The MCP server's argument validator now refuses these values, which it used to accept:
+
+- NaN for a number argument, such as `confidence` or `min_score`. A NaN `min_score` used
+  to act as no floor at all.
+- A metadata filter key that ends in a newline, such as `"team\n"`, in the `filters`
+  argument of `memory_search` or `memory_recall`.
+- A lone surrogate, half of a character, in the key of an object argument, such as a
+  key of `memory_add_document.metadata`. A lone surrogate in a string value was already
+  refused.
+
+Each refusal is an ordinary tool result with `isError: true` whose message names the
+argument, like every other argument the validator refuses.
+
+### Who this changes
+
+Only a client that sends one of these values. None of them was ever valid under the
+tools' schemas.
+
+### How to find your own instances
+
+Look in your client's logs for a tool result that starts with the tool's name and one of
+its arguments, such as `memory_search.min_score must be a number, got NaN`.
+
+---
+
 ## A store whose embedder record is missing or unreadable warns when it opens
 
 ### What changed

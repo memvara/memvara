@@ -254,6 +254,14 @@ def pytest_configure(config: Any) -> None:
         "markers",
         "derives_project: let ServerConfig.from_env() derive the project from a git "
         "remote, which tests/conftest.py otherwise switches off")
+    # Registered here as well as in tests/adversarial/conftest.py, because tests outside
+    # tests/adversarial carry covers marks too, and a run of one of those files alone
+    # never loads the adversarial conftest. Without this, pytest warns that the mark is
+    # unknown.
+    config.addinivalue_line(
+        "markers",
+        "covers(*items): the checklist items this test covers, such as "
+        "'tool:memory_recall' or 'inv:I3'. See docs/claude/testing.md.")
     config.pluginmanager.register(skips_module.SkipLedger(), "memvara-skip-ledger")
 
 

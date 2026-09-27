@@ -277,7 +277,7 @@ def violating(spec: Mapping[str, Any]) -> st.SearchStrategy[Any]:
         if "enum" in spec:
             options.append(TEXT.filter(lambda text: text not in spec["enum"]))
         if "pattern" in spec:
-            options.append(TEXT.filter(lambda text: re.search(spec["pattern"], text) is None))
+            options.append(TEXT.filter(lambda text: re.fullmatch(spec["pattern"], text) is None))
         if "maxLength" in spec:
             longest = spec["maxLength"]
             options.append(st.text(st.characters(exclude_categories=["Cs"]),

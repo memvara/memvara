@@ -90,7 +90,11 @@ JSON, under a header that names the text as data rather than instruction.
 3. `reciprocal_rank_fusion()` merges the ranked lists by position rather than by raw score,
    which is what lets two incomparable scoring scales be combined at all.
 4. `final_score()` re-scores the fused list using the claim's own properties: how fresh it
-   is for its predicate's volatility, its confidence, and its salience.
+   is for its predicate's volatility, its confidence, and its salience. Then `_rank()`
+   sorts by that score and keeps at most `max_per_slot` claims (2 by default) of one fact
+   slot in the head of the list. It moves the slot's other claims behind the remaining
+   matching results, and ahead of every result that scores 0, so a claim that matches is
+   never returned behind one that does not (#327).
 5. If a reranker is configured, `rerank()` reorders the top `rerank_top_n` items.
    `CrossEncoderReranker` is a cross-encoder, not a generative model. It is off by default.
 6. `recall()` renders the survivors into text under `RECALL_HEADER`, or under

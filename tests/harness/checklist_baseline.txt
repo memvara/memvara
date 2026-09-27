@@ -4,27 +4,6 @@
 # listed here, and when a line here is no longer a gap. When a test starts covering an
 # item, delete its line. A new item needs a test, not a line here.
 # docs/claude/testing.md explains the checklist.
-env:MEMVARA_ADVISE_REPLACEMENTS
-env:MEMVARA_AGENT
-env:MEMVARA_ANCHORED
-env:MEMVARA_CLOSED_VOCABULARY
-env:MEMVARA_EMBEDDER
-env:MEMVARA_EXTRACT_GUIDANCE
-env:MEMVARA_LLM
-env:MEMVARA_LLM_EXTRACT_SYSTEM
-env:MEMVARA_LLM_EXTRA_BODY
-env:MEMVARA_LLM_MAX_CLAIMS
-env:MEMVARA_LLM_MAX_TOKENS
-env:MEMVARA_LLM_MODEL
-env:MEMVARA_LLM_TERSE_CLAIMS
-env:MEMVARA_LLM_TIMEOUT
-env:MEMVARA_NAT64_PREFIXES
-env:MEMVARA_PREDICATES
-env:MEMVARA_PROJECT
-env:MEMVARA_READ_W_GRAPH
-env:MEMVARA_SESSION
-env:MEMVARA_TENANT
-env:MEMVARA_USER
 inv:CG1
 inv:CG2
 inv:CG3
@@ -85,17 +64,3 @@ inv:WP6
 inv:WP7
 inv:WP8
 inv:WP9
-switch:agentic_capture
-switch:agentic_extraction
-switch:extraction_chunks
-switch:extraction_guidance
-switch:index_command
-switch:ingest_media
-switch:ingest_urls
-switch:project_scope
-switch:recall_mark
-switch:research_agent
-switch:retrieval_chunks
-switch:status_line
-tool:memory_ask
-tool:memory_paths
