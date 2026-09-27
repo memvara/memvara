@@ -9,6 +9,13 @@ from typing import Mapping
 #: The checkout under test. This file is tests/harness/env.py, two levels below it.
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
+#: The nightly run's folder, relative to a checkout (scripts/nightly/night.py).
+NIGHTLY = ("local", "nightly")
+#: Where the timing run and the soak keep their records between runs, relative to a
+#: checkout. The nightly run's `Layout.records` and the soak tests' `records_dir` fixture
+#: both use it, so a local run and the nightly share one history.
+NIGHTLY_RECORDS = (*NIGHTLY, "records")
+
 
 def _real_home() -> pathlib.Path:
     """The account's home directory, read from the password database on POSIX when

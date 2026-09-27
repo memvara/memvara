@@ -16,6 +16,8 @@ from typing import Callable, NamedTuple
 
 import pytest
 
+from harness.env import NIGHTLY_RECORDS
+
 BENCH = Path(__file__).resolve().parents[3] / "bench"
 if str(BENCH) not in sys.path:
     sys.path.insert(0, str(BENCH))
@@ -43,7 +45,7 @@ def records_dir() -> Path:
     start with no history and the regression rules could never apply.
     """
     configured = os.environ.get("NIGHTLY_RECORDS_DIR")
-    folder = Path(configured) if configured else BENCH.parent / "local" / "nightly" / "records"
+    folder = Path(configured) if configured else BENCH.parent.joinpath(*NIGHTLY_RECORDS)
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
