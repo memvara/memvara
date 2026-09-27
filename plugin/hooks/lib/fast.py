@@ -197,6 +197,11 @@ QUOTA = "quota"
 DAILY = "daily"
 
 
+#: The reason token for a local store that is configured and could not open, followed by
+#: the exception's class after a colon, such as `open:DatabaseError`.
+OPEN = "open"
+
+
 def _reason(exc: "BaseException") -> str:
     """The short token for a failure, or `""` when there is nothing useful to add.
 
@@ -254,7 +259,9 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
 
     The third slot is `reason`: `""` when there is nothing to add, else a short token the
     caller can turn into words: `"quota"` for a spent monthly allowance and `"daily"` for a
-    spent daily one, each with its reset after a colon when the refusal said. It exists
+    spent daily one, each with its reset after a colon when the refusal said, and
+    `"open:<exception class>"` for a local store that is configured and could not open,
+    which comes with `ok=False` where "nothing configured" comes with `ok=None`. It exists
     because `False` alone sent a user to read a log about a store that was answering
     perfectly and telling him, in the body of a 402, exactly which allowance was spent and
     when it resets.
@@ -318,8 +325,13 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
 
         client = open_hosted()
         if client is None:
-            # Nothing is configured at all -- no local database, no library to read one
-            # with, and no credentials file. Distinct from a store that would not answer.
+            # No hosted store either. That is "nothing configured" -- no local database, no
+            # library to read one with, and no credentials file -- only when the local
+            # store was not configured, rather than configured and unable to open (#337).
+            from . import open as opener  # noqa: PLC0415 - already imported by _local_store
+
+            if opener.failure is not None:
+                return "", False, f"{OPEN}:{type(opener.failure).__name__}"
             return "", None, ""
         try:
             # No `query_rewrite` here, whatever the caller asked: the hosted client always

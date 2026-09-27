@@ -84,7 +84,6 @@ def test_a_deeply_nested_payload_is_answered_as_an_empty_one_is(
 @pytest.mark.parametrize("host, hook", [
     (host, hook) for host, hook, _ in support.outcome_cases(support.HOSTS,
                                                             ["store cannot open"])])
-@known_bugs.xfail("B55")
 def test_a_local_store_that_cannot_open_is_not_reported_as_not_configured(
         outcomes: support.Runs, host: str, hook: str) -> None:
     support.pin_cannot_open(outcomes, host, hook)
