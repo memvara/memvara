@@ -4339,10 +4339,11 @@ def test_equidistant_turns_come_back_in_the_same_order_on_every_file():
 def test_omittable_names_every_member_a_backend_may_actually_leave_out():
     """`Store` is `@runtime_checkable`, and `isinstance` on a Protocol is all-or-nothing.
 
-    So it cannot answer "can this store walk a graph" — it asks whether all 44 members
-    are present, and a backend that implements everything a memory needs and skips the
-    six optional ones is `False`. The capability check in this codebase is therefore
-    `getattr` per member, and `OMITTABLE` is the list those call sites are drawn from.
+    So it cannot answer "can this store walk a graph". It asks whether every member of
+    the protocol is present, and it is `False` for a backend that implements everything
+    a memory needs and skips the optional members. The capability check in this
+    codebase is therefore `getattr` per member, and `OMITTABLE` is the list those call
+    sites are drawn from.
     Asserted here because it is documentation: nothing at runtime reads it, so nothing
     else would notice it going stale.
     """
