@@ -179,6 +179,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   query with `text.encode()`, and the recall hook reported the whole recall as failed
   although the store was healthy. The hook now drops the half character from the prompt
   before it searches. #347.
+- **The LlamaIndex retriever's docstring shows an example that runs.** It showed
+  `index_or_engine.as_query_engine(retriever=MemvaraRetriever(mem, user="alice"))`, which
+  raises `TypeError` in llama-index-core at both memvara's floor, 0.13.0, and 0.14.25:
+  `as_query_engine` builds a retriever of its own and passes its keyword arguments on as
+  well, so `retriever` arrives twice. The docstring now shows
+  `RetrieverQueryEngine.from_args(MemvaraRetriever(mem, user="alice"))` and says why
+  `as_query_engine` does not work. #362.
 - **The MCP server refuses NaN for a number argument.** The server's JSON parser accepts
   the bare token `NaN`, and the validator let it through the bounds on `confidence` and
   `min_score`, because every comparison with NaN is false. A NaN `min_score` then acted as
