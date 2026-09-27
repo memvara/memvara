@@ -294,3 +294,34 @@ jobs:
       - name: The suite runs offline
         working-directory: npm/memvara
         run: node --test
+
+  report:
+    # A failure on main opens an issue in the private repository memvara/build-health, and
+    # the next passing run on main closes it. Main is fixed forward rather than reverted, so
+    # this issue is the notice that main is red. The issue goes to memvara/build-health
+    # because this repository is public, and so is every issue in it.
+    #
+    # It runs only for a push to main. The condition names the branch as well as the
+    # event, because `release.yml` calls this workflow on a tag push, where the event is
+    # also `push`. A release that fails is seen by the person releasing, and the called
+    # workflow has no BUILD_HEALTH_TOKEN, since `release.yml` passes it no secrets. A
+    # cancelled run was superseded by a newer push, whose own run reports instead.
+    #
+    # `bin/report` in memvara/build-health keeps one open issue per repository and
+    # workflow. BUILD_HEALTH_TOKEN is a fine-grained token scoped to memvara/build-health
+    # only, with Issues read and write and Contents read.
+    name: report to build-health
+    needs: [test, coverage, types, offline, benchmark, retrieval-regression, npm-bridge]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(needs.*.result, 'cancelled') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open, update or close the issue
+        env:
+          GH_TOKEN: ${{ secrets.BUILD_HEALTH_TOKEN }}
+          RESULT: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+        run: |
+          gh api repos/memvara/build-health/contents/bin/report \
+            -H "Accept: application/vnd.github.raw" > "$RUNNER_TEMP/report"
+          bash "$RUNNER_TEMP/report" --repo "$GITHUB_REPOSITORY" --workflow "$GITHUB_WORKFLOW" \
+            --kind main --result "$RESULT" --sha "$GITHUB_SHA" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

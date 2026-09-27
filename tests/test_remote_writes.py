@@ -322,6 +322,7 @@ def test_an_unset_memory_type_is_omitted_so_the_predicate_decides(recorded):
     assert "memory_type" not in _sent(recorded.calls[-1])
 
 
+@pytest.mark.covers("inv:RC3")
 def test_text_is_redacted_on_its_way_out_and_not_after_it_has_left(recorded):
     """Every field the policy is offered, checked on the wire.
 

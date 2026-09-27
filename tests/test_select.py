@@ -956,6 +956,7 @@ def test_unkept_seen_turns_get_selected_false_claims_stay_none(store, embedder) 
     (_status_exc(429), "provider", 429),
     (ConnectionError("down"), "error", None),
 ])
+@pytest.mark.covers("inv:TB6")
 def test_a_failed_model_call_falls_back_with_the_reranked_order(
     store, embedder, exc, reason, status,
 ) -> None:
@@ -1109,6 +1110,7 @@ def test_k_at_or_below_zero_on_an_unconfigured_retriever_still_says_unconfigured
 # --- token series: only when Usage.reported > 0, and retrieval.model_query -------------
 
 
+@pytest.mark.covers("inv:TB6")
 def test_tokens_and_model_query_emitted_when_usage_reports_something(store, embedder) -> None:
     _seed(store, embedder)
     selector = FakeSelector(top_n=3, keep=1, usage_tokens=(10, 5))

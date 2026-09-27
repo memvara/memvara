@@ -651,6 +651,7 @@ class TestTheGraphHarnessesDeclareTheirVocabularies:
     a table.
     """
 
+    @pytest.mark.covers("inv:TB8")
     def test_the_multihop_relations_carry_edges_and_the_padding_does_not(self):
         import bench.multihop as mh
 
@@ -666,6 +667,7 @@ class TestTheGraphHarnessesDeclareTheirVocabularies:
         assert registry.spec("works_at").cardinality is Cardinality.ONE
 
     @needs_toml
+    @pytest.mark.covers("inv:TB8")
     def test_the_twowiki_harness_loads_its_pack(self):
         import bench.twowiki as tw
 

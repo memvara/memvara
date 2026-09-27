@@ -27,9 +27,13 @@ class Reproduced(Exception):
 @dataclass(frozen=True)
 class KnownBug:
     id: str
-    #: The issue number in memvara/memvara.
+    #: The issue's number in `repo`.
     issue: int
     title: str
+    #: The repository the issue is in. The nightly run files its issues in the private
+    #: memvara/build-health, so an entry it pins names that repository here; the entries
+    #: filed by hand before that are in memvara/memvara.
+    repo: str = "memvara/memvara"
 
 
 KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
@@ -88,7 +92,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B63", 345, "a hosted endpoint that never answers keeps session start and recall "
              "past their limits"),
     KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
-    KnownBug("B65", 347, "half a surrogate pair in a prompt makes recall fail"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
     KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
@@ -112,8 +115,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "cannot save through MemvaraStorage, which has no write_lock"),
     KnownBug("B85", 364, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "
              "consolidation threshold of 0.85, so a repeated memory is stored twice"),
-    KnownBug("B86", 365, "import_mem0 dates mem0's UPDATE and DELETE rows by created_at, "
-             "which mem0 fills with the memory's creation time, and orders them by it"),
 )}
 
 
@@ -122,4 +123,4 @@ def xfail(bug_id: str) -> pytest.MarkDecorator:
     bug = KNOWN_BUGS[bug_id]
     return pytest.mark.xfail(
         strict=True, raises=Reproduced,
-        reason=f"{bug.id}, memvara/memvara#{bug.issue}: {bug.title}")
+        reason=f"{bug.id}, {bug.repo}#{bug.issue}: {bug.title}")

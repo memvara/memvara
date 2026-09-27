@@ -209,6 +209,7 @@ def test_rank_correlation_reports_absence_rather_than_zero(values):
 # The recorders
 # ===========================================================================
 
+@pytest.mark.covers("inv:TB5")
 def test_memory_recorder_accumulates_counters_and_keeps_every_observation():
     rec = MemoryRecorder()
     rec.counter("a.b")

@@ -126,25 +126,6 @@ PINNED: dict[tuple[str, str, str], tuple[pytest.MarkDecorator, Symptom]] = {
         known_bugs.xfail("B82"),
         Symptom("AssertionError", "defaults that differ from mem0's: get_all(top_k=100, "
                 "mem0 20), search(top_k=10, mem0 20)", whole=True)),
-    # mem0 writes the time of an UPDATE or DELETE in updated_at, and the importer reads
-    # the memory's creation time in created_at instead, then sorts on it, so the random
-    # row id decides whether an update is replayed before its ADD.
-    ("mem0", "floor", "import_mem0_dates_each_event_when_mem0_recorded_it"): (
-        known_bugs.xfail("B86"),
-        Symptom("AssertionError", "the import dated mem0's update at 2024-03-01 and its "
-                "delete at 2024-03-02")),
-    ("mem0", "latest", "import_mem0_dates_each_event_when_mem0_recorded_it"): (
-        known_bugs.xfail("B86"),
-        Symptom("AssertionError", "the import dated mem0's update at 2024-03-01 and its "
-                "delete at 2024-03-02")),
-    ("mem0", "floor", "import_mem0_replays_each_event_after_the_add_it_changes"): (
-        known_bugs.xfail("B86"),
-        Symptom("AssertionError", "after the import the live values are ['Alice likes "
-                "tea', 'Alice lives in Berlin'], not only the updated value", whole=True)),
-    ("mem0", "latest", "import_mem0_replays_each_event_after_the_add_it_changes"): (
-        known_bugs.xfail("B86"),
-        Symptom("AssertionError", "after the import the live values are ['Alice likes "
-                "tea', 'Alice lives in Berlin'], not only the updated value", whole=True)),
 }
 
 

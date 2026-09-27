@@ -761,6 +761,7 @@ def test_an_unconvertible_amount_does_not_cost_the_whole_batch() -> None:
 # -- truncation ------------------------------------------------------------------------
 
 
+@pytest.mark.covers("inv:WP7")
 def test_a_truncated_response_raises_rather_than_returning_no_claims():
     """The same silence `test_llm_openai.py` describes at length, under this provider's
     name for it. Anthropic reports it as `stop_reason="max_tokens"` on the response

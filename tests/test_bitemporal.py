@@ -215,6 +215,7 @@ def test_as_of_with_either_axis_raises_rather_than_picking_one(mem, kw):
     ("neighborhood", ("user",)),
     ("paths_between", ("user", "Berlin")),
 ])
+@pytest.mark.covers("inv:RT2")
 def test_every_read_that_takes_as_of_refuses_to_mix_it(mem, method, args):
     """One rule, not eight. A method that accepted the mix would be the one an
     integration reaches for, and the answer it returned would look ordinary."""
@@ -503,6 +504,7 @@ def test_the_state_filter_is_in_the_sql_not_applied_after_the_page(mem):
     lambda m, **kw: m.store.candidate_ids([SCOPE], **kw),
     lambda m, **kw: list(m.store.iter_claims("acme", **kw)),
 ])
+@pytest.mark.covers("inv:MM1")
 def test_states_and_include_invalidated_together_raise_rather_than_pick_one(mem, call):
     """There is no reading of `states=["retired"], include_invalidated=False` in which one
     of the two is not being ignored. Silently honouring either answers a question the
@@ -1231,6 +1233,7 @@ def test_ask_does_not_quote_a_value_we_had_already_stopped_believing(mem):
         "by June we had stopped believing it, so June would not have quoted it"
 
 
+@pytest.mark.covers("inv:RT2")
 def test_ask_carries_the_instant_it_answered_about(mem):
     """The same reason `Delta` carries `since`: a caller logging the result must not be
     able to separate the answer from the question it answers."""

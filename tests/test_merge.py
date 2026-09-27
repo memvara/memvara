@@ -235,6 +235,7 @@ def _merged(consolidator: Consolidator, sweep: str) -> int:
     ("local:BAAI/bge-small-en-v1.5", 0),
 ])
 @pytest.mark.parametrize("sweep", ["merge_duplicates", "run"])
+@pytest.mark.covers("inv:RT8")
 def test_the_merge_threshold_is_the_one_measured_in_the_embedders_space(name, merged,
                                                                         sweep):
     """bge-small scores two booking references a letter apart as high as 0.988, and
