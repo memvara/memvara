@@ -632,6 +632,9 @@ def test_the_skill_does_not_restate_a_tool_description() -> None:
     # the evidence, not the user's phrasing. That is the one thing no tool description
     # can say, because it is about a different tool's output.
     ("which closure the evidence decides", "evidence for"),
+    # The ranked argument's description says what the read does. When one is worth its
+    # model call, and what to do after each unranked outcome, spans more than one call.
+    ("when a ranked read is worth its model call", "A ranked read"),
 ])
 def test_the_skill_carries_what_no_single_description_can(carries: str, marker: str) -> None:
     """The spec's list of five, one assertion each, so a failure names what went missing.
