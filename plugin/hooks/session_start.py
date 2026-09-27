@@ -104,8 +104,13 @@ def _why(exc: "BaseException") -> str:
     return "notes unavailable (quota)" if getattr(exc, "code", "") == "quota_exhausted" else ""
 
 
+#: What the status line calls each section when it did not arrive.
+_SECTIONS = {"binding": "scope", "standing": "standing preferences", "notes": "notes"}
+
+
 def _local_binding(store: object) -> str:
-    """The binding line from a library handle, or '' if it cannot be read.
+    """The binding line from a library handle. A store that cannot be read raises, so that
+    `main` can say the store did not answer rather than that it is empty.
 
     `scope` means two different things on the two classes this can be handed. On a
     `ScopedMemvara` it is the bound `Scope`; on a bare `Memvara` it is the *method* that
@@ -113,13 +118,10 @@ def _local_binding(store: object) -> str:
     this wrong is silent — the attribute exists either way — which is why it is resolved
     explicitly rather than by a `try` that would swallow the difference.
     """
-    try:
-        scope_attr = getattr(store, "scope")
-        scoped = store if not callable(scope_attr) else store.scope()  # type: ignore[operator]
-        scope = scoped.scope.key()
-        visible = scoped.count()
-    except Exception:
-        return ""
+    scope_attr = getattr(store, "scope")
+    scoped = store if not callable(scope_attr) else store.scope()  # type: ignore[operator]
+    scope = scoped.scope.key()
+    visible = scoped.count()
     return _binding_line(scope, f"{visible} claim(s)")
 
 
@@ -237,10 +239,16 @@ def main() -> int:
             parts.append(binding)
 
         def _legacy_standing() -> str:
-            return str(store.recall(QUERY, k=STANDING_K,
-                                    budget=STANDING_FALLBACK_TOKENS,
-                                    header=STANDING_HEADER,
-                                    memory_types=STANDING, **plain_read) or "")
+            # `standing_block` catches every failure of its own routes and of this one, and
+            # answers "" for all of them, so a failure here is recorded before it is caught.
+            try:
+                return str(store.recall(QUERY, k=STANDING_K,
+                                        budget=STANDING_FALLBACK_TOKENS,
+                                        header=STANDING_HEADER,
+                                        memory_types=STANDING, **plain_read) or "")
+            except Exception as exc:
+                failed.append(("standing", exc))
+                raise
 
         try:
             standing = standing_block(store, hosted=hosted, budget=STANDING_BUDGET,
@@ -274,9 +282,14 @@ def main() -> int:
 
     for section, exc in failed:
         # On every host, as recall logs its failures, because most hosts show no status
-        # line and the log is the only account there is.
-        log_line("session_start", f"failed section={section} "
-                                  f"reason={getattr(exc, 'code', '') or type(exc).__name__}")
+        # line and the log is the only account there is. The exception's class, which
+        # names the kind of failure, and nothing the store's reply said.
+        log_line("session_start", f"failed section={section} reason={type(exc).__name__}")
+    if failed and not missing:
+        # A session that opened without a section says which one, so a partial session is
+        # not mistaken for a whole one. A spent quota has already said it in its own words.
+        missing = " and ".join(dict.fromkeys(_SECTIONS[name] for name, _ in failed))
+        missing += " unavailable"
 
     if not parts:
         # "Nothing stored yet" is a claim about the store's contents. Only make it when
