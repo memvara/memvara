@@ -769,7 +769,12 @@ def main() -> int:
     # matters because the miss is silent: the dedup file is keyed on session, so a renamed
     # key re-injects every memory on every turn while every banner still reads healthy.
     event = read_event(HOST, "recall", payload())
-    prompt = event.prompt.strip()
+    # Half of a surrogate pair is dropped. A client written in JavaScript can send one, an
+    # emoji cut in two, and JSON.stringify escapes it as \ud83d, which Python decodes into
+    # a string that cannot be encoded. The store hashes each query with `text.encode()`,
+    # so the whole recall failed on it although the store was healthy (#347). Half a
+    # character carries nothing a search can use.
+    prompt = event.prompt.encode("utf-8", "ignore").decode("utf-8").strip()
     session = event.session
 
     if not prompt or prompt.startswith(SKIP_PREFIXES):
