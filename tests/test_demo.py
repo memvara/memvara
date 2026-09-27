@@ -487,6 +487,7 @@ def test_both_retrieval_arms_may_spend_the_same_number_of_slots():
 # --- arm 5: memvara_structured ---------------------------------------------------
 
 
+@pytest.mark.covers("inv:TB4")
 def test_extraction_can_end_a_claim_but_can_never_retire_one():
     """Half the bitemporal model is unreachable from `add()`, by design, at any corpus.
 
@@ -1309,6 +1310,7 @@ def test_the_offline_run_answers_and_scores_every_item_with_no_key_and_no_file()
                                                                ek.ContainmentJudge)
 
 
+@pytest.mark.covers("inv:TB3")
 def test_the_offline_run_is_identical_twice():
     """Two runs, one diff. The whole reason this path is worth wiring up.
 
@@ -1350,6 +1352,7 @@ def test_two_ingest_orders_produce_the_same_context():
         assert rendered == backward.recall(q.text, k=bl.DEFAULT_K, include_episodes=True)
 
 
+@pytest.mark.covers("inv:TB3")
 def test_the_offline_cli_is_one_command_and_says_what_it_is_not(monkeypatch, capsys):
     """`--reader stub`, end to end, and the banner it has to carry.
 

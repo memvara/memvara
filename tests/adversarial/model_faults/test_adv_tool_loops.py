@@ -44,6 +44,7 @@ def test_a_model_that_never_stops_is_stopped_at_twelve_answers_and_each_is_bille
     assert set(fates(before, mem).values()) == {"unchanged"}
 
 
+@pytest.mark.covers("inv:WP10")
 def test_a_run_stopped_at_the_step_limit_loses_its_proposals(scripted: Make) -> None:
     """Every answer reads Berlin and proposes to end it. INTERNALS: a run past 12 answers
     is `step_limit`, "and its proposals are discarded"."""

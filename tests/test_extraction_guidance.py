@@ -32,6 +32,7 @@ GUIDE = Guidance(context="A payments service.",
 
 # --- the value --------------------------------------------------------------
 
+@pytest.mark.covers("inv:WP4")
 def test_a_context_over_the_limit_is_refused_rather_than_cut():
     Guidance(context="x" * MAX_CONTEXT_CHARS)
     with pytest.raises(GuidanceError, match="1501 characters, over the 1500"):
@@ -78,6 +79,7 @@ def test_no_guidance_and_empty_guidance_leave_the_prompt_byte_for_byte_unchanged
     assert Guidance().render() == ""
 
 
+@pytest.mark.covers("inv:WP4")
 def test_guidance_is_appended_after_the_shipped_rules_under_the_fixed_heading():
     system = with_guidance(EXTRACT_SYSTEM, GUIDE)
     assert system.startswith(EXTRACT_SYSTEM + "\n\n" + GUIDANCE_HEADING + ":\n")
@@ -102,6 +104,7 @@ def _anthropic_system(guidance: Guidance | None) -> tuple[str, Any]:
     return client.calls[0]["system"], client.calls[0]["messages"]
 
 
+@pytest.mark.covers("inv:WP4")
 def test_anthropic_appends_guidance_to_its_system_message_and_nowhere_else():
     """The turns are data in the user message; the guidance is an instruction and stays
     in the system message, so a turn that quotes rules cannot pass for one."""
@@ -121,6 +124,7 @@ def _openai_system(llm: OpenAILLM, client: Any, guidance: Guidance | None) -> tu
     return system["content"], user["content"]
 
 
+@pytest.mark.covers("inv:WP4")
 def test_openai_appends_guidance_to_the_shipped_prompt():
     client = test_llm_openai.FakeClient({"claims": []})
     system, user = _openai_system(OpenAILLM(client=client), client, GUIDE)
@@ -129,6 +133,7 @@ def test_openai_appends_guidance_to_the_shipped_prompt():
     assert _openai_system(OpenAILLM(client=client), client, None)[0] == EXTRACT_SYSTEM
 
 
+@pytest.mark.covers("inv:WP4")
 def test_a_replacement_prompt_keeps_its_meaning_and_gets_the_guidance_appended():
     """`MEMVARA_LLM_EXTRACT_SYSTEM` replaces the shipped prompt; guidance adds to whichever
     prompt is in use and does not bring the shipped one back."""
@@ -192,6 +197,7 @@ def test_empty_guidance_is_no_guidance_even_for_a_backend_that_cannot_take_it():
     assert _mem(llm, write_guidance=Guidance()).writer.guidance is None
 
 
+@pytest.mark.covers("inv:WP4")
 def test_guidance_for_a_backend_that_does_not_accept_it_is_refused_at_construction():
     """The other outcome is a guidance file the operator wrote that no extraction sees."""
     with pytest.raises(TypeError, match="recording does not accept extraction guidance"):

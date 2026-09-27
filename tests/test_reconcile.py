@@ -75,6 +75,7 @@ def test_multi_valued_predicates_accumulate(rec, store):
     assert live_objects(store, a.claim) == ["coffee", "tea"]
 
 
+@pytest.mark.covers("inv:CG6")
 def test_unknown_predicates_default_to_many(rec, store, registry):
     assert not registry.known("collects")
     a = rec.apply(claim("collects", "vinyl"))

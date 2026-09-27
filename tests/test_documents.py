@@ -157,6 +157,7 @@ def test_a_line_break_ends_a_sentence_without_punctuation():
 # --- adding ---------------------------------------------------------------------
 
 
+@pytest.mark.covers("inv:RT6", "inv:WP1")
 def test_a_document_is_stored_as_system_episodes_that_search_finds():
     m = mem()
     text = "\n\n".join(prose(12))
@@ -598,6 +599,7 @@ def _extracting(m: Memvara) -> list[str]:
     return seen
 
 
+@pytest.mark.covers("inv:WP1")
 def test_a_document_with_a_clear_fact_yields_a_claim_citing_its_chunk():
     """The design sends new chunks to extraction. A chunk is a system-role episode, and
     the default gate reads only user turns, so without the document path the gate
@@ -619,6 +621,7 @@ def test_a_document_with_a_clear_fact_yields_a_claim_citing_its_chunk():
     assert statuses == ["queued", "extracting", "done"] and doc.status == "done"
 
 
+@pytest.mark.covers("inv:WP1")
 def test_extract_false_is_kept_by_a_later_extraction_sweep():
     """A chunk stored with `extract=False` is not read now, and not by a scheduled
     `reextract()` sweep later either: the caller said not to extract this document."""

@@ -290,6 +290,7 @@ def test_two_pieces_giving_different_values_leave_two_claims():
 # -- failure and cost ---------------------------------------------------------------------
 
 
+@pytest.mark.covers("inv:WP11")
 def test_a_failed_piece_defers_the_whole_batch_so_a_retry_reads_the_turn_again():
     """No claim from the pieces that did answer is kept. `reextract()` skips a turn that
     already has claims, so keeping half a turn's claims would stop the retry from ever
@@ -330,6 +331,7 @@ class FailsOn(PieceLLM):
         return super().extract(episodes, known_predicates)
 
 
+@pytest.mark.covers("inv:WP11")
 def test_a_failed_piece_defers_only_its_own_turn_and_the_rest_of_the_batch_keeps_its_claims():
     """Turn A is short and goes whole; turn B is cut in two and B's second piece times
     out. A's claim is kept. B keeps nothing, not even what its first piece returned, and
