@@ -75,3 +75,15 @@ def test_standard_error_is_written_as_utf8_when_the_locale_says_cp1252(monkeypat
     written = buffer.getvalue()
     assert "—".encode("utf-8") in written
     assert written.decode("utf-8").startswith("memvara-mcp: unexpected argument")
+
+
+def test_the_help_is_written_as_utf8_when_the_locale_says_ascii(monkeypatch):
+    """`--help` prints the usage to standard output, and it holds em dashes. Replies to a
+    client are pure ASCII, but the usage is not, so an ASCII standard output raised
+    UnicodeEncodeError instead of printing it."""
+    buffer = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(buffer, encoding="ascii"))
+    assert main(["--help"], env={}) == 0
+    sys.stdout.flush()
+    assert buffer.getvalue().decode("utf-8").startswith("memvara-mcp ")
+    assert "—".encode("utf-8") in buffer.getvalue()

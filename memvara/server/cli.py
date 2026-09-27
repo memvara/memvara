@@ -36,11 +36,11 @@ from .mcp import MemvaraMCPServer
 
 __all__ = ["main"]
 
-#: The decoding error handler for standard input. It puts a NUL in place of each byte that
-#: is not UTF-8. JSON allows a NUL nowhere, not even inside a string, so the line then
-#: fails to parse and gets the parse error (-32700) any other malformed line gets, with
-#: the position of the first bad byte, and the server carries on. Replacing the byte with
-#: U+FFFD instead would parse, and store text the client never sent.
+#: The decoding error handler for standard input. It puts one NUL in place of each run of
+#: bytes that is not UTF-8. JSON allows a NUL nowhere, not even inside a string, so the
+#: line then fails to parse and gets the parse error (-32700) any other malformed line
+#: gets, at the column of the first NUL, and the server carries on. Replacing the bytes
+#: with U+FFFD instead would parse, and store text the client never sent.
 _NOT_UTF8 = "memvara-not-utf8"
 
 
@@ -71,14 +71,14 @@ def _utf8_stdin() -> tuple[TextIO, io.TextIOWrapper | None]:
     return wrapper, wrapper
 
 
-def _utf8_stderr() -> None:
-    """Write standard error as UTF-8, as standard input is read.
+def _utf8_output(stream: TextIO) -> None:
+    """Write one of the process's output streams as UTF-8, as standard input is read.
 
-    The server's startup refusals are read by the client, which reads them as UTF-8. On
-    Windows, an em dash in a refusal arrived as a cp1252 byte that such a client cannot
-    decode (#311). Standard output needs nothing, because every reply is pure ASCII.
+    The server's startup refusals go to standard error, and a client reads them as UTF-8.
+    On Windows, an em dash in a refusal arrived as a cp1252 byte that such a client cannot
+    decode (#311). Replies to a client are pure ASCII, but `--help` prints the usage to
+    standard output, and it holds em dashes, which an ASCII standard output cannot encode.
     """
-    stream = sys.stderr
     if (isinstance(stream, io.TextIOWrapper)
             and codecs.lookup(stream.encoding).name != "utf-8"):
         stream.reconfigure(encoding="utf-8", errors="backslashreplace")
@@ -274,9 +274,11 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
     """Serve until stdin closes. Returns a process exit status."""
     args = list(sys.argv[1:] if argv is None else argv)
     env = os.environ if env is None else env
-    out = sys.stdout if stdout is None else stdout
+    if stdout is None:
+        _utf8_output(sys.stdout)
     if stderr is None:
-        _utf8_stderr()
+        _utf8_output(sys.stderr)
+    out = sys.stdout if stdout is None else stdout
     err = sys.stderr if stderr is None else stderr
 
     if args:

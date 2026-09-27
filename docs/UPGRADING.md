@@ -14,8 +14,8 @@ Entries are newest first, and each one says how you find your own instances of i
 `memvara-mcp` and `python -m memvara.server` used to read requests in the encoding of the
 locale they ran in. They now read UTF-8 always, which is what the MCP stdio transport
 specifies. A line that holds a byte that is not UTF-8 gets a JSON-RPC parse error
-(`-32700`), and the server carries on with the next line. The server's standard error is
-written as UTF-8 too.
+(`-32700`), and the server carries on with the next line. The server's standard error,
+and the usage `--help` prints to standard output, are written as UTF-8 too.
 
 ### Who this changes
 
@@ -31,9 +31,9 @@ now stored as sent. Before, it was decoded as cp1252 and stored wrongly.
 ### How to find your own instances
 
 Look for replies with `"code":-32700` whose message reads `invalid JSON: Invalid control
-character at: line 1 column N`. The server puts a NUL character in place of each byte
-that is not UTF-8, so that the line cannot parse, and column N is where the first one
-was.
+character at: line 1 column N`. The server puts a NUL character in place of each run of
+bytes that is not UTF-8, so that the line cannot parse, and column N is where the first
+one was.
 
 ---
 

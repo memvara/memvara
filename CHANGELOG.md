@@ -202,9 +202,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   for the rest of its session. Under another encoding, such as cp1252 on a Windows pipe,
   UTF-8 text was decoded wrongly, so "Zürich" was stored as "ZÃ¼rich". The server now
   reads standard input as UTF-8. A line with a byte that is not UTF-8 gets a JSON-RPC
-  parse error (`-32700`) that gives the position of the first such byte, and the server
-  carries on. Standard error, where the server writes its startup refusals, is now
-  written as UTF-8 too. #311.
+  parse error (`-32700`) that points at the first such byte, and the server carries on.
+  Standard error, where the server writes its startup refusals, is now written as UTF-8
+  too, and so is standard output, where `--help` prints a usage that holds em dashes.
+  #311.
 - **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
   decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
   interpreter's stack allows, and the server let it escape, so a single such line ended
