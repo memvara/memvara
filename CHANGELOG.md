@@ -173,6 +173,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The standing preferences are injected once when a session opens.** Session start
+  injects them, and the recall hook checks them again every 15 minutes, injecting them
+  only when their digest changed. Session start recorded no digest, so the first prompt
+  of every session found the check due and the digest different, and injected the whole
+  block a second time, with the status "standing preferences updated" although nothing
+  had changed. Session start now records the digest and the time of the block it
+  injected in the session's recall state, and recall computes the digest the same way,
+  so the first prompt finds the block unchanged. #343.
 - **The MCP server refuses NaN for a number argument.** The server's JSON parser accepts
   the bare token `NaN`, and the validator let it through the bounds on `confidence` and
   `min_score`, because every comparison with NaN is false. A NaN `min_score` then acted as

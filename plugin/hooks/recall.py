@@ -82,9 +82,10 @@ from lib.ipc import (  # noqa: E402
 from lib.mark import count as count_memories  # noqa: E402
 from lib.mark import marked  # noqa: E402
 from lib.mark import on as mark_on  # noqa: E402
-from lib.mark import unmark_block  # noqa: E402
 from lib.project import bind as bind_project  # noqa: E402
 from lib.read_model import allowed as rewrite_allowed  # noqa: E402
+from lib.standing import digest as standing_digest  # noqa: E402
+from lib.standing import seen_dir, state_path  # noqa: E402
 
 #: The client this process is answering, resolved once. `run.py` binds it before importing
 #: this module; a bare `python3 recall.py` gets Claude Code, which is what that invocation
@@ -258,7 +259,7 @@ MACHINE_PREFIXES = HOST.machine_prompt_prefixes
 
 #: Where the per-session record of what has already been injected lives. Beside the store,
 #: not in the plugin, which is replaced wholesale on update.
-SEEN_DIR = os.path.join(os.path.expanduser("~"), ".memvara", ".hooks", "recalled")
+SEEN_DIR = seen_dir()
 
 #: Enough to cover a long session without the file becoming something that needs managing.
 MAX_SEEN = 500
@@ -330,11 +331,7 @@ def _count_recalled(session: str, n: int) -> None:
 
 
 def _seen_path(session: str) -> "str | None":
-    # A NUL byte makes every `os` call raise `ValueError`, not the `OSError` the state
-    # functions below are written to absorb, so such an id gets no state file at all.
-    if not session or "/" in session or "\0" in session or session in (".", ".."):
-        return None
-    return os.path.join(SEEN_DIR, f"{session}.json")
+    return state_path(SEEN_DIR, session)
 
 
 def _state_json(session: str) -> dict:
@@ -629,10 +626,9 @@ def _standing_refresh(session: str, now: float, cwd: str = "") -> "tuple[str, tu
         # the next one either.
         return "", (digest, now)
 
-    # Hashed without the recall mark, as `_digest` promises: the mark is presentation, and
-    # hashing it made every running session report "standing preferences updated" once
-    # after the upgrade and again each time the `recall_mark` switch changed.
-    fresh = _digest(unmark_block(block))
+    # The same digest session start records when it injects the block, so the first
+    # prompt of a session finds it unchanged.
+    fresh = standing_digest(block)
     if not block.strip() or fresh == digest:
         return "", (digest or fresh, now)
     return block.rstrip(), (fresh, now)

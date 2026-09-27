@@ -30,6 +30,7 @@ opening brief is the other case: narrative background is exactly what it is for.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -46,7 +47,7 @@ from lib.mark import count as count_memories  # noqa: E402
 from lib.mark import mark_block  # noqa: E402
 from lib.mark import on as mark_on  # noqa: E402
 from lib.project import bind as bind_project  # noqa: E402
-from lib.standing import standing_block  # noqa: E402
+from lib.standing import record_injected, standing_block  # noqa: E402
 from lib.write import open_writer  # noqa: E402
 
 #: Wider than the per-prompt hook: this runs once per session, not once per turn.
@@ -194,7 +195,8 @@ def main() -> int:
     # checkout, and `cwd` is how the second half is known. An unreadable payload gives "",
     # which `_mine` treats as "user notes only" -- the safe direction, since the failure it
     # avoids is carrying another project's instructions into this one.
-    cwd = read_event(host, "session_start", payload()).cwd
+    event = read_event(host, "session_start", payload())
+    cwd = event.cwd
     # Before the store is opened: the hosted client sends this project with every call.
     bind_project(cwd)
     # Once per session rather than on every write: the per-session counters and the
@@ -279,6 +281,11 @@ def main() -> int:
     _emit(Reply("session_start",
                 status=status(f"{opened} · {missing}" if missing else opened),
                 context="\n\n".join(parts)))
+    if standing.strip():
+        # After the reply is written, so only a block that was delivered is recorded. The
+        # recall hook reads this, and without it the first prompt injected the same block
+        # again (#343).
+        record_injected(event.session, standing, time.time())
     return 0
 
 

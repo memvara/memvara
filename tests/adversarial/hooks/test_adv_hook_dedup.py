@@ -73,7 +73,6 @@ PREFERENCE = "tabs for indentation in every file of every project"
 
 
 @pytest.mark.parametrize("host", ("claude", "opencode"))
-@known_bugs.xfail("B61")
 def test_the_standing_preferences_are_injected_once_when_a_session_opens(
         hooks: Make, tmp_path: pathlib.Path, host: str) -> None:
     """Recall re-checks the standing preferences every 15 minutes (recall.py,
