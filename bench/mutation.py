@@ -254,7 +254,8 @@ def default_tests(modules: Sequence[str], repo: pathlib.Path = REPO) -> list[str
     found = []
     for path in sorted((repo / "tests").rglob("test_*.py")):
         relative = path.relative_to(repo).as_posix()
-        if not reader.is_target(relative):
+        # This script's own tests name mutants in strings, which reads as an import.
+        if not reader.is_target(relative) or relative == "tests/test_bench_mutation.py":
             continue
         source = reader.read_source(relative, path.read_text(encoding="utf-8",
                                                              errors="replace"))
@@ -263,14 +264,32 @@ def default_tests(modules: Sequence[str], repo: pathlib.Path = REPO) -> list[str
     return found
 
 
-def mutmut_config(modules: Sequence[str], tests: Sequence[str]) -> str:
+#: What mutmut copies into its working folder without being told: the code it mutates
+#: (`source_paths`), `tests/` and the packaging files.
+COPIED_ANYWAY = frozenset({".git", "mutants", "memvara", "tests", "setup.cfg",
+                           "pyproject.toml"})
+
+
+def also_copy(clone: pathlib.Path) -> list[str]:
+    """Every other top-level entry of the clone. mutmut runs the tests from a copy of the
+    project that holds only the code and `tests/`, and the tests also read `bench/`,
+    `scripts/`, `docs/`, `README.md` and more: a conftest under `tests/adversarial/soak/`
+    imports `bench/perf_budget.py`, and without it the first test run fails."""
+    return sorted(entry.name for entry in clone.iterdir() if entry.name not in COPIED_ANYWAY)
+
+
+def mutmut_config(modules: Sequence[str], tests: Sequence[str],
+                  copy: Sequence[str] = ()) -> str:
     """The `[mutmut]` section of the clone's setup.cfg.
 
-    >>> print(mutmut_config(["memvara/write/reconcile.py"], ["tests/test_reconcile.py"]))
+    >>> print(mutmut_config(["memvara/write/reconcile.py"], ["tests/test_reconcile.py"],
+    ...                     ["README.md", "bench"]))
     [mutmut]
     source_paths=memvara
     only_mutate=memvara/write/reconcile.py
     pytest_add_cli_args_test_selection=tests/test_reconcile.py
+    also_copy=README.md
+        bench
     pytest_add_cli_args=-p
         no:cacheprovider
         -q
@@ -281,7 +300,8 @@ def mutmut_config(modules: Sequence[str], tests: Sequence[str]) -> str:
     return ("[mutmut]\nsource_paths=memvara\n"
             f"only_mutate={listed(modules)}\n"
             f"pytest_add_cli_args_test_selection={listed(tests)}\n"
-            "pytest_add_cli_args=-p\n    no:cacheprovider\n    -q\n")
+            + (f"also_copy={listed(copy)}\n" if copy else "")
+            + "pytest_add_cli_args=-p\n    no:cacheprovider\n    -q\n")
 
 
 def read_statuses(clone: pathlib.Path, modules: Sequence[str]) -> dict[str, str]:
@@ -337,7 +357,8 @@ def run(args: argparse.Namespace) -> int:
         subprocess.run(["git", "clone", "--quiet", "--shared", str(REPO), str(clone)],
                        check=True)
         subprocess.run(["git", "checkout", "--quiet", head], cwd=clone, check=True)
-        (clone / "setup.cfg").write_text(mutmut_config(modules, tests), encoding="utf-8")
+        (clone / "setup.cfg").write_text(mutmut_config(modules, tests, also_copy(clone)),
+                                         encoding="utf-8")
         print(f"== mutating {', '.join(modules)} at {head[:12]}, "
               f"with {len(tests)} test files, in {clone}")
         began = time.monotonic()
