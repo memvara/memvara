@@ -264,10 +264,10 @@ def read_source(path: str, text: str) -> Source:
             arguments = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
             source.parameters.update(argument.arg for argument in arguments)
             for decorator in node.decorator_list:
-                text = ast.unparse(decorator)
-                if "fixture" in text:
+                spelled = ast.unparse(decorator)
+                if "fixture" in spelled:
                     source.fixtures.add(node.name)
-                    source.autouse |= "autouse=True" in text
+                    source.autouse |= "autouse=True" in spelled
         elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
               and not any(character.isspace() for character in node.value)):
             source.strings.add(node.value)
