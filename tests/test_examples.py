@@ -50,6 +50,15 @@ ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = ROOT / "examples"
 
 
+#: Added to the failure message of an example that could not run. The examples import the
+#: installed memvara, so on a machine whose installed copy is not this checkout they fail
+#: with an import error that does not say why.
+NOT_THIS_CHECKOUT = (
+    "If the error is \"No module named 'memvara'\" or the output is from other code, the "
+    "memvara this Python has installed is not this checkout. CONTRIBUTING.md, under "
+    "\"Tests that fail only on your machine\", says how to check and fix it.")
+
+
 def run(script: Path, *args: str) -> str:
     """Run one example the way a reader would, and return what it printed.
 
@@ -71,7 +80,8 @@ def run(script: Path, *args: str) -> str:
                           capture_output=True, text=True, encoding="utf-8", timeout=300)
     assert proc.returncode == 0, (
         f"{script.relative_to(ROOT)} exited {proc.returncode}\n"
-        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}\n"
+        f"{NOT_THIS_CHECKOUT}")
     return proc.stdout
 
 

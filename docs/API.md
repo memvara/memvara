@@ -458,7 +458,29 @@ Two divergences are real and worth knowing before you write against them:
   `erase()` returns whether anything was erased, and `purge()` returns the per-table rows
   removed as the deployment's own count.
 
-**One method exists here and has no local twin: `service()`.** It returns the whole
+**Four methods exist here and have no local twin: `service()`, `health()`, `whoami()`
+and `end()`.** A caller who may be handed either client should guard these calls.
+
+- `health()` asks `GET /v1/health` whether the deployment is answering. It is the one route
+  that needs no credential, and it does not touch the store, so a 200 does not promise that
+  a read will succeed.
+- `whoami()` asks `GET /v1/whoami` what the presented credential authorizes: its scope, its
+  privilege and its expiry. It is answered from the token alone.
+- `end()` closes a fact that stopped being true, with nothing replacing it: `claim_id=` for
+  one memory, or `predicate=` (with `subject=`, default `"user"`) for every current value in
+  that slot. The local client does the same through `delete(claim_id, close="ended")` and
+  `forget(subject, predicate, close="ended")`, which the hosted client also has.
+- `service()` is described in the next paragraph.
+
+Two methods exist only on the local client, besides the ones without an endpoint listed
+above. `merge_predicate()` moves the claims filed under one predicate spelling to another
+and teaches the registry the alias; the hosted deployment has no endpoint for it. `bind()`
+narrows a `ScopedMemvara` to a smaller scope. A `ScopedRemoteMemvara` has no `bind()`, and
+its `scope` is a property that returns the bound `Scope`, not a method. To narrow a hosted
+view, call `scope()` on the client underneath it, as in `view.memvara.scope(session=...)`.
+A field you leave out keeps the view's value, as it does with `bind()`.
+
+`service()` returns the whole
 `GET /v1/stats` envelope — `scope`, `visible`, `tenant_counts`, `extractor`, `read_only` —
 where `stats()` returns `tenant_counts` alone so that `stats()["claims"]` is a number
 against either engine. Two of those fields have no local answer at all: `extractor` names a

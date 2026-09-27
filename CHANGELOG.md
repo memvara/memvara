@@ -20,6 +20,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   under the design's floor of 80%. `docs/claude/testing.md` describes the tool and where
   the missing tests are. mutmut is not a dependency of the package; install it to run the
   tool. The nightly step that runs it is not written yet.
+- **The packaged skill says when a ranked read is worth its model call.** A ranked recall
+  makes a model call whenever it has turns to rank, so the skill tells an agent to try an
+  ordinary recall first and to ask for a ranked one only when the right conversation came back with the
+  answering turn buried and the answer rests on what somebody said. It also says what to
+  do after each outcome the last line of an unranked block can name: stop asking after
+  `unconfigured` or `disabled`, tell the person after `key_rejected`, and answer from the
+  ordinary read after `fallback`. Both copies of `SKILL.md` change together, and
+  `tests/test_init.py` checks that the guidance stays. Each of the seven plugin
+  repositories gets a pull request with the change at its next sync, and the change
+  reaches that repository when the pull request is merged. #171.
 - **`scripts/test_changed.py` runs the tests a change can affect, before you push.** It
   runs the changed test files, the tests that import or name a changed file, and the tests
   that failed last time, and it runs the full suite when a change touches something it
@@ -196,6 +206,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`docs/API.md` names every method that only one client has.** Its section on a hosted
+  deployment did not mention `end()`, `health()` or `whoami()`, which only the hosted client
+  has, or `bind()` and `merge_predicate()`, which only the local client has. A caller who
+  swapped one client for the other had no warning which calls to guard. The section now
+  describes each. It says how the local client ends a fact (`delete(..., close="ended")`
+  and `forget(..., close="ended")`), and how to narrow a hosted scoped view, which has no
+  `bind()`: `view.memvara.scope(...)`. The parity test that pinned this as an expected
+  failure now passes. #336 (B54).
 - **The recall hook has a floor for each route, and the hosted route's is 0.35, so it
   stops injecting memories into most prompts a hosted store cannot answer.** Both routes
   used 0.29, measured on the plugin-recall benchmark's seeded store with the hashing
