@@ -146,7 +146,9 @@ JSON, under a header that names the text as data rather than instruction.
   `docs/INTERNALS.md`, which carries the measurements). Scope and state filtering happen
   in the store, not in a comprehension afterwards, or the top of the list is silently wrong.
   `HybridRetriever` filters `memory_types` after fusion on purpose and pays for it with a
-  bounded retry when the pool came back full. The caller's metadata and file-path filter
+  bounded retry when the pool came back full. It refuses a name that is not a memory type
+  before it reads anything (`known_memory_types`, #289), because a misspelled type would
+  keep no claim and answer nothing, with no error. The caller's metadata and file-path filter
   (`filters`, `filepath_prefix`, checked in `memvara/filters.py`) is a store parameter,
   `where`, on every capped store method, and the graph leg does not run when it is set.
   One store read cuts before it filters: `_episode_text_first` ranks turns before the

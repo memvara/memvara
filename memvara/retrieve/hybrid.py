@@ -318,6 +318,35 @@ _LEG_THREADS = MAX_QUERIES
 
 _T = TypeVar("_T")
 
+
+def known_memory_types(
+        memory_types: Sequence[MemoryType | str] | None) -> list[MemoryType] | None:
+    """`memory_types` as `MemoryType` members, refusing a name that is not one (#289).
+
+    The filter keeps only the kinds it names, so a misspelled name kept no claim at all,
+    and the search answered nothing with no error, which a caller cannot tell from a
+    store with nothing relevant in it. The refusal has the words `remember()` uses for
+    the same mistake (`core._as_memory_type`, #288).
+
+        >>> known_memory_types(["semantic"])
+        [<MemoryType.SEMANTIC: 'semantic'>]
+        >>> known_memory_types(["procedurel"])
+        Traceback (most recent call last):
+        ...
+        ValueError: memory_type must be one of episodic, semantic, procedural, not 'procedurel'
+    """
+    if memory_types is None:
+        return None
+    known = []
+    for value in memory_types:
+        try:
+            known.append(MemoryType(value))
+        except ValueError:
+            raise ValueError(
+                "memory_type must be one of "
+                + ", ".join(t.value for t in MemoryType) + f", not {value!r}") from None
+    return known
+
 #: The ranked-read outcomes that spend nothing on the final reranker pass. `applied`
 #: already reranked its turns inside the ranked stage. `disabled` is the operator's switch
 #: for shedding load, and the design spec says it spends nothing on the cross-encoder.
@@ -715,6 +744,7 @@ class HybridRetriever:
         have ranked above them. The graph leg does not run on a filtered search; see
         `_graph_search`.
         """
+        memory_types = known_memory_types(memory_types)
         if ranked and (not include_episodes or memory_types is not None):
             raise ValueError(
                 "ranked=True needs turns to rank: it requires include_episodes=True and "
