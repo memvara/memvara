@@ -61,14 +61,6 @@ class Symptom:
 #: Checks that fail today because of a known bug: (framework, pin, check) -> the bug's
 #: strict expected failure, and its symptom.
 PINNED: dict[tuple[str, str, str], tuple[pytest.MarkDecorator, Symptom]] = {
-    # as_query_engine builds its own retriever from its keyword arguments and hands them
-    # on to RetrieverQueryEngine.from_args as well, so retriever= arrives there twice.
-    ("llamaindex", "floor", "the_retriever_docstring_example_builds_a_query_engine"): (
-        known_bugs.xfail("B83"),
-        Symptom("TypeError", "got multiple values for argument 'retriever'")),
-    ("llamaindex", "latest", "the_retriever_docstring_example_builds_a_query_engine"): (
-        known_bugs.xfail("B83"),
-        Symptom("TypeError", "got multiple values for argument 'retriever'")),
     # crewai 1.10.1's EncodingFlow takes storage.write_lock, which the StorageBackend
     # protocol does not declare. From 1.11.0 on, CrewAI no longer asks for it.
     ("crewai", "floor", "crewais_memory_remembers_and_recalls_through_the_storage"): (
