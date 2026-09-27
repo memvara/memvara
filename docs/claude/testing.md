@@ -685,7 +685,7 @@ It prints a table and exits with 0 for a valid run that passes, 1 for a valid ru
 
 ### The tiers they run in
 
-- **Fast**, on every pull request: the statistics and the rules, the detectors on hand-built observations, the fault tests, a 200-turn soak through the command line, a timing run at 40 claims with one cold process and two warm calls per series, and the pins of the two bugs the soak found. They assert how the scripts behave and never how long anything took.
+- **Fast**, on every pull request: the statistics and the rules, the detectors on hand-built observations, the fault tests, a 200-turn soak through the command line, a timing run at 40 claims with one cold process and two warm calls per series, the pin of B50, and the test of B51, which is fixed. They assert how the scripts behave and never how long anything took.
 - **Nightly** (`tests/adversarial/soak/nightly/`): the 10,000-turn soak, pinned to B50 until #332 is fixed, and the full timing run at the three sizes. An invalid timing run skips with "the performance run is invalid: " and its reasons, which the skip ledger explains.
 - **Weekly** (`tests/adversarial/soak/weekly/`): the 100,000-turn soak, pinned to B50 until #332 is fixed.
 

@@ -87,9 +87,9 @@ def final_score(
 
     Every factor is monotone increasing and each weight is independent, so setting a
     weight to 0 removes that signal exactly rather than re-baselining the others.
-    Salience above 1.0 (heavily reinforced facts) is not clamped here, so this raw score
-    can rise above the fusion score times the maximum quality. The ranking's factor
-    stops at 1.0: see `ranking_quality`.
+    Salience above 1.0 (heavily reinforced facts) is not clamped here, so the multiplier
+    can exceed 1.5, its value when every signal is 1.0, and reaches 1.9 at the salience
+    cap. The ranking's factor stops at 1.0: see `ranking_quality`.
     """
     return fusion * quality_boost(
         recency=recency,
