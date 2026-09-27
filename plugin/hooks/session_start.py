@@ -39,7 +39,7 @@ from core.host import Reply, active  # noqa: E402
 from lib.ipc import (  # noqa: E402
     due_capture_alert, log_line, payload, plural, status, under_extraction, with_alert,
 )
-from lib import counts, project  # noqa: E402
+from lib import counts, deadline, project  # noqa: E402
 from lib.agentic import sweep_configs as sweep_capture_configs  # noqa: E402
 from lib.fast import OPEN, read_kinds  # noqa: E402
 from lib.mark import count as count_memories  # noqa: E402
@@ -160,7 +160,7 @@ def _binding_line(scope: str, visible: str) -> str:
     return line
 
 
-def main() -> int:
+def _main() -> int:
     if under_extraction():
         # `claude -p` opens a session like any other, so this hook fired inside every
         # extraction and built the whole standing block for a child that was about to be
@@ -184,6 +184,9 @@ def main() -> int:
     # valid banner and fail nothing.
     alert = due_capture_alert()
     host = active()
+    # Before any hosted call: every one of them stops at this, so the hook answers inside
+    # its host's limit however the endpoint behaves (#345).
+    deadline.set_from_limit(host.timeouts.get("session_start", 20))
 
     def _emit(reply: Reply) -> None:
         if reply.status:
@@ -290,6 +293,15 @@ def main() -> int:
                 status=status(f"{opened} · {missing}" if missing else opened),
                 context="\n\n".join(parts)))
     return 0
+
+
+def main() -> int:
+    """Run the hook, then clear the deadline it set, for a caller that runs it in this
+    process and goes on to make hosted calls of its own."""
+    try:
+        return _main()
+    finally:
+        deadline.clear()
 
 
 if __name__ == "__main__":

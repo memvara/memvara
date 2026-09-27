@@ -185,6 +185,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Session start and recall answer within their time limits when the hosted store does
+  not answer.** The hosted client waits up to 6 seconds for each request and retries a
+  request that got no answer once, and a hook makes several calls, so against an endpoint
+  that accepted connections and never answered, session start ran about 60 seconds and
+  recall about 36. The host stops a hook at its limit, 20 seconds for session start and
+  10 for recall, so the turn got no memories and no status line. Both hooks now set one
+  deadline for the whole hook, 1.5 seconds before their host's limit, and every hosted
+  call, and recall's wait for its daemon, waits at most the time left and is not started
+  or retried once it has passed. The hooks then report that the store did not answer, as
+  they do for any other failed call. The daemon and the capture hook set no deadline and
+  are unchanged. #345.
 - **A configured local store that cannot open is reported as a failure, not as "not
   configured".** When `MEMVARA_DB` named a store that exists and fails to open, such as a
   file that is not a SQLite database, session start and recall reported "not configured",

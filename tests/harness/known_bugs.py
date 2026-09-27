@@ -87,8 +87,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B61", 343, "the first prompt of a session injects the standing preferences a "
              "second time"),
     KnownBug("B62", 344, "a recall whose first read finds nothing starts two daemons"),
-    KnownBug("B63", 345, "a hosted endpoint that never answers keeps session start and recall "
-             "past their limits"),
     KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
