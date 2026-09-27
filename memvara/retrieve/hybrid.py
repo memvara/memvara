@@ -125,7 +125,7 @@ from .scoring import (
     final_score,
     lexical_relevance,
     normalized_score,
-    quality_boost,
+    ranking_quality,
     recency_factor,
     relevance,
     vector_relevance,
@@ -1189,7 +1189,6 @@ class HybridRetriever:
         rec.gauge(RETRIEVAL_RESULTS, float(len(results)))
         rec.timing(RETRIEVAL_LATENCY_MS, elapsed_ms)
 
-        span = 1.0 + self.w_recency + self.w_confidence + self.w_salience
         counts: list[float] = []
         for r in results:
             if not isinstance(r, Result):
@@ -1199,19 +1198,17 @@ class HybridRetriever:
                 # `observation_count` for something nothing observed.
                 continue
             counts.append(float(r.claim.observation_count))
-            # Unclamped on purpose. Quality is *supposed* to be able only to pull a
-            # result down from its evidence, and the single way past 1.0 is a salience
-            # reinforced beyond 1.0 - so a value above 1.0 is the direct evidence that
-            # freshness and salience are promoting rather than demoting, which is the
-            # failure this series exists to catch. Clamping would hide it.
-            rec.gauge(RETRIEVAL_QUALITY_FACTOR, quality_boost(
+            # The factor the ranking used, from the same function, so a value above
+            # 1.0 means the ranking has started to let quality promote a result past
+            # its evidence, which is the failure this series exists to catch (#333).
+            rec.gauge(RETRIEVAL_QUALITY_FACTOR, ranking_quality(
                 recency=r.explain.recency,
                 confidence=r.explain.confidence,
                 salience=r.explain.salience,
                 w_recency=self.w_recency,
                 w_confidence=self.w_confidence,
                 w_salience=self.w_salience,
-            ) / span)
+            ))
 
         correlation = rank_correlation(counts)
         if correlation is not None:

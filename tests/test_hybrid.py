@@ -1828,12 +1828,12 @@ def test_an_empty_result_set_is_reported_rather_than_omitted(
 def test_the_quality_factor_is_bounded_by_the_normalization_it_reports_on(
     store: SQLiteStore, embedder: HashingEmbedder
 ) -> None:
-    """Salience overriding relevance was the failure. The design intent is that quality
-    can only pull a result *down* from its evidence, by at most `1/span` — and the one
-    way past 1.0 is a salience reinforced beyond 1.0, which `quality_boost` deliberately
-    does not clamp. So above 1.0 is the alarm, and the series has to be able to report
-    it: the claim below is pinned at the top of the range reported from a production
-    store, and its factor must come back greater than one rather than clipped to it."""
+    """Salience overriding relevance was the failure (#333). Quality can only pull a
+    result *down* from its evidence, by at most `1/span`, and the series reports the
+    factor the ranking actually used. The claim below is reinforced to 2.6, the top of
+    the range reported from a production store. The ranking's factor stops at 1.0, so
+    this claim's factor is exactly 1.0, and a value above 1.0 would mean the ranking
+    had stopped doing so."""
     rec = MemoryRecorder()
     scope = Scope("acme", "alice")
     now = datetime.now(timezone.utc)
@@ -1847,10 +1847,8 @@ def test_the_quality_factor_is_bounded_by_the_normalization_it_reports_on(
     span = 1.0 + reader.w_recency + reader.w_confidence + reader.w_salience
     factors = sorted(rec.values(RETRIEVAL_QUALITY_FACTOR))
     assert len(factors) == 2
-    assert all(f >= 1.0 / span for f in factors)
-    assert factors[0] < 1.0 < factors[1], (
-        "the over-reinforced claim's factor was clipped, which is the one value worth "
-        "seeing")
+    assert all(1.0 / span <= f <= 1.0 for f in factors)
+    assert factors[1] == pytest.approx(1.0)
     # Fresh, confident and heavily reinforced against stale, unconfident and faded:
     # the spread is what makes the distribution worth plotting.
     assert factors[1] - factors[0] > 0.1

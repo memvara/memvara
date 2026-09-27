@@ -86,8 +86,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "or merge_predicate() among the methods only one client has"),
     KnownBug("B50", 332, "add() drops a turn repeated word for word after the value it "
              "stated has changed"),
-    KnownBug("B51", 333, "a fact restated often enough to reach the salience cap outranks "
-             "the fact a query asks about"),
     KnownBug("B73", 353, "memory_add says a turn was not stored when only no fact was "
              "extracted from it"),
     # Found by the framework tests against the real packages.

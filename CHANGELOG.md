@@ -137,8 +137,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     the timing run and the 10,000-turn soak as steps of their own, each with its own time
     limit and never rerun, and keeps their records in `local/nightly/records/`, outside
     the night's worktree, so each night is judged against the earlier ones. A timing run
-    on battery or under load is reported as invalid. Two bugs the soak found are pinned as
-    strict expected failures: #332 and #333.
+    on battery or under load is reported as invalid. The soak found two bugs: #332 is
+    pinned as a strict expected failure, and #333 is fixed (see "Fixed").
   - **Security properties.** `tests/adversarial/security/` checks the places where a
     defect would be a vulnerability. Stored text that imitates a result row or a header
     comes back harmless through every read tool and both hooks that read the store. Two
@@ -187,6 +187,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A fact restated many times no longer outranks the fact a query asks about.** Each
+  restatement raises a claim's salience, up to a cap of 5.0, and the ranking score used
+  the full value. At the cap, the restated claim's quality factor was 1.27 instead of at
+  most 1.0, so it ranked above any claim whose evidence for the query was less than about
+  21% stronger. For example, "tell me where Galphitor lives" returned "Galphitor likes
+  orixtor", restated 200 times, above "Galphitor lives in Viquinix". In the 100,000-turn
+  soak, the right claim ranked first in only 11,019 of 13,852 probes. The quality factor
+  in the ranking score (`Result.score`) now stops at 1.0, so recency, confidence and
+  salience can lower a result from its evidence but never lift it above. Salience above
+  1.0 still makes up for freshness or confidence a claim has lost, so among claims that
+  match a query equally well, the one restated more often still ranks higher. On a
+  30,000-turn soak the right claim now ranks first in 4,183 of 4,183 probes, and
+  restated facts still rank higher (correlation +0.81, against +0.86 before). Scores of
+  claims whose factor was already at most 1.0 do not change. `Explanation.raw_score`
+  still uses the full salience, and the `retrieval.quality_factor` telemetry series now
+  reports the factor the ranking used, so it no longer goes above 1.0. #333.
 - **The hosted client's `recall()` takes `valid_at`.** `RemoteMemvara.recall(valid_at=...)`
   and `AsyncRemoteMemvara.recall(valid_at=...)` raised `ValueError`, saying that
   `POST /v1/recall` has no time axis. The route takes `valid_at` now, the world clock alone,

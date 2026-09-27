@@ -465,11 +465,34 @@ def test_quality_can_only_pull_a_result_down() -> None:
 
 
 def test_scores_stay_in_the_unit_interval_even_for_a_reinforced_claim() -> None:
-    """Salience is deliberately uncapped upstream, so the clamp is what keeps the
-    contract - `Result.score` is in [0, 1] or callers cannot threshold on it."""
+    """Salience is uncapped upstream, and `Result.score` must stay in [0, 1] or callers
+    cannot threshold on it."""
     assert norm(1.0, salience=50.0) == 1.0
-    assert norm(0.99, salience=50.0) == 1.0
+    assert norm(0.99, salience=50.0) == pytest.approx(0.99)
     assert 0.0 <= norm(0.4, salience=50.0) <= 1.0
+
+
+def test_quality_never_lifts_a_score_above_its_evidence() -> None:
+    """A fact restated until its salience reached the cap of 5.0 used to score 1.27 times
+    its evidence, and outranked a claim with clearly more evidence for the query (#333).
+    The quality factor now stops at 1.0, so a restated fact scores at most its evidence
+    and still breaks a near-tie."""
+    assert norm(0.4, salience=5.0) == pytest.approx(0.4)
+    assert norm(0.5, salience=5.0) > norm(0.5, salience=0.5)
+    # The numbers from #333: the claim the query asks about has more evidence and a
+    # salience of 0.98, and the restated claim has less evidence and is at the cap.
+    assert norm(0.54, salience=0.98) > norm(0.44, salience=5.0)
+
+
+def test_salience_above_one_can_make_up_for_lost_quality() -> None:
+    """Restating a fact still counts past salience 1.0. It makes up for freshness or
+    confidence the claim has lost, up to the factor of 1.0, so among claims that match
+    a query equally well the one restated more often ranks higher."""
+    once = norm(0.5, recency=0.2, salience=1.0)
+    often = norm(0.5, recency=0.2, salience=3.0)
+    assert once < often <= 0.5
+    assert norm(0.5, recency=0.2, confidence=0.4, salience=2.0) < norm(
+        0.5, recency=0.2, confidence=0.4, salience=4.0)
 
 
 def test_zero_weights_reduce_to_pure_evidence() -> None:
