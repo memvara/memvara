@@ -12,7 +12,7 @@ from __future__ import annotations
 import functools
 import pathlib
 import sys
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Mapping
 
 import pytest
 
@@ -21,8 +21,9 @@ from memvara.server.config import FEATURES, ServerConfig
 
 from .commandline import (CommandLine, command_lines, config_reads, console_scripts,
                           default_off, false_claims, features, hides, nonexistent_features,
-                          paragraphs, read_script, read_subcommand, reads_in, removes, subcommands,
-                          undocumented, unread_variables, variable_defaults, variables)
+                          paragraphs, read_script, read_subcommand, reads_in, removes,
+                          subcommands, undocumented, unread_variables, variable_defaults,
+                          variables)
 from .planted import parse as parse_elsewhere
 from .surface import configurations, served
 
