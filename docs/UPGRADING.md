@@ -7,6 +7,34 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## search() no longer puts a matching claim behind claims that do not match
+
+### What changed
+
+`search()`, and `memory_search` and `recall()` through it, keep at most two claims of one
+fact slot (the same owner, subject and predicate) in the head of the results, and demote
+the rest. The demoted claims used to go to the very end of the list, behind results that
+score 0. They now go behind the other matching results and ahead of every result that
+scores 0. So a slot that holds three or more matching values, such as three languages a
+user knows, now returns all of them ahead of facts that do not match the query.
+
+### Who this changes
+
+**If you read the top `k` of a search over a slot with three or more values**, the third
+value can now be in your results where it was not before, and a result that scores 0 can
+drop out of them instead.
+
+**If you rely on the results being in score order**, they still are not in one case: a
+slot's third and later claims come after the other matching results, even ones that
+score lower. That was true before, too.
+
+### How to find your own instances
+
+Look for searches whose results used to end with a claim that has a higher `score` than
+the ones before it. That claim now appears earlier.
+
+---
+
 ## The stdio MCP server reads its input as UTF-8
 
 ### What changed

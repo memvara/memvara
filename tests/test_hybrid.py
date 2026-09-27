@@ -1203,6 +1203,29 @@ def test_diversity_does_not_reorder_within_a_slot(
     assert ids(capped) == ids(uncapped)
 
 
+def test_a_demoted_claim_never_falls_behind_a_result_that_scores_zero(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever,
+    cluster: dict[str, list[Claim]]
+) -> None:
+    """The cap moves a slot's third and later claims behind the other topics that match.
+    A result that scores 0 does not match at all, so a claim that does must stay ahead of
+    it, or one more non-matching candidate pushes a relevant claim out of the top k
+    (#327)."""
+    scope = Scope("acme", "alice")
+    for text, predicate in (("alice lives in lisbon", "lives_in"),
+                            ("alice works at acme corp", "works_at"),
+                            ("alice likes the colour blue", "favorite_color")):
+        add(store, embedder, text, scope, predicate=predicate)
+    dupe_ids = {c.id for c in cluster["dupes"]}
+
+    results = retriever.search("standup format rating", scope, k=12)
+
+    zero = [i for i, r in enumerate(results) if r.score <= 0]
+    demoted = [i for i, r in enumerate(results) if r.claim.id in dupe_ids][2:]
+    assert zero and demoted, [(r.claim.text, round(r.score, 3)) for r in results]
+    assert max(demoted) < min(zero), [(r.claim.text, round(r.score, 3)) for r in results]
+
+
 # ===========================================================================
 # Degenerate and adversarial input
 # ===========================================================================
