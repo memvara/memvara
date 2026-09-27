@@ -973,6 +973,16 @@ for ninety days still scored as ninety days stale. A `STATIC`
 predicate's 100-year half-life keeps its factor at ~1.0, so birthplaces do not decay out
 of the ranking while "what I'm working on today" does.
 
+`normalized_score` is the ranking: the retrievers' evidence, in [0, 1], times
+`ranking_quality`, which is the quality multiplier `1 + 0.25·recency + 0.15·confidence +
+0.10·salience` divided by its maximum at nominal signals, 1.5, and stopped at 1.0.
+Reinforcement raises salience up to 5.0, which once took the factor to 1.27 and let a
+much-restated fact outrank a claim with clearly more evidence (#333). With the stop,
+quality can only lower a result from its evidence. Salience above 1.0 still makes up for
+freshness or confidence a claim has lost, so a fact restated more often still ranks
+higher among equally good matches. `final_score`, reported as `Explanation.raw_score`,
+has no stop.
+
 ### `retrieve/hybrid.py`
 
 ```python
