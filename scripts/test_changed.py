@@ -87,11 +87,13 @@ DATA_FOLDERS: dict[str, str] = {
                 "or the packaged skill, which the library reads at run time",
 }
 
-#: Prose: a file with one of these extensions, at the repository root or under docs/. A
-#: changed prose file that no test names runs nothing. Any other changed file that no test
-#: imports or names runs the full suite, because nothing shows what reads it.
+#: Prose: a file with one of these extensions anywhere outside NOT_PROSE_FOLDERS. A changed
+#: prose file that no test names runs nothing. Any other changed file that no test imports
+#: or names runs the full suite, because nothing shows what reads it. Markdown under the
+#: folders below is not prose: it ships in a package or is read by code at run time, such
+#: as the packaged skill, the npm package's README or a test fixture.
 PROSE_EXTENSIONS = (".md", ".rst", ".txt")
-PROSE_FOLDERS = ("docs/",)
+NOT_PROSE_FOLDERS = ("memvara/", "tests/", "plugin/", "npm/")
 
 #: The reason printed for a changed file that no test reaches and that is not prose.
 UNKNOWN = ("no test imports or names it, and it is not prose, so nothing shows what reads "
@@ -153,8 +155,7 @@ def full_suite_reason(path: str) -> str | None:
 
 def is_prose(path: str) -> bool:
     """Whether `path` is documentation that nothing but a test naming it can read."""
-    return path.endswith(PROSE_EXTENSIONS) and (
-        "/" not in path or path.startswith(PROSE_FOLDERS))
+    return path.endswith(PROSE_EXTENSIONS) and not path.startswith(NOT_PROSE_FOLDERS)
 
 
 def module_names(path: str) -> list[str]:

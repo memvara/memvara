@@ -79,11 +79,15 @@ def test_an_ordinary_source_test_or_document_is_not_on_the_named_list(path: str)
 @pytest.mark.parametrize("path, prose", [
     ("README.md", True), ("CLAUDE.md", True), ("docs/claude/testing.md", True),
     ("docs/notes.rst", True), ("docs/list.txt", True), ("NOTES.txt", True),
+    ("benchmarks/agent_memory/README.md", True), (".claude/rules/doctests.md", True),
     (".pre-commit-config.yaml", False), ("noxfile.py", False), ("LICENSE", False),
-    ("benchmarks/agent_memory/README.md", False), ("docs/diagram.svg", False)])
+    ("docs/diagram.svg", False), ("memvara/skills/memvara/SKILL.md", False),
+    ("plugin/skills/memvara/SKILL.md", False), ("npm/memvara/README.md", False),
+    ("tests/fixtures/notes.md", False)])
 def test_prose_is_a_short_explicit_set(path: str, prose: bool) -> None:
-    """Only Markdown, reStructuredText and plain text at the root or under docs/ may run
-    nothing when no test names them. Every other file no test reaches runs the full suite."""
+    """Markdown, reStructuredText and plain text may run nothing when no test names them,
+    except under the folders whose Markdown ships in a package or is read at run time.
+    Every other file no test reaches runs the full suite."""
     assert tc.is_prose(path) is prose
 
 

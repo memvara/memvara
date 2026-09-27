@@ -235,7 +235,7 @@ suite unless the selection can show what reads it. That happens in two ways. A f
 in `FULL_SUITE` or `DATA_FOLDERS` at the top of `scripts/test_changed.py` reaches the tests
 by a route the import graph cannot see, such as a `conftest.py` file. Any other changed file
 that no test imports or names also runs the full suite, unless it is prose as
-`PROSE_EXTENSIONS` and `PROSE_FOLDERS` define it: a new tool's configuration file is read by
+`PROSE_EXTENSIONS` and `NOT_PROSE_FOLDERS` define it: a new tool's configuration file is read by
 something the selection cannot see, while a document that no test names can fail nothing.
 Those constants are the one list, each entry with its reason. The command prints which mode
 it chose and which file decided it. If you find a file it should have followed and did not,
