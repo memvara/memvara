@@ -105,8 +105,11 @@ def test_no_test_covers_an_exempt_item(repo: Repository) -> None:
 
 
 def test_every_exemption_gives_its_reason() -> None:
+    """Only the two kinds of item that `EXEMPT` describes can be exempt: an invariant that
+    is a rule for people, and a switch that only the plugin repositories act on."""
     for item, reason in checklist.EXEMPT.items():
-        assert item.startswith("inv:") and len(reason.split()) >= 8, (item, reason)
+        assert item.startswith(("inv:", "switch:")) and len(reason.split()) >= 8, (
+            item, reason)
 
 
 def test_the_baseline_leaves_out_comments_and_blank_lines(tmp_path: pathlib.Path) -> None:

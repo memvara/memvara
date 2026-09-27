@@ -88,5 +88,3 @@ inv:WP6
 inv:WP7
 inv:WP8
 inv:WP9
-switch:index_command
-switch:research_agent
