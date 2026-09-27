@@ -187,6 +187,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A ranked read whose model call fails now serves the plain read.** On a retriever with
+  a `read_selector`, `search(ranked=True)` gathers up to `rerank_top_n` turns for the
+  selector. When the selector failed (outcome `fallback`, `key_rejected` or `disabled`),
+  that larger pool was still interleaved with the claims, so the read returned more turns
+  than a plain read takes, and they pushed out facts the plain read shows. For example, a
+  read that took 3 turns returned 8 and lost the fact "user lives in Berlin" from its
+  `recall()` block. Every outcome but `applied` now returns exactly the plain read, as
+  `docs/INTERNALS.md` already said. `disabled` still spends nothing on the cross-encoder,
+  so it skips the plain read's reranker pass. A rewritten read follows the same rule for
+  its reranker pass over the fused list. A failed ranked read now costs one more local
+  retrieval, from the query vector it already has. On `fallback` or `key_rejected`, where
+  plain reads use a reranker, it also costs the plain read's reranker pass, after the one
+  the ranked stage spent ordering the turns for the selector. #308.
 - **One claim with an unreadable confidence no longer costs the whole batch.** When a
   model's answer gave one claim a confidence written as an integer of a few hundred
   digits, the shared shaping in `memvara/llm/_shape.py` raised `OverflowError` while
