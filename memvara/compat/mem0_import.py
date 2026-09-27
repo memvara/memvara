@@ -14,9 +14,9 @@ no vector-store dump required, and `memories=` is there only to recover the enti
 
 **Phase 1 is lossless and costs zero tokens.** Each memory becomes a note (see
 `_notes`) written at its original timestamp on *both* axes, and the log is then replayed
-in the order its events happened: an UPDATE *ends* the old value through the same slot and asserts
-the new one with an `invalidated_by` pointer, and a DELETE closes transaction time at the
-instant mem0 stopped believing it.
+in the order its events happened: an UPDATE *ends* the old value through the same slot
+and asserts the new one with an `invalidated_by` pointer, and a DELETE closes
+transaction time at the instant mem0 stopped believing it.
 
 Those are two different clocks on purpose. An UPDATE says the memory's text changed, not
 that the previous text had been a mistake, so the old value keeps its interval and stays
@@ -139,6 +139,17 @@ def _parse_ts(value: Any, *, where: str) -> datetime:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
+def _optional_ts(value: Any, *, where: str) -> datetime | None:
+    """A timestamp that may be absent: `None` for no value or a blank string.
+
+    Checked by what the value is rather than by truthiness, because `_parse_ts` reads a
+    number as seconds since the epoch, and 0 is a time, not a missing one.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return _parse_ts(value, where=where)
+
+
 def _column(row: sqlite3.Row, name: str) -> Any:
     """A column that older mem0 schemas may not have. Missing is not empty, but here
     both mean "nothing to carry over", so they collapse safely."""
@@ -196,8 +207,8 @@ def read_history_db(path: str | os.PathLike[str]) -> list[HistoryRow]:
             created_at=_parse_ts(r["created_at"], where=f"history row {r['id']}"),
             old_memory=_column(r, "old_memory"),
             new_memory=_column(r, "new_memory"),
-            updated_at=(None if not _column(r, "updated_at") else _parse_ts(
-                r["updated_at"], where=f"history row {r['id']}")),
+            updated_at=_optional_ts(_column(r, "updated_at"),
+                                    where=f"history row {r['id']}"),
             is_deleted=int(_column(r, "is_deleted") or 0),
             actor_id=_column(r, "actor_id"),
             role=_column(r, "role"),

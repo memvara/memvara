@@ -112,3 +112,19 @@ def test_a_row_with_no_updated_at_is_dated_by_created_at(tmp_path):
     con.close()
     [row] = read_history_db(str(path))
     assert (row.updated_at, row.at) == (None, JUNE)
+
+
+def test_an_updated_at_of_zero_is_a_time_not_a_missing_value(tmp_path):
+    """`_parse_ts` reads a number as seconds since the epoch, so 0 is 1970-01-01. A
+    column declared without a type hands the number back as an int, and a check for a
+    missing value that tested truthiness dropped it and dated the row by created_at."""
+    path = tmp_path / "history.db"
+    con = sqlite3.connect(path)
+    with con:
+        con.execute("CREATE TABLE history (id, memory_id, new_memory, event, created_at, "
+                    "updated_at)")
+        con.execute("INSERT INTO history VALUES (?,?,?,?,?,?)",
+                    ("h1", "m1", "Alice lives in Berlin", "UPDATE", JUNE.isoformat(), 0))
+    con.close()
+    [row] = read_history_db(str(path))
+    assert row.at == datetime(1970, 1, 1, tzinfo=timezone.utc)
