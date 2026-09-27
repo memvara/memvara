@@ -186,6 +186,12 @@ def tmp_path(request, _tmp_paths):
     The directory name starts with the test's name, cut to 30 characters, as pytest's
     does, and it is kept after the run, as pytest's are by default.
     """
+    # The prefix is pytest's own naming, `re.sub(r"[\W]", "_", name)[:30]` in
+    # `_pytest/tmpdir.py`, so a directory still reads as the test it belongs to.
+    # `tmp_path_factory.mktemp(prefix, numbered=False)` would need no listing either, but
+    # it makes exactly `prefix`, so two tests whose names agree in their first 30
+    # characters, such as the cases of one parametrised test, would collide.
+    # `mkdtemp` adds a random suffix that keeps every name unique.
     prefix = re.sub(r"\W", "_", request.node.name)[:30]
     return pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=_tmp_paths))
 
