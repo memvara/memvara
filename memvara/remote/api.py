@@ -42,6 +42,7 @@ from ..core import _check_k
 from ..filters import FilterValue, checked_filter
 from ..redact import CLAIM_OBJECT, CLAIM_SUBJECT, CLAIM_TEXT, EPISODE, Redactor
 from ..retrieve import EpisodeResult, Path, Retrieved
+from ..retrieve.hybrid import known_memory_types
 from ..types import (
     Answer, Claim, DeleteResult, Delta, Document, DocumentStatus, Episode,
     ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
@@ -99,10 +100,11 @@ def _iso(value: datetime | None) -> str | None:
 
 def _types(memory_types: Sequence[MemoryType | str] | None) -> list[str] | None:
     """Memory types as the wire spells them. `None` stays `None` so the transport drops
-    it, which is what asks for no filter at all."""
-    if memory_types is None:
-        return None
-    return [t.value if isinstance(t, MemoryType) else str(t) for t in memory_types]
+    it, which is what asks for no filter at all. A name that is not a memory type raises
+    `ValueError` before anything is sent, in the library's words (#289), rather than
+    leaving the refusal to the server's 422."""
+    known = known_memory_types(memory_types)
+    return None if known is None else [t.value for t in known]
 
 
 def _type(memory_type: MemoryType | str | None) -> str | None:
