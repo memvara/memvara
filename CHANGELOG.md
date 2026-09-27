@@ -203,6 +203,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   claims whose factor was already at most 1.0 do not change. `Explanation.raw_score`
   still uses the full salience, and the `retrieval.quality_factor` telemetry series now
   reports the factor the ranking used, so it no longer goes above 1.0. #333.
+- **The hosted client's `recall()` takes `valid_at`.** `RemoteMemvara.recall(valid_at=...)`
+  and `AsyncRemoteMemvara.recall(valid_at=...)` raised `ValueError`, saying that
+  `POST /v1/recall` has no time axis. The route takes `valid_at` now, the world clock alone,
+  so both clients send it, and `memory_recall` with `valid_at` works in cloud mode. A
+  deployment from before the field refuses a dated read with a 422 rather than answering it
+  with the present. `docs/UPGRADING.md` has the details. #298.
 - **`search()` and `recall()` refuse a memory type that does not exist.** A misspelled name
   in `memory_types`, such as `"procedurel"`, kept no claim, so the call returned nothing
   and raised no error, which a caller could not tell from a store with nothing relevant.
