@@ -190,10 +190,15 @@ Everything after that runs in CI or on a schedule.
    and doctest modules that import a changed Python file directly, through other modules
    or through a `conftest.py` above them, the test files that name a changed file in a
    string or match it with a glob pattern, which is how a test reads a document or starts
-   a module in a child process, and the tests that failed on the last run. It runs the fast tier only, as CI does, and names any changed test in a slower tier
-   with the command that runs it. Arguments after `--` go to pytest. It measures no
-   coverage, because coverage is a property of the whole suite and a partial run always
-   reports it short.
+   a module in a child process, and the tests that failed on the last run. It runs the
+   fast tier only, as CI does, and names any changed test in a slower tier with the
+   command that runs it. Arguments after `--` go to pytest. It measures no coverage,
+   because coverage is a property of the whole suite and a partial run always reports it
+   short. It runs the tests in parallel with `-n auto` when pytest-xdist is installed,
+   which the `dev` extra does; `-- -n 0` runs them one at a time. Each run gets a base
+   temporary directory of its own rather than pytest's shared default, because pytest
+   keeps only the three newest runs' folders there, and agents running pytest at the same
+   time on one machine used to delete each other's files in the middle of a run.
 2. **Pull request.** `.github/workflows/ci.yml` runs on every pull request, exactly as it did
    before: Python 3.10 to 3.13 on Linux, 3.13 on macOS and Windows, coverage gated at 100%,
    mypy, the import check with no extras, the benchmark smoke run, the LOCOMO retrieval

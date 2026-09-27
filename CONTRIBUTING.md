@@ -35,7 +35,10 @@ or through a `conftest.py` above them), the tests that name a changed file in a 
 match it with a pattern such as `*.md`, and the tests that failed on your last run. When you
 change something it cannot follow, such as a `conftest.py`, `pyproject.toml`, test data, a
 module that `tests/conftest.py` imports, or any file that is not documentation and that no
-test imports or names, it runs the full suite instead and prints which file made it do so. It measures
+test imports or names, it runs the full suite instead and prints which file made it do so.
+It runs the tests in parallel, one pytest-xdist worker per core, and gives each run its
+own base temporary directory, so several runs on one machine do not delete each other's
+files. Pass `-- -n 0` to run the tests one at a time. It measures
 no coverage. The full suite, coverage and mypy run in CI on your pull request, on every
 interpreter, so a green local run is a quick check and not the gate.
 

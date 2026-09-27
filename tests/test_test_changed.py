@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from types import ModuleType
 
 import pytest
@@ -413,6 +414,17 @@ def repo(tmp_path: pathlib.Path) -> pathlib.Path:
     return root
 
 
+def _given(command: list[str]) -> list[str]:
+    """The targets and the arguments passed through, without the options main adds: `-n
+    auto` when pytest-xdist is installed, and the run's own `--basetemp`."""
+    rest = command[4:]
+    if rest[:2] == ["-n", "auto"]:
+        rest = rest[2:]
+    if rest and rest[0].startswith("--basetemp="):
+        rest = rest[1:]
+    return rest
+
+
 class Recorder:
     def __init__(self, code: int = 0) -> None:
         self.code = code
@@ -435,7 +447,7 @@ def test_a_source_change_runs_the_tests_that_reach_it_and_the_last_failures(
     assert tc.main(["--base", "main", "--", "-x"], repo=repo, runner=runner) == 0
     [(command, cwd, env)] = runner.calls
     assert command[:4] == [sys.executable, "-m", "pytest", "-q"]
-    assert command[4:] == ["memvara/server/__main__.py", "memvara/server/tools.py",
+    assert _given(command) == ["memvara/server/__main__.py", "memvara/server/tools.py",
                            "tests/harness/runner.py", "tests/test_alone.py",
                            "tests/test_runner.py",
                            "tests/test_readme.py::test_x", "-x"]
@@ -454,7 +466,7 @@ def test_a_change_it_cannot_follow_runs_the_full_suite_and_says_which_file(
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
     [(command, _, _)] = runner.calls
-    assert command == [sys.executable, "-m", "pytest", "-q"]
+    assert command[:4] == [sys.executable, "-m", "pytest", "-q"] and _given(command) == []
     printed = capsys.readouterr().out
     assert "Mode: the full suite" in printed
     assert "pyproject.toml changed: it holds pytest's options" in printed
@@ -483,8 +495,7 @@ def test_a_file_no_test_reaches_runs_the_full_suite_unless_it_is_prose(
     _write(repo, ".pre-commit-config.yaml", "repos: []\n")
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
-    assert [command for command, _, _ in runner.calls] == [
-        [sys.executable, "-m", "pytest", "-q"]]
+    assert [_given(command) for command, _, _ in runner.calls] == [[]]
     assert (".pre-commit-config.yaml changed: no test imports or names it, and it is not "
             "prose") in capsys.readouterr().out
     (repo / ".pre-commit-config.yaml").unlink()
@@ -499,7 +510,7 @@ def test_a_file_no_test_reaches_runs_the_full_suite_unless_it_is_prose(
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
     [(command, _, _)] = runner.calls
-    assert command[4:] == ["tests/test_docs.py"]
+    assert _given(command) == ["tests/test_docs.py"]
     assert "Mode: selected tests." in capsys.readouterr().out
 
 
@@ -516,7 +527,7 @@ def test_a_broken_doctest_in_a_support_module_is_run_itself(repo: pathlib.Path) 
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
     [(command, _, _)] = runner.calls
-    assert command[4:] == ["tests/adversarial/parity/compare.py",
+    assert _given(command) == ["tests/adversarial/parity/compare.py",
                            "tests/adversarial/parity/test_adv_parity_x.py"]
 
 
@@ -565,7 +576,7 @@ def test_a_new_document_a_test_globs_for_runs_that_test(repo: pathlib.Path) -> N
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
     [(command, _, _)] = runner.calls
-    assert command[4:] == ["tests/test_wording.py"]
+    assert _given(command) == ["tests/test_wording.py"]
 
 
 def test_a_python_change_runs_the_test_that_collects_the_whole_tree(
@@ -581,7 +592,7 @@ def test_a_python_change_runs_the_test_that_collects_the_whole_tree(
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
     [(command, _, _)] = runner.calls
-    assert command[4:] == ["tests/adversarial/test_adv_tiers.py"]
+    assert _given(command) == ["tests/adversarial/test_adv_tiers.py"]
     printed = capsys.readouterr().out
     assert ("tests/adversarial/test_adv_tiers.py runs as well, because it collects every "
             "test module in a child process") in printed
@@ -592,7 +603,7 @@ def test_a_python_change_runs_the_test_that_collects_the_whole_tree(
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
     [(command, _, _)] = runner.calls
-    assert command[4:] == ["tests/test_readme.py"]
+    assert _given(command) == ["tests/test_readme.py"]
 
 
 def test_a_change_to_what_the_tests_conftest_registers_runs_the_full_suite(
@@ -606,6 +617,71 @@ def test_a_change_to_what_the_tests_conftest_registers_runs_the_full_suite(
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
     [(command, _, _)] = runner.calls
-    assert command == [sys.executable, "-m", "pytest", "-q"]
+    assert _given(command) == []
     assert ("tests/harness/skips.py changed: tests/conftest.py imports it and registers it "
             "as a plugin that sees every test in the run.") in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("installed, passed, workers", [
+    (True, [], ["-n", "auto"]),
+    (True, ["-n", "0"], []),
+    (True, ["-n4"], []),
+    (True, ["--numprocesses=2"], []),
+    (True, ["-p", "no:xdist"], []),
+    (False, [], []),
+])
+def test_it_runs_one_worker_per_core_when_pytest_xdist_is_installed(
+        repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch, installed: bool,
+        passed: list[str], workers: list[str]) -> None:
+    """Workers cost about two seconds to start and cut a large selection several times
+    over. Arguments after -- that choose the workers win, and without pytest-xdist the
+    run is serial rather than an error."""
+    monkeypatch.setattr(tc, "xdist_installed", lambda: installed)
+    _write(repo, "README.md", "# Changed\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main", "--", *passed], repo=repo, runner=runner) == 0
+    [(command, _, _)] = runner.calls
+    options = [arg for arg in command[4:] if not arg.startswith("--basetemp=")]
+    assert options == [*workers, "tests/test_readme.py", *passed]
+
+
+class TempRecorder(Recorder):
+    """A runner that also records whether the run's base temporary directory existed."""
+
+    def __call__(self, command: list[str], cwd: pathlib.Path, env: dict[str, str]) -> int:
+        [basetemp] = [arg.split("=", 1)[1] for arg in command if arg.startswith("--basetemp=")]
+        self.basetemp = pathlib.Path(basetemp)
+        self.existed = self.basetemp.is_dir()
+        return super().__call__(command, cwd, env)
+
+
+def test_each_run_gets_a_base_temporary_directory_of_its_own(
+        repo: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """pytest's default base temporary directory is shared by every run of one user, and
+    pytest deletes all but the newest three runs' folders in it, so concurrent runs by
+    several agents deleted each other's files. A run that passes leaves nothing behind; a
+    run that fails keeps its files and says where."""
+    _write(repo, "README.md", "# Changed\n")
+    first, second = TempRecorder(), TempRecorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=first) == 0
+    assert tc.main(["--base", "main"], repo=repo, runner=second) == 0
+    assert first.existed and second.existed and first.basetemp != second.basetemp
+    assert first.basetemp.parent == pathlib.Path(tempfile.gettempdir())
+    assert not first.basetemp.exists() and not second.basetemp.exists()
+
+    failing = TempRecorder(code=1)
+    assert tc.main(["--base", "main"], repo=repo, runner=failing) == 1
+    assert failing.basetemp.is_dir()
+    assert (f"the temporary files of this run are kept in {failing.basetemp}"
+            in capsys.readouterr().out)
+    shutil.rmtree(failing.basetemp)
+
+
+def test_a_base_temporary_directory_passed_through_is_used_instead(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    _write(repo, "README.md", "# Changed\n")
+    runner = Recorder()
+    chosen = f"--basetemp={tmp_path / 'mine'}"
+    assert tc.main(["--base", "main", "--", chosen], repo=repo, runner=runner) == 0
+    [(command, _, _)] = runner.calls
+    assert [arg for arg in command if arg.startswith("--basetemp")] == [chosen]

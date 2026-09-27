@@ -33,6 +33,17 @@ or names and that is not prose (see PROSE_EXTENSIONS), such as a new tool's
 configuration file: nothing shows what reads it, so the safe answer is everything. Every
 run prints which mode it chose and which file decided it.
 
+pytest runs with `-n auto`, one pytest-xdist worker per CPU core, when pytest-xdist is
+installed and the arguments after -- do not choose the workers themselves; `-- -n 0` runs
+one test at a time. Starting the workers costs about two seconds. On a shared 10-core Mac
+the whole fast tier took 105 s at `-n 4` and 466 s serially, measured under different
+loads; the CPU time was about the same, so the workers add no work. Each run also gets a base
+temporary directory of its own, made with `tempfile.mkdtemp`, unless the arguments pass
+`--basetemp`. pytest's default one is shared by every run of the same user and keeps only
+the three newest runs' folders, so two agents on one machine delete each other's files in
+the middle of a run. The directory is removed after a run that passes and kept, with its
+path printed, after one that fails.
+
 Only fast-tier tests are run, which is what a plain `pytest` and CI run. A changed test in
 a nightly, weekly, local or quarantine folder is named in the output, with the command to
 run it, and is not run.
@@ -53,8 +64,10 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from types import ModuleType
@@ -541,9 +554,32 @@ def make_plan(repo: pathlib.Path, changed: Sequence[str], failed: Sequence[str])
     return plan
 
 
-def pytest_command(plan: Plan, passthrough: Sequence[str]) -> list[str]:
+def xdist_installed() -> bool:
+    """Whether pytest-xdist is installed. It is in the `dev` extra, but this runs without
+    it, one test at a time."""
+    return importlib.util.find_spec("xdist") is not None
+
+
+def chooses_workers(passthrough: Sequence[str]) -> bool:
+    """Whether the arguments after -- already decide how many workers run, or turn
+    pytest-xdist off with `-p no:xdist`."""
+    return any(arg.startswith(("-n", "--numprocesses", "--dist")) or arg.endswith("no:xdist")
+               for arg in passthrough)
+
+
+def chooses_basetemp(passthrough: Sequence[str]) -> bool:
+    return any(arg.startswith("--basetemp") for arg in passthrough)
+
+
+def pytest_command(plan: Plan, passthrough: Sequence[str], *, parallel: bool = False,
+                   basetemp: pathlib.Path | None = None) -> list[str]:
+    """The pytest command line. `parallel` adds `-n auto`, one pytest-xdist worker per
+    CPU core. `basetemp` gives pytest a base temporary directory of this run's own."""
     targets = [] if plan.mode == "full" else plan.targets
-    return [sys.executable, "-m", "pytest", "-q", *targets, *passthrough]
+    options = ["-n", "auto"] if parallel else []
+    if basetemp is not None:
+        options.append(f"--basetemp={basetemp}")
+    return [sys.executable, "-m", "pytest", "-q", *options, *targets, *passthrough]
 
 
 def child_env(repo: pathlib.Path) -> dict[str, str]:
@@ -592,16 +628,27 @@ def main(argv: Sequence[str] | None = None, *, repo: pathlib.Path = REPO,
         print(line)
     if plan.mode == "nothing":
         return 0
-    command = pytest_command(plan, passthrough)
-    shown = command if len(command) <= 12 else command[:10] + [
-        f"... and {len(command) - 10} more arguments"]
+    # pytest's default base temporary directory is shared by every run of the same user,
+    # and pytest deletes all but the three newest runs' directories in it, so two agents
+    # running pytest on one machine delete each other's files in the middle of a run.
+    basetemp = (None if options.dry_run or chooses_basetemp(passthrough)
+                else pathlib.Path(tempfile.mkdtemp(prefix="memvara-test-changed-")))
+    parallel = xdist_installed() and not chooses_workers(passthrough)
+    command = pytest_command(plan, passthrough, parallel=parallel, basetemp=basetemp)
+    shown = command if len(command) <= 14 else command[:12] + [
+        f"... and {len(command) - 12} more arguments"]
     print(f"Running: {' '.join(shown)}", flush=True)
     if options.dry_run:
         return 0
     code = runner(command, repo, child_env(repo))
     if code == NO_TESTS_COLLECTED and plan.mode == "selected":
         print("test_changed: the selected files hold no tests, so nothing failed.")
-        return 0
+        code = 0
+    if basetemp is not None:
+        if code == 0:
+            shutil.rmtree(basetemp, ignore_errors=True)
+        else:
+            print(f"test_changed: the temporary files of this run are kept in {basetemp}.")
     return code
 
 

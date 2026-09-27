@@ -16,7 +16,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `conftest.py` above them), the tests that name it in a string or match it with a pattern
   such as `*.md`, and the tests that failed last time, and it runs the full suite when a
   change touches something it cannot follow, such as a `conftest.py` or `pyproject.toml`.
-  It replaces running the full suite with coverage and mypy locally before every push; CI
+  It runs them in parallel with pytest-xdist, which the `dev` extra now installs, and gives
+  each run a base temporary directory of its own. It replaces running the full suite with coverage and mypy locally before every push; CI
   still runs all of that on every pull request, and again on `main` after each merge, where
   a failure now opens an issue in the private repository memvara/build-health.
   `docs/claude/working-here.md` describes the five testing tiers. None of it changes the
