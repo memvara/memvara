@@ -239,8 +239,8 @@ def _reason(exc: "BaseException") -> str:
 
 def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = None,
            include_episodes: bool = False, memory_types: "list[str] | None" = None,
-           min_score: float = 0.0, query_rewrite: bool = False,
-           rewrite_wait: float = REWRITE_WAIT_SEC,
+           min_score: float = 0.0, hosted_min_score: "float | None" = None,
+           query_rewrite: bool = False, rewrite_wait: float = REWRITE_WAIT_SEC,
            spawn: bool = True) -> "tuple[str, bool | None, str]":
     """Recall text for `query`, by whatever route is available.
 
@@ -273,6 +273,12 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
 
     `query_rewrite=True` asks a library store to rewrite the query first, and the read is
     abandoned for the plain one after `rewrite_wait` seconds. See the module docstring.
+
+    `min_score` is the floor for a store read through the library, directly or through the
+    daemon. `hosted_min_score` is the floor for the hosted client, directly or through a
+    daemon that serves it, and `None` means the same as `min_score`. They are separate because the two routes usually score with
+    different embedders, and a floor measured on one embedder's scores is wrong for the
+    other's; `recall.py` explains the values it passes.
     """
     if not query.strip():
         return "", True, ""
@@ -301,6 +307,11 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
             # floor. A daemon is an optimisation and never a dependency: the two routes
             # returning different text for one query is the failure that rule exists for.
             request["min_score"] = min_score
+        if hosted_min_score is not None:
+            # The daemon may be serving the hosted client, on an install with no local
+            # store, and then it applies this floor instead. It is sent even when it is 0,
+            # so that a floor of 0 on the hosted route is not replaced by `min_score`.
+            request["hosted_min_score"] = hosted_min_score
         if header:
             request["header"] = header
         if include_episodes:
@@ -351,7 +362,9 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
             # asks its server for a plain read. See `lib.read_model`.
             text = client.recall(query, k=k, budget=budget, header=header,
                                  include_episodes=include_episodes,
-                                 memory_types=memory_types, min_score=min_score)
+                                 memory_types=memory_types,
+                                 min_score=(min_score if hosted_min_score is None
+                                            else hosted_min_score))
         except Exception as exc:
             # Including HostedError. Nothing below this to fall through to -- but the
             # caller still has a banner to print, and "could not ask" is not "nothing
