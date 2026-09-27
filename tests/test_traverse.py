@@ -71,6 +71,7 @@ def rendered(paths):
 # --- one instant for the whole traversal -------------------------------------
 
 
+@pytest.mark.covers("inv:I6")
 def test_a_path_is_never_stitched_from_edges_that_were_never_believed_together(walker,
                                                                               store):
     """The failure this whole feature could most easily produce, and the one nobody else
@@ -309,6 +310,7 @@ def test_a_hub_of_unreadable_claims_cannot_crowd_out_the_one_readable_edge(store
         "Hub -linked_to-> Target"]
 
 
+@pytest.mark.covers("inv:I7")
 def test_the_scope_reaches_the_store_rather_than_being_applied_after_it(store):
     """The line that makes the test above hold, pinned directly.
 

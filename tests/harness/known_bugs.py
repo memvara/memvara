@@ -27,9 +27,13 @@ class Reproduced(Exception):
 @dataclass(frozen=True)
 class KnownBug:
     id: str
-    #: The issue number in memvara/memvara.
+    #: The issue's number in `repo`.
     issue: int
     title: str
+    #: The repository the issue is in. The nightly run files its issues in the private
+    #: memvara/build-health, so an entry it pins names that repository here; the entries
+    #: filed by hand before that are in memvara/memvara.
+    repo: str = "memvara/memvara"
 
 
 KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
@@ -87,7 +91,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B63", 345, "a hosted endpoint that never answers keeps session start and recall "
              "past their limits"),
     KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
-    KnownBug("B65", 347, "half a surrogate pair in a prompt makes recall fail"),
     KnownBug("B66", 348, "a prompt of a few megabytes runs past recall's 10-second limit"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
@@ -122,4 +125,4 @@ def xfail(bug_id: str) -> pytest.MarkDecorator:
     bug = KNOWN_BUGS[bug_id]
     return pytest.mark.xfail(
         strict=True, raises=Reproduced,
-        reason=f"{bug.id}, memvara/memvara#{bug.issue}: {bug.title}")
+        reason=f"{bug.id}, {bug.repo}#{bug.issue}: {bug.title}")

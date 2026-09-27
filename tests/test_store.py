@@ -394,6 +394,7 @@ def _misfiled(path: str) -> dict[str, tuple[int, int]]:
         db.close()
 
 
+@pytest.mark.covers("inv:MM5")
 def test_every_index_row_sits_at_its_own_rows_rowid_in_every_copy(tmp_path):
     """The invariant the join above rests on, checked directly: each index row is at the
     rowid of the row it names, and every row has one. Then again after a `VACUUM`, which
@@ -1504,6 +1505,7 @@ def test_a_claim_due_in_another_scope_of_the_tenant_brings_the_list_forward(
     assert [h[0] for h in store.vector_search(onehot(1), [SCOPE], 5)] == [mine.id]
 
 
+@pytest.mark.covers("inv:MM7")
 def test_every_column_a_state_compares_with_the_clock_is_one_the_cache_watches():
     """A cached list is kept until the first instant a claim of the tenant changes state,
     found from the columns `_LAST_CHANGE` and `_NEXT_CHANGE` read. A state that came to
@@ -4279,6 +4281,7 @@ def _sardine_store(order):
     return mem
 
 
+@pytest.mark.covers("inv:MM3")
 def test_bm25_ties_are_broken_on_content_so_ingest_order_cannot_decide_the_page():
     """`ORDER BY s ASC` with no tiebreak made the answer a property of insertion order.
 
