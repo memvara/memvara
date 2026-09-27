@@ -51,6 +51,7 @@ import os
 import sys
 import time
 
+from . import deadline
 from .ipc import CLIENT_TIMEOUT_SEC, log_line, send, socket_path, store_key
 
 #: Set in a spawned daemon's environment so a daemon can never spawn a daemon.
@@ -276,6 +277,16 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
     except Exception:
         path = None
 
+    # The hook's deadline bounds the daemon's wait as it bounds a hosted call's (see
+    # `lib.deadline`): a hook that used most of its time on earlier calls must not spend
+    # this wait on top, and one that used all of it goes straight to the fallbacks below.
+    left = deadline.left()
+    if left is not None and left <= 0:
+        path = None
+    if left is not None:
+        # The same for the in-process rewrite below, which waits `rewrite_wait` for a model.
+        rewrite_wait = min(rewrite_wait, max(left, 0.0))
+
     if path is not None:
         request = {"q": query, "k": k, "budget": budget}
         if min_score:
@@ -294,6 +305,8 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
             # plain read.
             request["query_rewrite"] = True
         wait = rewrite_wait if query_rewrite else CLIENT_TIMEOUT_SEC
+        if left is not None:
+            wait = min(wait, left)
         began = _clock()
         answer = send(path, request, timeout=wait)
         served = _served(answer)

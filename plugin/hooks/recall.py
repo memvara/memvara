@@ -204,17 +204,12 @@ EPISODE_BUDGET = 600
 #: this hook exists to make and runs regardless of elapsed time; skipping it to stay inside
 #: a budget would be answering the timeout by not doing the hook's own job.
 #:
-#: What this does NOT close: it is checked before starting a call, not while one is
-#: already running, so it stops a SECOND slow call from compounding a first one but cannot
-#: shorten a call already in flight. On a fresh process the connection cache above is
-#: empty, so whichever hosted call happens to run first -- the standing refresh, if its own
-#: 15-minute interval is due, or otherwise the primary call itself -- gets no benefit from
-#: it and can still cost the full worst case on its own. If that first call is the standing
-#: refresh, in the worst case it alone can outlast this hook's entire 10s allowance before
-#: the primary call the budget was written to protect ever starts. Closing that fully would
-#: mean bounding the DURATION of an in-flight call -- a deadline enforced inside
-#: `lib.hosted` itself, shared by every caller of it, not a clock kept in this one file --
-#: which is a deeper change than a wall-clock gate on whether to start a second one.
+#: It is checked before starting a call, not while one is running, so on its own it could
+#: not shorten a call already in flight: the standing refresh alone could outlast the whole
+#: 10s allowance before the primary call ever started. `lib.deadline` closes that. `main`
+#: sets it from the host's limit, and every hosted call and the daemon's wait stop at it
+#: (#345). This budget still decides whether to START optional work, and is kept below the
+#: deadline so that the primary call has time left when the optional work is done.
 OVERALL_BUDGET_SEC = 7.5
 
 #: Prompts that are not questions to the model: a slash command, a bash escape, a comment.

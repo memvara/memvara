@@ -82,3 +82,37 @@ def test_a_limit_shorter_than_the_margin_leaves_no_time() -> None:
     deadline.set_from_limit(deadline.MARGIN_SEC / 2)
     left = deadline.left()
     assert left is not None and left <= 0
+
+
+def _daemon_wait(monkeypatch, **kwargs) -> list[float]:
+    """The timeouts `fast.recall` hands the daemon, with no store behind it."""
+    from lib import fast, open as opener
+
+    waits: list[float] = []
+    monkeypatch.setattr(fast, "socket_path", lambda key: "/nonexistent/daemon.sock")
+    monkeypatch.setattr(fast, "store_key", lambda: "k")
+    monkeypatch.setattr(fast, "send", lambda path, request, timeout: waits.append(timeout))
+    monkeypatch.setattr(fast, "_local_store", lambda: (None, {}, {}))
+    monkeypatch.setattr(hosted, "credentials", lambda: None)
+    monkeypatch.setattr(opener, "failure", None, raising=False)
+    fast.recall("where do I live", spawn=False, **kwargs)
+    return waits
+
+
+def test_the_daemon_is_given_no_longer_than_the_time_left(monkeypatch) -> None:
+    """The daemon's socket wait is 2 seconds, or 5 with a rewrite, and a hook that has
+    used most of its time on earlier calls must not spend that on top."""
+    deadline.set_from_limit(deadline.MARGIN_SEC + 0.5)
+    [wait] = _daemon_wait(monkeypatch, query_rewrite=True)
+    assert 0 < wait <= 0.5
+
+
+def test_the_daemon_is_not_asked_once_the_deadline_has_passed(monkeypatch) -> None:
+    deadline.set_from_limit(0)
+    assert _daemon_wait(monkeypatch) == []
+
+
+def test_with_no_deadline_the_daemon_gets_its_usual_wait(monkeypatch) -> None:
+    from lib import fast
+
+    assert _daemon_wait(monkeypatch) == [fast.CLIENT_TIMEOUT_SEC]

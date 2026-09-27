@@ -7,8 +7,8 @@ accepted connections and never answered kept session start for about 60 seconds 
 for about 36 (#345). The host killed the hook first, so the turn got no memories and not
 even the status line that would have said why.
 
-A reading hook sets the deadline once, from its host's limit less a margin for writing its
-reply. Every hosted call then waits at most the time left, and none is started or retried
+A reading hook sets the deadline once: `MARGIN_SEC` seconds before its host's limit, which
+leaves that long for writing its reply. Every hosted call then waits at most the time left, and none is started or retried
 once it is spent. A process that sets no deadline, such as the daemon or the capture hook,
 waits as it always has.
 
@@ -28,7 +28,8 @@ _at: "float | None" = None
 
 
 def set_from_limit(limit: float) -> None:
-    """Make the deadline `limit` less `MARGIN_SEC` seconds from now."""
+    """Set the deadline to `MARGIN_SEC` seconds before a limit of `limit` seconds from
+    now. With a 10-second limit, the deadline is 8.5 seconds from now."""
     global _at
     _at = time.monotonic() + max(0.0, limit - MARGIN_SEC)
 

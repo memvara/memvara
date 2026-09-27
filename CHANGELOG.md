@@ -179,10 +179,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   that accepted connections and never answered, session start ran about 60 seconds and
   recall about 36. The host stops a hook at its limit, 20 seconds for session start and
   10 for recall, so the turn got no memories and no status line. Both hooks now set one
-  deadline for the whole hook, their host's limit less 1.5 seconds, and every hosted call
-  waits at most the time left and is not started or retried once it has passed. The
-  hooks then report that the store did not answer, as they do for any other failed call.
-  The daemon and the capture hook set no deadline and are unchanged. #345.
+  deadline for the whole hook, 1.5 seconds before their host's limit, and every hosted
+  call, and recall's wait for its daemon, waits at most the time left and is not started
+  or retried once it has passed. The hooks then report that the store did not answer, as
+  they do for any other failed call. The daemon and the capture hook set no deadline and
+  are unchanged. #345.
 - **The LlamaIndex retriever's docstring shows an example that runs.** It showed
   `index_or_engine.as_query_engine(retriever=MemvaraRetriever(mem, user="alice"))`, which
   raises `TypeError` in llama-index-core at both memvara's floor, 0.13.0, and 0.14.25:
