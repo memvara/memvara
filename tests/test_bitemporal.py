@@ -215,6 +215,7 @@ def test_as_of_with_either_axis_raises_rather_than_picking_one(mem, kw):
     ("neighborhood", ("user",)),
     ("paths_between", ("user", "Berlin")),
 ])
+@pytest.mark.covers("inv:RT2")
 def test_every_read_that_takes_as_of_refuses_to_mix_it(mem, method, args):
     """One rule, not eight. A method that accepted the mix would be the one an
     integration reaches for, and the answer it returned would look ordinary."""
@@ -1232,6 +1233,7 @@ def test_ask_does_not_quote_a_value_we_had_already_stopped_believing(mem):
         "by June we had stopped believing it, so June would not have quoted it"
 
 
+@pytest.mark.covers("inv:RT2")
 def test_ask_carries_the_instant_it_answered_about(mem):
     """The same reason `Delta` carries `since`: a caller logging the result must not be
     able to separate the answer from the question it answers."""

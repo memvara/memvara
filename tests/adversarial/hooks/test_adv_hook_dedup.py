@@ -6,8 +6,8 @@ record per session of what it injected and does not inject it again
 one reply, so capture records the size of each transcript it mined and skips one that has
 not grown (plugin/hooks/capture.py, "It repeats").
 
-The first prompt of a session injects the standing preferences that session start has
-just injected, which B61 (#343) pins.
+Session start records the standing preferences it injects, so the first prompt of the
+session does not inject them again (#343).
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import pytest
 
 from harness import known_bugs, stores
 from harness.fakes.cli import FakeClis
+from harness.fakes.hosted_mcp import FakeHostedMcp
 from harness.hooks import HookRunner
 from memvara import MemoryType
 
@@ -73,13 +74,12 @@ PREFERENCE = "tabs for indentation in every file of every project"
 
 
 @pytest.mark.parametrize("host", ("claude", "opencode"))
-@known_bugs.xfail("B61")
 def test_the_standing_preferences_are_injected_once_when_a_session_opens(
         hooks: Make, tmp_path: pathlib.Path, host: str) -> None:
     """Recall re-checks the standing preferences every 15 minutes (recall.py,
-    `_standing_refresh`), comparing a digest with the one it recorded for the session.
-    Session start injects them and records no digest, so the first prompt of every session
-    finds the check due and the digest different, and injects the whole block again."""
+    `_standing_refresh`), comparing a digest with the one recorded for the session. When
+    session start recorded no digest, the first prompt of every session found the check due
+    and the digest different, and injected the whole block again (#343)."""
     db = tmp_path / "standing.db"
     with stores.file(db) as mem:
         mem.scope(user=support.USER).remember("user", "prefers", PREFERENCE,
@@ -94,3 +94,40 @@ def test_the_standing_preferences_are_injected_once_when_a_session_opens(
             f"B61: the first prompt of a session on {host} injects the standing preferences "
             f"that session start injected")
     assert support.STANDING_WORDS not in context
+
+
+def _recorded(runner: HookRunner, session: str) -> dict:
+    """What session start recorded for `session` in the recall state, or {}."""
+    path = runner.home / ".memvara" / ".hooks" / "recalled" / f"{session}.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def test_session_start_records_nothing_on_a_host_without_recall(
+        hooks: Make, tmp_path: pathlib.Path) -> None:
+    """Cursor runs no recall, and recall is what prunes the state files, so a record session
+    start wrote there would stay forever. Nothing on Cursor would ever read it."""
+    db = tmp_path / "standing.db"
+    with stores.file(db) as mem:
+        mem.scope(user=support.USER).remember("user", "prefers", PREFERENCE,
+                                              memory_type=MemoryType.PROCEDURAL)
+    runner = hooks("cursor", env=support.store_env(db))
+    opened = support.context_of("cursor", runner.run("session_start", session="one").reply)
+    assert PREFERENCE in opened, opened
+    assert _recorded(runner, "one") == {}
+
+
+def test_a_standing_block_from_the_legacy_fallback_is_not_recorded(hooks: Make) -> None:
+    """When memory_standing and memory_since both fail, session start falls back to a
+    ranked read of the preferences, which recall's refresh never uses. Recording that
+    block's digest would make the next refresh find the full block different and inject it
+    again as "updated"."""
+    with FakeHostedMcp() as fake:
+        fake.memvara.scope(user=fake.user).remember("user", "prefers", PREFERENCE,
+                                                    memory_type=MemoryType.PROCEDURAL)
+        for route in ("tools/call memory_standing", "tools/call memory_since"):
+            fake.fail(route, 500)
+        runner = hooks("claude", env={"MEMVARA_API_KEY": fake.api_key,
+                                      "MEMVARA_SERVER_URL": fake.serve()})
+        opened = support.context_of("claude", runner.run("session_start", session="one").reply)
+    assert PREFERENCE in opened, opened
+    assert "standing" not in _recorded(runner, "one")

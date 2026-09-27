@@ -84,7 +84,6 @@ def test_a_deeply_nested_payload_is_answered_as_an_empty_one_is(
 @pytest.mark.parametrize("host, hook", [
     (host, hook) for host, hook, _ in support.outcome_cases(support.HOSTS,
                                                             ["store cannot open"])])
-@known_bugs.xfail("B55")
 def test_a_local_store_that_cannot_open_is_not_reported_as_not_configured(
         outcomes: support.Runs, host: str, hook: str) -> None:
     support.pin_cannot_open(outcomes, host, hook)
@@ -98,7 +97,6 @@ def test_nothing_matching_is_told_apart_from_nothing_configured_without_a_status
 
 
 @pytest.mark.parametrize("host", support.HOSTS)
-@known_bugs.xfail("B57")
 def test_session_start_says_so_when_it_could_not_reach_the_store(
         outcomes: support.Runs, host: str) -> None:
     support.pin_unreachable(outcomes, host)

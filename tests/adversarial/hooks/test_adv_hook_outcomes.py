@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 
 from harness import known_bugs
+from harness.fakes.hosted_mcp import FakeHostedMcp
 
 from . import support
 
@@ -73,7 +74,6 @@ def test_each_outcome_has_its_own_words_on_a_host_with_a_status_line(
 
 @pytest.mark.parametrize("host, hook", [
     (host, hook) for host, hook, _ in support.outcome_cases(FAST_HOSTS, ["store cannot open"])])
-@known_bugs.xfail("B55")
 def test_a_local_store_that_cannot_open_is_not_reported_as_not_configured(
         outcomes: support.Runs, host: str, hook: str) -> None:
     """The design's "One more rule": a store that exists and fails to open is "recall
@@ -92,9 +92,26 @@ def test_nothing_matching_is_told_apart_from_nothing_configured_without_a_status
 
 
 @pytest.mark.parametrize("host", FAST_HOSTS)
-@known_bugs.xfail("B57")
 def test_session_start_says_so_when_it_could_not_reach_the_store(
         outcomes: support.Runs, host: str) -> None:
-    """session_start.py names only a spent quota among the reasons a section is missing,
-    so a handshake the endpoint refused ends in "nothing stored yet"."""
+    """A handshake the endpoint refused used to end in "nothing stored yet", because
+    session_start.py named only a spent quota among the reasons a section was missing
+    (#339). It now says the store failed, and logs which section and why."""
     support.pin_unreachable(outcomes, host)
+
+
+def test_session_start_names_a_section_that_did_not_arrive(hooks) -> None:
+    """When some sections arrive and one fails, the session still opens with what arrived,
+    and the status line names what is missing, so a partial session is not mistaken for a
+    whole one. The log names the section and the exception's class."""
+    with FakeHostedMcp() as fake:
+        fake.memvara.scope(user=fake.user).remember("user", "lives_in", "Lisbon")
+        fake.fail("tools/call memory_stats", 500)
+        result = hooks("claude", env={"MEMVARA_API_KEY": fake.api_key,
+                                      "MEMVARA_SERVER_URL": fake.serve()}).run("session_start")
+    assert "Lisbon" in support.context_of("claude", result.reply)
+    status = support.status_of("claude", result.reply)
+    assert status.startswith("⋈ Memvara · session opened") and "scope unavailable" in status, (
+        status)
+    [line] = result.log("session_start")
+    assert line.startswith("failed section=binding reason=") and "\n" not in line, line

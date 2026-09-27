@@ -58,6 +58,7 @@ def test_compositional_acknowledgements_are_dropped(gate, content):
      "thanks - also I'm allergic to shellfish",
      "sure thing, remind me that I live in Lisbon"],
 )
+@pytest.mark.covers("inv:WP2")
 def test_a_single_content_token_defeats_the_ack_rule(gate, content):
     # The recall bias in one test: one word outside the filler vocabulary and the turn
     # goes through, because a missed fact is unrecoverable and a spurious call is not.
@@ -80,6 +81,7 @@ def test_bare_questions_are_dropped(gate, content):
     assert reason in ("question", "too_short")
 
 
+@pytest.mark.covers("inv:WP2")
 def test_assistant_and_system_turns_are_dropped(gate):
     # Assistant text is generated, not observed. Treating it as evidence is how a store
     # ends up believing its own output.
@@ -179,6 +181,7 @@ def test_scope_does_not_affect_the_decision(gate):
 
 # --- who counts as evidence -----------------------------------------------------
 
+@pytest.mark.covers("inv:WP2")
 def test_the_default_still_treats_only_the_user_as_evidence():
     """Unchanged, and the reason is unchanged: assistant text restates and speculates,
     and believing it is how a store ends up believing its own hallucinations."""
@@ -200,6 +203,7 @@ def test_a_two_person_transcript_extracts_nothing_under_the_default():
             False, f"{speaker}_turn")
 
 
+@pytest.mark.covers("inv:WP2")
 def test_evidence_roles_none_admits_every_speaker():
     gate = SalienceGate(evidence_roles=None)
     for speaker in ("caroline", "melanie", "assistant", "user"):

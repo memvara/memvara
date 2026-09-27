@@ -814,6 +814,7 @@ def personal(store: SQLiteStore, embedder: HashingEmbedder) -> dict[str, Claim]:
     }
 
 
+@pytest.mark.covers("inv:RT4")
 def test_a_query_of_pure_stopwords_makes_the_lexical_leg_abstain(
     store: SQLiteStore, retriever: HybridRetriever, personal: dict[str, Claim]
 ) -> None:
@@ -1274,6 +1275,7 @@ def test_adversarial_queries_return_cleanly(
 
 
 @pytest.mark.parametrize("query", ["", "   ", "*", "!!!", "🙂"])
+@pytest.mark.covers("inv:RT4")
 def test_signal_free_queries_return_nothing_rather_than_arbitrary_order(
     store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever, query: str
 ) -> None:
@@ -2042,6 +2044,7 @@ def test_the_reading_is_cached_and_retaken_on_a_counter_not_a_clock(tmp_path):
     mem.close()
 
 
+@pytest.mark.covers("inv:CG5")
 def test_a_backend_that_cannot_measure_is_not_read_as_a_store_with_no_joins(tmp_path):
     """`{}` means it did not look. Reading that as zero would switch a working graph leg
     off on every third-party store at once, on a measurement nobody took.
@@ -2057,6 +2060,7 @@ def test_a_backend_that_cannot_measure_is_not_read_as_a_store_with_no_joins(tmp_
     mem.close()
 
 
+@pytest.mark.covers("inv:CG5")
 def test_a_store_without_connectivity_at_all_keeps_its_graph_leg(tmp_path):
     mem = _joined_store(tmp_path, star=True)
     r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
@@ -2336,6 +2340,7 @@ def _rows(results) -> list[tuple[str, str, float]]:
              r.score) for r in results]
 
 
+@pytest.mark.covers("inv:RT9")
 def test_on_a_file_each_stage_runs_its_vector_leg_on_another_thread(
         tmp_path, embedder, monkeypatch) -> None:
     """Both stages hand their vector leg to a pool thread and run the lexical leg
@@ -2356,6 +2361,7 @@ def test_on_a_file_each_stage_runs_its_vector_leg_on_another_thread(
     store.close()
 
 
+@pytest.mark.covers("inv:RT9")
 def test_inside_a_batch_every_leg_reads_on_the_calling_thread(tmp_path, embedder) -> None:
     """Inside `batch()` the calling thread reads its own uncommitted rows, and no other
     thread's connection can see them. A turn written in the batch must reach the
@@ -2370,6 +2376,7 @@ def test_inside_a_batch_every_leg_reads_on_the_calling_thread(tmp_path, embedder
     store.close()
 
 
+@pytest.mark.covers("inv:RT9")
 def test_a_database_with_no_file_runs_every_leg_on_the_calling_thread(
         store, embedder, monkeypatch) -> None:
     """One connection serves every read, so a second thread would only wait for it."""
@@ -2403,6 +2410,7 @@ def test_a_search_that_finds_every_leg_thread_busy_runs_the_leg_itself(
     store.close()
 
 
+@pytest.mark.covers("inv:RT9")
 def test_the_query_is_embedded_once_and_on_the_thread_that_searched(tmp_path) -> None:
     """The vector legs run on a pool thread, and the embedder is still called once per
     pass and only from the thread that called `search()`, as it always was: an embedder
