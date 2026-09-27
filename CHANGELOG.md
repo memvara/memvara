@@ -196,6 +196,52 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   When some sections arrived and one did not, the status line names it, as in "session
   opened with 3 memories · notes unavailable". "Nothing stored yet" now means every
   section answered and was empty. #339.
+- **The standing preferences are injected once when a session opens.** Session start
+  injects them, and the recall hook checks them again every 15 minutes, injecting them
+  only when their digest changed. Session start recorded no digest, so the first prompt
+  of every session found the check due and the digest different, and injected the whole
+  block a second time, with the status "standing preferences updated" although nothing
+  had changed. Session start now records the digest and the time of the block it
+  injected in the session's recall state, and recall computes the digest the same way,
+  so the first prompt finds the block unchanged. #343.
+- **Session start and recall answer within their time limits when the hosted store does
+  not answer.** The hosted client waits up to 6 seconds for each request and retries a
+  request that got no answer once, and a hook makes several calls, so against an endpoint
+  that accepted connections and never answered, session start ran about 60 seconds and
+  recall about 36. The host stops a hook at its limit, 20 seconds for session start and
+  10 for recall, so the turn got no memories and no status line. Both hooks now set one
+  deadline for the whole hook, 1.5 seconds before their host's limit, and every hosted
+  call, and recall's wait for its daemon, waits at most the time left and is not started
+  or retried once it has passed. The hooks then report that the store did not answer, as
+  they do for any other failed call. The daemon and the capture hook set no deadline and
+  are unchanged. #345.
+- **A configured local store that cannot open is reported as a failure, not as "not
+  configured".** When `MEMVARA_DB` named a store that exists and fails to open, such as a
+  file that is not a SQLite database, session start and recall reported "not configured",
+  exactly as they do when no store is configured, and wrote no log line, so a person
+  could not tell a broken store from a missing one. Both hooks now report "recall failed"
+  where the host shows a status line, and log `failed reason=open:<exception class>`, in
+  `recall.log` and in `session_start.log`. When the machine also has a hosted login, the
+  hooks still read from the hosted store, as before. #337.
+- **Recall answers a prompt of any size within its limit.** The recall hook sent the whole
+  prompt to the store as its query, and the store's time grows with the query, about 2
+  to 3 seconds a megabyte on a laptop. So a pasted log file of about 4 MB or more ran
+  past the 10-second limit every host gives recall, and the turn got no memories and no
+  status line. The hook now reads at most 8,000 characters of a prompt: a longer one
+  keeps its first and last 4,000, where a question usually is. A 16 MB prompt is now
+  answered in under a second. #348.
+- **`import_mem0` dates mem0's updates and deletes when they happened.** mem0 writes an
+  UPDATE or DELETE row with its memory's creation time in `created_at` and the time of
+  the event in `updated_at`, and the importer read `created_at`. So every imported update
+  ended the old value on the day the memory was created, and every delete stopped belief
+  on that day too. The importer also sorted the rows by that date, so rows with the same
+  date were replayed in the order of mem0's random row ids, and an update or delete
+  replayed before its ADD left the wrong value live, or brought a deleted memory back.
+  The importer now dates an UPDATE or DELETE by `updated_at`, falling back to
+  `created_at` when the column is missing or empty, and replays events in the order they
+  happened, with an ADD first when two share an instant. `HistoryRow.updated_at` is now
+  a `datetime`, as its type always said, and `HistoryRow.at` gives the time of the
+  event. #365.
 - **Recall answers a prompt that holds half of a surrogate pair.** A client written in
   JavaScript can send one, an emoji cut in two, which `JSON.stringify` escapes as
   `\ud83d`. Python decodes it into a string that cannot be encoded, the store hashes each

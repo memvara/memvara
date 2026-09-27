@@ -74,7 +74,6 @@ def test_each_outcome_has_its_own_words_on_a_host_with_a_status_line(
 
 @pytest.mark.parametrize("host, hook", [
     (host, hook) for host, hook, _ in support.outcome_cases(FAST_HOSTS, ["store cannot open"])])
-@known_bugs.xfail("B55")
 def test_a_local_store_that_cannot_open_is_not_reported_as_not_configured(
         outcomes: support.Runs, host: str, hook: str) -> None:
     """The design's "One more rule": a store that exists and fails to open is "recall

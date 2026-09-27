@@ -38,12 +38,16 @@ ordering by confidence is the refinement that arrives with route 2.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import unicodedata
 from typing import Any, Callable, NamedTuple
 
+from . import state_file
 from .mark import marked
 from .mark import on as mark_on
+from .mark import unmark_block
 
 #: A row of the "Believed now, not believed then" half of a `memory_since` reply. The other
 #: half is claims the store STOPPED believing, and parsing it into the standing set would
@@ -374,3 +378,71 @@ def standing_block(store: Any, *, hosted: bool, budget: int, header: str,
         return str(fallback() or "")
     except Exception:
         return ""
+
+
+# -- what the session has already seen ----------------------------------------------------
+
+def seen_dir() -> str:
+    """Where the recall hook keeps each session's state, `recall.SEEN_DIR`.
+
+    Worked out when called rather than at import, so that session start writes under the
+    home directory it runs with.
+    """
+    return os.path.join(os.path.expanduser("~"), ".memvara", ".hooks", "recalled")
+
+
+def state_path(directory: str, session: str) -> "str | None":
+    """The state file of `session` under `directory`, or None for an id that cannot name
+    one. A NUL byte makes every `os` call raise `ValueError`, not the `OSError` the state
+    functions are written to absorb, so such an id gets no state file at all."""
+    if not session or "/" in session or "\0" in session or session in (".", ".."):
+        return None
+    return os.path.join(directory, f"{session}.json")
+
+
+def fingerprint(text: str) -> str:
+    """A short hash of `text` with its whitespace collapsed. Recall's dedup hashes each
+    memory line with it, and `digest` hashes the standing block with it."""
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()[:16]
+
+
+def digest(block: str) -> str:
+    """The digest the recall hook compares to tell whether the standing block changed.
+
+    Taken over the block without the recall mark. The mark is presentation, and hashing it
+    made every running session report "standing preferences updated" once after an upgrade
+    and again each time the `recall_mark` switch changed.
+    """
+    return fingerprint(unmark_block(block))
+
+
+def normalised(data: object) -> dict:
+    """A session's state file contents as a dict. A bare list is the older format of the
+    file, which held only the seen hashes."""
+    if isinstance(data, list):
+        return {"seen": [h for h in data if isinstance(h, str)]}
+    return data if isinstance(data, dict) else {}
+
+
+def record_injected(session: str, block: str, now: float,
+                    directory: "str | None" = None) -> None:
+    """Record in `session`'s recall state that `block` was injected at `now`.
+
+    Session start calls this after it injects the standing block. The recall hook checks
+    the block again once `recall.STANDING_REFRESH_SECONDS` have passed since the time
+    recorded here, and injects it only when its digest differs. With nothing recorded, the
+    first prompt of every session found the check due and the digest different, and
+    injected the whole block a second time under "standing preferences updated" (#343).
+    Every other key in the state file is kept. Nothing here raises: a failure costs one
+    repeated block, which is less than a failed session start.
+    """
+    directory = directory or seen_dir()
+    path = state_path(directory, session)
+    if path is None:
+        return
+
+    def change(raw: object) -> dict:
+        return {**normalised(raw), "standing": digest(block), "standing_at": now}
+
+    state_file.update_json(path, change, lock_path=os.path.join(directory, ".lock"),
+                           prefix=".recalled-")

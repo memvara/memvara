@@ -201,6 +201,7 @@ def test_an_agentic_model_learns_nothing_about_another_users_claim_and_cannot_en
     assert set(fates(before, mem).values()) == {"unchanged"}
 
 
+@pytest.mark.covers("inv:WP10")
 def test_no_tool_retires_or_erases_and_calling_one_ends_the_run(scripted: Make) -> None:
     """A tool that was not offered is an answer the loop cannot use. Two in a row send
     the batch to single-call extraction, which here finds nothing."""

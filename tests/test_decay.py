@@ -360,6 +360,7 @@ def test_invalidated_claims_are_left_alone(consolidator):
     assert salience_of(store, retired.id) == 1.0
 
 
+@pytest.mark.covers("inv:CG6")
 def test_unknown_predicate_decays_at_the_conservative_slow_rate(consolidator):
     store = consolidator.store
     claim = add(store, "invented_by_an_llm", "something", age_days=730)

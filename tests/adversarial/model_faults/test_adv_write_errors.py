@@ -39,6 +39,7 @@ Make = Callable[..., ScriptedModel]
     pytest.param(TimeoutError("read timed out"), id="python-timeout"),
     pytest.param(Truncated('{"claims": [{"subject": "team"'), id="cut-off-at-the-limit"),
 ])
+@pytest.mark.covers("inv:WP7")
 def test_a_failed_extraction_keeps_the_turns_and_the_fast_paths_fact(
         scripted: Make, failure: object) -> None:
     model = scripted(extract=[failure])
@@ -108,6 +109,7 @@ def test_a_failed_judge_leaves_the_write_whole_and_the_advice_empty(scripted: Ma
     assert set(fates(before, mem).values()) == {"unchanged"}
 
 
+@pytest.mark.covers("inv:WP11")
 def test_a_failed_piece_of_a_long_turn_defers_that_turn_only(scripted: Make) -> None:
     """INTERNALS, `extraction_chunks`: "when a call carrying a turn fails, that turn's
     later pieces are not sent, what its earlier pieces returned is dropped, and the turn

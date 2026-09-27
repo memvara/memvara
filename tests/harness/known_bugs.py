@@ -76,8 +76,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "and the earlier period is lost"),
     KnownBug("B70", 351, "a different value written twice for a period before the "
              "current one is stored twice"),
-    KnownBug("B55", 337, 'a configured local store that cannot open is reported as "not '
-             'configured"'),
     KnownBug("B56", 338, 'on Codex, Copilot and OpenCode, "not configured" and "no matching '
              'memories" look identical'),
     KnownBug("B58", 340, 'the "_" approve separator never recovers a tool name on Cursor and '
@@ -85,13 +83,8 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B59", 341, "the hooks never find a store configured in Codex's, Cursor's or "
              "OpenCode's own MCP config"),
     KnownBug("B60", 342, "capture returns without a log line on four paths"),
-    KnownBug("B61", 343, "the first prompt of a session injects the standing preferences a "
-             "second time"),
     KnownBug("B62", 344, "a recall whose first read finds nothing starts two daemons"),
-    KnownBug("B63", 345, "a hosted endpoint that never answers keeps session start and recall "
-             "past their limits"),
     KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
-    KnownBug("B66", 348, "a prompt of a few megabytes runs past recall's 10-second limit"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
     KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
@@ -115,8 +108,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "cannot save through MemvaraStorage, which has no write_lock"),
     KnownBug("B85", 364, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "
              "consolidation threshold of 0.85, so a repeated memory is stored twice"),
-    KnownBug("B86", 365, "import_mem0 dates mem0's UPDATE and DELETE rows by created_at, "
-             "which mem0 fills with the memory's creation time, and orders them by it"),
 )}
 
 
