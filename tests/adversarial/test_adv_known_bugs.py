@@ -328,10 +328,11 @@ B47_FACTS = (("knows_language", "C"), ("knows_language", "C#"), ("knows_language
              ("visited", "Florence"))
 
 
-@known_bugs.xfail("B47")
 def test_search_returns_its_results_best_first() -> None:
-    """`Result.score` is a normalized relevance, so the list search() returns is in that
-    order, and a claim that matches cannot fall below claims that score zero (#327)."""
+    """A claim that matches cannot fall below claims that score zero (#327). Here the
+    only claim the slot cap demotes scores the same as the two it follows, so the whole
+    list is in score order. In the session-bound read, one more candidate that does not
+    match must not push it out of the top 10."""
     from datetime import datetime, timedelta, timezone
 
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -345,6 +346,10 @@ def test_search_returns_its_results_best_first() -> None:
     if scores != sorted(scores, reverse=True):
         raise known_bugs.Reproduced(f"results out of score order: {order}")
     assert sorted(r.claim.object for r in results[:3]) == ["C", "C#", "C++"], order
+    mem.remember("user", "prefers", "dark mode", user="u1", session="s1",
+                 valid_from=start, recorded_at=start)
+    session = [r.claim.object for r in mem.search("C++", k=10, user="u1", session="s1")]
+    assert {"C", "C#", "C++"} <= set(session[:3]), session
 
 
 # -- B70: a different value written twice for an earlier period is stored twice ---------

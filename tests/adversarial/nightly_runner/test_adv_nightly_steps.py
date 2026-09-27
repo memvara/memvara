@@ -233,14 +233,30 @@ def test_the_steps_environment_drops_what_the_harness_drops_and_sets_no_memvara_
     MEMVARA_ variable set, since several tests read the defaults."""
     base = {prefix + "SOMETHING": "secret" for prefix in harness_env._DROPPED}
     base.update({"KEEP_ME": "1", "PATH": os.pathsep.join(["/usr/bin", "/bin"])})
-    home, tmp, worktree, bin_dir = (tmp_path / name for name in ("home", "tmp", "wt", "bin"))
-    result = night.step_env(base, worktree=worktree, home=home, tmp=tmp, bin_dir=bin_dir)
+    home, tmp, worktree, bin_dir, records = (
+        tmp_path / name for name in ("home", "tmp", "wt", "bin", "records"))
+    result = night.step_env(base, worktree=worktree, home=home, tmp=tmp, records=records,
+                            bin_dir=bin_dir)
     assert not [key for key in result if key.startswith(harness_env._DROPPED)]
     assert result["KEEP_ME"] == "1"
     assert (result["HOME"], result["USERPROFILE"]) == (str(home), str(home))
     assert result["TMPDIR"] == result["TMP"] == result["TEMP"] == str(tmp)
     assert result["PYTHONPATH"] == str(worktree)
     assert result["PATH"].split(os.pathsep) == [str(bin_dir), "/usr/bin", "/bin"]
+
+
+def test_the_long_runs_keep_their_records_outside_the_nights_worktree(
+        tmp_path: pathlib.Path) -> None:
+    """The timing run's regression rule and the budgets read earlier nights' records, and
+    the soak judges store growth against them. Each night tests a fresh worktree, so a
+    records folder inside it would start empty every night and neither rule could ever
+    apply. The folder is local/nightly/records in the main checkout, kept between nights."""
+    layout = night.Layout(tmp_path / "main")
+    assert layout.records == tmp_path / "main" / "local" / "nightly" / "records"
+    assert not layout.records.is_relative_to(layout.night("2026-09-27"))
+    result = night.step_env({}, worktree=layout.night("2026-09-27") / "worktree",
+                            home=layout.home, tmp=tmp_path / "tmp", records=layout.records)
+    assert result["NIGHTLY_RECORDS_DIR"] == str(layout.records)
 
 
 def test_a_history_line_torn_by_a_killed_run_is_skipped_and_reported(

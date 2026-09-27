@@ -9,11 +9,12 @@ client, which typically renders them as a failed call and moves on.
 
 The validated subset of JSON Schema is exactly what the tools in this package declare:
 `type` (string/integer/number/boolean/array/object, or a list of those when a value may
-be any of several), `enum`, `minimum`, `maximum`, `maxLength`, `pattern` on a string,
-`default`, `required`, `additionalProperties` (`false` on a tool's own arguments, and a
-schema for every value of an `object` argument), and `propertyNames` for the keys of an
-`object` argument. Anything wider would be untested code in a validator, which is the one
-place that is not acceptable.
+be any of several), `enum`, `minimum`, `maximum`, `maxLength`, `pattern` on a string
+(anchored at both ends, as every declared one is), `default`, `required`,
+`additionalProperties` (`false` on a tool's own arguments, and a schema for every value of
+an `object` argument), and `propertyNames` for the keys of an `object` argument. Anything
+wider would be untested code in a validator, which is the one place that is not
+acceptable.
 
 That sentence is load-bearing, and `boolean` was missing from it for as long as it was
 missing from the code. `memory_recall` grew an `include_episodes` argument, declared it
@@ -42,11 +43,16 @@ memvara.server.validate.ToolError: demo.raw must be a boolean, got a string ('fa
 Traceback (most recent call last):
     ...
 memvara.server.validate.ToolError: demo.v must be a string or a number, got an array ([2])
+>>> validate({"c": {"type": "number", "maximum": 1.0}}, (), {"c": float("nan")}, tool="demo")
+Traceback (most recent call last):
+    ...
+memvara.server.validate.ToolError: demo.c must be a number, got NaN
 """
 
 from __future__ import annotations
 
 import difflib
+import math
 import re
 from typing import Any, Collection, Mapping, Sequence
 
@@ -151,6 +157,12 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
         if isinstance(value, bool) or not ok:
             raise ToolError(
                 f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
+        # The server's JSON parser accepts the bare token NaN. Every comparison with NaN
+        # is false, so the bounds below would let it through, and a NaN min_score then
+        # acts as no floor at all. It is refused here, whether or not the argument has
+        # bounds, because no caller means it as a number.
+        if isinstance(value, float) and math.isnan(value):
+            raise ToolError(f"{label} must be a number, got NaN")
         low, high = spec.get("minimum"), spec.get("maximum")
         if low is not None and value < low:
             raise ToolError(f"{label} must be >= {low}, got {value!r}")
@@ -183,12 +195,14 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
         if not isinstance(value, dict):
             raise ToolError(
                 f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
-        names = spec.get("propertyNames")
-        if names is not None:
-            # The keys are names the caller chose, such as a metadata field, so each one
-            # is checked like a string argument against the declared pattern.
-            for key in value:
-                _checked(f"{label} key {key!r}", key, {"type": "string", **names})
+        # The keys are names the caller chose, such as a metadata field, so each one is
+        # checked like a string argument, against `propertyNames` when the schema
+        # declares it. The check runs when it does not, too, because it is also what
+        # refuses a lone surrogate: `memory_add_document.metadata` declares no key
+        # pattern, and a key holding half of a character was stored.
+        names = spec.get("propertyNames", {})
+        for key in value:
+            _checked(f"{label} key {key!r}", key, {"type": "string", **names})
         return {key: _checked(f"{label}.{key}", item, spec["additionalProperties"])
                 for key, item in value.items()}
     elif not isinstance(value, str):
@@ -215,7 +229,12 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
                 "twice. Send the whole character or drop it.") from None
 
     pattern = spec.get("pattern")
-    if pattern is not None and not re.search(pattern, value):
+    # Matched against the whole value. In a JSON Schema pattern, as in JavaScript, `$`
+    # matches only at the end of the value, but in Python it also matches just before a
+    # newline at the end, so `re.search` let a filter key "team\n" through the pattern
+    # ^[A-Za-z0-9_.-]{1,64}$. Every pattern the tools declare is anchored at both ends,
+    # so a full match means the same thing as the schema's pattern.
+    if pattern is not None and not re.fullmatch(pattern, value):
         raise ToolError(f"{label} must match the pattern {pattern}, got {value!r}")
 
     allowed = spec.get("enum")

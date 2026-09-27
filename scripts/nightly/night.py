@@ -6,6 +6,9 @@ ignores:
 
     local/nightly/history.jsonl       one record per night, and one per filing
     local/nightly/home/               the HOME every step runs with, kept between nights
+    local/nightly/records/            the records of the timing run and the soak, kept
+                                      between nights, since both judge a night by earlier
+                                      ones
     local/nightly/<date>/             one folder per night, named by the day the run started
         heartbeat.json                written first, and again when the run finishes
         report.json, report.md        what happened, for a program and for a person
@@ -60,6 +63,14 @@ class Layout:
         nightly Hypothesis profile keeps the examples it found under the home directory,
         so that a failure found one night is tried first the next night."""
         return self.root / "home"
+
+    @property
+    def records(self) -> pathlib.Path:
+        """The folder the timing run and the soak keep their records in. It is kept from
+        night to night, outside the night's worktree, because the timing run's regression
+        rule and budgets and the soak's store-growth check read the earlier nights'
+        records. A folder inside the worktree would start empty every night."""
+        return self.root / "records"
 
     def night(self, date: str) -> pathlib.Path:
         """The folder of the night named `date`, which must be YYYY-MM-DD."""
@@ -146,17 +157,20 @@ def write_heartbeat(path: pathlib.Path, *, night: str, started_at: str,
 
 
 def step_env(base: Mapping[str, str], *, worktree: pathlib.Path, home: pathlib.Path,
-             tmp: pathlib.Path, bin_dir: pathlib.Path | None = None) -> dict[str, str]:
+             tmp: pathlib.Path, records: pathlib.Path,
+             bin_dir: pathlib.Path | None = None) -> dict[str, str]:
     """The environment the steps run in.
 
     It is `base` without the variables the harness keeps from every child process, with
-    HOME pointed at the nightly home, a private temporary folder, and the worktree on
-    PYTHONPATH so the tested code is what gets imported. It sets no MEMVARA_ variable,
-    so the suite runs with the defaults it runs with in CI.
+    HOME pointed at the nightly home, a private temporary folder, the worktree on
+    PYTHONPATH so the tested code is what gets imported, and NIGHTLY_RECORDS_DIR pointed
+    at `records`, where the timing run and the soak keep their history. It sets no
+    MEMVARA_ variable, so the suite runs with the defaults it runs with in CI.
     """
     env = {key: value for key, value in base.items() if not key.startswith(DROPPED_PREFIXES)}
     env.update({"HOME": str(home), "USERPROFILE": str(home), "TMPDIR": str(tmp),
-                "TMP": str(tmp), "TEMP": str(tmp), "PYTHONPATH": str(worktree)})
+                "TMP": str(tmp), "TEMP": str(tmp), "PYTHONPATH": str(worktree),
+                "NIGHTLY_RECORDS_DIR": str(records)})
     if bin_dir is not None:
         env["PATH"] = os.pathsep.join(
             [str(bin_dir)] + ([base["PATH"]] if base.get("PATH") else []))
