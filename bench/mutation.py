@@ -29,9 +29,9 @@ it afterwards.
 ## Which tests run
 
 By default, every test file under `tests/` that imports the module, or a public function or
-class the module defines, by name, found the way `scripts/test_changed.py` reads imports. That is narrower than every test the module can
-affect, which for a module under `memvara/` is most of the suite, and it is what keeps a
-run to minutes. A mutant that only a broader test would catch then counts as undetected,
+class the module defines, by name, found the way `scripts/test_changed.py` reads imports.
+That is narrower than every test the module can affect, which for a module under
+`memvara/` is most of the suite, and it is what keeps a run to minutes. A mutant that only a broader test would catch then counts as undetected,
 so the score is a lower bound. `--tests` replaces the default with a list you give.
 
 mutmut first runs the selection once to record which tests reach which function, and then
