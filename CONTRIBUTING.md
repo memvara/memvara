@@ -79,9 +79,11 @@ fake that counts its own calls. **If a test you add reaches the network, it is w
 To number the directory it makes, `mktemp()` lists every directory the session has made so
 far, so a call for every test makes the suite's run time grow with the square of its size.
 Make the directory with `tempfile.mkdtemp(dir=...)` inside one directory the session makes
-once, as the `_homes` fixture in `tests/conftest.py` does. A fixture that only the tests
-asking for it run, such as `mcp` in `tests/adversarial/conftest.py`, adds one listing per
-such test, which is fine.
+once, as the `_homes` fixture in `tests/conftest.py` does. pytest's own `tmp_path` numbers
+its directories the same way, and every test here asks for it, so `tests/conftest.py`
+replaces it with a fixture that uses `mkdtemp` too; `tmp_path` works as it always does. A
+fixture that only the tests asking for it run, such as `mcp` in
+`tests/adversarial/conftest.py`, adds one listing per such test, which is fine.
 
 **Slow tests go in a tier folder.** A test under a folder named `nightly/`, `weekly/`, `local/` or `quarantine/` is left out of a plain `python3 -m pytest -q`, which is what CI runs. `--tier nightly`, `--tier weekly`, `--tier local` and `--tier quarantine` collect them, and every run prints which tier folders it left out. `docs/claude/testing.md` has the details.
 

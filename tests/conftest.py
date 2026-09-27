@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import tempfile
 import traceback
 from typing import Any
@@ -157,10 +158,36 @@ def _homes(tmp_path_factory):
     which grows by one entry for every directory it has made. Called for every test, that
     listing made the suite's run time grow with the square of its size: on CI, the tests
     that run after the adversarial suite took about 40% longer than on their own.
-    `mkdtemp` picks a random name and needs no listing. `tests/test_suite_homes.py`
-    checks that neither directory is made directly in the base temporary directory.
+    `mkdtemp` picks a random name and needs no listing. `tmp_path` below is made the same
+    way, for the same reason. `tests/test_suite_homes.py` checks that none of the three
+    directories is made directly in the base temporary directory.
     """
     return tmp_path_factory.mktemp("homes")
+
+
+@pytest.fixture(scope="session")
+def _tmp_paths(tmp_path_factory):
+    """One directory for the whole session that holds every test's `tmp_path`."""
+    return tmp_path_factory.mktemp("tmp_paths")
+
+
+@pytest.fixture
+def tmp_path(request, _tmp_paths):
+    """pytest's `tmp_path`, made with `tempfile.mkdtemp` inside `_tmp_paths`.
+
+    Every test asks for `tmp_path`, because `_credentials_never_touch_home` below does.
+    pytest's own `tmp_path` numbers each new directory by listing every entry in the
+    session's base temporary directory, which gains one entry per test, so each test paid
+    for a listing as long as the number of tests before it. Measured on 2026-09-27, a
+    serial run of the fast tier spent 90 seconds inside that numbering, against 0.1
+    seconds with this fixture, and the CI logs put the cost on Windows at about six of
+    the job's seventeen minutes. `mkdtemp` picks a random name and needs no listing.
+
+    The directory name starts with the test's name, cut to 30 characters, as pytest's
+    does, and it is kept after the run, as pytest's are by default.
+    """
+    prefix = re.sub(r"\W", "_", request.node.name)[:30]
+    return pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=_tmp_paths))
 
 
 @pytest.fixture(autouse=True)
