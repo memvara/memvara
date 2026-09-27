@@ -22,6 +22,7 @@ from memvara.telemetry import (
 import memvara.telemetry
 
 from harness import stores
+from harness.skips import needs_toml
 
 from ..model_faults.handles import with_model
 from ..model_faults.scripted import Forever, ScriptedModel, Text
@@ -56,6 +57,7 @@ TWOWIKI = {"_id": "q1", "question": "Who is the father of the director of Film A
 
 
 @pytest.mark.covers("inv:TB4")
+@needs_toml
 def test_the_retrieval_harnesses_build_their_stores_with_no_extraction_model() -> None:
     """`docs/claude/telemetry-and-benchmarks.md` says the benchmark harnesses do not
     exercise ingestion: the retrieval corpora run against structured data with no
@@ -176,6 +178,7 @@ def test_the_harness_builders_switch_the_query_rewrite_off_for_a_model_that_can_
 
 
 @pytest.mark.covers("inv:TB8")
+@needs_toml
 def test_the_graph_harnesses_write_stores_whose_relations_carry_edges() -> None:
     """`docs/claude/telemetry-and-benchmarks.md` says a graph harness declares its
     corpus's relations, or it measures a store with no edges: `bench/multihop.py` builds

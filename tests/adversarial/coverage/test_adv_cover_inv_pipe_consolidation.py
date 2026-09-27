@@ -18,7 +18,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from memvara import Memvara, NullLLM
+from memvara import Memvara
 from memvara.consolidate import Consolidator, Sweep
 from memvara.consolidate import decay as decay_module
 from memvara.consolidate import merge as merge_module
@@ -27,6 +27,8 @@ from memvara.retrieve import HybridRetriever
 from memvara.schema import BUILTIN_PREDICATES, PredicateRegistry, PredicateSpec
 from memvara.store import SQLiteStore
 from memvara.types import Claim, MemoryType, Scope, utcnow
+
+from harness import stores
 
 from ..model_faults.scripted import ScriptedModel
 
@@ -238,7 +240,7 @@ def walks(chains: bool) -> tuple[int, dict[str, int]]:
     registry = PredicateRegistry(BUILTIN_PREDICATES + tuple(
         PredicateSpec(name, object_type=("entity",), graph=True)
         for name in ("uses", "configured_in", "near")))
-    mem = Memvara(embedder=HashingEmbedder(dim=512), llm=NullLLM(), registry=registry)
+    mem = stores.memory(registry=registry)
     mem.remember("user", "uses", "pytest")
     if chains:
         mem.remember("pytest", "configured_in", "pyproject.toml")
