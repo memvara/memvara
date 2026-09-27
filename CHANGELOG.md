@@ -187,6 +187,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`docs/API.md` names every method that only one client has.** Its section on a hosted
+  deployment did not mention `end()`, `health()` or `whoami()`, which only the hosted client
+  has, or `bind()` and `merge_predicate()`, which only the local client has. A caller who
+  swapped one client for the other had no warning which calls to guard. The section now
+  describes each, says how the local client ends a fact (`delete(..., close="ended")` and
+  `forget(..., close="ended")`), and says to call `scope()` where a hosted scoped view has
+  no `bind()`. The parity test that pinned this as an expected failure now passes. #336
+  (B54).
 - **One prompt starts at most one recall daemon, and a daemon that loses the race cannot
   strand the winner.** When no daemon was running and a prompt's first read found nothing
   fresh, the recall hook read a second time, wider, and each read started a daemon. The
