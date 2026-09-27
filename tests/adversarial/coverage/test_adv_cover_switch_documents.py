@@ -1,27 +1,22 @@
 """The three feature switches that change how the MCP server's store takes in a document:
 `ingest_urls`, `ingest_media` and `retrieval_chunks`.
 
-Each test reads the switch from environment variables the way the server does
-(`ServerConfig.from_env`), builds the server's store with `build_memvara`, and adds a
-document to it. The switches are described in the comment above `FEATURE_DEFAULTS` in
-memvara/server/config.py and in the `MEMVARA_FEATURE_<NAME>` row of docs/DEPLOY.md.
-Nothing here reaches a network: a URL is answered by a fetcher that records what it was
-asked for, and an image is described by a scripted stand-in for the model.
+Each test builds the server's store from environment variables with the `served` fixture
+(conftest.py beside this file) and adds a document to it. The switches are described in
+the comment above `FEATURE_DEFAULTS` in memvara/server/config.py and in the
+`MEMVARA_FEATURE_<NAME>` row of docs/DEPLOY.md. A URL is answered by a fetcher that
+records what it was asked for, and an image is described by a scripted stand-in for the
+model.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Iterator
-
 import pytest
 
-from memvara import Memvara
 from memvara.ingest import Fetched, IngestError
-from memvara.server import config as server_config
-from memvara.server.config import ServerConfig, build_memvara
 
-from ..model_faults.handles import NEW_MANY
-from ..model_faults.scripted import Forever, ScriptedModel
+from ..model_faults.scripted import ScriptedModel
+from .conftest import Serve
 
 #: The page the recording fetcher answers every URL with.
 PAGE = (b"<html><title>Refunds</title>"
@@ -32,8 +27,6 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 16
 
 #: What the stand-in model says the image shows.
 DESCRIPTION = "A whiteboard listing the three refund rules."
-
-Build = Callable[..., Memvara]
 
 
 class RecordingFetcher:
@@ -52,7 +45,7 @@ class SeeingModel(ScriptedModel):
     records every image it was shown."""
 
     def __init__(self) -> None:
-        super().__init__(resolve=[Forever(NEW_MANY)])
+        super().__init__()
         self.images: list[tuple[bytes, str]] = []
 
     def describe_image(self, data: bytes, mime: str) -> str:
@@ -63,31 +56,8 @@ class SeeingModel(ScriptedModel):
         raise AssertionError("no audio or video is added in these tests")
 
 
-@pytest.fixture
-def served(monkeypatch: pytest.MonkeyPatch) -> Iterator[Build]:
-    """Build the server's store from environment variables. With `model`, the store's
-    model is that model, put where the "openai" backend would be. Every store made is
-    closed when the test ends."""
-    made: list[Memvara] = []
-
-    def build(env: dict[str, str], model: ScriptedModel | None = None) -> Memvara:
-        base = {"MEMVARA_DB": ":memory:", "MEMVARA_EMBEDDER": "hashing",
-                "MEMVARA_USER": "u1", "MEMVARA_FEATURE_ENCRYPTION": "0",
-                "MEMVARA_FEATURE_PROJECT_SCOPE": "0"}
-        if model is not None:
-            monkeypatch.setattr(server_config, "_openai", lambda *args, **kwargs: model)
-            base["MEMVARA_LLM"] = "openai"
-        mem = build_memvara(ServerConfig.from_env({**base, **env}))
-        made.append(mem)
-        return mem
-
-    yield build
-    for mem in made:
-        mem.close()
-
-
 @pytest.mark.covers("switch:ingest_urls")
-def test_ingest_urls_switched_off_refuses_a_url_before_fetching_it(served: Build) -> None:
+def test_ingest_urls_switched_off_refuses_a_url_before_fetching_it(served: Serve) -> None:
     """A document given as a URL is fetched and stored while `ingest_urls` is on, which is
     its default. `MEMVARA_FEATURE_INGEST_URLS=0` refuses such a document with the code
     `feature_off`, and nothing is fetched or stored. docs/DEPLOY.md and
@@ -113,7 +83,7 @@ def test_ingest_urls_switched_off_refuses_a_url_before_fetching_it(served: Build
 
 @pytest.mark.covers("switch:ingest_media")
 def test_ingest_media_switched_off_refuses_an_image_before_the_model_sees_it(
-        served: Build) -> None:
+        served: Serve) -> None:
     """An image added as a document is described by the model, and the description is
     stored as the document's text, while `ingest_media` is on, which is its default.
     `MEMVARA_FEATURE_INGEST_MEDIA=0` refuses images, audio and video with the code
@@ -138,7 +108,7 @@ def test_ingest_media_switched_off_refuses_an_image_before_the_model_sees_it(
 
 @pytest.mark.covers("switch:retrieval_chunks")
 def test_retrieval_chunks_switched_off_stores_a_long_document_as_one_chunk(
-        served: Build) -> None:
+        served: Serve) -> None:
     """A document is split into chunks of about 1,000 characters while `retrieval_chunks`
     is on, which is its default. `MEMVARA_FEATURE_RETRIEVAL_CHUNKS=0` stores each document
     as one chunk instead. docs/DEPLOY.md and the comment above `FEATURE_DEFAULTS` make
