@@ -22,7 +22,7 @@ JSON, under a header that names the text as data rather than instruction.
 - Fusion: `memvara/retrieve/fusion.py` — `reciprocal_rank_fusion()`, with `rrf_k` of 60.
 - Scoring: `memvara/retrieve/scoring.py` — `final_score()`, `relevance()`,
   `lexical_relevance()`, `vector_relevance()`, `recency_factor()`, `quality_boost()`,
-  `normalized_score()`.
+  `ranking_quality()`, `normalized_score()`.
 - Filters: `memvara/filters.py` — `search_filter()`, `SearchFilter` and `meta_matches()`,
   the SQL function `SQLiteStore` evaluates metadata filters with. Tests:
   `tests/test_metadata_filters.py`.

@@ -50,14 +50,14 @@ def test_liking_again_in_the_same_words_after_taking_it_back_is_kept() -> None:
     assert live == ["vasnu"]
 
 
-# -- B51: a fact at the salience cap outranks the fact a query asks about ----------------
+# -- B51, fixed: a fact at the salience cap outranked the fact a query asks about ------
 
-@known_bugs.xfail("B51")
 def test_a_fact_at_the_salience_cap_does_not_outrank_the_fact_asked_about() -> None:
     """Ranking is evidence first, with freshness and salience as the tiebreak
     (`scoring.normalized_score`). A fact restated 200 times over three weeks reaches the
-    salience cap, and its quality factor of 1.27 then outranks a claim with more evidence
-    for the question (#333). The soak saw this on 20% of its probes over 100,000 turns."""
+    salience cap of 5.0. Its quality factor used to be 1.27, which outranked a claim with
+    more evidence for the question (#333); the soak saw this on 20% of its probes over
+    100,000 turns. The ranking's quality factor now stops at 1.0."""
     start = datetime.now(timezone.utc) - timedelta(days=21)
     mem = stores.memory(user="u1")
     mem.remember("Galphitor", "lives_in", "Viquinix", valid_from=start)
