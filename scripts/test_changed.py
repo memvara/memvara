@@ -10,17 +10,21 @@ It finds the files that differ from the merge base with `--base`, including unco
 and untracked files, and runs pytest on:
 
 * the test files that changed;
-* the test files, and the modules under memvara/ whose doctests run as tests, that import
-  a changed Python file, directly or through other modules;
+* the test files and doctest modules that import a changed Python file, directly or
+  through other modules. A doctest module is any module under memvara/, and any other
+  module under tests/ that holds a doctest example, because pyproject.toml passes
+  --doctest-modules;
 * the test files that name a changed file in a string, such as `ROOT / "docs"` or
   `"-m", "memvara.server"`, directly or through a module they import. That is how a test
   reaches a document, a data file or a script it runs as a separate process;
 * the tests that failed on the last run in this checkout, from pytest's own cache.
 
-It runs the full suite instead when a file changes that this cannot see through, such as a
-conftest.py file, pyproject.toml, the test harness or test data. FULL_SUITE below is the
-whole list, with the reason for each entry. Every run prints which of the two modes it
-chose and why.
+It runs the full suite instead in two cases. The first is a file in FULL_SUITE or
+DATA_FOLDERS below: a file that reaches the tests by a route this cannot see, such as a
+conftest.py file, pyproject.toml, the test harness or test data. The second is any other
+changed file that no test imports or names and that is not prose (see PROSE_EXTENSIONS),
+such as a new tool's configuration file: nothing shows what reads it, so the safe answer
+is everything. Every run prints which mode it chose and which file decided it.
 
 Only fast-tier tests are run, which is what a plain `pytest` and CI run. A changed test in
 a nightly, weekly, local or quarantine folder is named in the output, with the command to
@@ -83,6 +87,16 @@ DATA_FOLDERS: dict[str, str] = {
                 "or the packaged skill, which the library reads at run time",
 }
 
+#: Prose: a file with one of these extensions, at the repository root or under docs/. A
+#: changed prose file that no test names runs nothing. Any other changed file that no test
+#: imports or names runs the full suite, because nothing shows what reads it.
+PROSE_EXTENSIONS = (".md", ".rst", ".txt")
+PROSE_FOLDERS = ("docs/",)
+
+#: The reason printed for a changed file that no test reaches and that is not prose.
+UNKNOWN = ("no test imports or names it, and it is not prose, so nothing shows what reads "
+           "it and every test may")
+
 #: The folders Python puts on the import path when the tests run: the repository root,
 #: tests/ (it has no __init__.py, so pytest adds it), and the two folders that tests add
 #: themselves before importing a script from them.
@@ -137,6 +151,12 @@ def full_suite_reason(path: str) -> str | None:
     return None
 
 
+def is_prose(path: str) -> bool:
+    """Whether `path` is documentation that nothing but a test naming it can read."""
+    return path.endswith(PROSE_EXTENSIONS) and (
+        "/" not in path or path.startswith(PROSE_FOLDERS))
+
+
 def module_names(path: str) -> list[str]:
     """The dotted names under which `path` can be imported, one per import root that holds
     it. tests/harness/env.py is both `tests.harness.env` and `harness.env`."""
@@ -177,6 +197,10 @@ class Source:
     #: saying "see docs/claude/testing.md", and reading prose as a path would make every
     #: test that imports a documented helper look as if it read the documents.
     strings: set[str] = field(default_factory=set)
+    #: Whether it holds a doctest example. pyproject.toml passes --doctest-modules, so
+    #: pytest collects the examples in every module under tests/ and memvara/, support
+    #: modules such as tests/adversarial/parity/compare.py included.
+    doctests: bool = False
 
 
 _SEPARATORS = re.compile(r"[/\\]+")
@@ -186,7 +210,7 @@ _DOTTED = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
 def read_source(path: str, text: str) -> Source:
     """Parse one file. A file that does not parse imports nothing, as far as this can tell,
     and still counts as changed if it changed."""
-    source = Source()
+    source = Source(doctests=">>>" in text)
     try:
         tree = ast.parse(text, filename=path)
     except (SyntaxError, ValueError):
@@ -228,6 +252,7 @@ class Graph:
             for name in module_names(path):
                 self.by_name.setdefault(name, path)
         self._closures: dict[str, frozenset[str]] = {}
+        self._imports: dict[str, set[str]] = {}
 
     @classmethod
     def build(cls, repo: pathlib.Path, paths: Iterable[str]) -> Graph:
@@ -241,9 +266,12 @@ class Graph:
 
     def imports(self, path: str) -> set[str]:
         """The files `path` imports directly and that exist here."""
-        source = self.sources[path]
-        found = {self.by_name[name] for name in source.names if name in self.by_name}
-        return found | {file for file in source.files if file in self.sources}
+        if path not in self._imports:
+            source = self.sources[path]
+            found = {self.by_name[name] for name in source.names if name in self.by_name}
+            self._imports[path] = found | {file for file in source.files
+                                           if file in self.sources}
+        return self._imports[path]
 
     def closure(self, path: str) -> frozenset[str]:
         """`path` and every file it imports, directly or through other files."""
@@ -282,32 +310,37 @@ def tokens(path: str) -> tuple[set[str], set[str]]:
     return names, named
 
 
-def is_target(path: str) -> bool:
-    """Whether pytest collects `path` as a test file or as a module of doctests."""
+def is_target(path: str, *, doctests: bool = False) -> bool:
+    """Whether pytest collects `path` as a test file or as a module of doctests.
+
+    Under tests/, that is a test file, or any other module that holds a doctest example
+    (`doctests`). Under memvara/, every module is a target, whether or not it holds an
+    example today, so that a changed library module always selects at least itself."""
     if path.startswith(NOT_COLLECTED) or not path.endswith(".py"):
         return False
     if path.startswith("tests/"):
         name = path.rsplit("/", 1)[-1]
-        return any(fnmatch.fnmatchcase(name, pattern) for pattern in TEST_FILE_PATTERNS)
+        return doctests or any(fnmatch.fnmatchcase(name, pattern)
+                               for pattern in TEST_FILE_PATTERNS)
     return path.startswith("memvara/")
 
 
-def affected(graph: Graph, changed: Sequence[str]) -> dict[str, str]:
-    """Each test file or doctest module a change reaches, with the changed file that
-    reached it first. A target is reached when a file in its import closure is a changed
-    file, imports a changed module by name, or, outside the library, names a changed file
-    in a string."""
+def affected(graph: Graph, changed: Sequence[str]) -> dict[str, set[str]]:
+    """Each test file or doctest module a change reaches, with the changed files that
+    reach it. A target is reached when a file in its import closure is a changed file,
+    imports a changed module by name, or, outside the library, names a changed file in a
+    string."""
     wanted = [(path, *tokens(path)) for path in changed]
-    found: dict[str, str] = {}
-    for target in sorted(path for path in graph.sources if is_target(path)):
+    found: dict[str, set[str]] = {}
+    for target in sorted(path for path, source in graph.sources.items()
+                         if is_target(path, doctests=source.doctests)):
         closure = graph.closure(target)
         for path, names, named in wanted:
             if path in closure or any(
                     names & graph.sources[each].names
                     or (named & graph.sources[each].strings and not each.startswith(LIBRARY))
                     for each in closure):
-                found[target] = path
-                break
+                found.setdefault(target, set()).add(path)
     return found
 
 
@@ -371,6 +404,10 @@ def make_plan(repo: pathlib.Path, changed: Sequence[str], failed: Sequence[str])
     tracked = git("ls-files", "-z", "*.py", cwd=repo).split("\0")
     graph = Graph.build(repo, {path for path in tracked if path} | set(changed))
     reached = affected(graph, changed)
+    reaching = set().union(*reached.values())
+    unknown = [path for path in changed if path not in reaching and not is_prose(path)]
+    if unknown:
+        return Plan("full", [f"{path} changed: {UNKNOWN}." for path in unknown])
 
     plan = Plan("selected")
     for path in sorted(reached):
@@ -381,12 +418,12 @@ def make_plan(repo: pathlib.Path, changed: Sequence[str], failed: Sequence[str])
             continue
         plan.targets.append(path)
     tests = [path for path in plan.targets if path.startswith("tests/")]
-    doctests = [path for path in plan.targets if path.startswith("memvara/")]
+    library = [path for path in plan.targets if path.startswith("memvara/")]
     changed_tests = [path for path in tests if path in changed]
     plan.reasons.append(f"Changed: {', '.join(changed)}." if changed else "Nothing changed.")
-    plan.reasons.append(f"{_count(len(tests), 'test file')} and "
-                        f"{_count(len(doctests), 'module')} with doctests import or name a "
-                        f"changed file. Of those test files, {len(changed_tests)} changed "
+    plan.reasons.append(f"{_count(len(tests), 'file')} under tests/ and "
+                        f"{_count(len(library), 'library module')} import or name a changed "
+                        f"file. Of those files under tests/, {len(changed_tests)} changed "
                         "themselves.")
     selected = set(plan.targets)
     extra = [node for node in failed if node.split("::", 1)[0] not in selected

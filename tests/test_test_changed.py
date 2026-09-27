@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -69,9 +70,32 @@ def test_a_change_selection_cannot_follow_runs_the_full_suite(path: str, named: 
     "memvara/core.py", "tests/test_fast.py", "tests/adversarial/sessions/runner.py",
     "scripts/nightly/filing.py", "bench/soak.py", "docs/claude/testing.md", "README.md",
     "CLAUDE.md", "examples/quickstart.py"])
-def test_an_ordinary_source_test_or_document_change_is_selected_not_run_in_full(
-        path: str) -> None:
+def test_an_ordinary_source_test_or_document_is_not_on_the_named_list(path: str) -> None:
+    """These go through selection. Whether one of them still runs the full suite depends on
+    whether any test reaches it, which the end-to-end tests below check."""
     assert tc.full_suite_reason(path) is None
+
+
+@pytest.mark.parametrize("path, prose", [
+    ("README.md", True), ("CLAUDE.md", True), ("docs/claude/testing.md", True),
+    ("docs/notes.rst", True), ("docs/list.txt", True), ("NOTES.txt", True),
+    (".pre-commit-config.yaml", False), ("noxfile.py", False), ("LICENSE", False),
+    ("benchmarks/agent_memory/README.md", False), ("docs/diagram.svg", False)])
+def test_prose_is_a_short_explicit_set(path: str, prose: bool) -> None:
+    """Only Markdown, reStructuredText and plain text at the root or under docs/ may run
+    nothing when no test names them. Every other file no test reaches runs the full suite."""
+    assert tc.is_prose(path) is prose
+
+
+def test_the_folders_it_skips_are_the_folders_pyproject_tells_pytest_to_ignore() -> None:
+    """pytest never collects what `--ignore` names, so selecting a file there would pass a
+    path pytest refuses. The two lists must not drift apart."""
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    addopts = re.search(r'^addopts\s*=\s*"([^"]*)"', text, re.M)
+    assert addopts is not None
+    ignored = {f"{folder.rstrip('/')}/"
+               for folder in re.findall(r"--ignore=(\S+)", addopts.group(1))}
+    assert ignored == set(tc.NOT_COLLECTED)
 
 
 # -- Reading one file -----------------------------------------------------------------------
@@ -185,11 +209,28 @@ def test_a_changed_test_file_is_always_its_own_target() -> None:
     assert _affected(["tests/test_alone.py"]) == {"tests/test_alone.py"}
 
 
-def test_the_packaged_skill_is_never_collected_and_helpers_are_not_test_files() -> None:
+def test_the_packaged_skill_is_never_collected_and_helpers_count_only_with_doctests() -> None:
     assert not tc.is_target("memvara/skills/memvara/auth.py")
+    assert not tc.is_target("memvara/skills/memvara/auth.py", doctests=True)
     assert not tc.is_target("tests/harness/runner.py")
+    assert tc.is_target("tests/adversarial/parity/compare.py", doctests=True)
     assert tc.is_target("tests/adversarial/test_adv_x.py")
     assert tc.is_target("memvara/core.py")
+
+
+COMPARE = 'def normalise(x):\n    """>>> normalise(1)\n    {}\n    """\n    return x\n'
+
+
+def test_a_support_module_under_tests_with_a_doctest_is_its_own_target() -> None:
+    """pyproject.toml passes --doctest-modules, so pytest runs the examples in
+    tests/adversarial/parity/compare.py as tests of their own. A broken example there once
+    selected only the four test files that import the module, and passed, while
+    `pytest tests/adversarial/parity/compare.py` failed."""
+    files = {"tests/adversarial/parity/compare.py": COMPARE.format(1),
+             "tests/adversarial/parity/test_adv_parity_x.py": "from . import compare\n"}
+    reached = set(tc.affected(_graph(files), ["tests/adversarial/parity/compare.py"]))
+    assert reached == {"tests/adversarial/parity/compare.py",
+                       "tests/adversarial/parity/test_adv_parity_x.py"}
 
 
 # -- The last run's failures ---------------------------------------------------------------
@@ -235,7 +276,7 @@ def repo(tmp_path: pathlib.Path) -> pathlib.Path:
     _write(root, "tests/adversarial/nightly/__init__.py", "")
     _write(root, "tests/adversarial/nightly/test_slow.py", "import memvara\n")
     _write(root, "pyproject.toml", "")
-    _write(root, ".gitignore", ".pytest_cache/\n")
+    _write(root, ".gitignore", ".pytest_cache/\n__pycache__/\n")
     _git(root, "init", "-q", "-b", "main")
     _git(root, "add", ".")
     _git(root, "commit", "-q", "-m", "start")
@@ -302,6 +343,51 @@ def test_a_changed_test_in_a_slow_tier_is_named_with_its_command_and_not_run(
     assert "Mode: nothing to run." in printed
     assert ("Not run: tests/adversarial/nightly/test_slow.py is in the nightly tier. Run it "
             "with `python3 -m pytest tests/adversarial/nightly/test_slow.py`.") in printed
+
+
+def test_a_file_no_test_reaches_runs_the_full_suite_unless_it_is_prose(
+        repo: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A new tool's configuration file is read by something this cannot see, so it runs
+    everything. A document no test names is read by nothing that can fail, so it runs
+    nothing; a document that a test names runs that test."""
+    _write(repo, ".pre-commit-config.yaml", "repos: []\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
+    assert [command for command, _, _ in runner.calls] == [
+        [sys.executable, "-m", "pytest", "-q"]]
+    assert (".pre-commit-config.yaml changed: no test imports or names it, and it is not "
+            "prose") in capsys.readouterr().out
+    (repo / ".pre-commit-config.yaml").unlink()
+
+    _write(repo, "NOTES.md", "# Notes\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
+    assert runner.calls == []
+    assert "Mode: nothing to run." in capsys.readouterr().out
+
+    _write(repo, "docs/guide.md", "# Guide\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
+    [(command, _, _)] = runner.calls
+    assert command[4:] == ["tests/test_docs.py"]
+    assert "Mode: selected tests." in capsys.readouterr().out
+
+
+def test_a_broken_doctest_in_a_support_module_is_run_itself(repo: pathlib.Path) -> None:
+    """The case a reviewer reproduced: the example in a support module under tests/ is
+    what changed, so pytest has to be given that module, not only the tests importing it."""
+    _write(repo, "tests/adversarial/parity/__init__.py", "")
+    _write(repo, "tests/adversarial/parity/compare.py", COMPARE.format(1))
+    _write(repo, "tests/adversarial/parity/test_adv_parity_x.py", "from . import compare\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "add parity")
+    _git(repo, "branch", "-f", "main", "HEAD")
+    _write(repo, "tests/adversarial/parity/compare.py", COMPARE.format(2))
+    runner = Recorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
+    [(command, _, _)] = runner.calls
+    assert command[4:] == ["tests/adversarial/parity/compare.py",
+                           "tests/adversarial/parity/test_adv_parity_x.py"]
 
 
 def test_a_dry_run_prints_the_plan_and_runs_nothing(

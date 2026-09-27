@@ -32,8 +32,9 @@ python3 scripts/test_changed.py --dry-run  # prints what it would run, and runs 
 
 It runs the test files you changed, the tests that import a changed Python file or name a
 changed file in a string, and the tests that failed on your last run. When you change
-something it cannot follow, such as a `conftest.py`, `pyproject.toml`, the test harness or
-test data, it runs the full suite instead and prints which file made it do so. It measures
+something it cannot follow, such as a `conftest.py`, `pyproject.toml`, the test harness,
+test data, or any file that is not documentation and that no test imports or names, it runs
+the full suite instead and prints which file made it do so. It measures
 no coverage. The full suite, coverage and mypy run in CI on your pull request, on every
 interpreter, so a green local run is a quick check and not the gate.
 

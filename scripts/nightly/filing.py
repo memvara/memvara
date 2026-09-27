@@ -56,6 +56,11 @@ REPO = "memvara/memvara"
 #: Where issues go. It is private, so a break is not described in public before its pin
 #: is reviewed; memvara/memvara is public, and so is every issue in it.
 ISSUE_REPO = "memvara/build-health"
+#: Where issues were filed before 2026-09-27, when they moved to ISSUE_REPO. Every issue
+#: filed since then is recorded with a GitHub address that names ISSUE_REPO, so a stored
+#: issue record whose address does not name a repository was written before the move, and
+#: its issue is here. See repo_of.
+EARLIER_ISSUE_REPO = "memvara/memvara"
 LABEL = "nightly-break"
 BRANCH_PREFIX = "test/nightly-"
 #: Reads the fingerprint back out of an issue's body or an advisory's description.
@@ -482,19 +487,23 @@ def _file(args: argparse.Namespace, layout: night.Layout, *, gh: Runner,
         result = open_pr(finding, args.fingerprint, issue=issue["number"] if issue else None,
                          worktree=pathlib.Path(args.worktree), night=args.night, gh=gh,
                          git=git, dry_run=dry_run, repo=args.repo,
-                         issue_repo=repo_of(issue.get("url") if issue else None))
+                         issue_repo=(repo_of(issue.get("url")) if issue else ISSUE_REPO))
     _say(result)
     if not result.dry_run:
         night.append_jsonl(layout.history, result.record(night=args.night, severity=severity))
     return 0
 
 
-def repo_of(url: Any, default: str = ISSUE_REPO) -> str:
-    """The owner/name of the repository an issue's address points into, so a pull request
-    cites the issue where it was really filed. `default` when the address is missing or
-    is not a GitHub issue address."""
+def repo_of(url: Any) -> str:
+    """The owner/name of the repository a stored issue's address points into, so a pull
+    request cites the issue, and a reopening reopens it, where it was really filed.
+
+    A new issue always goes to ISSUE_REPO and never passes through here. This is only for
+    an issue already on record, and a record whose address is missing or is not a GitHub
+    issue address was written before issues moved, so it gets EARLIER_ISSUE_REPO. Guessing
+    ISSUE_REPO instead would reopen or cite an unrelated issue that has the same number."""
     found = re.fullmatch(r"https://github\.com/([^/\s]+/[^/\s]+)/issues/\d+/?", str(url or ""))
-    return found.group(1) if found else default
+    return found.group(1) if found else EARLIER_ISSUE_REPO
 
 
 def _confirmed(layout: night.Layout, date: str, fingerprint: str) -> regressions.Failure:

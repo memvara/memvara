@@ -213,14 +213,16 @@ def test_the_pull_request_cites_its_private_issue_by_a_full_cross_repository_ref
 @pytest.mark.parametrize("url, repo", [
     ("https://github.com/memvara/build-health/issues/302", "memvara/build-health"),
     ("https://github.com/memvara/memvara/issues/266", "memvara/memvara"),
-    ("https://x/302", "memvara/build-health"),
-    (None, "memvara/build-health"),
+    ("https://x/302", "memvara/memvara"),
+    (None, "memvara/memvara"),
 ], ids=["build-health", "an issue filed before the move", "not an issue address", "none"])
-def test_a_pull_request_cites_the_issue_in_the_repository_it_was_filed_in(
+def test_a_stored_issue_is_found_in_the_repository_it_was_filed_in(
         url: Any, repo: str) -> None:
-    """The history keeps each issue's address, and the pull request cites the repository in
-    that address. An issue filed before issues moved to memvara/build-health keeps its own
-    repository rather than being cited as a number in the wrong one."""
+    """The history keeps each issue's address, and a pull request cites, and a reopening
+    reopens, the issue in the repository that address names. Every issue filed since the
+    move to memvara/build-health is recorded with an address naming it, so a record with
+    no such address is older, and its issue is in memvara/memvara. Guessing
+    memvara/build-health would point at an unrelated issue with the same number."""
     assert filing.repo_of(url) == repo
 
 

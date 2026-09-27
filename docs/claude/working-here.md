@@ -223,16 +223,23 @@ and `memvara/__init__.py` imports most of the package, so a change to a module u
 that code, and it is still faster than the old gate because it measures no coverage and runs
 no type checks. It is much narrower for scripts, benchmarks, tests and documents.
 
-**When it runs the full suite instead.** Some files reach the tests by a route the import
-graph cannot see, and a change to one of them runs the full fast suite. `FULL_SUITE` and
-`DATA_FOLDERS` at the top of `scripts/test_changed.py` are the whole list, each entry with its
-reason: any `conftest.py`, `pyproject.toml` and other pytest configuration, lockfiles and
-requirements files, `tests/harness/`, test data (anything under `tests/fixtures/` or
-`tests/scenarios/`, and any non-Python file under `tests/`), package data (any non-Python
-file under `memvara/`), `.github/`, and `plugin/`, whose hooks run as separate processes and
-load host modules by name. The command prints which mode it chose and which file decided it.
-If you find a file it should have followed and did not, add it to that list rather than
-working around it.
+**Doctests count as tests.** `pyproject.toml` passes `--doctest-modules`, so pytest runs the
+examples in every module it collects, not only in `memvara/`. A support module under
+`tests/`, such as `tests/adversarial/parity/compare.py`, is run on its own when it holds an
+example, so the selection gives pytest that module itself as well as the tests that import
+it. Every module under `memvara/` is given to pytest when it is reached, whether or not it
+holds an example.
+
+**When it runs the full suite instead.** The rule is that a changed file runs the full fast
+suite unless the selection can show what reads it. That happens in two ways. A file named
+in `FULL_SUITE` or `DATA_FOLDERS` at the top of `scripts/test_changed.py` reaches the tests
+by a route the import graph cannot see, such as a `conftest.py` file. Any other changed file
+that no test imports or names also runs the full suite, unless it is prose as
+`PROSE_EXTENSIONS` and `PROSE_FOLDERS` define it: a new tool's configuration file is read by
+something the selection cannot see, while a document that no test names can fail nothing.
+Those constants are the one list, each entry with its reason. The command prints which mode
+it chose and which file decided it. If you find a file it should have followed and did not,
+add it there rather than working around it.
 
 **Why it follows imports rather than recorded coverage.** `pytest-testmon` records which
 tests execute which code and selects more precisely. It was not chosen, for four reasons.
