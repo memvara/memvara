@@ -475,8 +475,11 @@ and `end()`.** A caller who may be handed either client should guard these calls
 Two methods exist only on the local client, besides the ones without an endpoint listed
 above. `merge_predicate()` moves the claims filed under one predicate spelling to another
 and teaches the registry the alias; the hosted deployment has no endpoint for it. `bind()`
-narrows a `ScopedMemvara` to a smaller scope; a `ScopedRemoteMemvara` has no `bind()`, so
-call `scope()` on the hosted client with the narrower fields instead.
+narrows a `ScopedMemvara` to a smaller scope. A `ScopedRemoteMemvara` has no `bind()`, and
+its `scope` is a property that returns the bound `Scope`, not a method. To narrow a hosted
+view, call `scope()` on the client underneath it, `view.memvara.scope(user=...,
+agent=..., session=...)`. Name every field you want: a field you leave out takes the
+client's value, not the view's, where `bind()` keeps the view's.
 
 `service()` returns the whole
 `GET /v1/stats` envelope — `scope`, `visible`, `tenant_counts`, `extractor`, `read_only` —

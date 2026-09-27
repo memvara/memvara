@@ -192,8 +192,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   has, or `bind()` and `merge_predicate()`, which only the local client has. A caller who
   swapped one client for the other had no warning which calls to guard. The section now
   describes each, says how the local client ends a fact (`delete(..., close="ended")` and
-  `forget(..., close="ended")`), and says to call `scope()` where a hosted scoped view has
-  no `bind()`. The parity test that pinned this as an expected failure now passes. #336
+  `forget(..., close="ended")`), and says how to narrow a hosted scoped view, which has no
+  `bind()`: `view.memvara.scope(...)`, naming every field. The parity test that pinned this as an expected failure now passes. #336
   (B54).
 - **One prompt starts at most one recall daemon, and a daemon that loses the race cannot
   strand the winner.** When no daemon was running and a prompt's first read found nothing

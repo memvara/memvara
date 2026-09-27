@@ -172,6 +172,7 @@ def test_a_hosted_receipt_carries_the_ungrounded_and_polluted_counts() -> None:
 
 # -- B54, memvara/memvara#336: methods only one client has must be documented -----------
 
+
 def _public(cls: type) -> set[str]:
     """The methods a caller can reach on an instance of `cls`, by name. A classmethod
     such as `Memvara.connect` is reached on the class whatever you hold, so it is left
