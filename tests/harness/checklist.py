@@ -451,9 +451,11 @@ def items() -> set[str]:
     return {item for found in sources.values() for item in found} | set(bug_items())
 
 
-#: Items that no test can check, each with the reason. They are rules for people, listed
-#: among a page's invariants, rather than behaviour of memvara. They stay on the
-#: checklist, so that a reworded rule is still noticed, but they are never gaps.
+#: Items that no test here can check, each with the reason. There are two kinds. Some
+#: invariants are rules for people rather than behaviour of memvara. Some switches have
+#: no effect in this repository, because only the plugin repositories act on them. Both
+#: stay on the checklist, so that a reworded rule or a renamed switch is still noticed,
+#: but they are never gaps.
 EXEMPT: dict[str, str] = {
     "inv:TB1": "A rule for how a person checks work: an output is compared, not an exit "
                "status. It describes a method, not anything memvara does.",
@@ -463,6 +465,16 @@ EXEMPT: dict[str, str] = {
                "there is no code here for a test to run.",
     "inv:RP1": "A rule of the release process, which the suite leaves out of scope: the "
                "package index refuses to replace a published version.",
+    "switch:index_command": "The switch has no effect in this repository: only the plugin "
+                            "repositories act on it, where the /memvara:index command "
+                            "refuses to run while it is off. The server accepts the "
+                            "variable and changes nothing, so no test here could show "
+                            "the switch working.",
+    "switch:research_agent": "The switch has no effect in this repository: only the plugin "
+                             "repositories act on it, where /memvara:setup turns it off by "
+                             "denying the memory-researcher subagent in Claude Code's "
+                             "settings. The server accepts the variable and changes "
+                             "nothing, so no test here could show the switch working.",
 }
 
 
