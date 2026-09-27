@@ -175,7 +175,7 @@ def run_steps(steps: Sequence[Step], context: Any, *,
             outcome = Outcome(ERROR, _last_line(exc))
         end = clock()
         status, summary = outcome.status, outcome.summary
-        if status in (PASSED, FAILED) and end > deadline:
+        if status in (PASSED, FAILED, INVALID) and end > deadline:
             status = TIMED_OUT
             summary = (f"{summary} The step returned {end - deadline:.0f} seconds after "
                        "its cap.").strip()

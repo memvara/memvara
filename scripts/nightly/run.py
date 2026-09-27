@@ -145,6 +145,7 @@ def preflight(context: Night, deadline: float) -> steps.Outcome:
     context.tmp = pathlib.Path(tempfile.mkdtemp(prefix="memvara-nightly-"))
     home = context.layout.home
     home.mkdir(parents=True, exist_ok=True)
+    context.layout.records.mkdir(parents=True, exist_ok=True)
     if context.given_python:
         assert context.python is not None
         notes.append(f"The steps ran with the given interpreter, {context.python}, not a "
@@ -158,7 +159,6 @@ def preflight(context: Night, deadline: float) -> steps.Outcome:
         context.python = python
         notes.append(f"A virtual environment was built in the worktree, with .[{EXTRAS}] "
                      "installed as CI installs it.")
-    context.layout.records.mkdir(parents=True, exist_ok=True)
     context.env = night.step_env(os.environ, worktree=context.worktree, home=home,
                                  tmp=context.tmp, records=context.layout.records,
                                  bin_dir=pathlib.Path(context.python).parent)
@@ -323,6 +323,9 @@ def long_run_step(name: str, *,
             return steps.Outcome(steps.TIMED_OUT, f"The run reached its cap. {summary}")
         if ran.returncode != 0 or found:
             return steps.Outcome(steps.FAILED, summary)
+        if not results.tests:
+            return steps.Outcome(steps.FAILED, "The run recorded no test, so it checked "
+                                 f"nothing. {summary}")
         skipped = [test for test in results.tests if test["outcome"] == "skipped"]
         if skipped and len(skipped) == len(results.tests):
             reasons = "; ".join(test.get("message") or "no reason given" for test in skipped)

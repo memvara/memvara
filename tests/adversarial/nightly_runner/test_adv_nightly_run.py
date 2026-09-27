@@ -716,3 +716,26 @@ def test_a_long_run_before_the_regressions_step_keeps_its_failures_and_counts(
     # The soak layer holds the timing run too, which passed after the regressions step.
     assert report["tests"]["layers"]["soak"] == {"run": 2, "failed": 1, "flaky": 0}
     assert report["tests"]["layers"]["model"] == {"run": 1, "failed": 1, "flaky": 0}
+
+
+def test_a_long_run_that_ran_no_test_is_a_failure_not_a_pass(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """A long run that recorded no test checked nothing, whatever its exit status says. It
+    must never read as a passed night."""
+    table = _table(tmp_path, [PASSED], 0, soak=steps.Step("soak", 600.0, run.long_run_step(
+        "soak", command=_pytest_result(tmp_path, [], 0))))
+    _night(repo, "2026-09-27", table, notify=Notifications())
+    [step] = [step for step in _report(repo, "2026-09-27")["steps"] if step["name"] == "soak"]
+    assert step["status"] == "failed"
+    assert "no test" in step["summary"]
+
+
+def test_the_headline_names_an_invalid_step_apart_from_the_steps_that_did_not_pass() -> None:
+    """A timing run on battery is neither a pass nor a failure. The headline says it could
+    not be judged, so it is not read as a break, and the night still never reads as quiet."""
+    report = {"night": "2026-09-26", "status": "finished", "commit": "c" * 40,
+              "steps": [_step("preflight", "passed"), _step("regressions", "passed"),
+                        _step("performance", "invalid")], "failures": []}
+    lead = render.markdown(report).splitlines()[2]
+    assert lead.startswith("**steps that could not be judged: performance.**"), lead
+    assert "did not pass" not in lead and "Nothing broke" not in lead
