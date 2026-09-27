@@ -397,9 +397,10 @@ def transaction(store: object) -> AbstractContextManager[Any]:
 #: Members a backend may leave out, and what it costs to leave each one out.
 #:
 #: `Store` is `@runtime_checkable`, and `isinstance` on a Protocol is **all or nothing**:
-#: it asks whether every one of the 46 members is present, so it cannot answer "can this
+#: it asks whether every member of the protocol is present, so it cannot answer "can this
 #: store walk a graph". A backend that implements everything a memory needs and skips the
-#: eight below is a perfectly good store and `isinstance(x, Store)` is `False` for it.
+#: optional members listed below is a working store, yet `isinstance(x, Store)` is
+#: `False` for it.
 #:
 #: So the capability check in this codebase is `getattr(store, name, None)`, per member,
 #: at the call site that needs it — and each of those call sites degrades in a way it
