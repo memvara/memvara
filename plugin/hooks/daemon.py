@@ -84,9 +84,13 @@ def _listening(path: str) -> bool:
 
 
 class Daemon:
-    def __init__(self, path: str, store: object) -> None:
+    def __init__(self, path: str, store: object, *, hosted: bool = False) -> None:
         self.path = path
         self.store = store
+        #: Whether `store` is the hook's hosted client rather than a library store. A
+        #: request carries a floor for each route (`lib.fast.recall`), and the daemon
+        #: applies the one for the backend it serves.
+        self.hosted = hosted
         self.last_seen = time.monotonic()
         self._lock = threading.Lock()
         self.failures = 0
@@ -108,6 +112,8 @@ class Daemon:
                 "budget": int(request.get("budget") or 700),
             }
             floor = float(request.get("min_score") or 0.0)
+            if self.hosted and "hosted_min_score" in request:
+                floor = float(request["hosted_min_score"] or 0.0)
             if floor:
                 # Sent only when there is a floor to apply, which is exactly what
                 # `lib.fast.recall` does on the direct path. Passing it unconditionally
@@ -324,7 +330,7 @@ def main() -> int:
         # accept connections and answer every one with silence, which is indistinguishable
         # from a working daemon over a store that happens to be empty.
         return 0
-    served = Daemon(socket_path(store_key()), store)
+    served = Daemon(socket_path(store_key()), store, hosted=hosted)
     # The warm-up is a plain read: it exists to pay connection costs, not a model call.
     # The library's store is told so with the plain read the daemon decided on at
     # startup; the stdlib hosted client takes no such argument and always asks its server
