@@ -259,7 +259,9 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
 
     The third slot is `reason`: `""` when there is nothing to add, else a short token the
     caller can turn into words: `"quota"` for a spent monthly allowance and `"daily"` for a
-    spent daily one, each with its reset after a colon when the refusal said. It exists
+    spent daily one, each with its reset after a colon when the refusal said, and
+    `"open:<exception class>"` for a local store that is configured and could not open,
+    which comes with `ok=False` where "nothing configured" comes with `ok=None`. It exists
     because `False` alone sent a user to read a log about a store that was answering
     perfectly and telling him, in the body of a 402, exactly which allowance was spent and
     when it resets.

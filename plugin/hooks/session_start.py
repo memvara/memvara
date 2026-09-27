@@ -41,7 +41,7 @@ from lib.ipc import (  # noqa: E402
 )
 from lib import counts, project  # noqa: E402
 from lib.agentic import sweep_configs as sweep_capture_configs  # noqa: E402
-from lib.fast import read_kinds  # noqa: E402
+from lib.fast import OPEN, read_kinds  # noqa: E402
 from lib.mark import count as count_memories  # noqa: E402
 from lib.mark import mark_block  # noqa: E402
 from lib.mark import on as mark_on  # noqa: E402
@@ -213,7 +213,8 @@ def main() -> int:
         from lib import open as opener  # noqa: PLC0415
 
         if opener.failure is not None:
-            log_line("session_start", f"failed reason=open:{type(opener.failure).__name__}")
+            log_line("session_start",
+                     f"failed reason={OPEN}:{type(opener.failure).__name__}")
             _emit(Reply("session_start", status=status("recall failed")))
             return 0
         _emit(Reply("session_start", status=status("not configured")))
