@@ -170,11 +170,7 @@ def test_a_hosted_receipt_carries_the_ungrounded_and_polluted_counts() -> None:
     assert (read.ungrounded, read.polluted) == (2, 1)
 
 
-# -- B54, memvara/memvara#336: undocumented methods only one client has ----------------
-
-#: The methods #336 is about: one client has them, and the section of docs/API.md about a
-#: hosted deployment does not name them.
-UNNAMED_336 = frozenset({"end", "health", "whoami", "bind", "merge_predicate"})
+# -- B54, memvara/memvara#336: methods only one client has must be documented -----------
 
 
 def _public(cls: type) -> set[str]:
@@ -211,12 +207,9 @@ def test_the_hosted_section_ends_at_the_next_heading_of_its_level_or_higher() ->
     assert _named_in_the_hosted_section(text) == {"one", "two"}
 
 
-@known_bugs.xfail("B54")
 def test_the_documentation_names_every_method_only_one_client_has() -> None:
     """docs/API.md says what a hosted deployment lacks and what it adds, so a caller can
     tell which calls to guard. A method only one client has, which that section does not
     name, fails a caller who swaps one client for the other with no warning."""
     unnamed = _one_sided() - _named_in_the_hosted_section()
-    if unnamed == UNNAMED_336:
-        raise known_bugs.Reproduced(f"B54: docs/API.md does not name {sorted(unnamed)}")
     assert unnamed == set(), sorted(unnamed)

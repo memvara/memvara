@@ -187,6 +187,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`docs/API.md` names every method that only one client has.** Its section on a hosted
+  deployment did not mention `end()`, `health()` or `whoami()`, which only the hosted client
+  has, or `bind()` and `merge_predicate()`, which only the local client has. A caller who
+  swapped one client for the other had no warning which calls to guard. The section now
+  describes each. It says how the local client ends a fact (`delete(..., close="ended")`
+  and `forget(..., close="ended")`), and how to narrow a hosted scoped view, which has no
+  `bind()`: `view.memvara.scope(...)`. The parity test that pinned this as an expected
+  failure now passes. #336 (B54).
 - **The recall hook has a floor for each route, and the hosted route's is 0.35, so it
   stops injecting memories into most prompts a hosted store cannot answer.** Both routes
   used 0.29, measured on the plugin-recall benchmark's seeded store with the hashing
