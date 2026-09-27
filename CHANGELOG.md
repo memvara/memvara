@@ -187,6 +187,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The hosted client's `recall()` takes `valid_at`.** `RemoteMemvara.recall(valid_at=...)`
+  and the async client's refused the argument with `ValueError`, saying that
+  `POST /v1/recall` has no time axis. The route takes `valid_at` now, the world clock alone,
+  so both clients send it, and `memory_recall` with `valid_at` works in cloud mode. A
+  deployment from before the field refuses a dated read with a 422 rather than answering it
+  with the present. `docs/UPGRADING.md` has the details. #298.
 - **A ranked read whose model call fails now serves the plain read.** On a retriever with
   a `read_selector`, `search(ranked=True)` gathers up to `rerank_top_n` turns for the
   selector. When the selector failed (outcome `fallback`, `key_rejected` or `disabled`),
