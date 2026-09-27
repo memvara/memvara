@@ -1,10 +1,12 @@
 """Filing a new confirmed break, which is a dry run unless the operator asks for more.
 
-For a public break the filing opens one issue, labelled `nightly-break`, with a hidden
-marker holding the fingerprint, so a later night finds the issue and files nothing new.
-Then it pushes a branch holding the strict-xfail test and opens a draft pull request. A
-security-class break goes to a private draft advisory instead, and never to an issue, a
-branch or a pull request. An unclassified break is filed nowhere public.
+For a public break the filing opens one issue in the private repository
+memvara/build-health, labelled `nightly-break`, with a hidden marker holding the
+fingerprint, so a later night finds the issue and files nothing new. Then it pushes a
+branch holding the strict-xfail test to memvara/memvara and opens a draft pull request
+there, which cites the issue as memvara/build-health#N. A security-class break goes to a
+private draft advisory in memvara/memvara instead, and never to an issue, a branch or a
+pull request. An unclassified break is filed nowhere.
 
 Nothing here calls GitHub. A dry run calls nothing at all, and the other tests replay the
 output gh and git print, from gh_recorded.json, through a fake runner that also checks
@@ -76,10 +78,10 @@ def test_a_dry_run_sends_nothing_and_plans_one_labelled_issue_with_the_marker() 
     filed = filing.file_issue(finding, fp, night=NIGHT, gh=never)
     assert (filed.what, filed.dry_run, filed.number, filed.url) == ("issue", True, None, None)
     listing, create = filed.commands
-    assert listing.argv == ("gh", "issue", "list", "--repo", "memvara/memvara", "--label",
+    assert listing.argv == ("gh", "issue", "list", "--repo", "memvara/build-health", "--label",
                             "nightly-break", "--state", "all", "--limit", "1000",
                             "--json", "number,state,url,body")
-    assert create.argv == ("gh", "issue", "create", "--repo", "memvara/memvara", "--title",
+    assert create.argv == ("gh", "issue", "create", "--repo", "memvara/build-health", "--title",
                            filing.issue_title(finding), "--label", "nightly-break",
                            "--body-file", "-")
     assert create.stdin is not None
@@ -95,7 +97,7 @@ def test_a_new_break_is_filed_as_one_issue_and_its_number_is_read_back() -> None
     filed = filing.file_issue(finding, fp, night=NIGHT, gh=gh, dry_run=False)
     assert (filed.dry_run, filed.existing, filed.number, filed.state) == (
         False, False, 302, "OPEN")
-    assert filed.url == "https://github.com/memvara/memvara/issues/302"
+    assert filed.url == "https://github.com/memvara/build-health/issues/302"
     assert gh.script == []
 
 
@@ -129,7 +131,7 @@ def test_a_closed_issue_is_reopened_with_a_comment_that_carries_the_marker() -> 
     fp = finding.signature()
     planned = filing.reopen_issue(finding, fp, number=301, night=NIGHT, gh=never)
     assert (planned.what, planned.dry_run, planned.number) == ("reopen", True, 301)
-    gh = Recorded((("gh", "issue", "reopen", "301", "--repo", "memvara/memvara",
+    gh = Recorded((("gh", "issue", "reopen", "301", "--repo", "memvara/build-health",
                     "--comment"), "issue_reopen"))
     filed = filing.reopen_issue(finding, fp, number=301, night=NIGHT, gh=gh, dry_run=False)
     comment = gh.calls[0].argv[-1]
@@ -185,9 +187,55 @@ def test_a_pull_request_pushes_only_to_the_nightly_branch_and_opens_as_a_draft(
     assert create.argv == ("gh", "pr", "create", "--repo", "memvara/memvara", "--draft",
                            "--base", "main", "--head", f"test/nightly-{fp[:12]}",
                            "--title", filing.pr_title(finding, 302), "--body-file", "-")
-    assert create.stdin is not None and "#302" in create.stdin
+    assert create.stdin is not None
     assert (filed.what, filed.number, filed.url) == (
         "pr", 303, "https://github.com/memvara/memvara/pull/303")
+
+
+def test_the_pull_request_cites_its_private_issue_by_a_full_cross_repository_reference(
+        tmp_path: pathlib.Path) -> None:
+    """The issue is in memvara/build-health and the pull request is in memvara/memvara.
+    A bare #302 in the pull request would point at memvara/memvara's own item 302, which
+    is some other issue or pull request, so both the title and the body name the issue's
+    repository."""
+    finding = _finding()
+    fp = finding.signature()
+    filed = filing.open_pr(finding, fp, issue=302, worktree=tmp_path, night=NIGHT, gh=never,
+                           git=never)
+    create = filed.commands[1]
+    assert create.stdin is not None
+    title = create.argv[create.argv.index("--title") + 1]
+    assert title.endswith("memvara/build-health#302")
+    assert "memvara/build-health#302" in create.stdin
+    assert " #302" not in create.stdin and " #302" not in title
+
+
+@pytest.mark.parametrize("url, repo", [
+    ("https://github.com/memvara/build-health/issues/302", "memvara/build-health"),
+    ("https://github.com/memvara/memvara/issues/266", "memvara/memvara"),
+    ("https://x/302", "memvara/memvara"),
+    (None, "memvara/memvara"),
+], ids=["build-health", "an issue filed before the move", "not an issue address", "none"])
+def test_a_stored_issue_is_found_in_the_repository_it_was_filed_in(
+        url: Any, repo: str) -> None:
+    """The history keeps each issue's address, and a pull request cites, and a reopening
+    reopens, the issue in the repository that address names. Every issue filed since the
+    move to memvara/build-health is recorded with an address naming it, so a record with
+    no such address is older, and its issue is in memvara/memvara. Guessing
+    memvara/build-health would point at an unrelated issue with the same number."""
+    assert filing.repo_of(url) == repo
+
+
+def test_issues_go_to_the_private_repository_and_code_stays_in_the_public_one() -> None:
+    """Every issue in a public repository is public, so the issue goes to
+    memvara/build-health. The draft pull request carries code and the advisory is private
+    already, so both stay in memvara/memvara."""
+    command = filing.parser()
+    common = ["--night", NIGHT, "--fingerprint", "f" * 64]
+    assert command.parse_args(["issue", *common, "--severity", "crash"]).repo == (
+        "memvara/build-health")
+    assert command.parse_args(["advisory", *common]).repo == "memvara/memvara"
+    assert command.parse_args(["pr", *common, "--worktree", "w"]).repo == "memvara/memvara"
 
 
 def test_a_dry_run_pull_request_calls_nothing_at_all(tmp_path: pathlib.Path) -> None:
@@ -330,10 +378,13 @@ def test_a_reopened_break_can_get_a_new_pull_request(tmp_path: pathlib.Path) -> 
     fp = failure.fingerprint
     _night_folder(tmp_path, failure)
     history = night.Layout(tmp_path).history
-    for what, number in (("issue", 301), ("pr", 302), ("reopen", 301)):
+    for what, number, url in (
+            ("issue", 301, "https://github.com/memvara/build-health/issues/301"),
+            ("pr", 302, "https://github.com/memvara/memvara/pull/302"),
+            ("reopen", 301, "https://github.com/memvara/build-health/issues/301")):
         night.append_jsonl(history, {"kind": "filed", "date": NIGHT, "what": what,
                                      "fingerprint": fp, "severity": "data-loss",
-                                     "number": number, "url": f"https://x/{number}",
+                                     "number": number, "url": url,
                                      "state": "OPEN", "existing": False})
     git = Recorded((("git", "-C", str(tmp_path), "status", "--porcelain"), "git_status_clean"),
                    (("git", "-C", str(tmp_path), "push"), "git_push"))
@@ -341,6 +392,7 @@ def test_a_reopened_break_can_get_a_new_pull_request(tmp_path: pathlib.Path) -> 
     assert filing.main(["pr", "--checkout", str(tmp_path), "--night", NIGHT, "--fingerprint",
                         fp, "--worktree", str(tmp_path), "--file"], gh=gh, git=git) == 0
     assert gh.script == [] and git.script == []
+    assert "memvara/build-health#301" in (gh.calls[0].stdin or "")
     records, _ = night.read_jsonl(history)
     assert (records[-1]["what"], records[-1]["number"]) == ("pr", 303)
 

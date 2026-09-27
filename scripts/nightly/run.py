@@ -534,9 +534,12 @@ def _reopen(failure: regressions.Failure, context: Night,
                         "Reopen the advisory on GitHub, where its fix and test land."}
     number = int(issue["number"])
     try:
+        # The issue is reopened in the repository its stored address names: an issue
+        # filed before issues moved to memvara/build-health is still in memvara/memvara.
         result = filing.reopen_issue(failure.finding, failure.fingerprint, number=number,
                                      night=context.date, gh=context.gh,
-                                     dry_run=not context.filing_on)
+                                     dry_run=not context.filing_on,
+                                     repo=filing.repo_of(issue.get("url")))
     except filing.FilingError as exc:
         context.dependencies["github"] = "down"
         return {"needs": "reopening", "commands": [], "error": str(exc)}
