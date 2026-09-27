@@ -9,10 +9,14 @@ configuration it writes into the clone. A real run is measured by hand and recor
 
 from __future__ import annotations
 
+import doctest
 import json
 import pathlib
+import subprocess
+import sys
 
 import pytest
+from harness.skips import needs_toml
 
 from bench import mutation
 
@@ -25,24 +29,28 @@ def _write(tmp_path: pathlib.Path, text: str) -> pathlib.Path:
     return path
 
 
+@needs_toml
 def test_the_shipped_equivalents_file_reads_and_stays_under_the_limit():
     found = mutation.load_equivalents()
     assert len(found) <= mutation.MAX_EQUIVALENTS
     assert all(entry.reason for entry in found.values())
 
 
+@needs_toml
 def test_an_equivalent_without_a_reason_is_refused(tmp_path):
     path = _write(tmp_path, '[[equivalent]]\nmutant = "m.f__mutmut_1"\nreason = " "\n')
     with pytest.raises(ValueError, match="needs a mutant and a reason"):
         mutation.load_equivalents(path)
 
 
+@needs_toml
 def test_an_equivalent_listed_twice_is_refused(tmp_path):
     row = '[[equivalent]]\nmutant = "m.f__mutmut_1"\nreason = "r"\n'
     with pytest.raises(ValueError, match="listed twice"):
         mutation.load_equivalents(_write(tmp_path, row * 2))
 
 
+@needs_toml
 def test_more_equivalents_than_the_design_allows_are_refused(tmp_path):
     rows = "".join(f'[[equivalent]]\nmutant = "m.f__mutmut_{n}"\nreason = "r"\n'
                    for n in range(mutation.MAX_EQUIVALENTS + 1))
@@ -125,9 +133,40 @@ def test_a_module_mutmut_wrote_nothing_for_is_an_error(tmp_path):
         mutation.read_statuses(tmp_path, ["memvara/write/reconcile.py"])
 
 
-def test_a_module_outside_the_library_is_refused():
-    with pytest.raises(SystemExit, match="not a module under memvara/"):
-        mutation.main(["run", "bench/mutation.py"])
+@pytest.mark.parametrize("path", ["bench/mutation.py", "memvara/py.typed"])
+def test_a_path_that_is_not_a_library_module_is_refused(path):
+    """Refused with a message before anything runs. `memvara/py.typed` is under the
+    library and is not Python, and it used to reach `dotted()` and crash."""
+    with pytest.raises(SystemExit, match="not a Python module under memvara/"):
+        mutation.main(["run", path])
+
+
+def test_the_examples_in_the_docstrings_still_run():
+    """`pyproject.toml` points `--doctest-modules` at `tests` and `memvara`, so nothing
+    else runs these, as `tests/test_agent_memory_bench.py` says of the benchmark's own."""
+    failures, attempted = doctest.testmod(mutation, verbose=False)
+    assert attempted > 0
+    assert failures == 0
+
+
+def test_a_run_stopped_at_its_cap_says_so_and_keeps_what_was_tested(tmp_path):
+    """mutmut is stopped at the cap, with the workers it started. The mutants it had not
+    tested read as "not checked", which the score leaves out, and the summary says the run
+    was cut short."""
+    code = mutation._run_capped([sys.executable, "-c", "import time; time.sleep(30)"],
+                                tmp_path, subprocess.DEVNULL, 0.5)
+    assert code is None
+    statuses = {"m.f__mutmut_1": "killed", "m.f__mutmut_2": mutation.status_of(None)}
+    [m] = mutation.score(statuses, {})
+    assert (m.caught, m.counted) == (1, 1)
+    report = {"commit": "0" * 40, "mutmut": mutation.MUTMUT, "tests": [], "seconds": 0.5,
+              "stopped_at_cap": True, "stale_equivalents": [], "scores": []}
+    assert "stopped at its cap" in mutation.render(report)
+
+
+def test_a_run_that_finishes_returns_its_exit_code(tmp_path):
+    assert mutation._run_capped([sys.executable, "-c", "raise SystemExit(3)"],
+                                tmp_path, subprocess.DEVNULL, 30) == 3
 
 
 def test_the_floor_fails_a_module_under_it(capsys):

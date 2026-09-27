@@ -31,8 +31,9 @@ it afterwards.
 By default, every test file under `tests/` that imports the module, or a public function or
 class the module defines, by name, found the way `scripts/test_changed.py` reads imports.
 That is narrower than every test the module can affect, which for a module under
-`memvara/` is most of the suite, and it is what keeps a run to minutes. A mutant that only a broader test would catch then counts as undetected,
-so the score is a lower bound. `--tests` replaces the default with a list you give.
+`memvara/` is most of the suite, and it is what keeps a run to minutes. A mutant that only
+a broader test would catch then counts as undetected, so the score is a lower bound.
+`--tests` replaces the default with a list you give.
 
 mutmut first runs the selection once to record which tests reach which function, and then
 runs, for each mutant, only the tests that reached its function. A mutant in a function
@@ -62,13 +63,14 @@ import argparse
 import dataclasses
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from collections import Counter
 from typing import Any, Sequence
 
@@ -143,6 +145,13 @@ def load_equivalents(path: pathlib.Path = EQUIVALENTS) -> dict[str, Equivalent]:
     appear once, and there may be at most `MAX_EQUIVALENTS` entries."""
     if not path.exists():
         return {}
+    try:
+        # Imported here rather than at the top, because tomllib arrives in Python 3.11 and
+        # the package supports 3.10, as memvara.schema does for predicate packs.
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - 3.10 only
+        raise SystemExit(f"{path.name} is read with tomllib, which arrives in Python "
+                         "3.11. Run this script with Python 3.11 or later.") from None
     rows = tomllib.loads(path.read_text(encoding="utf-8")).get("equivalent", [])
     found: dict[str, Equivalent] = {}
     for row in rows:
@@ -331,16 +340,44 @@ def _check_mutmut(python: str) -> None:
 
 
 def _diff(clone: pathlib.Path, python: str, mutant: str) -> str:
-    done = subprocess.run([python, "-m", "mutmut", "show", mutant], cwd=clone,
-                          capture_output=True, text=True, timeout=60)
+    """The mutant's diff, or a note saying why there is none. A diff is a convenience, so
+    a `mutmut show` that hangs costs that one diff and not the run's results."""
+    try:
+        done = subprocess.run([python, "-m", "mutmut", "show", mutant], cwd=clone,
+                              capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return "(no diff: mutmut show did not answer within 60 seconds)"
     return done.stdout.strip()
+
+
+def _run_capped(command: list[str], cwd: pathlib.Path, log: Any,
+                seconds: float) -> int | None:
+    """Run `command` and return its exit code, or None when it was stopped at `seconds`.
+    mutmut starts worker processes, so it runs in a session of its own, and the whole
+    session is stopped at the cap rather than the parent alone."""
+    process = subprocess.Popen(command, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
+                               start_new_session=True)
+    try:
+        return process.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(process.pid, signal.SIGKILL)
+            else:  # Windows has no process groups to stop
+                process.kill()
+        except ProcessLookupError:
+            pass
+        process.wait()
+        return None
 
 
 def run(args: argparse.Namespace) -> int:
     modules = [pathlib.PurePosixPath(m).as_posix() for m in args.modules]
     for module in modules:
-        if not module.startswith("memvara/") or not (REPO / module).is_file():
-            raise SystemExit(f"{module} is not a module under memvara/ in this checkout")
+        if (not module.startswith("memvara/") or not module.endswith(".py")
+                or not (REPO / module).is_file()):
+            raise SystemExit(f"{module} is not a Python module under memvara/ in this "
+                             "checkout")
     tests = args.tests or default_tests(modules)
     if not tests:
         raise SystemExit("no test file imports these modules; name the tests with --tests")
@@ -363,19 +400,29 @@ def run(args: argparse.Namespace) -> int:
               f"with {len(tests)} test files, in {clone}")
         began = time.monotonic()
         with open(out / "mutmut.log", "w", encoding="utf-8") as log:
-            done = subprocess.run(
+            code = _run_capped(
                 [args.python, "-m", "mutmut", "run", "--max-children", str(args.max_children)],
-                cwd=clone, stdout=log, stderr=subprocess.STDOUT, timeout=args.cap * 60)
+                clone, log, args.cap * 60)
         seconds = time.monotonic() - began
-        if done.returncode != 0:
-            print(f"mutmut exited {done.returncode}; see {out / 'mutmut.log'}",
-                  file=sys.stderr)
+        capped = code is None
+        if code not in (0, None):
+            print(f"mutmut exited {code}; see {out / 'mutmut.log'}", file=sys.stderr)
             return 2
-        statuses = read_statuses(clone, modules)
+        try:
+            statuses = read_statuses(clone, modules)
+        except FileNotFoundError as exc:
+            if not capped:
+                raise
+            print(f"mutmut was stopped at its cap of {args.cap:g} minutes before it wrote "
+                  f"any results ({exc}); see {out / 'mutmut.log'}", file=sys.stderr)
+            return 2
         scores = score(statuses, equivalents)
         report = {
             "commit": head, "modules": modules, "tests": tests, "mutmut": MUTMUT,
             "seconds": round(seconds, 1), "max_children": args.max_children,
+            # Stopped at the cap: the mutants mutmut had not tested yet read as
+            # "not checked", which the score leaves out.
+            "stopped_at_cap": capped,
             "stale_equivalents": stale(statuses, equivalents, modules),
             "scores": [{"module": s.module, "score": s.score, "counted": s.counted,
                         "caught": s.caught, "equivalents": s.equivalents,
@@ -385,12 +432,14 @@ def run(args: argparse.Namespace) -> int:
                                        for m in s.undetected]}
                        for s in scores],
         }
+        # Written before the clone goes, so nothing after this point can lose the results.
+        (out / "report.json").write_text(json.dumps(report, indent=1) + "\n",
+                                         encoding="utf-8")
     finally:
         if args.keep:
             print(f"kept the clone at {clone}")
         else:
             shutil.rmtree(clone, ignore_errors=True)
-    (out / "report.json").write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
     print(render(report))
     print(f"\nwrote {out / 'report.json'}")
     return _verdict(report, args.floor)
@@ -400,6 +449,8 @@ def render(report: dict[str, Any]) -> str:
     """The summary a person reads: one line per module, and the stale entries."""
     lines = [f"commit {report['commit'][:12]}, mutmut {report['mutmut']}, "
              f"{len(report['tests'])} test files, {report['seconds']} s"]
+    if report.get("stopped_at_cap"):
+        lines.append("  stopped at its cap: the mutants it had not tested are left out")
     for s in report["scores"]:
         value = "n/a" if s["score"] is None else f"{s['score']:.1f}%"
         counts = ", ".join(f"{n} {status}" for status, n in sorted(s["counts"].items()))
