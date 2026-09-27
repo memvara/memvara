@@ -537,8 +537,8 @@ def _sample(prompt: str, memories: "list[str]", *, anaphoric: bool) -> None:
 #: questions a store should answer and plausible questions it should not, and finds the
 #: score that separates the two. Each question is scored by its top result.
 #:
-#: `MIN_SCORE` is the floor for a store the hook reads through the library, locally or
-#: through its daemon. A local store embeds with the hashing embedder unless
+#: `MIN_SCORE` is the floor for a store the hook reads through the library, directly or
+#: through a daemon that serves that store. A local store embeds with the hashing embedder unless
 #: `memvara[local-embed]` is installed. On the plugin-recall benchmark's seeded store, with
 #: that embedder, the 15 answerable questions scored 0.3603 or more and the 22
 #: unanswerable ones 0.2346 or less. A scripted session in the adversarial suite
