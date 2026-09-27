@@ -18,10 +18,17 @@ point of the project and it is also the development setup:
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install -e ".[dev,cloud,ingest,encrypt]"
 
-python3 -m pytest -q                                              # 9,689 passing, 12 skipped, 91 expected failures
-python3 -m coverage run -m pytest && python3 -m coverage report    # gated at 100%
+python3 -m pytest -q -n auto                                      # 9,689 passing, 12 skipped, 91 expected failures
+python3 -m coverage run -m pytest -n auto                          # then combine and report:
+python3 -m coverage combine && python3 -m coverage report          # gated at 100%
 python3 -m mypy -p memvara                                         # must be clean
 ```
+
+`-n auto` runs one pytest-xdist worker per CPU core; leave it out to run one test at a
+time. Coverage is measured in every process the tests start, so each process writes its
+own data file, and `coverage combine` has to run before `coverage report`. Set
+`COVERAGE_CORE=sysmon` on Python 3.12 or later to make the coverage run much cheaper, as CI
+does.
 
 **Before you push, run the tests your change can affect, not the three commands above:**
 

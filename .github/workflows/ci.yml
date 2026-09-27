@@ -90,7 +90,14 @@ jobs:
           # reason in the log, and still never executing. A permanent skip is not a guard.
           # Unset in forks and until the secret exists, where it goes back to skipping.
           MEMVARA_API_KEY: ${{ secrets.MEMVARA_API_KEY }}
-        run: python -m pytest -q
+        # `-n auto` runs one pytest-xdist worker per CPU: 4 on the Linux and Windows
+        # runners, 3 on macOS. Until 2026-09-27 every job ran one test at a time, and the
+        # Windows job, the slowest, took a median of 18.2 minutes over ten runs that day,
+        # 17.3 of them in pytest. Four tests have deadlines that a loaded machine can miss
+        # (docs/claude/testing.md, "Running in parallel", names them). If one fails here,
+        # give its deadline a stated margin or keep it on one worker with an
+        # xdist_group; never retry it.
+        run: python -m pytest -q -n auto
 
   coverage:
     # Separate job, one version. Coverage is a property of the suite, not of the
@@ -111,8 +118,17 @@ jobs:
           # job; memvara/store/encryption.py is covered only when SQLCipher is installed.
           python -m pip install -e ".[dev,cloud,ingest,encrypt]"
       # `coverage report` exits non-zero below fail_under, so this step is the gate.
-      - run: |
-          python -m coverage run -m pytest -q
+      # pyproject.toml has coverage.py measure every process the tests start, the
+      # pytest-xdist workers included, so each writes its own data file and `coverage
+      # combine` joins them before the report. `COVERAGE_CORE=sysmon` uses Python 3.12's
+      # sys.monitoring instead of a trace function: measured on the whole suite it cost
+      # about 25% more CPU than no coverage, against about 120% for the default core.
+      # This job took 11.9 minutes, 11 of them in `coverage run`, before both changes.
+      - env:
+          COVERAGE_CORE: sysmon
+        run: |
+          python -m coverage run -m pytest -q -n auto
+          python -m coverage combine -q
           python -m coverage report
 
   types:

@@ -202,7 +202,9 @@ Everything after that runs in CI or on a schedule.
 2. **Pull request.** `.github/workflows/ci.yml` runs on every pull request, exactly as it did
    before: Python 3.10 to 3.13 on Linux, 3.13 on macOS and Windows, coverage gated at 100%,
    mypy, the import check with no extras, the benchmark smoke run, the LOCOMO retrieval
-   regression and the npm bridge. It stays complete because this repository is public, so
+   regression and the npm bridge. Since 2026-09-27 the test and coverage jobs run pytest
+   with `-n auto`, one worker per CPU, and the coverage job measures every process the
+   tests start and combines the results before it checks the 100%. It stays complete because this repository is public, so
    GitHub's hosted runners cost nothing here.
 3. **Merge queue.** GitHub's merge queue is not available on the organisation's plan, so this
    tier is the merge train: when several pull requests are ready, rebase and merge them in
