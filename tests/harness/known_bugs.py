@@ -46,7 +46,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "version"),
     KnownBug("B23", 300, "a store refused for its embedder has already been migrated"),
     KnownBug("B24", 301, "a store refused as too new leaves its SQLite connection open"),
-    KnownBug("B47", 327, "search() does not return its results in order of score"),
 
     KnownBug("B36", 313, "a refusal or a no-match reply quotes the whole argument"),
     KnownBug("B39", 316, "memory_recall reports ranked without include_episodes as a "
@@ -89,7 +88,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B63", 345, "a hosted endpoint that never answers keeps session start and recall "
              "past their limits"),
     KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
-    KnownBug("B65", 347, "half a surrogate pair in a prompt makes recall fail"),
     KnownBug("B66", 348, "a prompt of a few megabytes runs past recall's 10-second limit"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
@@ -110,8 +108,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "2.x's methods take, and the score key of mem0's get() row"),
     KnownBug("B82", 361, "the mem0 shim's search() and get_all() default to top_k 10 and "
              "100, where mem0 2.x defaults to 20"),
-    KnownBug("B83", 362, "the as_query_engine example in the LlamaIndex MemvaraRetriever "
-             "docstring raises TypeError"),
     KnownBug("B84", 363, "at crewai 1.10.1, memvara's declared floor, CrewAI's Memory "
              "cannot save through MemvaraStorage, which has no write_lock"),
     KnownBug("B85", 364, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "

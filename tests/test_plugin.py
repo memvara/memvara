@@ -143,6 +143,7 @@ def test_the_dispatcher_points_at_a_reference_that_exists(name: str) -> None:
     assert (SKILL / "references" / name).is_file()
 
 
+@pytest.mark.covers("inv:RP6")
 def test_the_canonical_plugin_claude_md_has_exactly_one_local_marker() -> None:
     """`plugin-claude.md` is copied into every repo in `plugin-repos.txt` as its CLAUDE.md.
 
@@ -164,6 +165,7 @@ def test_the_canonical_plugin_claude_md_has_exactly_one_local_marker() -> None:
         "it must say where it is copied to, since the copy is what people will read")
 
 
+@pytest.mark.covers("inv:RP7")
 def test_plugin_repos_list_is_the_public_set() -> None:
     names = [
         line.strip()

@@ -337,7 +337,14 @@ def _retriever_class(base: type) -> type:
     class MemvaraRetriever(_Retriever, base):  # type: ignore[misc, valid-type]
         """Memvara as a LlamaIndex retriever.
 
-            index_or_engine.as_query_engine(retriever=MemvaraRetriever(mem, user="alice"))
+        To answer questions from memory, build a query engine around it, where
+        `RetrieverQueryEngine` is `llama_index.core.query_engine.RetrieverQueryEngine`:
+
+            RetrieverQueryEngine.from_args(MemvaraRetriever(mem, user="alice"))
+
+        Do not pass it to an index's `as_query_engine(retriever=...)`. That method builds
+        a retriever of its own from its keyword arguments and passes them on as well, so
+        `retriever` arrives twice and llama-index raises TypeError.
 
         Returns `NodeWithScore`, each node carrying the triple, both time axes, the
         ranking explanation and the source turn ids in `metadata` — see

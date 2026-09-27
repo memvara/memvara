@@ -545,6 +545,7 @@ def _without(name: str) -> PredicateRegistry:
         s for s in FIXTURE_PREDICATES if s.name != name))
 
 
+@pytest.mark.covers("inv:I2")
 def test_a_predicate_left_at_the_default_cardinality_stops_superseding_silently():
     """The registry step is required, not decoration, and this is what skipping it costs.
 

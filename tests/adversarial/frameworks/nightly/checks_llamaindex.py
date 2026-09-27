@@ -182,16 +182,15 @@ def check_the_retriever_works_inside_a_query_engine(ctx: Context) -> None:
 
 
 def check_the_retriever_docstring_example_builds_a_query_engine(ctx: Context) -> None:
-    """The as_query_engine example in MemvaraRetriever's docstring gives a query engine
-    that answers from memvara. `index_or_engine` is a SummaryIndex here, and the global
-    model is llama-index-core's MockLLM, so the example runs offline as written."""
+    """The query engine example in MemvaraRetriever's docstring gives a query engine that
+    answers from memvara. The global model is llama-index-core's MockLLM, so the example
+    runs offline as written."""
     core = _li("")
     mem = ctx.memvara()
     mem.remember("user", "lives_in", "Berlin")
     # Left set after this check: no later check reads the global model.
     core.Settings.llm = _li(".llms").MockLLM()
-    namespace = {"index_or_engine": core.SummaryIndex.from_documents(
-                     [core.Document(text="An unrelated document.")]),
+    namespace = {"RetrieverQueryEngine": _li(".query_engine").RetrieverQueryEngine,
                  "MemvaraRetriever": adapter.MemvaraRetriever, "mem": mem}
     # The example is code from this checkout's own docstring, so evaluating it runs
     # nothing that is not already in the repository.

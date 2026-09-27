@@ -173,6 +173,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Recall answers a prompt that holds half of a surrogate pair.** A client written in
+  JavaScript can send one, an emoji cut in two, which `JSON.stringify` escapes as
+  `\ud83d`. Python decodes it into a string that cannot be encoded, the store hashes each
+  query with `text.encode()`, and the recall hook reported the whole recall as failed
+  although the store was healthy. The hook now drops the half character from the prompt
+  before it searches. #347.
+- **The LlamaIndex retriever's docstring shows an example that runs.** It showed
+  `index_or_engine.as_query_engine(retriever=MemvaraRetriever(mem, user="alice"))`, which
+  raises `TypeError` in llama-index-core at both memvara's floor, 0.13.0, and 0.14.25:
+  `as_query_engine` builds a retriever of its own and passes its keyword arguments on as
+  well, so `retriever` arrives twice. The docstring now shows
+  `RetrieverQueryEngine.from_args(MemvaraRetriever(mem, user="alice"))` and says why
+  `as_query_engine` does not work. #362.
 - **The MCP server refuses NaN for a number argument.** The server's JSON parser accepts
   the bare token `NaN`, and the validator let it through the bounds on `confidence` and
   `min_score`, because every comparison with NaN is false. A NaN `min_score` then acted as
@@ -210,6 +223,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   Standard error, where the server writes its startup refusals, is now written as UTF-8
   too, and so is standard output, where `--help` prints a usage that holds em dashes.
   #311.
+- **A claim that matches a search is never returned behind claims that do not.**
+  `search()` caps each fact slot (the same owner, subject and predicate) at two places in
+  the head of the list, and moved the slot's third and later claims to the very end,
+  behind results that score 0 and do not match the query at all. So for a user who knows
+  C, C# and C++, a search for "C++" returned "C" last, behind eight unrelated facts, and
+  in a read with one more candidate "C" fell out of the top 10. The demoted claims now go
+  behind the other matching results and ahead of every result that scores 0. The list
+  is in score order except for that demotion. LOCOMO retrieval does not move, because it
+  scores conversation turns and the cap applies to claims. #327.
 - **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
   decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
   interpreter's stack allows, and the server let it escape, so a single such line ended

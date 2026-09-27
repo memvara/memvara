@@ -1371,6 +1371,7 @@ def _model_calls() -> set[str]:
     return found
 
 
+@pytest.mark.covers("inv:I1")
 def test_a_model_is_reached_only_from_the_places_invariant_1_names() -> None:
     assert _model_calls() == MODEL_CALLS
 
