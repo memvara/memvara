@@ -161,18 +161,101 @@ three places, and knowing them helps you resist it.
 
 How to check: read the sentence back. If a colleague would need to hear it twice, rewrite it.
 
-**A change that touches only prose runs only the checks it can affect.** Do not run the full
-gate for a documentation change. A prose edit cannot move a test suite, and the gate here
-takes about nine minutes. Run the type check if a typed file changed, and the specific test
-file that reads the changed document — for example the test that parses a dashboard JSON or
-a queries file — and quote its "N passed" line in the pull request body. A code change still
-gets the full gate.
+**A change that touches only prose runs only the checks it can affect.** A prose edit cannot
+move a test suite, so running the whole suite for one is time spent learning nothing.
+`scripts/test_changed.py` finds the checks that apply: for a changed document it runs only
+the tests that name that document or its top-level folder, such as the link checker for a
+file under `docs/`. Run the type check as well if a typed file changed, and quote the "N passed"
+lines in the pull request body. A code change runs the same command, and CI then runs the
+full suite on its pull request, as the next section describes.
 
 Both rules were stated by the user on 2026-09-06. The first came after the user quoted a
 dashboard panel description an agent had written and asked "from where are you getting that
 you need to write like this?". The second was stated as "Don't run the gate just for the
 document update". The same section is in the `memvara`, `memvara-cloud` and `memvara-web`
-repositories and in the user's global `CLAUDE.md`.
+repositories and in the user's global `CLAUDE.md`. On 2026-09-27 the second rule was
+reworded for the five testing tiers below, which removed the full local gate for every
+change, not only for documentation.
+
+## Tests run in five tiers, and none of them is a full local gate
+
+Testing is split into five tiers. Each tier runs where it is cheapest to run, and each one
+catches what the tier before it could not. You run the first tier yourself before you push.
+Everything after that runs in CI or on a schedule.
+
+1. **Local, before you push.** Run `python3 scripts/test_changed.py`. It compares your
+   checkout with `origin/main` (pass `--base <ref>` to compare with something else) and
+   runs the tests that the change can reach: the test files that changed, the test files
+   and doctest modules that import a changed Python file directly or through other
+   modules, the test files that name a changed file in a string, which is how a test reads
+   a document or starts a module in a child process, and the tests that failed on the last
+   run. It runs the fast tier only, as CI does, and names any changed test in a slower tier
+   with the command that runs it. Arguments after `--` go to pytest. It measures no
+   coverage, because coverage is a property of the whole suite and a partial run always
+   reports it short.
+2. **Pull request.** `.github/workflows/ci.yml` runs on every pull request, exactly as it did
+   before: Python 3.10 to 3.13 on Linux, 3.13 on macOS and Windows, coverage gated at 100%,
+   mypy, the import check with no extras, the benchmark smoke run, the LOCOMO retrieval
+   regression and the npm bridge. It stays complete because this repository is public, so
+   GitHub's hosted runners cost nothing here.
+3. **Merge queue.** GitHub's merge queue is not available on the organisation's plan, so this
+   tier is the merge train: when several pull requests are ready, rebase and merge them in
+   turn, and let the CI run on the merged main be the check for all of them together,
+   rather than re-running each branch after every merge.
+4. **After merge.** A push to `main` runs the same CI again. Its last job, `report to
+   build-health`, needs every other job. When any of them failed, it opens an issue in the
+   private repository memvara/build-health, or comments on the one already open; when they
+   all pass, it closes that issue. The issue goes to memvara/build-health because every
+   issue in this public repository is public. A red main is **fixed forward**: whoever
+   merged the change that broke it, or whoever picks up the issue, pushes a fix through an
+   ordinary pull request. Revert only when the fix will take more than a day. A run
+   cancelled by a newer push reports nothing, because the newer run reports instead.
+5. **Nightly and release.** `scripts/nightly/` runs the slow test tiers against
+   `origin/main` once a night and files each new break in memvara/build-health, as
+   [the testing guide](testing.md#the-nightly-run) describes. A release runs CI again on the
+   tagged commit through `release.yml`, and `docs/RELEASING.md` has the checks it adds.
+
+**How the local selection decides.** It follows imports statically: it parses every Python
+file, builds the import graph, and selects a test when anything in its import closure is a
+changed file. This is coarse for the library itself. Almost every test imports `memvara`,
+and `memvara/__init__.py` imports most of the package, so a change to a module under
+`memvara/` usually selects most of the suite. That is correct, because those tests do run
+that code, and it is still faster than the old gate because it measures no coverage and runs
+no type checks. It is much narrower for scripts, benchmarks, tests and documents.
+
+**When it runs the full suite instead.** Some files reach the tests by a route the import
+graph cannot see, and a change to one of them runs the full fast suite. `FULL_SUITE` and
+`DATA_FOLDERS` at the top of `scripts/test_changed.py` are the whole list, each entry with its
+reason: any `conftest.py`, `pyproject.toml` and other pytest configuration, lockfiles and
+requirements files, `tests/harness/`, test data (anything under `tests/fixtures/` or
+`tests/scenarios/`, and any non-Python file under `tests/`), package data (any non-Python
+file under `memvara/`), `.github/`, and `plugin/`, whose hooks run as separate processes and
+load host modules by name. The command prints which mode it chose and which file decided it.
+If you find a file it should have followed and did not, add it to that list rather than
+working around it.
+
+**Why it follows imports rather than recorded coverage.** `pytest-testmon` records which
+tests execute which code and selects more precisely. It was not chosen, for four reasons.
+It needs a database built by a full run with coverage tracing, and work here happens in a
+fresh worktree per session, so every session would pay that full run before its first
+selection. It cannot see code that a test runs in a child process, which is how this suite
+tests the MCP server and the plugin's hooks. It records coverage, which the local tier is
+meant to leave to CI. And it would be one more development dependency in a public
+library. The static graph needs no state, no dependency and no warm-up, and when it is
+wrong it errs towards running more.
+
+**Nothing in this repository may run on the self-hosted runner.** memvara-cloud and
+memvara-web run their CI on one self-hosted machine. This repository is public, and a pull
+request from a fork could run its own code on any runner a workflow here names, so every job
+here runs on GitHub's hosted runners.
+
+Decided 2026-09-27 with the user, together with the matching change in memvara-cloud and
+memvara-web. The full local gate was the slowest step in every change, about nine minutes,
+and it repeated what CI already runs on every pull request, on more interpreters and more
+operating systems than any one machine can. The old rule ("run the full gate before
+anything reaches main") is withdrawn. The rules that depended on it keep their purpose: a
+documentation change still runs only the checks it can move, and the code-review rule now
+says to re-run the local tier and let the pull request's CI run again.
 
 ## More than one agent may be working in this checkout at once
 
@@ -253,17 +336,19 @@ of them. If your session cannot send a follow-up message to a subagent, an agent
 early cannot be resumed at all; relaunching is the only option, and the findings already in
 hand stay good.
 
-**Run the checks CI runs, not the ones you remember.** The gate in `CONTRIBUTING.md` is
-`mypy -p memvara`, and `.github/workflows/ci.yml` runs a second pass,
-`mypy benchmarks/agent_memory --ignore-missing-imports`, that the first does not cover. On
-2026-09-08 a pull request went up with a local gate reported green and that second pass
-failing on the branch. Read the workflow file before you claim a gate passed.
+**Do not report a CI check as passed because a local run passed.** CI runs checks that no
+local command covers by default. For example, `.github/workflows/ci.yml` runs
+`mypy benchmarks/agent_memory --ignore-missing-imports` as well as `mypy -p memvara`. On
+2026-09-08 a pull request went up with a local run reported green and that second pass
+failing on the branch. Say which commands you ran, and let the pull request's CI answer for
+the rest.
 
 **Use `high`, not `ultra`.** The `ultra` level is user-triggered and billed, an agent cannot
 launch it, and attempting it wastes a turn. Reach for `max` instead when the change is large
 or lands on something load-bearing.
 
-**Fix everything it finds, on the same branch, then re-run the gate.** The `--fix` flag
+**Fix everything it finds, on the same branch, then re-run the local tier and let the pull
+request's CI run again.** The `--fix` flag
 applies findings to the working tree, so the commit and the push are still yours to make.
 Where a finding is wrong, write the reason in the pull request body. A disagreement recorded
 is a decision, and a finding dropped in silence is a defect with a delay on it.

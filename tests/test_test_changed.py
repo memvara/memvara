@@ -1,0 +1,338 @@
+"""The local test selection in scripts/test_changed.py, which is the first tier of testing.
+
+It runs the tests a change can reach through imports, the tests that name a changed file
+in a string, and the tests that failed last time, and it runs the full suite when a file
+changes that it cannot follow. Its one failure worth fearing is quiet: a test the change
+affects that it leaves out, so a developer pushes believing the change was checked. These
+tests pin both halves: what must be selected, and what must send it to the full suite.
+
+The end-to-end tests build a small git repository in a temporary folder, with the real
+tier rules copied into it, and replace pytest with a runner that records its command.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+from types import ModuleType
+
+import pytest
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _load() -> ModuleType:
+    path = ROOT / "scripts" / "test_changed.py"
+    spec = importlib.util.spec_from_file_location("_test_changed_script", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+tc = _load()
+
+
+# -- What sends a change to the full suite --------------------------------------------------
+
+@pytest.mark.parametrize("path, named", [
+    ("conftest.py", "conftest"),
+    ("tests/adversarial/hooks/conftest.py", "conftest"),
+    ("pyproject.toml", "pytest's options"),
+    ("requirements-dev.txt", "lockfile"),
+    ("npm/memvara/package-lock.json", "lockfile"),
+    ("tests/harness/env.py", "harness"),
+    ("tests/fixtures/stores/v0.1.0/memory.db", "test data"),
+    ("tests/scenarios/scripted/first.json", "test data"),
+    ("tests/adversarial/nightly_runner/gh_recorded.json", "test data"),
+    ("memvara/packs/engineering.toml", "package data"),
+    ("memvara/skills/memvara/SKILL.md", "package data"),
+    (".github/workflows/ci.yml", "CI configuration"),
+    ("plugin/hooks/run.py", "separate processes"),
+])
+def test_a_change_selection_cannot_follow_runs_the_full_suite(path: str, named: str) -> None:
+    """Each of these reaches tests by a route the import graph does not see: pytest loads
+    conftest files itself, pyproject.toml configures every run, and data, CI configuration
+    and hook scripts are read or run by path. The reason is printed, so it has to say
+    what the file is."""
+    reason = tc.full_suite_reason(path)
+    assert reason is not None and named in reason
+
+
+@pytest.mark.parametrize("path", [
+    "memvara/core.py", "tests/test_fast.py", "tests/adversarial/sessions/runner.py",
+    "scripts/nightly/filing.py", "bench/soak.py", "docs/claude/testing.md", "README.md",
+    "CLAUDE.md", "examples/quickstart.py"])
+def test_an_ordinary_source_test_or_document_change_is_selected_not_run_in_full(
+        path: str) -> None:
+    assert tc.full_suite_reason(path) is None
+
+
+# -- Reading one file -----------------------------------------------------------------------
+
+def test_module_names_follow_every_folder_the_tests_import_from() -> None:
+    """tests/ and the two script folders are on the import path when the tests run, so a
+    file there is imported under a shorter name as well as its full one."""
+    assert tc.module_names("memvara/server/__init__.py") == ["memvara.server"]
+    assert tc.module_names("tests/harness/env.py") == ["tests.harness.env", "harness.env"]
+    assert tc.module_names("scripts/nightly/filing.py") == [
+        "scripts.nightly.filing", "nightly.filing"]
+    assert tc.module_names("bench/evalkit.py") == ["bench.evalkit", "evalkit"]
+    assert tc.module_names("docs/API.md") == []
+    assert tc.module_names("npm/memvara-cli/x.py") == []
+
+
+def test_every_kind_of_import_is_read_and_prose_is_not_read_as_a_path() -> None:
+    source = tc.read_source("tests/adversarial/test_x.py", "\n".join([
+        '"""A docstring that mentions docs/claude/testing.md in passing."""',
+        "import memvara.store.sqlite",
+        "from harness import env, stores",
+        "from . import helpers",
+        "from ..shared import tools",
+        "def later():",
+        "    import bench_module",
+        'ARGS = ["-m", "memvara.server"]',
+        'DOCS = ROOT / "docs" / "API.md"',
+        'NOTE = "see docs/API.md for this"',
+    ]))
+    assert {"memvara.store.sqlite", "memvara.store", "memvara", "harness", "harness.env",
+            "harness.stores", "bench_module"} <= source.names
+    assert {"memvara.server", "memvara.server.__main__"} <= source.names
+    assert {"tests/adversarial/helpers.py", "tests/shared.py",
+            "tests/shared/tools.py"} <= source.files
+    assert {"docs", "API.md", "-m"} <= source.strings
+    assert not any("testing.md" in each or " " in each for each in source.strings)
+
+
+def test_a_file_that_does_not_parse_imports_nothing_rather_than_stopping_the_run() -> None:
+    source = tc.read_source("tests/test_broken.py", "def broken(:\n")
+    assert (source.names, source.files, source.strings) == (set(), set(), set())
+
+
+# -- Selection over a small graph ------------------------------------------------------------
+
+def _graph(files: dict[str, str]) -> object:
+    return tc.Graph({path: tc.read_source(path, text) for path, text in files.items()})
+
+
+FILES = {
+    "memvara/__init__.py": "from .core import Memvara\n",
+    "memvara/core.py": "from .store import sqlite\nURL = 'https://memvara.dev/docs/cloud'\n",
+    "memvara/store/__init__.py": "",
+    "memvara/store/sqlite.py": "'''>>> 1 + 1\n2\n'''\n",
+    "memvara/lazy.py": "def load():\n    import memvara.gone\n",
+    "tests/harness/__init__.py": "",
+    "tests/harness/runner.py": "import memvara\nARGS = ['-m', 'memvara.server']\n",
+    "tests/test_core.py": "from memvara import Memvara\n",
+    "tests/test_runner.py": "from harness import runner\n",
+    "tests/test_docs.py": "DOCS = ROOT / 'docs'\n",
+    "tests/test_readme.py": "PAGE = ROOT / 'README.md'\n",
+    "tests/test_alone.py": "import json\n",
+    "memvara/server/__init__.py": "",
+    "memvara/server/__main__.py": "from . import tools\n",
+    "memvara/server/tools.py": "",
+}
+
+
+def _affected(changed: list[str]) -> set[str]:
+    return set(tc.affected(_graph(FILES), changed))
+
+
+def test_a_change_reaches_every_test_that_imports_it_through_any_chain() -> None:
+    """tests/test_core.py never names sqlite, but importing memvara runs it."""
+    assert "tests/test_core.py" in _affected(["memvara/store/sqlite.py"])
+    assert "tests/test_alone.py" not in _affected(["memvara/store/sqlite.py"])
+
+
+def test_the_changed_modules_own_doctests_and_its_importers_doctests_run() -> None:
+    reached = _affected(["memvara/store/sqlite.py"])
+    assert {"memvara/store/sqlite.py", "memvara/core.py", "memvara/__init__.py"} <= reached
+
+
+def test_a_module_a_test_starts_in_a_child_process_reaches_that_test() -> None:
+    """`python -m memvara.server` runs memvara/server/__main__.py and what it imports, and
+    the test that starts it imports none of them."""
+    assert "tests/test_runner.py" in _affected(["memvara/server/tools.py"])
+    assert "tests/test_core.py" not in _affected(["memvara/server/tools.py"])
+
+
+def test_a_document_reaches_the_tests_that_name_it_or_its_top_folder() -> None:
+    assert _affected(["README.md"]) == {"tests/test_readme.py"}
+    assert _affected(["docs/claude/testing.md"]) == {"tests/test_docs.py"}
+
+
+def test_a_string_in_the_library_does_not_make_every_test_read_the_docs() -> None:
+    """memvara/core.py holds https://memvara.dev/docs/cloud and every test imports the
+    library. If the library's strings counted, a change to any document would select
+    every test."""
+    assert "tests/test_core.py" not in _affected(["docs/API.md"])
+
+
+def test_a_deleted_module_reaches_the_tests_that_still_import_it_by_name() -> None:
+    """memvara/gone.py is not in the graph any more, and the import that names it now
+    fails. The tests that reach that import must run and show it."""
+    assert "tests/test_core.py" not in _affected(["memvara/gone.py"])
+    assert "memvara/lazy.py" in _affected(["memvara/gone.py"])
+
+
+def test_a_changed_test_file_is_always_its_own_target() -> None:
+    assert _affected(["tests/test_alone.py"]) == {"tests/test_alone.py"}
+
+
+def test_the_packaged_skill_is_never_collected_and_helpers_are_not_test_files() -> None:
+    assert not tc.is_target("memvara/skills/memvara/auth.py")
+    assert not tc.is_target("tests/harness/runner.py")
+    assert tc.is_target("tests/adversarial/test_adv_x.py")
+    assert tc.is_target("memvara/core.py")
+
+
+# -- The last run's failures ---------------------------------------------------------------
+
+def test_the_last_runs_failures_are_read_from_pytests_cache(tmp_path: pathlib.Path) -> None:
+    assert tc.last_failed(tmp_path) == []
+    cache = tmp_path / ".pytest_cache" / "v" / "cache"
+    cache.mkdir(parents=True)
+    (cache / "lastfailed").write_text("not json")
+    assert tc.last_failed(tmp_path) == []
+    (cache / "lastfailed").write_text("[1, 2]")
+    assert tc.last_failed(tmp_path) == []
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("")
+    (cache / "lastfailed").write_text(json.dumps({
+        "tests/test_a.py::test_one[x-1]": True, "tests/test_deleted.py::test_two": True}))
+    assert tc.last_failed(tmp_path) == ["tests/test_a.py::test_one[x-1]"]
+
+
+# -- End to end, in a small repository -------------------------------------------------------
+
+def _git(repo: pathlib.Path, *args: str) -> None:
+    subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                    "-c", "commit.gpgsign=false", *args], cwd=repo, check=True,
+                   capture_output=True)
+
+
+def _write(repo: pathlib.Path, path: str, text: str) -> None:
+    file = repo / path
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(text)
+
+
+@pytest.fixture()
+def repo(tmp_path: pathlib.Path) -> pathlib.Path:
+    """A repository on branch work, one commit ahead of main, with nothing changed yet."""
+    root = tmp_path / "repo"
+    (root / "tests" / "harness").mkdir(parents=True)
+    shutil.copy(ROOT / "tests" / "harness" / "tiers.py", root / "tests" / "harness")
+    for path, text in FILES.items():
+        _write(root, path, text)
+    _write(root, "tests/adversarial/__init__.py", "")
+    _write(root, "tests/adversarial/nightly/__init__.py", "")
+    _write(root, "tests/adversarial/nightly/test_slow.py", "import memvara\n")
+    _write(root, "pyproject.toml", "")
+    _write(root, ".gitignore", ".pytest_cache/\n")
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "start")
+    _git(root, "checkout", "-q", "-b", "work")
+    return root
+
+
+class Recorder:
+    def __init__(self, code: int = 0) -> None:
+        self.code = code
+        self.calls: list[tuple[list[str], pathlib.Path, dict[str, str]]] = []
+
+    def __call__(self, command: list[str], cwd: pathlib.Path, env: dict[str, str]) -> int:
+        self.calls.append((command, cwd, env))
+        return self.code
+
+
+def test_a_source_change_runs_the_tests_that_reach_it_and_the_last_failures(
+        repo: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write(repo, "memvara/server/tools.py", "CHANGED = True\n")
+    _git(repo, "commit", "-qam", "change tools")
+    _write(repo, "tests/test_alone.py", "import json  # edited, not committed\n")
+    cache = repo / ".pytest_cache" / "v" / "cache"
+    cache.mkdir(parents=True)
+    (cache / "lastfailed").write_text(json.dumps({"tests/test_readme.py::test_x": True}))
+    runner = Recorder()
+    assert tc.main(["--base", "main", "--", "-x"], repo=repo, runner=runner) == 0
+    [(command, cwd, env)] = runner.calls
+    assert command[:4] == [sys.executable, "-m", "pytest", "-q"]
+    assert command[4:] == ["memvara/server/__main__.py", "memvara/server/tools.py",
+                           "tests/test_alone.py", "tests/test_runner.py",
+                           "tests/test_readme.py::test_x", "-x"]
+    assert cwd == repo
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(repo)
+    printed = capsys.readouterr().out
+    assert "Mode: selected tests." in printed
+    assert "Changed: memvara/server/tools.py, tests/test_alone.py." in printed
+    assert "1 more test that failed on the last run is run again." in printed
+
+
+def test_a_change_it_cannot_follow_runs_the_full_suite_and_says_which_file(
+        repo: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write(repo, "pyproject.toml", "[tool.pytest.ini_options]\n")
+    _write(repo, "memvara/core.py", "CHANGED = True\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
+    [(command, _, _)] = runner.calls
+    assert command == [sys.executable, "-m", "pytest", "-q"]
+    printed = capsys.readouterr().out
+    assert "Mode: the full suite" in printed
+    assert "pyproject.toml changed: it holds pytest's options" in printed
+
+
+def test_a_changed_test_in_a_slow_tier_is_named_with_its_command_and_not_run(
+        repo: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A plain pytest and CI run only the fast tier. A nightly test run here by default
+    could take the time this tier exists to save, so it is named instead, with the command
+    that runs it."""
+    _write(repo, "tests/adversarial/nightly/test_slow.py", "import memvara  # edited\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
+    assert runner.calls == []
+    printed = capsys.readouterr().out
+    assert "Mode: nothing to run." in printed
+    assert ("Not run: tests/adversarial/nightly/test_slow.py is in the nightly tier. Run it "
+            "with `python3 -m pytest tests/adversarial/nightly/test_slow.py`.") in printed
+
+
+def test_a_dry_run_prints_the_plan_and_runs_nothing(
+        repo: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write(repo, "README.md", "# Changed\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main", "--dry-run"], repo=repo, runner=runner) == 0
+    assert runner.calls == []
+    assert "tests/test_readme.py" in capsys.readouterr().out
+
+
+def test_selected_files_that_hold_no_tests_are_not_a_failure(
+        repo: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A module with no doctests collects nothing, and pytest says so with exit status 5.
+    Nothing failed, so the run passes. In the full suite, the same status would mean the
+    suite lost its tests, so it is passed on there."""
+    _write(repo, "memvara/lazy.py", "X = 1\n")
+    assert tc.main(["--base", "main"], repo=repo, runner=Recorder(code=5)) == 0
+    assert "hold no tests" in capsys.readouterr().out
+    _write(repo, "pyproject.toml", "# changed\n")
+    assert tc.main(["--base", "main"], repo=repo, runner=Recorder(code=5)) == 5
+    assert tc.main(["--base", "main"], repo=repo, runner=Recorder(code=1)) == 1
+
+
+def test_a_base_that_does_not_exist_stops_with_gits_own_message(repo: pathlib.Path) -> None:
+    with pytest.raises(SystemExit, match="git merge-base no-such-ref HEAD failed"):
+        tc.main(["--base", "no-such-ref"], repo=repo, runner=Recorder())
+
+
+def test_a_renamed_module_counts_under_its_old_name_too(repo: pathlib.Path) -> None:
+    """The tests that imported the old name now fail to import it, so they must run."""
+    _git(repo, "mv", "memvara/lazy.py", "memvara/eager.py")
+    _, changed = tc.changed_files("main", cwd=repo)
+    assert changed == ["memvara/eager.py", "memvara/lazy.py"]

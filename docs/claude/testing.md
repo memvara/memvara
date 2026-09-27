@@ -56,6 +56,8 @@ The `--tier` option, and the filter that leaves the other tiers out, are in the 
 
 The files named `test_adv_*_tier_guard.py` fail if their folder is ever collected by a tier that should have left it out. The ordinary fast run is therefore the proof that the tiers work.
 
+`scripts/test_changed.py`, the check to run before you push, runs fast-tier tests only, and it uses `tests/harness/tiers.py` to tell. When you change a test in another tier, it names that test with the command that runs it instead of running it. `docs/claude/working-here.md` describes that command and the five testing tiers it belongs to, which are a different thing from the test tiers on this page.
+
 ## Skips
 
 **A skip needs a rule.** This applies to every test in the repository, not only the adversarial suite, because `tests/conftest.py` registers the ledger for every run that collects tests under `tests/`. A run given only `memvara/` has no ledger, which is harmless while no doctest skips. Every skip reason must match a rule in `tests/harness/skips.py`, and each rule says why that skip hides no failure. A skip with no matching rule fails the whole run, and the run lists the test and its reason.
