@@ -41,7 +41,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "switch removes"),
     KnownBug("B20", 296, "two tool descriptions state a default that the schema does not "
              "declare"),
-    KnownBug("B21", 297, "the command-line help does not name --version"),
 
     KnownBug("B22", 299, "the MCP server exits with a traceback on a store from a newer "
              "version"),

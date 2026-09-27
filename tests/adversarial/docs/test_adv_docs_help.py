@@ -16,12 +16,12 @@ from typing import Any, Callable, Iterable, Mapping
 
 import pytest
 
-from harness import known_bugs
+from memvara.server.config import _BACKENDS as BACKENDS
 from memvara.server.config import FEATURES, ServerConfig
 
 from .commandline import (CommandLine, command_lines, config_reads, console_scripts,
                           default_off, false_claims, features, hides, nonexistent_features,
-                          read_script, read_subcommand, reads_in, removes, subcommands,
+                          paragraphs, read_script, read_subcommand, reads_in, removes, subcommands,
                           undocumented, unread_variables, variable_defaults, variables)
 from .planted import parse as parse_elsewhere
 from .surface import configurations, served
@@ -321,31 +321,35 @@ def test_a_feature_set_to_its_stated_default_changes_nothing(tmp_path: pathlib.P
         "no help says which features are on by default")
 
 
-#: The drift #297 pins, exactly: these two console scripts accept --version, and neither
-#: help names it. Another script, or another unnamed word, is a new drift and fails.
-UNNAMED = {"memvara": ["--version"], "memvara-mcp": ["--version"]}
-
-
-def _script_params(commands: Iterable[CommandLine]) -> list[Any]:
-    """One parameter per console script, with the #297 marker on the scripts it names."""
-    return [pytest.param(command, id=command.name,
-                         marks=[known_bugs.xfail("B21")] if command.name in UNNAMED else [])
-            for command in commands if command.top]
-
-
-def test_the_pin_for_297_marks_only_the_scripts_it_names() -> None:
-    """A third console script with the same gap is a new drift, so its test must fail
-    rather than be absorbed by the marker on the two scripts #297 is about."""
-    third = CommandLine("memvara-third", planted_main, frozenset({"--version"}),
-                        frozenset(), "", top=True)
-    marked = {param.id for param in _script_params([*SCRIPTS, third]) if param.marks}
-    assert marked == {"memvara", "memvara-mcp"}
-
-
-@pytest.mark.parametrize("command", _script_params(command_lines()))
+@pytest.mark.parametrize("command", [c for c in command_lines() if c.top],
+                         ids=lambda command: command.name)
 def test_every_word_a_console_script_accepts_is_in_its_help(command: CommandLine) -> None:
     words = undocumented(command)
-    if words and words == UNNAMED.get(command.name):
-        raise known_bugs.Reproduced(f"{command.name} accepts {words}, and its help names "
-                                    "none of them")
     assert not words, f"{command.name} accepts {words}, and its help names none of them"
+
+
+def _server_help() -> str:
+    return next(command.help for command in command_lines() if command.name == "memvara-mcp")
+
+
+def test_the_server_help_names_every_variable_the_configuration_reads() -> None:
+    """The server is configured by environment alone, so a variable its help leaves out
+    is a setting a person running `--help` cannot find. A feature's own variable counts
+    as named when the help gives the MEMVARA_FEATURE_ prefix and the feature's name."""
+    help = _server_help()
+    named = variables(help)
+    if "MEMVARA_FEATURE_" in named:
+        named |= {f"MEMVARA_FEATURE_{name}" for name in features(help)}
+    missing = sorted(config_reads() - named)
+    assert not missing, f"the server help does not name {missing}"
+
+
+def test_the_server_help_names_every_feature() -> None:
+    missing = sorted(name for name in FEATURES if name.upper() not in features(_server_help()))
+    assert not missing, f"the server help does not name the features {missing}"
+
+
+def test_the_server_help_names_every_model_backend() -> None:
+    paragraph = next(text for name, text in paragraphs(_server_help()) if name == "MEMVARA_LLM")
+    missing = [backend for backend in BACKENDS if f"'{backend}'" not in paragraph]
+    assert not missing, f"the MEMVARA_LLM paragraph does not name {missing}"
