@@ -169,6 +169,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`import_mem0` dates mem0's updates and deletes when they happened.** mem0 writes an
+  UPDATE or DELETE row with its memory's creation time in `created_at` and the time of
+  the event in `updated_at`, and the importer read `created_at`. So every imported update
+  ended the old value on the day the memory was created, and every delete stopped belief
+  on that day too. The importer also sorted the rows by that date, so rows with the same
+  date were replayed in the order of mem0's random row ids, and an update or delete
+  replayed before its ADD left the wrong value live, or brought a deleted memory back.
+  The importer now dates an UPDATE or DELETE by `updated_at`, falling back to
+  `created_at` when the column is missing or empty, and replays events in the order they
+  happened, with an ADD first when two share an instant. `HistoryRow.updated_at` is now
+  a `datetime`, as its type always said, and `HistoryRow.at` gives the time of the
+  event. #365.
 - **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
   decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
   interpreter's stack allows, and the server let it escape, so a single such line ended
