@@ -173,6 +173,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Recall answers a prompt that holds half of a surrogate pair.** A client written in
+  JavaScript can send one, an emoji cut in two, which `JSON.stringify` escapes as
+  `\ud83d`. Python decodes it into a string that cannot be encoded, the store hashes each
+  query with `text.encode()`, and the recall hook reported the whole recall as failed
+  although the store was healthy. The hook now drops the half character from the prompt
+  before it searches. #347.
 - **The MCP server refuses NaN for a number argument.** The server's JSON parser accepts
   the bare token `NaN`, and the validator let it through the bounds on `confidence` and
   `min_score`, because every comparison with NaN is false. A NaN `min_score` then acted as

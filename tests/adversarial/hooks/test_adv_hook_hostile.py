@@ -63,7 +63,6 @@ def test_a_deeply_nested_payload_is_answered_as_an_empty_one_is(
 
 
 @pytest.mark.parametrize("host", ("claude", "copilot"))
-@known_bugs.xfail("B65")
 def test_a_prompt_with_half_a_surrogate_pair_still_gets_its_memories(
         hooks: Callable[..., HookRunner], store_env: dict[str, str], host: str) -> None:
     """A client written in JavaScript can send half of a surrogate pair, for example an
