@@ -41,7 +41,6 @@ def _label(pair: tuple[Tool, str]) -> str:
 # tests do not depend on which locales a machine has installed. "utf-8:strict" is what
 # LC_ALL=en_US.UTF-8 gives on macOS, and cp1252 is a Windows pipe's default.
 
-@known_bugs.xfail("B34")
 def test_a_byte_that_is_not_utf8_gets_a_parse_error_and_the_server_carries_on(
         mcp: Start) -> None:
     server = mcp(env={"PYTHONIOENCODING": "utf-8:strict"})
@@ -57,7 +56,6 @@ def test_a_byte_that_is_not_utf8_gets_a_parse_error_and_the_server_carries_on(
     assert replies[0]["error"]["code"] == -32700, replies
 
 
-@known_bugs.xfail("B34")
 def test_the_server_reads_utf8_input_whatever_its_stream_encoding(mcp: Start) -> None:
     """A Node client writes "Zürich" as UTF-8 bytes, because JSON.stringify does not
     escape non-ASCII characters."""

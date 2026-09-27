@@ -196,6 +196,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `MEMVARA_ADVISE_REPLACEMENTS`, `MEMVARA_CLOSED_VOCABULARY` and
   `MEMVARA_NAT64_PREFIXES`. New tests fail when the help leaves out a variable the
   configuration reads, a feature, or a model backend. #297.
+- **The stdio MCP server reads UTF-8, whatever the locale says.** The server read its
+  requests in the locale's encoding, but the MCP stdio transport is UTF-8. Under a strict
+  UTF-8 locale, one byte that was not UTF-8 ended the server, so the agent had no memory
+  for the rest of its session. Under another encoding, such as cp1252 on a Windows pipe,
+  UTF-8 text was decoded wrongly, so "Zürich" was stored as "ZÃ¼rich". The server now
+  reads standard input as UTF-8. A line with a byte that is not UTF-8 gets a JSON-RPC
+  parse error (`-32700`) that gives the position of the first such byte, and the server
+  carries on. Standard error, where the server writes its startup refusals, is now
+  written as UTF-8 too. #311.
 - **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
   decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
   interpreter's stack allows, and the server let it escape, so a single such line ended

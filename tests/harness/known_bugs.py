@@ -48,8 +48,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B24", 301, "a store refused as too new leaves its SQLite connection open"),
     KnownBug("B47", 327, "search() does not return its results in order of score"),
 
-    KnownBug("B34", 311, "the MCP server reads its input in the locale's encoding, not "
-             "UTF-8"),
     KnownBug("B36", 313, "a refusal or a no-match reply quotes the whole argument"),
     KnownBug("B39", 316, "memory_recall reports ranked without include_episodes as a "
              "ValueError"),
