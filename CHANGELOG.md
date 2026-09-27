@@ -90,7 +90,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     worktree of `main`, with a time limit on every step, and writes a report that says
     what ran, what broke and what is new. It gives each break a fingerprint, so a break
     seen again is not reported as new. A new break whose severity a step declared gets
-    one public issue, or a private security advisory when its class is security. An
+    one issue in the private repository memvara/build-health, or a private security
+    advisory in this repository when its class is security. Issues go to
+    memvara/build-health because every issue in this public repository is public. The
+    draft pull request that pins the break is opened here, and it cites the issue as
+    `memvara/build-health#<number>`. An
     unclassified break waits for the scheduled session that follows the run, which
     classifies it. A watchdog started by launchd writes a "did not run" report when a
     night is missed. Nothing in the run merges anything.

@@ -3,14 +3,18 @@
 Filing is a dry run unless the operator passes --file. A dry run calls nothing at all: it
 builds the exact commands a real run would send and prints them.
 
-* **A public break** gets one issue, labelled `nightly-break`, whose body ends with a hidden
-  marker holding the break's fingerprint. Before filing, the issues with that label are
+* **A public break** gets one issue in the private repository memvara/build-health,
+  labelled `nightly-break`, whose body ends with a hidden marker holding the break's
+  fingerprint. The issue goes there rather than to memvara/memvara because memvara/memvara
+  is public, and so is every issue in it. Before filing, the issues with that label are
   read and their markers compared, so a break that was filed before, even by hand or on
   a machine whose history was lost, is not filed again. Then a branch holding the
-  strict-xfail test is pushed and a draft pull request is opened. Nothing is merged.
+  strict-xfail test is pushed to memvara/memvara and a draft pull request is opened
+  there, because it carries code. The pull request cites the issue with a full
+  cross-repository reference, memvara/build-health#N. Nothing is merged.
 * **A security-class break**, one in scope for SECURITY.md, gets a private draft advisory
-  whose description carries the marker. It never gets an issue, a branch or a pull
-  request: its failing test lands together with its fix.
+  in memvara/memvara whose description carries the marker. It never gets an issue, a
+  branch or a pull request: its failing test lands together with its fix.
 * **An unclassified break** is filed nowhere public. Somebody checks it against
   SECURITY.md's "In scope" section first.
 
@@ -47,7 +51,11 @@ from nightly import night, regressions  # noqa: E402 - needs the path set just a
 
 from harness.report import Finding  # noqa: E402 - the nightly package puts tests/ on the path
 
+#: Where the code lives: draft pull requests and private security advisories go here.
 REPO = "memvara/memvara"
+#: Where issues go. It is private, so a break is not described in public before its pin
+#: is reviewed; memvara/memvara is public, and so is every issue in it.
+ISSUE_REPO = "memvara/build-health"
 LABEL = "nightly-break"
 BRANCH_PREFIX = "test/nightly-"
 #: Reads the fingerprint back out of an issue's body or an advisory's description.
@@ -192,21 +200,33 @@ def _body(finding: Finding, fingerprint: str, *, night: str,
 def issue_body(finding: Finding, fingerprint: str, *, night: str,
                paths: Mapping[str, str]) -> str:
     return _body(finding, fingerprint, night=night, paths=paths, closing=(
-        "A draft pull request will add a strict expected failure that cites this issue. "
-        "The fix follows in its own pull request, which removes the marker."))
+        f"A draft pull request in {REPO} will add a strict expected failure that cites "
+        "this issue. The fix follows in its own pull request, which removes the marker."))
 
 
-def pr_title(finding: Finding, issue: int | None) -> str:
-    return (f"Add a strict expected failure for the nightly break in #{issue}"
+def issue_ref(issue: int, repo: str = ISSUE_REPO) -> str:
+    """The full cross-repository reference to an issue, such as memvara/build-health#302.
+    A bare #302 in a pull request in memvara/memvara would point at memvara/memvara's own
+    number 302, which is a different item."""
+    return f"{repo}#{issue}"
+
+
+def pr_title(finding: Finding, issue: int | None, issue_repo: str = ISSUE_REPO) -> str:
+    return (f"Add a strict expected failure for the nightly break in "
+            f"{issue_ref(issue, issue_repo)}"
             if issue is not None else "Add a strict expected failure for a nightly break")
 
 
-def pr_body(finding: Finding, fingerprint: str, *, issue: int | None, night: str) -> str:
-    cites = f"#{issue}" if issue is not None else "the issue filed for this break"
+def pr_body(finding: Finding, fingerprint: str, *, issue: int | None, night: str,
+            issue_repo: str = ISSUE_REPO) -> str:
+    cites = (issue_ref(issue, issue_repo) if issue is not None
+             else "the issue filed for this break")
     return "\n".join([
         f"This pull request adds a strict expected failure for {cites}, which the nightly "
         f"run found on {night} at commit `{finding.commit or 'unknown'}`. It does not fix "
         "the bug: the fix follows in its own pull request, which removes the marker.", "",
+        f"The issue is in {issue_repo}, which is private, so only the maintainers can open "
+        "it.", "",
         "It stays a draft until the code review has run and a person has read it.", "",
         f"Fingerprint: `{fingerprint}`", "", marker(fingerprint), ""])
 
@@ -237,12 +257,12 @@ def _last_line(text: str) -> str:
 def _public_only(finding: Finding) -> None:
     if finding.severity == "security":
         raise FilingError("this break is security-class: it goes to a private draft "
-                          "advisory (filing.py advisory), never to a public issue, branch "
-                          "or pull request")
+                          "advisory (filing.py advisory), never to an issue, a branch or a "
+                          "pull request")
     if finding.severity not in PUBLIC:
         raise FilingError("this break is unclassified: check it against the In scope "
                           "section of SECURITY.md first; the nightly run never files an "
-                          "unclassified break in public")
+                          "unclassified break as an issue or a pull request")
 
 
 def _listing(repo: str, label: str) -> Command:
@@ -250,7 +270,7 @@ def _listing(repo: str, label: str) -> Command:
                     "--limit", "1000", "--json", "number,state,url,body"))
 
 
-def existing_issues(gh: Runner, *, repo: str = REPO,
+def existing_issues(gh: Runner, *, repo: str = ISSUE_REPO,
                     label: str = LABEL) -> dict[str, dict[str, Any]]:
     """Every fingerprint marked in an issue with the label: its number, state and address."""
     found: dict[str, dict[str, Any]] = {}
@@ -276,9 +296,10 @@ def existing_advisories(gh: Runner, *, repo: str = REPO) -> dict[str, dict[str, 
 
 
 def file_issue(finding: Finding, fingerprint: str, *, night: str, gh: Runner,
-               dry_run: bool = True, repo: str = REPO, label: str = LABEL,
+               dry_run: bool = True, repo: str = ISSUE_REPO, label: str = LABEL,
                paths: Mapping[str, str] | None = None) -> Filed:
-    """Open one issue for a public break, unless one with its marker exists already."""
+    """Open one issue for a public break in `repo`, memvara/build-health by default, unless
+    one with its marker exists there already."""
     _public_only(finding)
     listing = _listing(repo, label)
     create = Command(("gh", "issue", "create", "--repo", repo, "--title",
@@ -321,7 +342,7 @@ def file_advisory(finding: Finding, fingerprint: str, *, night: str, gh: Runner,
 
 
 def reopen_issue(finding: Finding, fingerprint: str, *, number: int, night: str,
-                 gh: Runner, dry_run: bool = True, repo: str = REPO) -> Filed:
+                 gh: Runner, dry_run: bool = True, repo: str = ISSUE_REPO) -> Filed:
     """Reopen the closed issue of a break that came back, with a comment that says so and
     carries the marker. The break keeps its one issue; a second issue with the same marker
     would make the marker name two issues."""
@@ -355,18 +376,20 @@ def filed_state(history: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any
 
 def open_pr(finding: Finding, fingerprint: str, *, issue: int | None,
             worktree: pathlib.Path, night: str, gh: Runner, git: Runner,
-            dry_run: bool = True, repo: str = REPO) -> Filed:
+            dry_run: bool = True, repo: str = REPO, issue_repo: str = ISSUE_REPO) -> Filed:
     """Push the worktree's current commit to the break's nightly branch, and open a draft
-    pull request for it. The worktree must hold only committed work: the pull request
-    must contain what was reviewed and nothing else. A dry run calls nothing, git
-    included, so it does not check the worktree either."""
+    pull request for it in `repo`, citing the issue in `issue_repo`. The worktree must
+    hold only committed work: the pull request must contain what was reviewed and nothing
+    else. A dry run calls nothing, git included, so it does not check the worktree
+    either."""
     _public_only(finding)
     target = branch(fingerprint)
     push = Command(("git", "-C", str(worktree), "push", "origin", f"HEAD:refs/heads/{target}"))
     create = Command(("gh", "pr", "create", "--repo", repo, "--draft", "--base", "main",
-                      "--head", target, "--title", pr_title(finding, issue),
+                      "--head", target, "--title", pr_title(finding, issue, issue_repo),
                       "--body-file", "-"),
-                     stdin=pr_body(finding, fingerprint, issue=issue, night=night))
+                     stdin=pr_body(finding, fingerprint, issue=issue, night=night,
+                                   issue_repo=issue_repo))
     if dry_run:
         return Filed("pr", fingerprint, True, [push, create])
     status = _check(git, Command(("git", "-C", str(worktree), "status", "--porcelain")))
@@ -384,18 +407,19 @@ def parser() -> argparse.ArgumentParser:
         prog="filing.py", description="File a confirmed break from a night's report. A dry "
         "run, which prints what would be sent, unless --file is given.")
     sub = command.add_subparsers(dest="command", required=True)
-    for name, help_text in (("issue", "a public issue, for a break outside SECURITY.md's "
-                                      "scope"),
-                            ("advisory", "a private draft advisory, for a security-class "
-                                         "break"),
-                            ("pr", "a draft pull request with the strict-xfail test, after "
-                                   "the issue")):
+    for name, help_text, repo in (
+            ("issue", f"an issue in {ISSUE_REPO}, for a break outside SECURITY.md's scope",
+             ISSUE_REPO),
+            ("advisory", f"a private draft advisory in {REPO}, for a security-class break",
+             REPO),
+            ("pr", f"a draft pull request in {REPO} with the strict-xfail test, after the "
+                   "issue", REPO)):
         each = sub.add_parser(name, help=help_text)
         each.add_argument("--night", required=True, help="the night's date, YYYY-MM-DD")
         each.add_argument("--fingerprint", required=True, help="the break's fingerprint")
         each.add_argument("--checkout", help="the main checkout; the one this file is in by "
                           "default")
-        each.add_argument("--repo", default=REPO, help=f"the repository; {REPO} by default")
+        each.add_argument("--repo", default=repo, help=f"the repository; {repo} by default")
         each.add_argument("--file", action="store_true",
                           help="send it to GitHub; without this, only print what would be "
                                "sent")
@@ -457,11 +481,20 @@ def _file(args: argparse.Namespace, layout: night.Layout, *, gh: Runner,
         finding = dataclasses.replace(failure.finding, severity=severity)
         result = open_pr(finding, args.fingerprint, issue=issue["number"] if issue else None,
                          worktree=pathlib.Path(args.worktree), night=args.night, gh=gh,
-                         git=git, dry_run=dry_run, repo=args.repo)
+                         git=git, dry_run=dry_run, repo=args.repo,
+                         issue_repo=repo_of(issue.get("url") if issue else None))
     _say(result)
     if not result.dry_run:
         night.append_jsonl(layout.history, result.record(night=args.night, severity=severity))
     return 0
+
+
+def repo_of(url: Any, default: str = ISSUE_REPO) -> str:
+    """The owner/name of the repository an issue's address points into, so a pull request
+    cites the issue where it was really filed. `default` when the address is missing or
+    is not a GitHub issue address."""
+    found = re.fullmatch(r"https://github\.com/([^/\s]+/[^/\s]+)/issues/\d+/?", str(url or ""))
+    return found.group(1) if found else default
 
 
 def _confirmed(layout: night.Layout, date: str, fingerprint: str) -> regressions.Failure:

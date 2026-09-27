@@ -120,7 +120,7 @@ A server started on the same file with the child environment opens it in the sam
 
 ## Known bugs and security findings
 
-**A bug the suite finds lands at once as a failing test marked `xfail(strict=True)`.** The marker cites a GitHub issue, and the fix follows in its own PR.
+**A bug the suite finds lands at once as a failing test marked `xfail(strict=True)`.** The marker cites a GitHub issue, and the fix follows in its own PR. The bugs registered before 2026-09-27 have their issues in memvara/memvara. A bug the nightly run files has its issue in the private repository memvara/build-health, so its `KnownBug` entry sets `repo="memvara/build-health"`, and the marker cites the issue as `memvara/build-health#<number>`.
 
 - **Strict mode keeps the marker honest.** When the fix lands, the test starts passing and strict mode fails the run until the fix PR removes the marker.
 - **Registering a bug.** `tests/harness/known_bugs.py` lists each open bug, and `known_bugs.xfail("B2")` builds its marker.
@@ -385,7 +385,7 @@ These two checks keep the baseline equal to today's gaps, in both directions. Th
 **Exempt items.** Four invariant bullets are rules for people rather than behaviour of memvara, so no test can check them: `TB1` ("verify" means comparing an output), `TB2` (a number is reported with its caveat), `RC5` (this repository does not implement the hosted server) and `RP1` (a published version is final; the release process is outside the suite's scope). `EXEMPT` in `tests/harness/checklist.py` lists each with its reason. An exempt item stays on the checklist, so a reworded rule is still noticed, but it is never a gap. The fast tier fails if an exemption names an item that no longer exists, or an item that a test covers. Add an exemption only for a rule that no test could ever check, and give the reason.
 ## The nightly run
 
-The nightly run turns what the slow tiers find into a report and, for each new break, one issue. The plan is `docs/superpowers/plans/2026-09-26-adversarial-nightly.md`.
+The nightly run turns what the slow tiers find into a report and, for each new break, one issue in the private repository memvara/build-health. The plan is `docs/superpowers/plans/2026-09-26-adversarial-nightly.md`.
 
 ### Running a night
 
@@ -487,8 +487,8 @@ Each failed test becomes a finding (`scripts/nightly/regressions.py`). Its invar
 
 `scripts/nightly/filing.py` files a confirmed break, and it is a dry run unless `--file` is given: a dry run calls nothing, and prints the exact commands a real run would send. Nothing in the suite calls GitHub; the tests replay the output of `gh` and `git` from `tests/adversarial/nightly_runner/gh_recorded.json`.
 
-- **A public break** gets one issue with the label `nightly-break`. The issue's body ends with a hidden marker, `<!-- memvara-nightly-fingerprint: <fingerprint> -->`. Before filing, `filing.py` reads every issue with the label and compares their markers, so a break that was filed before is not filed again, even when the local history is lost. A break whose issue is closed but which fails again is reported as recurred and notified, and it is never planned as filed and finished: with `--file` the run reopens the issue, with a comment that carries the marker, and the break then needs a new strict-xfail test and draft pull request, because the fix removed the old pin. A reopening therefore clears the old pull request from what counts as filed. The run only knows an issue is closed by reading GitHub, so a dry run cannot see a break recur. Then a branch named `test/nightly-<first 12 characters of the fingerprint>` is pushed with the strict-xfail test, by an explicit refspec that cannot reach `main`, and a draft pull request is opened. Nothing is merged.
-- **A security-class break** gets a private draft advisory whose description carries the marker, and nothing else: no issue, no branch and no pull request, because its failing test lands together with its fix.
+- **A public break** gets one issue with the label `nightly-break`, in the private repository memvara/build-health. It goes there because memvara/memvara is public, and every issue in a public repository is public; a break should not be described in public before its pin has been reviewed. The issue's body ends with a hidden marker, `<!-- memvara-nightly-fingerprint: <fingerprint> -->`. Before filing, `filing.py` reads every issue with the label and compares their markers, so a break that was filed before is not filed again, even when the local history is lost. A break whose issue is closed but which fails again is reported as recurred and notified, and it is never planned as filed and finished: with `--file` the run reopens the issue, with a comment that carries the marker, and the break then needs a new strict-xfail test and draft pull request, because the fix removed the old pin. A reopening therefore clears the old pull request from what counts as filed. The run only knows an issue is closed by reading GitHub, so a dry run cannot see a break recur. Then a branch named `test/nightly-<first 12 characters of the fingerprint>` is pushed to memvara/memvara with the strict-xfail test, by an explicit refspec that cannot reach `main`, and a draft pull request is opened there, because it carries code. The pull request cites the issue by its full cross-repository reference, `memvara/build-health#<number>`, since a bare `#<number>` in memvara/memvara would point at a different item. `filing.py` takes the issue's repository from the address recorded in the history, so an issue filed in memvara/memvara before the move is still cited there. Nothing is merged.
+- **A security-class break** gets a private draft advisory in memvara/memvara whose description carries the marker, and nothing else: no issue, no branch and no pull request, because its failing test lands together with its fix.
 - **An unclassified break** is filed nowhere public. A failed test from the regressions step is always unclassified, so the scheduled session checks it against the "In scope" section of `SECURITY.md` first, and then files it with the class it chose:
 
 ```bash
@@ -499,7 +499,7 @@ python3 scripts/nightly/filing.py advisory --night <date> --fingerprint <fingerp
 
 A dry run calls nothing at all, git included, so a dry run of `pr` does not check the worktree for uncommitted changes; a real run does, before it pushes. Before a break's issue exists, a dry run of `pr` uses the break's own severity, so it refuses an unclassified or security-class break, just as a real run would.
 
-Every filing with `--file` is recorded in `local/nightly/history.jsonl`, so a later night knows the break is filed. Before anything goes to GitHub, the operator's paths are removed from the failure's text: the checkout, the home folder, the temporary folder, and the user name in pytest's temporary folders. The label has to exist before the first real filing; create it once with `gh label create nightly-break --repo memvara/memvara --description "Found by the nightly run"`.
+Every filing with `--file` is recorded in `local/nightly/history.jsonl`, so a later night knows the break is filed. Before anything goes to GitHub, the operator's paths are removed from the failure's text: the checkout, the home folder, the temporary folder, and the user name in pytest's temporary folders. The label has to exist before the first real filing; create it once with `gh label create nightly-break --repo memvara/build-health --description "Found by the nightly run"`. The `gh` login on the machine that runs the night needs write access to issues in memvara/build-health as well as to memvara/memvara.
 
 ### The watchdog
 
@@ -523,7 +523,7 @@ Nothing in this repository installs the schedule, the watchdog or anything else.
 
 1. Create the scheduled task with `task.md` as its prompt, with the checkout filled in and Filing left at `dry-run`.
 2. Fill in `com.memvara.nightly-watchdog.plist.template` and load it, as its comment describes, with the watchdog's deadline a few hours after the task's start.
-3. Create the `nightly-break` label.
+3. Create the `nightly-break` label in memvara/build-health.
 4. Watch one night as a supervised dry run: the report, the DID NOT RUN path (run the watchdog by hand for a night with no heartbeat), the canary, and filing against a test label (`filing.py issue --label <a test label> --file`). Only then change Filing to `file`.
 
 ## A model that misbehaves
