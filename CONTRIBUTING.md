@@ -38,6 +38,37 @@ the full suite instead and prints which file made it do so. It measures
 no coverage. The full suite, coverage and mypy run in CI on your pull request, on every
 interpreter, so a green local run is a quick check and not the gate.
 
+**Tests that fail only on your machine.** If tests pass in CI and fail locally on an
+untouched `main`, check these two things about the Python you run them with. Both were
+found on a Mac whose system `python3` failed 18 tests that CI passes.
+
+- **The installed memvara must be this checkout.** Some tests run code the way a reader
+  would, in a subprocess that imports the installed package:
+  - `tests/test_examples.py` runs each example under `examples/`, with `PYTHONPATH`
+    removed.
+  - `tests/test_docs.py` runs the getting-started pages from a temporary directory, so a
+    relative `PYTHONPATH=.` points at that directory rather than at the checkout.
+  - `tests/test_docs.py` also runs the coding-agent example to check the transcript the
+    README quotes, with `PYTHONPATH` removed.
+
+  If this Python has an editable install of another checkout, those tests run that
+  checkout's code, and if that checkout has been deleted they fail with
+  `No module named 'memvara'`. To check, run
+  `python3 -c "import memvara; print(memvara.__file__)"` from outside the repository, and
+  `python3 -m pip show memvara`, which names the editable project's
+  location. To fix it, run the install command above from this checkout, or use a virtual
+  environment for each checkout.
+- **The `encrypt` extra must be installed.** The MCP server's configuration creates a new
+  store encrypted by default; `Memvara()` itself does not. So a test that opens a store
+  through the server's configuration fails with a `ConfigError` asking for
+  `memvara[encrypt]` when `sqlcipher3` is missing. That refusal is the correct behaviour
+  of the default configuration, so the tests are not changed to avoid it. To check, run
+  `python3 -c "import sqlcipher3"`. To fix it, install the extras the command above names.
+
+Having a provider SDK installed, such as `anthropic` or `openai`, does not change any
+result. Each provider has one test that needs its SDK to be absent, and each of those
+tests hides the SDK itself.
+
 **Pass `embedder=` at every `Memvara()` you construct in a test.** `tests/conftest.py`
 fails the run otherwise, naming the file and line. `default_embedder()` returns a
 sentence-transformers model as soon as that package is importable — and it is importable
