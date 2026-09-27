@@ -3660,6 +3660,7 @@ def test_a_flag_that_is_neither_true_nor_false_is_a_startup_error():
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_READ_ONLY": "maybe"})
 
 
+@pytest.mark.covers("env:MEMVARA_LLM")
 def test_an_unknown_backend_is_a_startup_error():
     with pytest.raises(ConfigError, match="is not a backend"):
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "ollama"})
@@ -3764,6 +3765,7 @@ def test_no_cap_is_the_default_because_hosted_openai_rejects_one(monkeypatch):
 
 @pytest.mark.parametrize("value", ["0", "-1", "abc", "3.5", "twelve",
                                    "\u00b9\u00b2", "\u0661\u0662"])
+@pytest.mark.covers("env:MEMVARA_LLM_MAX_CLAIMS")
 def test_an_unusable_claim_cap_is_refused_at_startup(value):
     """Refused rather than clamped or ignored. `0` would forbid every claim and make
     extraction a silent no-op, and a typo falling back to uncapped would leave a grammar
@@ -3842,6 +3844,7 @@ def test_the_claim_cap_and_the_terse_shape_are_separate_switches(monkeypatch):
 
 
 @pytest.mark.parametrize("value", ["maybe", "2", "yes please"])
+@pytest.mark.covers("env:MEMVARA_LLM_TERSE_CLAIMS")
 def test_an_unusable_terse_flag_is_refused_at_startup(value):
     """Refused rather than read as false. A typo falling through to the full shape would
     leave an operator believing they had halved their generation time when they had not,
@@ -3892,6 +3895,7 @@ def test_no_extraction_timeout_leaves_the_sdk_default_alone(monkeypatch):
 
 @pytest.mark.parametrize("value", ["0", "-5", "inf", "nan", "1e400", "soon", "10s",
                                    "\u0661", "\u0665\u0660\u0660"])
+@pytest.mark.covers("env:MEMVARA_LLM_TIMEOUT")
 def test_an_unusable_extraction_timeout_is_refused_at_startup(value):
     """`float()` alone would take `inf`, `nan` and `1e400`, and none of those is a
     duration. `inf` is the sharp one: it would wait on a single turn forever, which is
@@ -3966,6 +3970,7 @@ def test_the_budget_and_the_claim_cap_are_separate_switches(monkeypatch):
 @pytest.mark.parametrize("value", ["0", "-1", "2048 tokens", "2.5", "lots",
                                    "0x10", "2_048", "\u00b2\u2070\u2074\u2078",
                                    "\u0662\u0660\u0664\u0668"])
+@pytest.mark.covers("env:MEMVARA_LLM_MAX_TOKENS")
 def test_an_unusable_response_budget_is_refused_at_startup(value):
     """Refused rather than clamped or ignored. A typo falling back to 8,192 would leave
     an operator believing they had bounded a runaway they had not — and `0` is the sharp
@@ -4026,6 +4031,7 @@ def test_the_shipped_extraction_instructions_are_the_default(monkeypatch):
     memory.close()
 
 
+@pytest.mark.covers("env:MEMVARA_LLM_EXTRACT_SYSTEM")
 def test_an_unreadable_extraction_prompt_is_refused_at_startup(tmp_path):
     """Refused rather than falling back to the shipped prompt. A deployment that named
     this file meant to change what the model is told, and quietly not changing it is the
@@ -4157,6 +4163,7 @@ def test_a_missing_openai_key_is_a_startup_error_not_a_traceback(monkeypatch):
                                              "MEMVARA_LLM": "openai"}))
 
 
+@pytest.mark.covers("env:MEMVARA_LLM_MODEL")
 def test_cloud_mode_refuses_a_named_extraction_model():
     """Same rule as MEMVARA_LLM and MEMVARA_EMBEDDER, and the same reason: extraction
     runs inside the deployment, so a model named here would be read and never used. An
@@ -4270,6 +4277,7 @@ def test_a_deployment_with_no_extras_and_no_variable_is_unchanged(tmp_path, monk
     memory.close()
 
 
+@pytest.mark.covers("env:MEMVARA_EMBEDDER")
 def test_a_width_the_default_cannot_read_is_reachable_from_the_environment(tmp_path):
     """Why the value takes an argument at all.
 
@@ -4379,6 +4387,7 @@ def test_an_unknown_embedder_is_a_startup_error_that_names_the_vocabulary():
     ("hashing:0", "does not name a width"),
     ("hashing:-8", "does not name a width"),
 ])
+@pytest.mark.covers("env:MEMVARA_EMBEDDER")
 def test_every_unusable_embedder_value_fails_before_the_store_is_touched(value, fragment):
     with pytest.raises(ConfigError) as caught:
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_EMBEDDER": value})
@@ -4942,6 +4951,7 @@ def test_anchored_recall_says_nothing_about_a_stranger_and_search_agrees(server)
 
 # -- the read configuration a deployment can choose ---------------------------
 
+@pytest.mark.covers("env:MEMVARA_READ_W_GRAPH")
 def test_the_graph_leg_can_be_switched_on_from_the_environment():
     """`read_w_graph` existed as a constructor argument and no deployment could set it.
 
@@ -4968,6 +4978,7 @@ def test_the_graph_leg_is_off_when_nobody_asks_for_it():
 
 @pytest.mark.parametrize("value", ["-1", "-0.5", "lots", "1.0.0", "1,0",
                                    "\u0661", "nan", "inf"])
+@pytest.mark.covers("env:MEMVARA_READ_W_GRAPH")
 def test_an_unusable_graph_weight_is_refused_at_startup(value):
     """Refused rather than ignored, for the reason every other setting here is: a typo
     that fell back to 0.0 would leave an operator believing they had switched the leg on.

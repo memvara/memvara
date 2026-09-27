@@ -130,6 +130,8 @@ def test_every_outcome_is_recorded_and_the_run_goes_past_a_file_that_cannot_impo
     assert results.exitstatus == 1
     tests = _by_id(results)
     assert "one is not two" in tests["test_outcomes.py::test_fails"]["message"]
+    # The timing step reports an invalid run by the reason its test skipped with.
+    assert tests["test_outcomes.py::test_skipped"]["message"] == "not on this machine"
     assert tests["test_outcomes.py::test_setup_errors"]["when"] == "setup"
     assert "the fixture broke" in tests["test_outcomes.py::test_setup_errors"]["longrepr"]
     assert tests["test_broken_import.py"]["when"] == "collect"

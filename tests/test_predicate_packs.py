@@ -131,6 +131,7 @@ class TestLoading:
 
 @needs_toml
 class TestServerWiring:
+    @pytest.mark.covers("env:MEMVARA_PREDICATES")
     def test_a_typo_is_a_startup_error_not_a_first_write_surprise(self, tmp_path):
         # By the first write the process has already accepted facts into the very slots
         # the pack was meant to shape.
@@ -143,6 +144,7 @@ class TestServerWiring:
         memory = build_memvara(config)
         assert not memory.registry.known("git_state")
 
+    @pytest.mark.covers("env:MEMVARA_PREDICATES")
     def test_a_declared_predicate_supersedes(self, tmp_path):
         memory = build_memvara(
             ServerConfig.from_env(_env(tmp_path, MEMVARA_PREDICATES="engineering")))
