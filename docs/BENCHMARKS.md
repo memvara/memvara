@@ -1878,6 +1878,65 @@ zero or well above it depending on the store and the embedder. Pass
 100% by construction on any non-empty store, which is why it is not the
 default.
 
+#### How the recall hook's default floors were chosen
+
+The recall hook injects nothing that scores under its floor. It has one floor
+for each route, because a floor is a property of the embedder that produced the
+scores, and the two routes usually use different embedders:
+
+- `MIN_SCORE`, 0.29, applies when the hook reads a store through the library,
+  directly or through its daemon. A local store embeds with the hashing embedder
+  unless `memvara[local-embed]` is installed.
+- `HOSTED_MIN_SCORE`, 0.35, applies when the hook reads the hosted service
+  through its own client. The service embeds with `all-MiniLM-L6-v2`.
+
+`MEMVARA_RECALL_MIN_SCORE` overrides both. Both constants are in
+`plugin/hooks/recall.py`, and `bench/hosted.py` uses the one for the route it
+measures.
+
+They were measured on 2026-09-27 (issue #154) by recording the top score of every
+question and asking where the answerable questions end and the unanswerable
+ones begin:
+
+| Store | Embedder | Lowest answerable | Highest unanswerable |
+|---|---|---|---|
+| Plugin-recall benchmark, seeded, 15 facts, 15 + 22 questions | hashing | 0.3603 | 0.2346 |
+| Scripted session `session-recall-every-prompt`, a two-question prompt | hashing | 0.2997 | none |
+| Plugin-recall benchmark, seeded | all-MiniLM-L6-v2 | 0.4704 | 0.2977 |
+| A real hosted store, 2,407 claims, 20 + 8 questions | all-MiniLM-L6-v2 | 0.3713 | 0.3468 |
+| Plugin-recall benchmark, seeded | BAAI/bge-small-en-v1.5 | 0.5741 | 0.5584 |
+
+On the hashing embedder a floor must be above 0.2346 and at or below 0.2997, and
+0.29 is. On `all-MiniLM-L6-v2` it must be above 0.3468 and at or below 0.3713,
+and 0.35 is. No single floor fits both: the hook used 0.29 on both routes until
+this measurement, and on the real hosted store that let six of the eight
+unanswerable questions inject memories.
+
+| Floor on the real hosted store | Unanswerable questions that still inject | Gold claims kept |
+|---|---|---|
+| 0.29 (the old default) | 6 of 8 | 12 of 12 |
+| 0.34 | 1 of 8 | 11 of 12 |
+| 0.35 (the hosted default now) | 0 of 8 | 11 of 12 |
+| 0.40 | 0 of 8 | 11 of 12 |
+
+"Gold claims kept" counts the claims the probe file names as the right answer
+that appeared in the top four results. The one lost at 0.35 was ranked second
+and scored 0.33, and its question still gets its first-ranked result.
+
+`BAAI/bge-small-en-v1.5` is the model a local store uses once
+`memvara[local-embed]` is installed. Its scores run higher, so the local floor of
+0.29 filters nothing on it, and its two classes on the seeded store are only
+0.0157 apart. Neither default suits that embedder. Measure your own store and set
+`MEMVARA_RECALL_MIN_SCORE`.
+
+The samples are small, and the hosted probes were written by hand. Treat both
+defaults as starting points. To measure a hosted store, run
+`bench/hosted.py --min-score 0 --out run.jsonl`, find the highest top score
+among your `abstain` probes and the lowest among your `hit` probes, and set
+`MEMVARA_RECALL_MIN_SCORE` between them. For a local store,
+`python -m benchmarks.plugin_recall.calibrate --db <store>` does the
+calculation for you.
+
 ---
 
 Previous: [How it works](DESIGN.md) · Next: [Roadmap](ROADMAP.md) · [Documentation index](README.md)

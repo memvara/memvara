@@ -132,6 +132,122 @@ def test_the_default_applies_when_nothing_is_configured(monkeypatch):
     assert recall_hook._min_score() == pytest.approx(recall_hook.MIN_SCORE)
 
 
+#: The scores each route's default floor was chosen from, measured on 2026-09-27 (#154).
+#: Each question is scored by its top result, except the scripted session's, which is the
+#: score of the memory that answers it. The numbers are the lowest score of a question the
+#: store should answer and the highest score of one it should not; a floor must be above
+#: the second and at or below the first.
+#:
+#: The local route reads through the library, whose default embedder is the hashing one.
+#: The seeded store is the plugin-recall benchmark's own: 15 facts, 15 questions it should
+#: answer and 22 plausible questions it cannot. The scripted session is
+#: `tests/scenarios/scripted/session-recall-every-prompt.json`, whose "asks-again" prompt
+#: asks about the door code and the employer at once.
+#:
+#: The hosted route reaches the hosted service, which embeds with all-MiniLM-L6-v2. The
+#: real store is a hosted store of 2,407 claims, probed with 20 questions it should answer
+#: and 8 it cannot; the probe file is private to the store and is not in this repository.
+MEASURED = {
+    "local": {
+        "seeded store, hashing embedder": {"answerable": 0.3603, "unanswerable": 0.2346},
+        "scripted session, hashing embedder": {"answerable": 0.2997},
+    },
+    "hosted": {
+        "seeded store, all-MiniLM-L6-v2": {"answerable": 0.4704, "unanswerable": 0.2977},
+        "real hosted store": {"answerable": 0.3713, "unanswerable": 0.3468},
+    },
+}
+
+
+@pytest.mark.parametrize("route, store", [
+    (route, store) for route in sorted(MEASURED) for store in sorted(MEASURED[route])])
+def test_each_route_default_floor_separates_what_was_measured_on_it(route, store):
+    """Each route's floor must silence every unanswerable question and keep every
+    answerable one on the stores it was measured against.
+
+    Both routes used one floor, 0.29, measured on the seeded store alone. On the real
+    hosted store six of its eight unanswerable questions scored above that, so the hook
+    injected memories into prompts the store knew nothing about. Raising the one floor to
+    0.35 would have fixed that and dropped the scripted session's answer, which scores
+    0.2997 on the hashing embedder. If you change either constant, measure again with
+    `bench/hosted.py` and `python -m benchmarks.plugin_recall.calibrate`, and update these
+    numbers from what you measured.
+    """
+    import recall as recall_hook
+
+    floor = {"local": recall_hook.MIN_SCORE, "hosted": recall_hook.HOSTED_MIN_SCORE}[route]
+    scores = MEASURED[route][store]
+    if "unanswerable" in scores:
+        assert scores["unanswerable"] < floor, (
+            f"on the {store}, an unanswerable question scoring {scores['unanswerable']} "
+            f"clears the {route} floor of {floor}, so the hook would inject memories into "
+            "a prompt the store cannot answer")
+    assert floor <= scores["answerable"], (
+        f"on the {store}, an answerable question scoring {scores['answerable']} falls "
+        f"under the {route} floor of {floor}, so the hook would stay silent on a prompt "
+        "the store can answer")
+
+
+def test_the_hosted_default_applies_when_nothing_is_configured(monkeypatch):
+    import recall as recall_hook
+
+    monkeypatch.delenv("MEMVARA_RECALL_MIN_SCORE", raising=False)
+    assert recall_hook._min_score(recall_hook.HOSTED_MIN_SCORE) == pytest.approx(
+        recall_hook.HOSTED_MIN_SCORE)
+
+
+def test_a_configured_floor_overrides_both_routes(monkeypatch):
+    import recall as recall_hook
+
+    monkeypatch.setenv("MEMVARA_RECALL_MIN_SCORE", "0.4")
+    assert recall_hook._min_score() == pytest.approx(0.4)
+    assert recall_hook._min_score(recall_hook.HOSTED_MIN_SCORE) == pytest.approx(0.4)
+
+
+class _Asked:
+    """A store or hosted client that records the floor each recall was given."""
+
+    def __init__(self) -> None:
+        self.floors: list[float | None] = []
+
+    def recall(self, query, **kwargs):
+        self.floors.append(kwargs.get("min_score"))
+        return ""
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("hosted_floor, sent", [(0.35, 0.35), (None, 0.29)])
+def test_the_hosted_client_gets_the_hosted_floor(monkeypatch, tmp_path, hosted_floor, sent):
+    """With no local store, `fast.recall` asks the hosted client, at `hosted_min_score`
+    when it is given and at `min_score` when it is not."""
+    import lib.hosted
+    from lib import fast
+
+    client = _Asked()
+    monkeypatch.setattr(fast, "socket_path", lambda *a, **k: str(tmp_path / "absent.sock"))
+    monkeypatch.setattr(fast, "_local_store", lambda: (None, {}, {}))
+    monkeypatch.setattr(lib.hosted, "open_hosted", lambda: client)
+    _, ok, _ = fast.recall("who owns billing", min_score=0.29,
+                           hosted_min_score=hosted_floor, spawn=False)
+    assert ok is True
+    assert client.floors == [sent]
+
+
+def test_a_local_store_gets_the_local_floor(monkeypatch, tmp_path):
+    from lib import fast
+    from lib import open as opener
+
+    store = _Asked()
+    monkeypatch.setattr(fast, "socket_path", lambda *a, **k: str(tmp_path / "absent.sock"))
+    monkeypatch.setattr(opener, "open_store", lambda: store)
+    _, ok, _ = fast.recall("who owns billing", min_score=0.29, hosted_min_score=0.35,
+                           spawn=False)
+    assert ok is True
+    assert store.floors == [0.29]
+
+
 class OlderBackend:
     """A store whose `recall()` predates `min_score`, which is most of them."""
 
