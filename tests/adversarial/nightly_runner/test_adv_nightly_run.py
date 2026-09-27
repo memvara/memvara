@@ -10,7 +10,7 @@ calls GitHub: the run is given this interpreter, and filing is a dry run.
 
 from __future__ import annotations
 
-import hashlib
+import itertools
 import json
 import pathlib
 import re
@@ -80,6 +80,10 @@ def never(command: filing.Command) -> filing.Completed:
     raise AssertionError(f"a dry run must call nothing, and it ran {command.argv}")
 
 
+#: Numbers the canned results files, so that no two stand-ins share one.
+_CANNED = itertools.count()
+
+
 def _pytest_result(tmp_path: pathlib.Path, tests: list[dict[str, Any]], exitstatus: int,
                    *, env_to: pathlib.Path | None = None) -> Callable[..., list[str]]:
     """A stand-in for the command of the regressions step or of a long run: it writes a
@@ -87,7 +91,7 @@ def _pytest_result(tmp_path: pathlib.Path, tests: list[dict[str, Any]], exitstat
     `env_to`, it also appends the NIGHTLY_RECORDS_DIR it was given to that file."""
     text = ("".join(json.dumps(test) + "\n" for test in tests)
             + json.dumps({"exitstatus": exitstatus}) + "\n")
-    canned = tmp_path / f"canned-{hashlib.sha256(text.encode()).hexdigest()[:12]}.jsonl"
+    canned = tmp_path / f"canned-{next(_CANNED)}.jsonl"
     canned.write_text(text)
     record = ("" if env_to is None else
               f"open({str(env_to)!r}, 'a').write("
@@ -126,9 +130,7 @@ def _table(tmp_path: pathlib.Path, tests: list[dict[str, Any]], exitstatus: int,
                 command=_pytest_result(tmp_path, tests, exitstatus, env_to=env_to),
                 rerun_command=_reruns_exit(rerun_code))))
         elif step.name in regressions.LONG_RUNS:
-            table.append(steps.Step(step.name, 600.0, run.long_run_step(
-                step.name, command=_pytest_result(tmp_path, [_long_passed(step.name)], 0,
-                                                  env_to=env_to))))
+            table.append(_long_step(tmp_path, step.name, {}, 0, env_to=env_to))
         else:
             table.append(step)
     return tuple(table)
@@ -230,9 +232,10 @@ def test_every_step_of_every_night_keeps_the_long_runs_records_in_one_folder(
 
 
 def _long_step(tmp_path: pathlib.Path, name: str, test: dict[str, Any], exitstatus: int,
-               cap: float = 600.0) -> steps.Step:
+               cap: float = 600.0, *, env_to: pathlib.Path | None = None) -> steps.Step:
     return steps.Step(name, cap, run.long_run_step(
-        name, command=_pytest_result(tmp_path, [{**_long_passed(name), **test}], exitstatus)))
+        name, command=_pytest_result(tmp_path, [{**_long_passed(name), **test}], exitstatus,
+                                     env_to=env_to)))
 
 
 def test_a_timing_run_on_battery_or_under_load_is_invalid_not_failed(
@@ -250,6 +253,35 @@ def test_a_timing_run_on_battery_or_under_load_is_invalid_not_failed(
     assert step["status"] == "invalid"
     assert reason in step["summary"]
     assert report["failures"] == [] and notify.sent == []
+
+
+def test_a_long_run_is_invalid_when_any_of_its_tests_skipped_as_an_invalid_run(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """A long-run file may hold more than one test. One test that skipped because its run
+    is invalid makes the step invalid, even when another test in the file passed."""
+    reason = "the performance run is invalid: the machine was under load"
+    skipped = {**_long_passed("performance"),
+               "nodeid": f"{regressions.LONG_RUNS['performance']}::test_other",
+               "outcome": "skipped", "message": reason}
+    table = _table(tmp_path, [PASSED], 0, performance=steps.Step(
+        "performance", 600.0, run.long_run_step("performance", command=_pytest_result(
+            tmp_path, [_long_passed("performance"), skipped], 0))))
+    assert _night(repo, "2026-09-27", table, notify=Notifications()) == 0
+    [step] = [step for step in _report(repo, "2026-09-27")["steps"]
+              if step["name"] == "performance"]
+    assert step["status"] == "invalid"
+    assert reason in step["summary"]
+
+
+def test_the_invalid_run_prefix_is_the_one_the_timing_test_skips_with() -> None:
+    """The runner recognises an invalid run by the start of its skip reason, which
+    bench/perf_budget.py writes."""
+    bench = str(REPO / "bench")
+    if bench not in sys.path:
+        sys.path.insert(0, bench)
+    import perf_budget
+    reason = perf_budget.skip_reason({"invalid_reasons": ["the machine ran on battery"]})
+    assert reason.startswith(regressions.INVALID_RUN)
 
 
 def test_a_long_run_that_fails_is_a_confirmed_break_and_is_not_rerun(

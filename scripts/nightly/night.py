@@ -33,6 +33,7 @@ from typing import Any, Mapping
 # The prefixes of the variables no child process of the suite may inherit: the
 # harness's own list, so the two can never disagree.
 from harness.env import _DROPPED as DROPPED_PREFIXES
+from harness.env import NIGHTLY_RECORDS
 
 #: The nightly folder, relative to the main checkout.
 NIGHTLY = ("local", "nightly")
@@ -69,8 +70,9 @@ class Layout:
         """The folder the timing run and the soak keep their records in. It is kept from
         night to night, outside the night's worktree, because the timing run's regression
         rule and budgets and the soak's store-growth check read the earlier nights'
-        records. A folder inside the worktree would start empty every night."""
-        return self.root / "records"
+        records. A folder inside the worktree would start empty every night. The soak
+        tests use the same folder when they run outside the nightly run."""
+        return self.checkout.joinpath(*NIGHTLY_RECORDS)
 
     def night(self, date: str) -> pathlib.Path:
         """The folder of the night named `date`, which must be YYYY-MM-DD."""
