@@ -61,8 +61,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "object is stored as Python text"),
     KnownBug("B30", 307, "a model retraction at low confidence ends a fact the user "
              "asserted"),
-    KnownBug("B31", 308, "a ranked read whose selector fails does not serve the plain "
-             "read"),
     KnownBug("B32", 309, "invented predicates past the learned cap make one write take "
              "quadratic time"),
     KnownBug("B45", 317, "a backdated retraction's tombstone is live in reads of the past"),
