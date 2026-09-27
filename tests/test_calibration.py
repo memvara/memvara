@@ -22,6 +22,7 @@ class _Named:
     CachedEmbedder(HashingEmbedder(dim=512)),
     _Named("local:some-org/unmeasured-model"),
 ])
+@pytest.mark.covers("inv:RT8")
 def test_a_space_nobody_measured_keeps_the_thresholds_every_release_used(embedder):
     """0.40 and 0.97 hold under hashing, which folds none of the 69 pairs of different
     values at any threshold measured. An embedder that was not measured on its own keeps

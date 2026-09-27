@@ -187,6 +187,7 @@ def test_repr_still_reports_live_and_total_claims(mem):
 # The embedder a store was built with
 # =============================================================================
 
+@pytest.mark.covers("inv:RT7")
 def test_a_new_store_records_the_embedder_that_owns_it(tmp_path):
     path = str(tmp_path / "m.db")
     with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
@@ -195,6 +196,7 @@ def test_a_new_store_records_the_embedder_that_owns_it(tmp_path):
     assert recorded == {"embedder": "hashing:128:3-5", "dim": 128}
 
 
+@pytest.mark.covers("inv:RT7")
 def test_an_embedder_swap_is_refused_at_construction_not_discovered_at_read(tmp_path):
     """The `memvara[local-embed]` upgrade path: `default_embedder()` starts returning a
     384-dim model, every read raises, and writes keep succeeding into a store nothing
@@ -527,6 +529,7 @@ def _default_asked_for(monkeypatch) -> list:
     return asked
 
 
+@pytest.mark.covers("inv:RT7")
 def test_a_store_keeps_the_local_model_its_fingerprint_names(tmp_path, monkeypatch):
     """`Memvara()` with no embedder asks for the model the store records, so a store
     MiniLM wrote goes on opening with MiniLM after the default moved."""
@@ -864,6 +867,7 @@ def _bare_claim(predicate):
 # reembed(): the migration the error message always promised
 # =============================================================================
 
+@pytest.mark.covers("inv:RT7")
 def test_reembed_at_construction_migrates_a_store_to_a_new_embedder(tmp_path):
     path = str(tmp_path / "m.db")
     with Memvara(path, embedder=HashingEmbedder(dim=512), llm=NullLLM()) as mem:
@@ -1797,6 +1801,7 @@ def test_recall_at_a_past_day_renders_that_day_and_says_so(mem):
     assert with_ids.claim_ids == (berlin.id,)
 
 
+@pytest.mark.covers("inv:RT1")
 def test_recall_at_a_past_day_reaches_no_retired_claim(mem):
     """The reason `valid_at` is on `recall()` and `as_of` is not.
 

@@ -285,6 +285,7 @@ ROWS: list[Any] = [
 
 
 @pytest.mark.parametrize("row, expected", ROWS)
+@pytest.mark.covers("inv:WP8")
 def test_each_operation_makes_the_model_calls_internals_states(
         scripted: Make, tmp_path: pathlib.Path, row: Row,
         expected: dict[str, int]) -> None:

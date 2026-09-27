@@ -7,6 +7,37 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## import_mem0 dates mem0's updates and deletes by when they happened
+
+### What changed
+
+`import_mem0` used to date each UPDATE and DELETE row of mem0's `history.db` by its
+`created_at`, which mem0 fills with the memory's creation time, and to replay the rows in
+that order. It now dates them by `updated_at`, the time mem0 recorded the event, and
+replays events in the order they happened. `read_history_db` returns
+`HistoryRow.updated_at` as a `datetime` rather than as the raw column text.
+
+### Who this changes
+
+**If you imported a mem0 store that has updates or deletes**, the store you imported holds
+the wrong dates: an updated value ends on the day its memory was created, and a deleted
+memory stops being believed on that day. Where mem0's random row ids put an update or a
+delete before its ADD, the wrong value may be live. Importing the same `history.db` into a
+new store gives the right dates and the right live values. Importing it again into the old
+store does not repair it.
+
+**If you read `HistoryRow.updated_at`**, it is now a `datetime`, or `None`.
+
+### How to find your own instances
+
+Compare the live values in the imported store, from `mem.get_all()`, with what mem0's own
+`get_all()` returns for the same user. A value that mem0 updated or deleted and that is
+still live in memvara is one of these. For the dates, look at `valid_to` on a value that
+mem0 updated: if it is the day the memory was created rather than the day of the update,
+the store was imported before this fix.
+
+---
+
 ## search() no longer puts a matching claim behind claims that do not match
 
 ### What changed

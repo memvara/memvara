@@ -125,6 +125,7 @@ def test_a_repeat_with_an_expiry_and_an_earlier_start_still_puts_the_expiry_on_r
 
 # --- the sweep ----------------------------------------------------------------
 
+@pytest.mark.covers("inv:I3")
 def test_nothing_is_erased_before_the_instant_and_everything_due_is_erased_after(m):
     code = m.remember("user", "door_code", "4411", expires_at=utcnow() + DAY,
                       expire_reason="rental").added[0]
@@ -153,6 +154,7 @@ def test_the_report_carries_no_copy_of_the_erased_fact(m):
     assert not {"subject", "predicate", "object", "text"} & set(ErasedClaim.__slots__)
 
 
+@pytest.mark.covers("inv:I3")
 def test_ended_superseded_and_retired_claims_are_kept_however_old_they_are(m):
     """Invariant 3: `valid_to` closes history and is never a reason to erase."""
     long_ago = utcnow() - timedelta(days=400)

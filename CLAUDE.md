@@ -54,12 +54,33 @@ sentence with a clear subject and verb, saying what the thing is and then what i
 the reader. Read it back and rewrite anything a colleague would need to hear twice. The
 clipped style of the older files here is not the target.
 
-A change that touches only prose runs only the checks it can affect. Do not run the full gate
-for a documentation change; it takes about nine minutes and a prose edit cannot move a test
-suite. Run the type check if a typed file changed, and the specific tests that read the
-changed document, and quote their "N passed" lines in the pull request body. A code change
-still gets the full gate.
+A change that touches only prose runs only the checks it can affect. `scripts/test_changed.py`
+finds them: for a document, it runs only the tests that name that document or its folder. Run
+the type check as well if a typed file changed, and quote the "N passed" lines in the pull
+request body. A code change runs the same command, and CI runs the full suite on its pull
+request.
 [Full rule.](docs/claude/working-here.md#write-plainly-and-run-only-the-checks-a-docs-only-change-can-move)
+
+## Tests run in five tiers, and none of them is a full local gate
+
+Decided 2026-09-27. Before you push, run only the first tier; CI runs the rest.
+
+1. **Local:** `python3 scripts/test_changed.py`. It runs the tests your change can reach
+   and the tests that failed last time, and it prints when it has to run the full suite
+   instead. It measures no coverage.
+2. **Pull request:** `.github/workflows/ci.yml`, unchanged: every interpreter, macOS and
+   Windows, 100% coverage, mypy and the rest, on GitHub's hosted runners.
+3. **Merge queue:** GitHub's merge queue is not available here, so a queue of pull requests
+   lands as a merge train, and the run on the merged main is the check.
+4. **After merge:** CI runs again on main. A failure opens an issue in the private
+   repository memvara/build-health, and main is fixed forward with a new pull request, not
+   reverted.
+5. **Nightly:** `scripts/nightly/` runs the slow test tiers on origin/main and files each new
+   break in memvara/build-health.
+
+Nothing in this repository may run on the self-hosted runner, because the repository is
+public.
+[Full rule.](docs/claude/working-here.md#tests-run-in-five-tiers-and-none-of-them-is-a-full-local-gate)
 
 ## More than one agent may be working in this checkout at once
 
@@ -89,7 +110,8 @@ cannot launch it. Read the report before acting on it: a subagent reports confid
 self-checks badly, so verify each finding against the code. Wait for the fan-out rather than
 for the agent you dispatched, which returns as soon as the finders are started; each finder
 reports on its own. Fix everything it finds on the
-same branch, then re-run the gate, and write the reason in the body where a finding is wrong.
+same branch, then re-run the local tier and let the pull request's CI run again, and write
+the reason in the body where a finding is wrong.
 The pull request body says the review ran, at what effort, and what it found. It never names
 the model that reviewed, and nothing the review publishes may carry an AI attribution — say so
 in the brief you hand the subagent, which does not inherit the reason for it.
