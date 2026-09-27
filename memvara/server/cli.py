@@ -336,6 +336,17 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         print(f"memvara-mcp: MEMVARA_MODE=cloud cannot start a server here. {exc}",
               file=err)
         return 2
+    except RuntimeError as exc:
+        # The store refuses a file written by a newer Memvara, so that this build cannot
+        # write rows the newer one cannot read, and says so clearly. It raises a plain
+        # RuntimeError, so this is told apart from a bug by its message, and anything else
+        # is re-raised: a traceback is what a bug should produce. Reported like the
+        # refusals above, rather than as a traceback in a log the client may not show
+        # (#299).
+        if "was written by a newer Memvara" not in str(exc):
+            raise
+        print(f"memvara-mcp: {exc}", file=err)
+        return 2
     except EmbedderMismatchError as exc:
         # Not a ConfigError — the library raised it about the store — but from here it is
         # one: this environment names an embedder that cannot read this store, and the

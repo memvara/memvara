@@ -1,5 +1,6 @@
-"""Three bugs the upgrade tests found, each pinned as a strict expected failure that
-accepts only its own symptom (#299, #300, #301)."""
+"""Three bugs the upgrade tests found. Two are pinned as strict expected failures that
+accept only their own symptom (#300, #301); the third is fixed (#299), and its test runs
+as a normal test."""
 
 from __future__ import annotations
 
@@ -20,12 +21,11 @@ from . import golden
 from .test_adv_upgrade_refusals import NEWER, newer_store, serve
 
 
-@known_bugs.xfail("B22")
 def test_the_server_refuses_a_store_from_a_newer_version_without_a_traceback(
         tmp_path: pathlib.Path, home: pathlib.Path) -> None:
-    """The server should exit with status 2 and one `memvara-mcp:` line, as it does for
-    an embedder mismatch. Today it exits with status 1 and a traceback that ends in the
-    RuntimeError from the store, because the command line does not catch it."""
+    """The server exits with status 2 and one `memvara-mcp:` line, as it does for an
+    embedder mismatch. It used to exit with status 1 and a traceback that ends in the
+    RuntimeError from the store, because the command line did not catch it (#299)."""
     db = newer_store(tmp_path)
     done = serve(db, home)
     if (done.returncode == 1 and "Traceback" in done.stderr
