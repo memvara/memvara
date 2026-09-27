@@ -143,6 +143,7 @@ def live(store, tenant: str = "acme"):
 
 # --- the headline number -----------------------------------------------------
 
+@pytest.mark.covers("inv:WP5")
 def test_twenty_turns_three_facts_costs_exactly_one_call():
     """20 turns, 3 of which carry facts: one batched extract call, 17 skipped."""
     facts = [
@@ -190,6 +191,7 @@ def test_twenty_turns_three_facts_costs_exactly_one_call():
     store.close()
 
 
+@pytest.mark.covers("inv:WP8")
 def test_pure_chitchat_never_reaches_the_model():
     llm = CountingLLM()
     pipe, store, _ = build(llm)
@@ -394,6 +396,7 @@ def test_a_turn_holding_other_numbers_than_the_nearest_claim_is_not_a_restatemen
     ("local:BAAI/bge-small-en-v1.5", 0.995, None, True),
     ("local:BAAI/bge-small-en-v1.5", 0.985, 0.97, True),
 ])
+@pytest.mark.covers("inv:RT8")
 def test_the_near_duplicate_threshold_is_the_one_measured_in_the_embedders_space(
         name, cosine, given, restated):
     """A turn worded like a claim embeds exactly as that claim would, so tier 0 reads it
@@ -522,6 +525,7 @@ def test_a_repeat_does_not_reinforce_a_claim_that_has_been_retired():
 
 # --- tier 2: schema acquisition is paid for once -----------------------------
 
+@pytest.mark.covers("inv:WP8")
 def test_novel_predicate_is_classified_exactly_once():
     def responder(episodes):
         return [{"subject": "user", "predicate": "collects", "object": obj,
@@ -605,6 +609,7 @@ def test_a_predicate_classified_as_one_does_supersede():
     store.close()
 
 
+@pytest.mark.covers("inv:WP5")
 def test_fast_path_turns_never_reach_the_llm():
     llm = CountingLLM()
     pipe, store, _ = build(llm)
@@ -663,6 +668,7 @@ def test_a_deterministically_foldable_form_never_reaches_the_model():
     store.close()
 
 
+@pytest.mark.covers("inv:WP9")
 def test_a_no_op_backend_is_not_billed_and_reports_the_loss():
     from memvara.llm import NullLLM
 
@@ -674,6 +680,7 @@ def test_a_no_op_backend_is_not_billed_and_reports_the_loss():
     store.close()
 
 
+@pytest.mark.covers("inv:WP9")
 def test_a_no_op_backend_reports_deferred_when_a_worker_will_read_the_turns():
     """The same batch, the other word. `unextracted` says the content is lost; on a
     deployment where a worker runs `reextract()` over stored turns it is not lost, it is
@@ -690,6 +697,7 @@ def test_a_no_op_backend_reports_deferred_when_a_worker_will_read_the_turns():
     store.close()
 
 
+@pytest.mark.covers("inv:WP9")
 def test_deferred_is_off_by_default_so_the_default_configuration_still_says_lost():
     """A caller who never deployed a worker must keep being told the truth."""
     from memvara.llm import NullLLM
@@ -1028,6 +1036,7 @@ def test_malformed_model_output_is_dropped_not_repaired(bad):
 # keeps working with fabricated-but-structurally-valid objects like "tea" against
 # unrelated filler text. These turn the option on explicitly.
 
+@pytest.mark.covers("inv:WP6")
 def test_a_claim_sharing_no_vocabulary_with_its_source_is_dropped():
     """The exact shape the option exists for: a well-formed claim, invented whole.
 
@@ -1149,6 +1158,7 @@ class KeyedEmbedder:
         return out
 
 
+@pytest.mark.covers("inv:WP6")
 def test_auto_rescues_a_paraphrase_the_lexical_check_would_reject():
     """The reason "auto" exists, and the reason it can default on.
 
@@ -1176,6 +1186,7 @@ def test_auto_rescues_a_paraphrase_the_lexical_check_would_reject():
     store.close()
 
 
+@pytest.mark.covers("inv:WP6")
 def test_auto_still_rejects_what_the_embedder_cannot_connect_either():
     """A fabrication fails both checks: no shared vocabulary, orthogonal embedding."""
     llm = CountingLLM(claims=[
@@ -1220,6 +1231,7 @@ class _AngledEmbedder:
     ("local:sentence-transformers/all-MiniLM-L6-v2", True),
     ("local:BAAI/bge-small-en-v1.5", False),
 ])
+@pytest.mark.covers("inv:RT8")
 def test_the_rescue_reads_a_cosine_in_the_space_it_was_measured_in(name, kept):
     """A cosine of 0.5 between an ungrounded claim and its source clears the 0.40 measured
     under MiniLM, where the paraphrases the rescue exists for score. Under bge-small it is
@@ -1317,6 +1329,7 @@ def test_a_broken_embedder_fails_the_rescue_open_and_says_so_once():
     store.close()
 
 
+@pytest.mark.covers("inv:WP6")
 def test_a_fabricated_claim_cannot_retire_a_true_fact_by_default():
     """The stake, stated as behaviour: why this defaults on rather than off.
 
@@ -1372,6 +1385,7 @@ def test_a_mode_nobody_defined_is_a_construction_error():
         build(reject_ungrounded="yes")
 
 
+@pytest.mark.covers("inv:WP6")
 def test_the_default_mode_is_auto():
     pipe, store, _ = build()
     assert pipe.reject_ungrounded == "auto"
@@ -2076,6 +2090,7 @@ def test_an_empty_batch_emits_nothing():
     store.close()
 
 
+@pytest.mark.covers("inv:WP2")
 def test_evidence_roles_reaches_the_gate_from_the_pipeline_constructor():
     """`write_evidence_roles=` on `Memvara` works because this parameter is keyword-only
     here — the facade forwards `write_*` by reading this signature. Pinned so the
@@ -2212,6 +2227,7 @@ def test_a_non_finite_amount_from_a_custom_llm_is_dropped():
 #
 # Off by default, so every test above keeps its invented predicates. These turn it on.
 
+@pytest.mark.covers("inv:WP3")
 def test_an_unregistered_predicate_is_refused_and_counted_under_a_closed_vocabulary():
     """The exact shape the option exists for: a real value under a predicate nobody
     declared. `build_commit` is one of about a hundred spellings one production
@@ -2268,6 +2284,7 @@ def test_a_registered_predicate_and_a_declared_alias_survive_a_closed_vocabulary
     store.close()
 
 
+@pytest.mark.covers("inv:WP3")
 def test_closed_vocabulary_is_off_by_default_and_remember_never_sees_it():
     """Two things the option must not change: an open pipeline still learns a new
     predicate, and a caller asserting a fact through the fast path is never filtered --

@@ -4,34 +4,3 @@
 # listed here, and when a line here is no longer a gap. When a test starts covering an
 # item, delete its line. A new item needs a test, not a line here.
 # docs/claude/testing.md explains the checklist.
-inv:CG1
-inv:CG2
-inv:CG3
-inv:CG4
-inv:CG5
-inv:CG6
-inv:RT1
-inv:RT2
-inv:RT4
-inv:RT5
-inv:RT6
-inv:RT7
-inv:RT8
-inv:RT9
-inv:TB3
-inv:TB4
-inv:TB5
-inv:TB6
-inv:TB7
-inv:TB8
-inv:WP1
-inv:WP10
-inv:WP11
-inv:WP2
-inv:WP3
-inv:WP4
-inv:WP5
-inv:WP6
-inv:WP7
-inv:WP8
-inv:WP9

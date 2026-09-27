@@ -3,10 +3,10 @@
   "issue_list_empty": {"returncode": 0, "stdout": "[]\n", "stderr": ""},
   "issue_list_known": {
     "returncode": 0,
-    "stdout": "[{\"body\":\"The nightly run found this break on 2026-09-20.\\n\\n<!-- memvara-nightly-fingerprint: FINGERPRINT -->\\n\",\"number\":301,\"state\":\"CLOSED\",\"url\":\"https://github.com/memvara/memvara/issues/301\"},{\"body\":\"An issue somebody filed by hand, with no marker.\",\"number\":299,\"state\":\"OPEN\",\"url\":\"https://github.com/memvara/memvara/issues/299\"}]\n",
+    "stdout": "[{\"body\":\"The nightly run found this break on 2026-09-20.\\n\\n<!-- memvara-nightly-fingerprint: FINGERPRINT -->\\n\",\"number\":301,\"state\":\"CLOSED\",\"url\":\"https://github.com/memvara/build-health/issues/301\"},{\"body\":\"An issue somebody filed by hand, with no marker.\",\"number\":299,\"state\":\"OPEN\",\"url\":\"https://github.com/memvara/build-health/issues/299\"}]\n",
     "stderr": ""
   },
-  "issue_create": {"returncode": 0, "stdout": "https://github.com/memvara/memvara/issues/302\n", "stderr": ""},
+  "issue_create": {"returncode": 0, "stdout": "https://github.com/memvara/build-health/issues/302\n", "stderr": ""},
   "issue_create_missing_label": {"returncode": 1, "stdout": "", "stderr": "could not add label: 'nightly-break' not found\n"},
   "issue_reopen": {"returncode": 0, "stdout": "", "stderr": ""},
   "git_status_clean": {"returncode": 0, "stdout": "", "stderr": ""},

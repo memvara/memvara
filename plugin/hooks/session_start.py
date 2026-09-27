@@ -38,11 +38,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.envelope import read_event, write  # noqa: E402
 from core.host import Reply, active  # noqa: E402
 from lib.ipc import (  # noqa: E402
-    due_capture_alert, payload, plural, status, under_extraction, with_alert,
+    due_capture_alert, log_line, payload, plural, status, under_extraction, with_alert,
 )
-from lib import counts, project  # noqa: E402
+from lib import counts, deadline, project  # noqa: E402
 from lib.agentic import sweep_configs as sweep_capture_configs  # noqa: E402
-from lib.fast import read_kinds  # noqa: E402
+from lib.fast import OPEN, read_kinds  # noqa: E402
 from lib.mark import count as count_memories  # noqa: E402
 from lib.mark import mark_block  # noqa: E402
 from lib.mark import on as mark_on  # noqa: E402
@@ -161,7 +161,7 @@ def _binding_line(scope: str, visible: str) -> str:
     return line
 
 
-def main() -> int:
+def _main() -> int:
     if under_extraction():
         # `claude -p` opens a session like any other, so this hook fired inside every
         # extraction and built the whole standing block for a child that was about to be
@@ -185,6 +185,9 @@ def main() -> int:
     # valid banner and fail nothing.
     alert = due_capture_alert()
     host = active()
+    # Before any hosted call: every one of them stops at this, so the hook answers inside
+    # its host's limit however the endpoint behaves (#345).
+    deadline.set_from_limit(host.timeouts.get("session_start", 20))
 
     def _emit(reply: Reply) -> None:
         if reply.status:
@@ -209,6 +212,16 @@ def main() -> int:
     sweep_capture_configs()
     store, close = open_writer()
     if store is None:
+        # `open_writer` answers None both when nothing is configured and when a local
+        # store is configured and cannot open. The second is a failure, and saying "not
+        # configured" of it sent a person looking for configuration that was there (#337).
+        from lib import open as opener  # noqa: PLC0415
+
+        if opener.failure is not None:
+            log_line("session_start",
+                     f"failed reason={OPEN}:{type(opener.failure).__name__}")
+            _emit(Reply("session_start", status=status("recall failed")))
+            return 0
         _emit(Reply("session_start", status=status("not configured")))
         return 0
 
@@ -295,6 +308,15 @@ def main() -> int:
         # would read the record, and recall is what prunes these files.
         record_injected(event.session, standing, time.time())
     return 0
+
+
+def main() -> int:
+    """Run the hook, then clear the deadline it set, for a caller that runs it in this
+    process and goes on to make hosted calls of its own."""
+    try:
+        return _main()
+    finally:
+        deadline.clear()
 
 
 if __name__ == "__main__":

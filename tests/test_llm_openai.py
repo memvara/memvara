@@ -491,6 +491,7 @@ def test_the_budget_the_truncation_message_names_is_the_one_that_was_sent():
 CUT_OFF = '{"claims": [{"subject": "user", "predicate": "lives'
 
 
+@pytest.mark.covers("inv:WP7")
 def test_a_truncated_extraction_raises_rather_than_returning_no_claims():
     """The silence this check exists to end.
 

@@ -11,6 +11,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`scripts/test_changed.py` runs the tests a change can affect, before you push.** It
+  runs the changed test files, the tests that import or name a changed file, and the tests
+  that failed last time, and it runs the full suite when a change touches something it
+  cannot follow, such as a `conftest.py` or `pyproject.toml`. It replaces running the full
+  suite with coverage and mypy locally before every push; CI still runs all of that on every
+  pull request, and again on `main` after each merge, where a failure now opens an issue in
+  the private repository memvara/build-health. `docs/claude/working-here.md` describes the
+  five testing tiers. None of it changes the library.
 - **An adversarial test suite that tries to break memvara the way agents use it.** It
   lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
   scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
@@ -90,7 +98,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     worktree of `main`, with a time limit on every step, and writes a report that says
     what ran, what broke and what is new. It gives each break a fingerprint, so a break
     seen again is not reported as new. A new break whose severity a step declared gets
-    one public issue, or a private security advisory when its class is security. An
+    one issue in the private repository memvara/build-health, or a private security
+    advisory in this repository when its class is security. Issues go to
+    memvara/build-health because every issue in this public repository is public. The
+    draft pull request that pins the break is opened here, and it cites the issue as
+    `memvara/build-health#<number>`. An
     unclassified break waits for the scheduled session that follows the run, which
     classifies it. A watchdog started by launchd writes a "did not run" report when a
     night is missed. Nothing in the run merges anything.
@@ -181,6 +193,44 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   had changed. Session start now records the digest and the time of the block it
   injected in the session's recall state, and recall computes the digest the same way,
   so the first prompt finds the block unchanged. #343.
+- **Session start and recall answer within their time limits when the hosted store does
+  not answer.** The hosted client waits up to 6 seconds for each request and retries a
+  request that got no answer once, and a hook makes several calls, so against an endpoint
+  that accepted connections and never answered, session start ran about 60 seconds and
+  recall about 36. The host stops a hook at its limit, 20 seconds for session start and
+  10 for recall, so the turn got no memories and no status line. Both hooks now set one
+  deadline for the whole hook, 1.5 seconds before their host's limit, and every hosted
+  call, and recall's wait for its daemon, waits at most the time left and is not started
+  or retried once it has passed. The hooks then report that the store did not answer, as
+  they do for any other failed call. The daemon and the capture hook set no deadline and
+  are unchanged. #345.
+- **A configured local store that cannot open is reported as a failure, not as "not
+  configured".** When `MEMVARA_DB` named a store that exists and fails to open, such as a
+  file that is not a SQLite database, session start and recall reported "not configured",
+  exactly as they do when no store is configured, and wrote no log line, so a person
+  could not tell a broken store from a missing one. Both hooks now report "recall failed"
+  where the host shows a status line, and log `failed reason=open:<exception class>`, in
+  `recall.log` and in `session_start.log`. When the machine also has a hosted login, the
+  hooks still read from the hosted store, as before. #337.
+- **Recall answers a prompt of any size within its limit.** The recall hook sent the whole
+  prompt to the store as its query, and the store's time grows with the query, about 2
+  to 3 seconds a megabyte on a laptop. So a pasted log file of about 4 MB or more ran
+  past the 10-second limit every host gives recall, and the turn got no memories and no
+  status line. The hook now reads at most 8,000 characters of a prompt: a longer one
+  keeps its first and last 4,000, where a question usually is. A 16 MB prompt is now
+  answered in under a second. #348.
+- **`import_mem0` dates mem0's updates and deletes when they happened.** mem0 writes an
+  UPDATE or DELETE row with its memory's creation time in `created_at` and the time of
+  the event in `updated_at`, and the importer read `created_at`. So every imported update
+  ended the old value on the day the memory was created, and every delete stopped belief
+  on that day too. The importer also sorted the rows by that date, so rows with the same
+  date were replayed in the order of mem0's random row ids, and an update or delete
+  replayed before its ADD left the wrong value live, or brought a deleted memory back.
+  The importer now dates an UPDATE or DELETE by `updated_at`, falling back to
+  `created_at` when the column is missing or empty, and replays events in the order they
+  happened, with an ADD first when two share an instant. `HistoryRow.updated_at` is now
+  a `datetime`, as its type always said, and `HistoryRow.at` gives the time of the
+  event. #365.
 - **Recall answers a prompt that holds half of a surrogate pair.** A client written in
   JavaScript can send one, an emoji cut in two, which `JSON.stringify` escapes as
   `\ud83d`. Python decodes it into a string that cannot be encoded, the store hashes each

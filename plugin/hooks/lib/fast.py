@@ -51,6 +51,7 @@ import os
 import sys
 import time
 
+from . import deadline
 from .ipc import CLIENT_TIMEOUT_SEC, log_line, send, socket_path, store_key
 
 #: Set in a spawned daemon's environment so a daemon can never spawn a daemon.
@@ -197,6 +198,11 @@ QUOTA = "quota"
 DAILY = "daily"
 
 
+#: The reason token for a local store that is configured and could not open, followed by
+#: the exception's class after a colon, such as `open:DatabaseError`.
+OPEN = "open"
+
+
 def _reason(exc: "BaseException") -> str:
     """The short token for a failure, or `""` when there is nothing useful to add.
 
@@ -254,7 +260,9 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
 
     The third slot is `reason`: `""` when there is nothing to add, else a short token the
     caller can turn into words: `"quota"` for a spent monthly allowance and `"daily"` for a
-    spent daily one, each with its reset after a colon when the refusal said. It exists
+    spent daily one, each with its reset after a colon when the refusal said, and
+    `"open:<exception class>"` for a local store that is configured and could not open,
+    which comes with `ok=False` where "nothing configured" comes with `ok=None`. It exists
     because `False` alone sent a user to read a log about a store that was answering
     perfectly and telling him, in the body of a 402, exactly which allowance was spent and
     when it resets.
@@ -276,6 +284,16 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
     except Exception:
         path = None
 
+    # The hook's deadline bounds the daemon's wait as it bounds a hosted call's (see
+    # `lib.deadline`): a hook that used most of its time on earlier calls must not spend
+    # this wait on top, and one that used all of it goes straight to the fallbacks below.
+    left = deadline.left()
+    if left is not None and left <= 0:
+        path = None
+    if left is not None:
+        # The same for the in-process rewrite below, which waits `rewrite_wait` for a model.
+        rewrite_wait = min(rewrite_wait, max(left, 0.0))
+
     if path is not None:
         request = {"q": query, "k": k, "budget": budget}
         if min_score:
@@ -294,6 +312,8 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
             # plain read.
             request["query_rewrite"] = True
         wait = rewrite_wait if query_rewrite else CLIENT_TIMEOUT_SEC
+        if left is not None:
+            wait = min(wait, left)
         began = _clock()
         answer = send(path, request, timeout=wait)
         served = _served(answer)
@@ -318,8 +338,13 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
 
         client = open_hosted()
         if client is None:
-            # Nothing is configured at all -- no local database, no library to read one
-            # with, and no credentials file. Distinct from a store that would not answer.
+            # No hosted store either. That is "nothing configured" -- no local database, no
+            # library to read one with, and no credentials file -- only when the local
+            # store was not configured, rather than configured and unable to open (#337).
+            from . import open as opener  # noqa: PLC0415 - already imported by _local_store
+
+            if opener.failure is not None:
+                return "", False, f"{OPEN}:{type(opener.failure).__name__}"
             return "", None, ""
         try:
             # No `query_rewrite` here, whatever the caller asked: the hosted client always

@@ -109,6 +109,7 @@ def test_adverbial_tails_are_stripped_so_the_slot_does_not_fragment(fast):
         "I live in the same place we were talking about during that long call earlier.",
     ],
 )
+@pytest.mark.covers("inv:WP5")
 def test_ambiguous_turns_emit_nothing(fast, content):
     assert fast.extract(ep(content)) == []
 
@@ -132,6 +133,7 @@ def test_empty_and_junk_input_is_safe(fast, content):
 
 # --- provenance and metadata -------------------------------------------------
 
+@pytest.mark.covers("inv:WP5")
 def test_claims_carry_full_provenance(fast):
     scope = Scope("acme", "u1", "agent", "sess")
     ts = utcnow() - timedelta(days=3)

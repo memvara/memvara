@@ -71,7 +71,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.envelope import read_event, write  # noqa: E402
 from core.host import Reply, active  # noqa: E402
-from lib import counts, state_file  # noqa: E402
+from lib import counts, deadline, state_file  # noqa: E402
 from lib.fast import REWRITE_WAIT_SEC  # noqa: E402
 from lib.fast import recall as fast_recall  # noqa: E402
 from lib.ipc import (  # noqa: E402
@@ -204,17 +204,12 @@ EPISODE_BUDGET = 600
 #: this hook exists to make and runs regardless of elapsed time; skipping it to stay inside
 #: a budget would be answering the timeout by not doing the hook's own job.
 #:
-#: What this does NOT close: it is checked before starting a call, not while one is
-#: already running, so it stops a SECOND slow call from compounding a first one but cannot
-#: shorten a call already in flight. On a fresh process the connection cache above is
-#: empty, so whichever hosted call happens to run first -- the standing refresh, if its own
-#: 15-minute interval is due, or otherwise the primary call itself -- gets no benefit from
-#: it and can still cost the full worst case on its own. If that first call is the standing
-#: refresh, in the worst case it alone can outlast this hook's entire 10s allowance before
-#: the primary call the budget was written to protect ever starts. Closing that fully would
-#: mean bounding the DURATION of an in-flight call -- a deadline enforced inside
-#: `lib.hosted` itself, shared by every caller of it, not a clock kept in this one file --
-#: which is a deeper change than a wall-clock gate on whether to start a second one.
+#: It is checked before starting a call, not while one is running, so on its own it could
+#: not shorten a call already in flight: the standing refresh alone could outlast the whole
+#: 10s allowance before the primary call ever started. `lib.deadline` closes that. `main`
+#: sets it from the host's limit, and every hosted call and the daemon's wait stop at it
+#: (#345). This budget still decides whether to START optional work, and is kept below the
+#: deadline so that the primary call has time left when the optional work is done.
 OVERALL_BUDGET_SEC = 7.5
 
 #: Prompts that are not questions to the model: a slash command, a bash escape, a comment.
@@ -302,6 +297,21 @@ MIN_SUBSTANTIVE_CHARS = 12
 #: How much of the carried query to keep. It is prepended to the real prompt, so it must
 #: not crowd out the words the user actually typed this turn.
 MAX_CARRY_CHARS = 300
+
+#: The longest prompt recall reads. A longer one keeps its first and last half of this
+#: many characters. The store's time grows with the query, about 2 to 3 seconds a
+#: megabyte on a laptop, so a pasted log file of a few megabytes ran past the host's
+#: 10-second limit and the turn got no memories at all (#348). A question is at the start
+#: or the end of what someone pastes, and retrieval gains nothing from the middle.
+MAX_PROMPT_CHARS = 8000
+
+
+def _bounded(prompt: str) -> str:
+    """`prompt`, or its first and last `MAX_PROMPT_CHARS // 2` characters when longer."""
+    if len(prompt) <= MAX_PROMPT_CHARS:
+        return prompt
+    half = MAX_PROMPT_CHARS // 2
+    return f"{prompt[:half]}\n{prompt[-half:]}"
 
 #: The leading clause is load-bearing beyond its wording: `transcript.RECALL_MARKERS`
 #: matches on it to keep an injected block out of the text that gets mined. Change the
@@ -743,7 +753,7 @@ def _belongs_here(bullet: str, cwd: str) -> bool:
         node = parent
 
 
-def main() -> int:
+def _main() -> int:
     # The clock the optional hosted work below is measured against -- see
     # OVERALL_BUDGET_SEC. `monotonic`, not `time.time()`: this is an ELAPSED-time budget,
     # and `daemon.py` already uses `time.monotonic()` for its own idle-timeout for the same
@@ -754,6 +764,9 @@ def main() -> int:
     # them so it covers the whole invocation, even though nothing before the first hosted
     # call is expensive enough to matter in practice.
     start = time.monotonic()
+    # Before any hosted call: every one of them stops at this, so the hook answers inside
+    # its host's limit however the endpoint behaves (#345).
+    deadline.set_from_limit(HOST.timeouts.get("recall", 10))
 
     if under_extraction():
         # The prompt in front of us is `capture.py`'s own extraction request, not a
@@ -774,7 +787,7 @@ def main() -> int:
     # a string that cannot be encoded. The store hashes each query with `text.encode()`,
     # so the whole recall failed on it although the store was healthy (#347). Half a
     # character carries nothing a search can use.
-    prompt = event.prompt.encode("utf-8", "ignore").decode("utf-8").strip()
+    prompt = _bounded(event.prompt.encode("utf-8", "ignore").decode("utf-8").strip())
     session = event.session
 
     if not prompt or prompt.startswith(SKIP_PREFIXES):
@@ -961,6 +974,15 @@ def main() -> int:
     _emit(Reply("recall", status=label, context=block_text))
     _count_recalled(session, count_memories(block_text))
     return 0
+
+
+def main() -> int:
+    """Run the hook, then clear the deadline it set, for a caller that runs it in this
+    process and goes on to make hosted calls of its own."""
+    try:
+        return _main()
+    finally:
+        deadline.clear()
 
 
 if __name__ == "__main__":
