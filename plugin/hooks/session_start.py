@@ -105,8 +105,13 @@ def _why(exc: "BaseException") -> str:
     return "notes unavailable (quota)" if getattr(exc, "code", "") == "quota_exhausted" else ""
 
 
+#: What the status line calls each section when it did not arrive.
+_SECTIONS = {"binding": "scope", "standing": "standing preferences", "notes": "notes"}
+
+
 def _local_binding(store: object) -> str:
-    """The binding line from a library handle, or '' if it cannot be read.
+    """The binding line from a library handle. A store that cannot be read raises, so that
+    `main` can say the store did not answer rather than that it is empty.
 
     `scope` means two different things on the two classes this can be handed. On a
     `ScopedMemvara` it is the bound `Scope`; on a bare `Memvara` it is the *method* that
@@ -114,13 +119,10 @@ def _local_binding(store: object) -> str:
     this wrong is silent — the attribute exists either way — which is why it is resolved
     explicitly rather than by a `try` that would swallow the difference.
     """
-    try:
-        scope_attr = getattr(store, "scope")
-        scoped = store if not callable(scope_attr) else store.scope()  # type: ignore[operator]
-        scope = scoped.scope.key()
-        visible = scoped.count()
-    except Exception:
-        return ""
+    scope_attr = getattr(store, "scope")
+    scoped = store if not callable(scope_attr) else store.scope()  # type: ignore[operator]
+    scope = scoped.scope.key()
+    visible = scoped.count()
     return _binding_line(scope, f"{visible} claim(s)")
 
 
@@ -128,12 +130,10 @@ def _hosted_binding(store: object) -> str:
     """The binding line from the hosted endpoint's own `memory_stats` report.
 
     The server already formats the scope and the count, so this reads them back rather than
-    deriving a second version that could disagree with the first.
+    deriving a second version that could disagree with the first. A failed call raises, so
+    that `main` can say the store did not answer rather than that it is empty.
     """
-    try:
-        report = str(store.stats() or "")  # type: ignore[attr-defined]
-    except Exception:
-        return ""
+    report = str(store.stats() or "")  # type: ignore[attr-defined]
     scope, visible = "", ""
     for line in report.splitlines():
         line = line.strip()
@@ -238,10 +238,18 @@ def _main() -> int:
     #: What a section could not be fetched for, in words. Set before the `try` so that
     #: every path to the banner below has it, including the ones that leave early.
     missing = ""
+    #: `(section, exception)` for each section the store did not answer for. A store that
+    #: did not answer is not an empty one, and before this list the hook said "nothing
+    #: stored yet" of an endpoint it could not reach, and logged nothing (#339).
+    failed: "list[tuple[str, BaseException]]" = []
     mark = mark_on()
     try:
         parts = []
-        binding = _hosted_binding(store) if hosted else _local_binding(store)
+        try:
+            binding = _hosted_binding(store) if hosted else _local_binding(store)
+        except Exception as exc:
+            binding = ""
+            failed.append(("binding", exc))
         if binding:
             parts.append(binding)
 
@@ -253,17 +261,24 @@ def _main() -> int:
         def _legacy_standing() -> str:
             nonlocal legacy
             legacy = True
-            return str(store.recall(QUERY, k=STANDING_K,
-                                    budget=STANDING_FALLBACK_TOKENS,
-                                    header=STANDING_HEADER,
-                                    memory_types=STANDING, **plain_read) or "")
+            # `standing_block` catches every failure of its own routes and of this one, and
+            # answers "" for all of them, so a failure here is recorded before it is caught.
+            try:
+                return str(store.recall(QUERY, k=STANDING_K,
+                                        budget=STANDING_FALLBACK_TOKENS,
+                                        header=STANDING_HEADER,
+                                        memory_types=STANDING, **plain_read) or "")
+            except Exception as exc:
+                failed.append(("standing", exc))
+                raise
 
         try:
             standing = standing_block(store, hosted=hosted, budget=STANDING_BUDGET,
                                       header=STANDING_HEADER, fallback=_legacy_standing,
                                       cwd=cwd)
-        except Exception:
+        except Exception as exc:
             standing = ""
+            failed.append(("standing", exc))
         if standing.strip():
             # Marked here as well as in `render`, because the legacy fallback returns the
             # server's own block, whose bullets carry no mark. Marking twice is harmless.
@@ -280,18 +295,31 @@ def _main() -> int:
             # memory. Measured on a spent quota: three sections and 15,324 characters
             # became two and 13,541, with the banner unchanged.
             notes, missing = "", _why(exc)
+            failed.append(("notes", exc))
         if notes.strip():
             parts.append(mark_block(notes.rstrip(), mark))
     finally:
         if close is not None:
             close()
 
+    for section, exc in failed:
+        # On every host, as recall logs its failures, because most hosts show no status
+        # line and the log is the only account there is. The exception's class, which
+        # names the kind of failure, and nothing the store's reply said.
+        log_line("session_start", f"failed section={section} reason={type(exc).__name__}")
+    if failed and not missing:
+        # A session that opened without a section says which one, so a partial session is
+        # not mistaken for a whole one. A spent quota has already said it in its own words.
+        missing = " and ".join(dict.fromkeys(_SECTIONS[name] for name, _ in failed))
+        missing += " unavailable"
+
     if not parts:
         # "Nothing stored yet" is a claim about the store's contents. Only make it when
         # every section came back empty rather than unavailable -- otherwise a store that
         # is merely unreachable is reported as one that is empty, and nobody investigates
         # an empty store.
-        _emit(Reply("session_start", status=status(missing or "nothing stored yet")))
+        empty = "recall failed" if failed else "nothing stored yet"
+        _emit(Reply("session_start", status=status(missing or empty)))
         return 0
 
     count = count_memories("\n\n".join(parts))

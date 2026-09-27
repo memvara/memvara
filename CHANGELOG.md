@@ -185,6 +185,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Session start says so when the store did not answer, instead of "nothing stored
+  yet".** Session start swallowed each section's failure: the scope line, the standing
+  block and the notes each became empty, and with every section empty it reported
+  "nothing stored yet", a claim about the store's contents it had no basis for, and
+  logged nothing. On a host that shows no status line, an unreachable store looked
+  exactly like no store configured. Session start now keeps each section that failed,
+  logs `failed section=<section> reason=<exception class>` to `session_start.log` on
+  every host, and reports "recall failed" when nothing arrived because a section failed.
+  When some sections arrived and one did not, the status line names it, as in "session
+  opened with 3 memories · notes unavailable". "Nothing stored yet" now means every
+  section answered and was empty. #339.
 - **The standing preferences are injected once when a session opens.** Session start
   injects them, and the recall hook checks them again every 15 minutes, injecting them
   only when their digest changed. Session start recorded no digest, so the first prompt
