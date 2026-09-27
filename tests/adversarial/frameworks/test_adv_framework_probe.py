@@ -264,6 +264,13 @@ def test_network_access_is_recognised_in_each_form() -> None:
         assert probe.network_access("socket.sendto", (udp, ("192.0.2.1", 53))) == (
             "send to 192.0.2.1:53")
         assert probe.network_access("socket.bind", (tcp, ("127.0.0.1", 0))) is None
+        # sendmsg on a connected socket names no address: the peer is the one it sends to.
+        udp.connect(("192.0.2.1", 53))
+        assert probe.network_access("socket.sendmsg", (udp, None)) == (
+            "send to 192.0.2.1:53")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as unconnected:
+        assert probe.network_access("socket.sendmsg", (unconnected, None)) == (
+            "send on a socket with no peer")
     if hasattr(socket, "AF_UNIX"):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unix:
             assert probe.network_access("socket.connect", (unix, "/tmp/d.sock")) is None
