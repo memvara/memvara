@@ -109,6 +109,8 @@ mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False,
 #     `Explanation.anchor` (subject | object | path | None). Needs no number; combines
 #     with min_score. Against a hosted deployment it is sent only when set, so a server
 #     from before the field refuses it rather than quietly answering unfiltered.
+#   memory_types= a list of episodic, semantic or procedural; any other name raises
+#     ValueError before anything is read.
 #   ranked=True runs a configured read_selector over the reranked turns and returns the
 #     ones it named first, whole, with Explanation.selected/.span set — see
 #     memvara.select. Needs include_episodes=True and no memory_types (ValueError
@@ -125,8 +127,10 @@ mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False,
            query_rewrite=True, synthesize=False, header=None, include_episodes=False,
            episode_header=None, include_history=False, history_header=None,
            budget=None, counter=<internal>, valid_at=None, filters=None,
-           filepath_prefix=None, with_ids=False)
+           filepath_prefix=None, memory_types=None, with_ids=False)
                                                   -> str | RecallResult
+#   memory_types= keeps only claims of those types, as on search(), and refuses an
+#     unknown name with ValueError before anything is read.
 #   filters= and filepath_prefix= narrow the facts and the turns as they do on search().
 #     The include_history tail is the past values of the facts that were kept, and is
 #     not filtered again.
@@ -422,10 +426,12 @@ an `AttributeError` at the call site and a mypy error before that, where a metho
 raised would compile, ship and fail in production. The same rule decides which *arguments*
 exist. `recall()` takes no `with_ids`, because `POST /v1/recall` returns a rendered string
 and carries no ids at all; `get_all()` takes no `memory_types`, because the endpoint has no
-such filter and would answer with an unfiltered page. `budget` and `valid_at` are the two
-refusals rather than omissions: both stay in `recall()`'s signature so that `None` works,
-and a value raises `ValueError`, because a budget silently ignored is an oversized prompt
-with no signal, and a dated read silently answered with the present is a wrong one.
+such filter and would answer with an unfiltered page. `budget` is the one refusal rather
+than an omission: it stays in `recall()`'s signature so that `None` works, and a value
+raises `ValueError`, because a budget silently ignored is an oversized prompt with no
+signal. `recall(valid_at=...)` is sent to `POST /v1/recall`, which takes it as the world
+clock alone. A deployment from before the field refuses a dated read with a 422, which the
+client raises as `InvalidRequest`.
 
 `search()` and `recall()` send `filters` and `filepath_prefix` only when you set them, and
 check them first with the rules the local engine uses. `RemoteMemvara(metadata_filters=False)`
