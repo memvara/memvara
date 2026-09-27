@@ -73,7 +73,15 @@ Each of them failed at least once on a shared Mac with a load average between 30
 
 If one of these tests fails under xdist, loosen its deadline to a bound that still proves what the test is for, or keep it on one worker with `@pytest.mark.xdist_group` and `--dist loadgroup`. Never add a retry.
 
-The coverage job runs the same way. `pyproject.toml` has coverage.py measure every process the tests start (`patch = ["subprocess"]`), so each worker and each child process writes its own data file, and `coverage combine` joins them before `coverage report` checks the 100%.
+The coverage job runs the same way. `pyproject.toml` has coverage.py measure every process the tests start (`patch = ["subprocess"]`), so each worker and each child process writes its own data file, and `coverage combine` joins them before `coverage report` checks the 100%. Run `coverage erase` first, as CI does:
+
+```bash
+python3 -m coverage erase
+python3 -m coverage run -m pytest -q -n auto
+python3 -m coverage combine && python3 -m coverage report
+```
+
+`coverage combine` merges every data file it finds, including those left by an earlier run, so without the erase a line that the current code no longer covers can still count as covered and the 100% check can pass wrongly.
 
 ## Skips
 

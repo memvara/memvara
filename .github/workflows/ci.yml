@@ -126,7 +126,11 @@ jobs:
       # This job took 11.9 minutes, 11 of them in `coverage run`, before both changes.
       - env:
           COVERAGE_CORE: sysmon
+        # `coverage erase` does nothing on a fresh runner. It is here so that this step is
+        # the same command a developer runs, where data left by an earlier run would
+        # otherwise be merged in by `coverage combine`.
         run: |
+          python -m coverage erase
           python -m coverage run -m pytest -q -n auto
           python -m coverage combine -q
           python -m coverage report

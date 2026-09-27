@@ -6,6 +6,9 @@ can close the issue while that job is still running, and a failure in it then re
 nobody. So the list must be every other job in the file, and a job added later must be
 added to it.
 
+It also checks the coverage commands, in the workflow and in the documents that show
+them, because `coverage combine` merges data left by any earlier run.
+
 The workflow is read with a small text parse, as tests/test_npm_release.py reads the
 release workflows, because PyYAML is not a test dependency here.
 """
@@ -46,3 +49,26 @@ def test_the_report_job_runs_only_for_a_push_to_main() -> None:
     assert "github.event_name == 'push'" in condition.group(1)
     assert "github.ref == 'refs/heads/main'" in condition.group(1)
     assert "!contains(needs.*.result, 'cancelled')" in condition.group(1)
+
+
+#: Every file that runs or shows the command that measures coverage.
+COVERAGE_COMMANDS = (".github/workflows/ci.yml", "README.md", "CONTRIBUTING.md",
+                     "docs/RELEASING.md", "docs/claude/testing.md")
+
+
+def test_every_coverage_run_is_preceded_by_an_erase_and_followed_by_a_combine() -> None:
+    """pyproject.toml has coverage.py write one data file per process, and `coverage
+    combine` merges every data file it finds. Without `coverage erase` first, the data of
+    an earlier run is merged in, and a line the current code no longer covers can still
+    count as covered, so the 100% check passes when it should fail."""
+    for name in COVERAGE_COMMANDS:
+        text = (ROOT / name).read_text(encoding="utf-8")
+        runs = [match.start() for match in re.finditer(r"coverage run -m pytest", text)]
+        assert runs, f"{name} no longer shows the coverage command; update this list"
+        for index, start in enumerate(runs):
+            previous = runs[index - 1] if index else 0
+            following = runs[index + 1] if index + 1 < len(runs) else len(text)
+            assert "coverage erase" in text[previous:start], (
+                f"{name}: a coverage run without `coverage erase` before it")
+            assert "coverage combine" in text[start:following], (
+                f"{name}: a coverage run without `coverage combine` after it")
