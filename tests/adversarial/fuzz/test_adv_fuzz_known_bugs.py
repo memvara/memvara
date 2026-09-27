@@ -76,7 +76,6 @@ def test_the_server_reads_utf8_input_whatever_its_stream_encoding(mcp: Start) ->
 # -- B35: NaN passes the bounds -----------------------------------------------------------
 
 @pytest.mark.parametrize("pair", NUMBERS, ids=_label)
-@known_bugs.xfail("B35")
 def test_nan_is_refused_by_the_bounds_of_every_number_argument(
         pair: tuple[Tool, str]) -> None:
     """Every comparison with NaN is false, so a bound written as `value < low` or
@@ -92,8 +91,20 @@ def test_nan_is_refused_by_the_bounds_of_every_number_argument(
     raise known_bugs.Reproduced(f"{tool.name}.{name} accepted NaN")
 
 
+@pytest.mark.parametrize("pair", NUMBERS, ids=_label)
+def test_an_integer_too_large_for_a_float_is_refused_by_its_bound_not_by_the_nan_check(
+        pair: tuple[Tool, str]) -> None:
+    """The NaN check must look only at floats. `math.isnan` converts an integer to a
+    float first, and an integer of 400 digits, which JSON allows, raises OverflowError
+    there instead of reaching the bound it breaks."""
+    tool, name = pair
+    arguments: dict[str, Any] = {required: "tea" for required in tool.required}
+    arguments[name] = 10 ** 400
+    with pytest.raises(ToolError, match=rf"^{tool.name}\.{name} must be <= "):
+        validate(tool.properties, tool.required, arguments, tool=tool.name)
+
+
 @pytest.mark.parametrize("tool", ["memory_search", "memory_recall"])
-@known_bugs.xfail("B35")
 def test_a_nan_floor_sent_over_the_pipe_is_refused(shared_server: McpProcess,
                                                     tool: str) -> None:
     """The validator lets NaN through, and a NaN `min_score` then acts as no floor at
@@ -143,7 +154,6 @@ def test_a_read_that_finds_nothing_quotes_only_a_short_part_of_the_query(
 
 # -- B37: the key pattern's $ matches before a final newline -----------------------------
 
-@known_bugs.xfail("B37")
 def test_a_filter_key_that_ends_in_a_newline_is_refused() -> None:
     """The schema's key pattern is ^[A-Za-z0-9_.-]{1,64}$. In Python, $ also matches just
     before a newline at the end of a string, so re.search lets "team\\n" through."""
@@ -157,9 +167,33 @@ def test_a_filter_key_that_ends_in_a_newline_is_refused() -> None:
     raise known_bugs.Reproduced("memory_search accepted the filter key 'team\\n'")
 
 
+def _patterns(spec: Any) -> list[str]:
+    """Every `pattern` anywhere inside one argument's schema."""
+    if isinstance(spec, dict):
+        found = [spec["pattern"]] if isinstance(spec.get("pattern"), str) else []
+        return found + [p for value in spec.values() for p in _patterns(value)]
+    if isinstance(spec, list):
+        return [p for value in spec for p in _patterns(value)]
+    return []
+
+
+def test_every_pattern_a_tool_declares_is_anchored_at_both_ends() -> None:
+    """The validator matches a pattern against the whole value, which means the same as
+    the schema's own pattern only when the pattern is written ^...$. An unanchored
+    pattern added later would be applied more strictly than a client reading the schema
+    expects, so this test names it."""
+    # A list of pairs rather than a dict keyed by argument, because one argument's
+    # schema can declare more than one pattern, and a dict would keep only the last.
+    patterns = [(f"{tool.name}.{name}", pattern) for tool in TOOLS
+                for name, spec in tool.properties.items() for pattern in _patterns(spec)]
+    assert patterns, "no tool declares a pattern, so this test checks nothing"
+    loose = [(label, pattern) for label, pattern in patterns
+             if not (pattern.startswith("^") and pattern.endswith("$"))]
+    assert loose == [], loose
+
+
 # -- B38: a lone surrogate in an object key is stored ------------------------------------
 
-@known_bugs.xfail("B38")
 def test_a_lone_surrogate_in_an_object_key_is_refused_like_one_in_a_value(
         shared_server: McpProcess) -> None:
     before = rows(shared_server.db)

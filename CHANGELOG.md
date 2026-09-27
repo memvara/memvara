@@ -173,6 +173,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The MCP server refuses NaN for a number argument.** The server's JSON parser accepts
+  the bare token `NaN`, and the validator let it through the bounds on `confidence` and
+  `min_score`, because every comparison with NaN is false. A NaN `min_score` then acted as
+  no floor at all. The validator now refuses NaN for every number argument, with
+  `<tool>.<argument> must be a number, got NaN`, before anything is read or written.
+  #312.
+- **A metadata filter key that ends in a newline is refused.** The key pattern
+  `^[A-Za-z0-9_.-]{1,64}$` was checked with Python's `re.search`, where `$` also matches
+  just before a newline at the end of the value, so `memory_search` and `memory_recall`
+  accepted the filter key `"team\n"`. The validator now matches a pattern against the
+  whole value, which is what `$` means in a JSON Schema pattern. #314.
+- **A lone surrogate in the key of an object argument is refused.** The validator checked
+  a key only when the argument's schema declared a pattern for its keys, and
+  `memory_add_document.metadata` declares none, so a metadata key holding half of a
+  character, such as `"a\ud800b"`, was stored. Every key of every object argument is now
+  checked like a string argument, and a lone surrogate in one is refused with the same
+  "unpaired surrogate" message a string value gets. #315.
 - **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
   decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
   interpreter's stack allows, and the server let it escape, so a single such line ended
