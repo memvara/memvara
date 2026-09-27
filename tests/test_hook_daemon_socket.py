@@ -97,3 +97,19 @@ def test_a_daemon_leaves_a_path_it_no_longer_owns(path: str,
     finally:
         for sock in others:
             sock.close()
+
+
+def test_a_daemon_whose_path_vanished_after_binding_exits_quietly(
+        path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Another daemon can remove the socket file between this one's `bind` and its
+    reading of the file's identity. That daemon owns the path now, so this one exits
+    with status 0 rather than a traceback, and leaves the path alone."""
+    real_stat = os.stat
+
+    def vanished(target, *args, **kwargs):
+        if os.fspath(target) == path:
+            raise FileNotFoundError(path)
+        return real_stat(target, *args, **kwargs)
+
+    monkeypatch.setattr(daemon.os, "stat", vanished)
+    assert daemon.Daemon(path, object()).run() == 0

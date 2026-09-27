@@ -253,6 +253,17 @@ class Daemon:
                 server.bind(self.path)
             except OSError:
                 return 0
+        # The file's identity, read straight after `bind()`, so that `_release` removes
+        # only this daemon's socket. It is read from the path because `fstat` on a socket
+        # does not describe the socket's file. A second daemon needs a failed `bind()`, an
+        # import and a refused probe before it can replace the file, which is far longer
+        # than the one call between `bind()` and this one. A file that is already gone
+        # belongs to that other daemon now, so this one leaves.
+        try:
+            ours = os.stat(self.path)
+        except OSError:
+            server.close()
+            return 0
         # Listen at once. A second daemon whose `bind()` fails probes this path, and takes
         # a refused probe to mean the owner is dead: a socket that is bound and not yet
         # listening refuses too, so listening only after the sweep below let a loser
@@ -260,7 +271,6 @@ class Daemon:
         # could reach (#344). The socket is private before `chmod` as well, because its
         # directory is 0700 (`lib.ipc.runtime_dir`).
         server.listen(16)
-        ours = os.stat(self.path)
         try:
             try:
                 os.chmod(self.path, 0o600)
@@ -293,8 +303,7 @@ class Daemon:
         daemon may have replaced it, and removing that daemon's socket would leave it
         serving an address no client can reach."""
         try:
-            now = os.stat(self.path)
-            if (now.st_dev, now.st_ino) == (ours.st_dev, ours.st_ino):
+            if os.path.samestat(os.stat(self.path), ours):
                 os.unlink(self.path)
         except OSError:
             pass
