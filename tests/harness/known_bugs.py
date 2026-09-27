@@ -116,8 +116,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "2.x's methods take, and the score key of mem0's get() row"),
     KnownBug("B82", 361, "the mem0 shim's search() and get_all() default to top_k 10 and "
              "100, where mem0 2.x defaults to 20"),
-    KnownBug("B83", 362, "the as_query_engine example in the LlamaIndex MemvaraRetriever "
-             "docstring raises TypeError"),
     KnownBug("B84", 363, "at crewai 1.10.1, memvara's declared floor, CrewAI's Memory "
              "cannot save through MemvaraStorage, which has no write_lock"),
     KnownBug("B85", 364, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "

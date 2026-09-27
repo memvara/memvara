@@ -169,6 +169,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The LlamaIndex retriever's docstring shows an example that runs.** It showed
+  `index_or_engine.as_query_engine(retriever=MemvaraRetriever(mem, user="alice"))`, which
+  raises `TypeError` in llama-index-core at both memvara's floor, 0.13.0, and 0.14.25:
+  `as_query_engine` builds a retriever of its own and passes its keyword arguments on as
+  well, so `retriever` arrives twice. The docstring now shows
+  `RetrieverQueryEngine.from_args(MemvaraRetriever(mem, user="alice"))` and says why
+  `as_query_engine` does not work. #362.
 - **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
   decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
   interpreter's stack allows, and the server let it escape, so a single such line ended
