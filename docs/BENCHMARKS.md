@@ -1618,8 +1618,9 @@ when the two files name the same project, and a failed lookup also refuses the f
 Two differences are not incidental and are printed above the report's tables. A hosted
 project cannot be sent the support schema, so the arm closes single-valued slots itself
 rather than relying on a declared cardinality, and the built-in vocabulary files `plan`
-under its alias `goal`. And `POST /v1/recall` has no time axis, so the four dated questions
-are read with `search(valid_at=)` and rendered by the library's own recall renderer.
+under its alias `goal`. And the four dated questions are read with `search(valid_at=)` and
+rendered by the library's own recall renderer, because `POST /v1/recall` had no time axis
+when the arm was written; it keeps doing so, so its rows stay comparable.
 Extraction and the episode cap are the deployment's, so each context records how many
 claims its scope held when it was read.
 [`demo/README.md`](../demo/README.md#the-memvara-arms-against-the-hosted-service) has the

@@ -535,9 +535,9 @@ def hosted_reads(items: Sequence[Item], arms: Mapping[str, Arm]) -> list[str]:
 
     Nothing for a local run: no local context carries `claims_in_scope`, so the offline
     report is unchanged. For a hosted arm, two things a reader of its row needs. How many
-    of its contexts were read through `search(valid_at=)` and rendered here rather than
-    through `recall()`, because the hosted recall has no time axis. And how many claims
-    its scopes held when they were read, because the deployment extracts on its own
+    of its contexts were read through `search(valid_at=)` and rendered here, rather than
+    through `recall()`; the hosted arm reads every dated question that way (see
+    `demo/hosted.py`). And how many claims its scopes held when they were read, because the deployment extracts on its own
     schedule and the `memvara` row was measured on whatever claim tier existed by then.
     """
     lines: list[str] = []

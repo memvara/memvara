@@ -187,6 +187,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The hosted client's `recall()` takes `valid_at`.** `RemoteMemvara.recall(valid_at=...)`
+  and `AsyncRemoteMemvara.recall(valid_at=...)` raised `ValueError`, saying that
+  `POST /v1/recall` has no time axis. The route takes `valid_at` now, the world clock alone,
+  so both clients send it, and `memory_recall` with `valid_at` works in cloud mode. A
+  deployment from before the field refuses a dated read with a 422 rather than answering it
+  with the present. `docs/UPGRADING.md` has the details. #298.
 - **`search()` and `recall()` refuse a memory type that does not exist.** A misspelled name
   in `memory_types`, such as `"procedurel"`, kept no claim, so the call returned nothing
   and raised no error, which a caller could not tell from a store with nothing relevant.

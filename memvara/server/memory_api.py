@@ -112,11 +112,12 @@ class MemoryAPI(Protocol):
         and takes no budget, and a ceiling silently not applied is an oversized prompt
         with nothing to notice it by.
 
-        `valid_at` is declared for the same reason and refused the same way against a
-        hosted deployment: `POST /v1/recall` has no time axis, and a dated read that
-        silently answered with the present would be a wrong prompt. Only `valid_at`,
-        never `as_of`: `memory_recall` renders into a prompt, and rewinding the belief
-        clock would render records retired since.
+        `valid_at` is declared because `_recall` passes it on every call too. Against a
+        hosted deployment `ScopedRemoteMemvara.recall` sends it to `POST /v1/recall`,
+        which takes it, and a deployment from before the field refuses a dated read with
+        a 422 rather than answering it with the present. Only `valid_at`, never `as_of`:
+        `memory_recall` renders into a prompt, and rewinding the belief clock would render
+        records retired since.
 
         `ranked` is declared here and not on `search` above because `memory_search` does
         not take it (`server/tools.py`, "The MCP door" in the design spec): `_search`

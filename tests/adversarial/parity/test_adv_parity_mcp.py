@@ -21,9 +21,8 @@ difference is real:
   `_storage_fact`);
 * `memory_standing` ends with a "more not shown" line only for a local store, because
   `GET /v1/standing` reports no total (`memvara/server/tools.py`, `_standing`);
-* `memory_recall` refuses `budget` and `valid_at` in cloud mode
-  (`memvara/server/memory_api.py`, `MemoryAPI.recall`); memvara/memvara#298 tracks
-  giving the hosted recall a time axis;
+* `memory_recall` refuses `budget` in cloud mode (`memvara/server/memory_api.py`,
+  `MemoryAPI.recall`);
 * in cloud mode, the descriptions of `memory_forget` and `memory_end` promise that,
   given a predicate rather than a claim id, they close only the current values of that
   fact, because a hosted deployment on a release from before memvara/memvara#282 does
@@ -385,7 +384,7 @@ LOCAL_LINES = (
 
 #: The steps whose cloud reply a documented rule of its own describes, each checked by its
 #: own test below rather than by the step-by-step comparison.
-CLOUD_BY_OWN_TEST = frozenset({"recall.budget", "recall.past"})
+CLOUD_BY_OWN_TEST = frozenset({"recall.budget"})
 
 
 def without_local_lines(step: str, text: str) -> str:
@@ -507,21 +506,6 @@ def test_a_line_documented_as_local_is_written_locally_and_not_in_cloud_mode(
                 assert found == [], f"{step} in cloud mode: {line.documented}"
             else:
                 assert len(found) == 1, f"{step} through {surface}: {rows}"
-
-
-def test_cloud_mode_refuses_a_dated_recall(played: Played) -> None:
-    """`memvara/server/memory_api.py`, `MemoryAPI.recall`: `valid_at` is refused against a
-    hosted deployment, because `POST /v1/recall` has no time axis and a dated read that
-    silently answered with the present would be a wrong prompt. memvara/memvara#298
-    tracks giving it one; when that lands, this test fails, and the dated recall joins
-    the step-by-step comparison."""
-    for surface in ("in-process", "stdio local"):
-        error, text = played.replies[surface]["recall.past"]
-        assert not error and "as things were on 31 January 2024" in text, (surface, text)
-    error, text = played.replies["stdio cloud"]["recall.past"]
-    assert error
-    assert text.startswith("memory_recall failed: ValueError: recall(valid_at=...) is not "
-                           "available against a hosted deployment"), text
 
 
 def test_cloud_mode_refuses_a_recall_budget(played: Played) -> None:
