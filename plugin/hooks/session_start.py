@@ -232,7 +232,14 @@ def main() -> int:
         if binding:
             parts.append(binding)
 
+        #: Whether the standing block came from the ranked read below. Recall's refresh
+        #: never uses that read, so its digest would differ from the full block the next
+        #: refresh builds, and that refresh would inject the block again as "updated".
+        legacy = False
+
         def _legacy_standing() -> str:
+            nonlocal legacy
+            legacy = True
             return str(store.recall(QUERY, k=STANDING_K,
                                     budget=STANDING_FALLBACK_TOKENS,
                                     header=STANDING_HEADER,
@@ -281,10 +288,11 @@ def main() -> int:
     _emit(Reply("session_start",
                 status=status(f"{opened} · {missing}" if missing else opened),
                 context="\n\n".join(parts)))
-    if standing.strip():
+    if standing.strip() and not legacy and "recall" in host.events:
         # After the reply is written, so only a block that was delivered is recorded. The
         # recall hook reads this, and without it the first prompt injected the same block
-        # again (#343).
+        # again (#343). Not on a host that runs no recall, such as Cursor: nothing there
+        # would read the record, and recall is what prunes these files.
         record_injected(event.session, standing, time.time())
     return 0
 

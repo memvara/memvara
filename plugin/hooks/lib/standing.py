@@ -400,15 +400,28 @@ def state_path(directory: str, session: str) -> "str | None":
     return os.path.join(directory, f"{session}.json")
 
 
+def fingerprint(text: str) -> str:
+    """A short hash of `text` with its whitespace collapsed. Recall's dedup hashes each
+    memory line with it, and `digest` hashes the standing block with it."""
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()[:16]
+
+
 def digest(block: str) -> str:
     """The digest the recall hook compares to tell whether the standing block changed.
 
-    Taken over the block without the recall mark and with its whitespace collapsed. The
-    mark is presentation, and hashing it made every running session report "standing
-    preferences updated" once after an upgrade and again each time the `recall_mark`
-    switch changed.
+    Taken over the block without the recall mark. The mark is presentation, and hashing it
+    made every running session report "standing preferences updated" once after an upgrade
+    and again each time the `recall_mark` switch changed.
     """
-    return hashlib.sha256(" ".join(unmark_block(block).split()).encode("utf-8")).hexdigest()[:16]
+    return fingerprint(unmark_block(block))
+
+
+def normalised(data: object) -> dict:
+    """A session's state file contents as a dict. A bare list is the older format of the
+    file, which held only the seen hashes."""
+    if isinstance(data, list):
+        return {"seen": [h for h in data if isinstance(h, str)]}
+    return data if isinstance(data, dict) else {}
 
 
 def record_injected(session: str, block: str, now: float,
@@ -429,10 +442,7 @@ def record_injected(session: str, block: str, now: float,
         return
 
     def change(raw: object) -> dict:
-        # A bare list is the older format of the file, holding only the seen hashes.
-        was = {"seen": raw} if isinstance(raw, list) else dict(raw) if isinstance(
-            raw, dict) else {}
-        return {**was, "standing": digest(block), "standing_at": now}
+        return {**normalised(raw), "standing": digest(block), "standing_at": now}
 
     state_file.update_json(path, change, lock_path=os.path.join(directory, ".lock"),
                            prefix=".recalled-")

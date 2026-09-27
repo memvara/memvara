@@ -60,7 +60,6 @@ count for the status line (`lib.counts`).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os.path
 import time
@@ -85,7 +84,7 @@ from lib.mark import on as mark_on  # noqa: E402
 from lib.project import bind as bind_project  # noqa: E402
 from lib.read_model import allowed as rewrite_allowed  # noqa: E402
 from lib.standing import digest as standing_digest  # noqa: E402
-from lib.standing import seen_dir, state_path  # noqa: E402
+from lib.standing import fingerprint, normalised, seen_dir, state_path  # noqa: E402
 
 #: The client this process is answering, resolved once. `run.py` binds it before importing
 #: this module; a bare `python3 recall.py` gets Claude Code, which is what that invocation
@@ -321,7 +320,7 @@ def _digest(line: str) -> str:
     Hashing the marked line instead would make every memory a session had already seen look
     new on the first prompt after the upgrade, and inject all of them again.
     """
-    return hashlib.sha256(" ".join(line.split()).encode("utf-8")).hexdigest()[:16]
+    return fingerprint(line)
 
 
 def _count_recalled(session: str, n: int) -> None:
@@ -348,14 +347,9 @@ def _state_json(session: str) -> dict:
             data = json.load(fh)
     except (OSError, ValueError):
         return {}
-    return _normalised(data)
+    return normalised(data)
 
 
-def _normalised(data: object) -> dict:
-    """A state file's contents as a dict, reading the old bare-list format too."""
-    if isinstance(data, list):
-        return {"seen": [h for h in data if isinstance(h, str)]}
-    return data if isinstance(data, dict) else {}
 
 
 def _read_state(session: str) -> "tuple[list[str], str]":
@@ -416,7 +410,7 @@ def _write_state(session: str, hashes: "list[str]", query: str,
         return
 
     def change(raw: object) -> dict:
-        was = _normalised(raw)
+        was = normalised(raw)
         kept = set(hashes)
         earlier = [h for h in was.get("seen") or [] if isinstance(h, str) and h not in kept]
         was_digest = was.get("standing")
