@@ -10,12 +10,14 @@ calls GitHub: the run is given this interpreter, and filing is a dry run.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import re
 import shlex
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -78,18 +80,29 @@ def never(command: filing.Command) -> filing.Completed:
     raise AssertionError(f"a dry run must call nothing, and it ran {command.argv}")
 
 
-def _pytest_result(tmp_path: pathlib.Path, tests: list[dict[str, Any]], exitstatus: int
-                   ) -> Callable[[str, pathlib.Path], list[str]]:
-    """A stand-in for the regressions command: it writes a canned results file, as
-    pytest_results.py would, and exits with pytest's status."""
-    canned = tmp_path / f"canned-{len(tests)}-{exitstatus}.jsonl"
-    canned.write_text("".join(json.dumps(test) + "\n" for test in tests)
-                      + json.dumps({"exitstatus": exitstatus}) + "\n")
+def _pytest_result(tmp_path: pathlib.Path, tests: list[dict[str, Any]], exitstatus: int,
+                   *, env_to: pathlib.Path | None = None) -> Callable[..., list[str]]:
+    """A stand-in for the command of the regressions step or of a long run: it writes a
+    canned results file, as pytest_results.py would, and exits with pytest's status. With
+    `env_to`, it also appends the NIGHTLY_RECORDS_DIR it was given to that file."""
+    text = ("".join(json.dumps(test) + "\n" for test in tests)
+            + json.dumps({"exitstatus": exitstatus}) + "\n")
+    canned = tmp_path / f"canned-{hashlib.sha256(text.encode()).hexdigest()[:12]}.jsonl"
+    canned.write_text(text)
+    record = ("" if env_to is None else
+              f"open({str(env_to)!r}, 'a').write("
+              "os.environ.get('NIGHTLY_RECORDS_DIR', '<unset>') + '\\n'); ")
 
-    def command(python: str, results: pathlib.Path) -> list[str]:
-        return [python, "-c", "import shutil, sys; shutil.copyfile(sys.argv[1], sys.argv[2]); "
-                "sys.exit(int(sys.argv[3]))", str(canned), str(results), str(exitstatus)]
+    def command(python: str, results: pathlib.Path, *paths: str) -> list[str]:
+        return [python, "-c", f"import os, shutil, sys; {record}"
+                "shutil.copyfile(sys.argv[1], sys.argv[2]); sys.exit(int(sys.argv[3]))",
+                str(canned), str(results), str(exitstatus)]
     return command
+
+
+def _long_passed(name: str) -> dict[str, Any]:
+    return {"nodeid": f"{regressions.LONG_RUNS[name]}::test_it", "outcome": "passed",
+            "when": "call", "message": "", "longrepr": ""}
 
 
 def _reruns_exit(code: int) -> Callable[..., list[str]]:
@@ -99,18 +112,25 @@ def _reruns_exit(code: int) -> Callable[..., list[str]]:
 
 
 def _table(tmp_path: pathlib.Path, tests: list[dict[str, Any]], exitstatus: int, *,
-           rerun_code: int = 1, **replace: steps.Step) -> tuple[steps.Step, ...]:
-    """The run's own step table, with a canned regressions result, and any step replaced
-    by name."""
-    regressions = steps.Step("regressions", 600.0, run.regressions_step(
-        command=_pytest_result(tmp_path, tests, exitstatus),
-        rerun_command=_reruns_exit(rerun_code)))
+           rerun_code: int = 1, env_to: pathlib.Path | None = None,
+           **replace: steps.Step) -> tuple[steps.Step, ...]:
+    """The run's own step table, with a canned regressions result, a canned passing result
+    for each long run, and any step replaced by name."""
     table = []
     for step in run.STEPS:
-        if step.name == "regressions":
-            table.append(regressions)
+        key = step.name.replace(" ", "_")
+        if key in replace:
+            table.append(replace[key])
+        elif step.name == "regressions":
+            table.append(steps.Step("regressions", 600.0, run.regressions_step(
+                command=_pytest_result(tmp_path, tests, exitstatus, env_to=env_to),
+                rerun_command=_reruns_exit(rerun_code))))
+        elif step.name in regressions.LONG_RUNS:
+            table.append(steps.Step(step.name, 600.0, run.long_run_step(
+                step.name, command=_pytest_result(tmp_path, [_long_passed(step.name)], 0,
+                                                  env_to=env_to))))
         else:
-            table.append(replace.get(step.name.replace(" ", "_"), step))
+            table.append(step)
     return tuple(table)
 
 
@@ -150,8 +170,8 @@ def test_a_night_tests_a_clean_worktree_of_origin_main_and_writes_every_file(
     assert [(step["name"], step["status"]) for step in report["steps"]] == [
         ("preflight", "passed"), ("regressions", "passed"), ("agents", "not built yet"),
         ("red team", "not built yet"), ("hosted", "not built yet"),
-        ("production smoke", "not built yet"), ("performance", "not built yet"),
-        ("soak", "not built yet"), ("mutation", "not built yet"),
+        ("production smoke", "not built yet"), ("performance", "passed"),
+        ("soak", "passed"), ("mutation", "not built yet"),
         ("replay", "not built yet")]
     assert any("given interpreter" in line for line in report["preflight"])
     assert any("not built yet" in line for line in report["preflight"])
@@ -164,7 +184,8 @@ def test_a_night_tests_a_clean_worktree_of_origin_main_and_writes_every_file(
     [record] = _history(repo)
     assert (record["kind"], record["date"], record["commit"], record["status"]) == (
         "night", "2026-09-27", origin_main, "finished")
-    assert record["layers"] == {"unit": {"run": 1, "failed": 0, "flaky": 0}}
+    assert record["layers"] == {"unit": {"run": 1, "failed": 0, "flaky": 0},
+                                "soak": {"run": 2, "failed": 0, "flaky": 0}}
 
 
 def test_every_step_the_design_names_is_in_the_table_and_an_unbuilt_step_says_why() -> None:
@@ -175,9 +196,113 @@ def test_every_step_the_design_names_is_in_the_table_and_an_unbuilt_step_says_wh
         "performance", "soak", "mutation", "replay"]
     assert run.STEPS[0].essential
     assert [step.name for step in run.STEPS if step.run is not None] == [
-        "preflight", "regressions"]
-    for step in run.STEPS[2:]:
-        assert step.not_built and step.waits_for, step.name
+        "preflight", "regressions", "performance", "soak"]
+    for step in run.STEPS:
+        if step.run is None:
+            assert step.not_built and step.waits_for, step.name
+
+
+def test_the_regressions_step_leaves_each_long_run_to_its_own_step() -> None:
+    """The timing run and the soak have caps of their own, and neither is rerun, so the
+    regressions step must not run them as well: a failed timing run rerun twice there
+    would take the rest of the night."""
+    argv = regressions.command("python", pathlib.Path("results.jsonl"))
+    for name, path in regressions.LONG_RUNS.items():
+        assert (REPO / path).is_file(), f"{name}: {path} was moved or renamed"
+        assert f"--ignore={path}" in argv
+        long_run = regressions.long_run_command("python", pathlib.Path("r.jsonl"), path)
+        assert long_run[-3:] == ["--tier", "nightly", path]
+    assert set(regressions.LONG_RUNS) == {"performance", "soak"}
+
+
+def test_every_step_of_every_night_keeps_the_long_runs_records_in_one_folder(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """The timing run's regression rule and the budgets read the records of earlier
+    nights. A night tests a fresh worktree, so the records must live outside it, in the
+    same folder every night, or every night would start with no history."""
+    seen = tmp_path / "records-seen.txt"
+    table = _table(tmp_path, [PASSED], 0, env_to=seen)
+    for date in ("2026-09-27", "2026-09-28"):
+        assert _night(repo, date, table, notify=Notifications()) == 0
+    records = night.Layout(repo.resolve()).records
+    # The regressions step and the two long runs, on each of the two nights.
+    assert seen.read_text().splitlines() == [str(records)] * 6
+
+
+def _long_step(tmp_path: pathlib.Path, name: str, test: dict[str, Any], exitstatus: int,
+               cap: float = 600.0) -> steps.Step:
+    return steps.Step(name, cap, run.long_run_step(
+        name, command=_pytest_result(tmp_path, [{**_long_passed(name), **test}], exitstatus)))
+
+
+def test_a_timing_run_on_battery_or_under_load_is_invalid_not_failed(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """The design marks such a night invalid rather than failed. The timing test skips
+    with the reasons, and the step says invalid and gives them, so the night is neither
+    reported as a pass nor filed as a break."""
+    reason = "the performance run is invalid: the machine was on battery power"
+    table = _table(tmp_path, [PASSED], 0, performance=_long_step(
+        tmp_path, "performance", {"outcome": "skipped", "message": reason}, 0))
+    notify = Notifications()
+    assert _night(repo, "2026-09-27", table, notify=notify) == 0
+    report = _report(repo, "2026-09-27")
+    [step] = [step for step in report["steps"] if step["name"] == "performance"]
+    assert step["status"] == "invalid"
+    assert reason in step["summary"]
+    assert report["failures"] == [] and notify.sent == []
+
+
+def test_a_long_run_that_fails_is_a_confirmed_break_and_is_not_rerun(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """The soak is seeded, so a rerun repeats the same turns, and the timing run confirms a
+    regression by measuring again before it fails. A failure of either is therefore a
+    confirmed break as it stands, planned for classification like any other."""
+    table = _table(tmp_path, [PASSED], 0, soak=_long_step(
+        tmp_path, "soak", {"outcome": "failed", "message": "the recency detector fired",
+                           "longrepr": "E   AssertionError: the recency detector fired"}, 1))
+    notify = Notifications()
+    assert _night(repo, "2026-09-27", table, notify=notify) == 0
+    report = _report(repo, "2026-09-27")
+    [step] = [step for step in report["steps"] if step["name"] == "soak"]
+    assert step["status"] == "failed"
+    [entry] = report["failures"]
+    assert (entry["kind"], entry["verdict"], entry["reruns"], entry["novelty"],
+            entry["plan"]["needs"]) == ("finding", "confirmed", [], "new", "classification")
+    assert entry["finding"]["artifacts"] == {"log": "soak/output.log",
+                                             "results": "soak/results.jsonl"}
+    assert len(notify.sent) == 1 and "1 new break" in notify.sent[0][1]
+    assert report["tests"]["layers"]["soak"] == {"run": 2, "failed": 1, "flaky": 0}
+
+
+def test_a_long_runs_strict_expected_failure_that_passes_is_reported_not_filed(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """The soak is pinned to B50. When the fix lands, the pin passes and strict mode fails
+    the run: a person removes the marker, and nothing is filed."""
+    table = _table(tmp_path, [PASSED], 0, soak=_long_step(
+        tmp_path, "soak", {"outcome": "xpass-strict", "message": "[XPASS(strict)] B50"}, 1))
+    notify = Notifications()
+    assert _night(repo, "2026-09-27", table, notify=notify) == 0
+    report = _report(repo, "2026-09-27")
+    [step] = [step for step in report["steps"] if step["name"] == "soak"]
+    assert step["status"] == "failed"
+    [entry] = report["failures"]
+    assert entry["kind"] == "xpass-strict" and "plan" not in entry
+    assert notify.sent == []
+
+
+def test_a_long_run_past_its_cap_is_stopped_and_reported(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    def hangs(python: str, results: pathlib.Path, path: str) -> list[str]:
+        return [python, "-c", "import time; time.sleep(60)"]
+
+    table = _table(tmp_path, [PASSED], 0, performance=steps.Step(
+        "performance", 1.0, run.long_run_step("performance", command=hangs)))
+    started = time.monotonic()
+    assert _night(repo, "2026-09-27", table, notify=Notifications()) == 0
+    assert time.monotonic() - started < 50
+    [step] = [step for step in _report(repo, "2026-09-27")["steps"]
+              if step["name"] == "performance"]
+    assert step["status"] == "timed out"
 
 
 def test_a_break_seen_on_two_nights_is_new_once_and_planned_until_it_is_filed(
@@ -413,13 +538,13 @@ def test_the_reports_first_line_never_calls_a_night_with_a_failed_step_quiet() -
 
 def test_the_headline_never_says_nothing_broke_while_steps_are_not_built() -> None:
     """Most of the design's steps are not built yet. A bare "Nothing broke." would read as
-    if the whole night had checked everything, when only two steps ran."""
+    if the whole night had checked everything, when only four steps ran."""
     report = {"night": "2026-09-26", "status": "finished", "commit": "c" * 40,
               "steps": [_step(step.name, "passed" if step.run else "not built yet")
                         for step in run.STEPS], "failures": []}
     lead = render.markdown(report).splitlines()[2]
     assert "**Nothing broke.**" not in lead
-    assert lead.startswith("**Nothing broke in the 2 steps that ran.** 8 steps are not built "
+    assert lead.startswith("**Nothing broke in the 4 steps that ran.** 6 steps are not built "
                            "yet.")
 
 
@@ -444,8 +569,8 @@ def test_a_test_run_that_dies_before_writing_a_result_is_a_failure_for_a_person(
     def dies(python: str, results: pathlib.Path) -> list[str]:
         return [python, "-c", "raise SystemExit(3)"]
 
-    table = tuple(steps.Step("regressions", 600.0, run.regressions_step(command=dies))
-                  if step.name == "regressions" else step for step in run.STEPS)
+    table = _table(tmp_path, [], 0, regressions=steps.Step(
+        "regressions", 600.0, run.regressions_step(command=dies)))
     _night(repo, "2026-09-27", table, notify=Notifications())
     report = _report(repo, "2026-09-27")
     assert [(entry["kind"], entry["finding"]["invariant"]) for entry in report["failures"]] == [
@@ -495,7 +620,7 @@ def test_a_failed_test_is_rerun_in_the_tier_the_night_ran(
 
     regression = steps.Step("regressions", 600.0, run.regressions_step(
         command=_pytest_result(tmp_path, [FAILED], 1), rerun_command=rerun_command))
-    table = tuple(regression if step.name == "regressions" else step for step in run.STEPS)
+    table = _table(tmp_path, [], 0, regressions=regression)
     _night(repo, "2026-09-27", table, notify=Notifications())
     assert asked == [(NODEID, tier)]
     assert runs.read_text().splitlines() == ["ran", "ran"]
@@ -515,8 +640,8 @@ def test_a_torn_line_in_the_test_results_is_a_warning_in_the_report(
         return [python, "-c", "import shutil, sys; shutil.copyfile(sys.argv[1], sys.argv[2])",
                 str(canned), str(results)]
 
-    table = tuple(steps.Step("regressions", 600.0, run.regressions_step(command=torn))
-                  if step.name == "regressions" else step for step in run.STEPS)
+    table = _table(tmp_path, [], 0, regressions=steps.Step(
+        "regressions", 600.0, run.regressions_step(command=torn)))
     _night(repo, "2026-09-27", table, notify=Notifications())
     warnings = _report(repo, "2026-09-27")["warnings"]
     assert any("results.jsonl" in warning and "2" in warning for warning in warnings), warnings

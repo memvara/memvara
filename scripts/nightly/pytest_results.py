@@ -12,7 +12,8 @@ Each line is `{"nodeid", "outcome", "when", "message", "longrepr"}`. The outcome
 of passed, failed (in the test itself), error (in setup, teardown or collection),
 skipped, xfailed, xpassed, and xpass-strict: a test marked as a strict expected failure
 that passed, which pytest counts as failed. A file that fails to import is an error line
-under the file's own path. The last line is `{"exitstatus": N}`, pytest's exit status.
+under the file's own path. A skipped test's message is the reason it gave. The last line
+is `{"exitstatus": N}`, pytest's exit status.
 """
 
 from __future__ import annotations
@@ -55,8 +56,11 @@ class ResultLog:
             entry.update(outcome=outcome, when=report.when, message=_message(report),
                          longrepr=text[-KEEP:])
         elif report.skipped and entry["outcome"] == "passed":
-            entry.update(outcome="xfailed" if hasattr(report, "wasxfail") else "skipped",
-                         when=report.when)
+            xfailed = hasattr(report, "wasxfail")
+            entry.update(outcome="xfailed" if xfailed else "skipped", when=report.when)
+            if not xfailed and isinstance(report.longrepr, tuple):
+                # (path, line, reason): the timing step reports an invalid run by it.
+                entry["message"] = str(report.longrepr[2]).removeprefix("Skipped: ")
         elif report.when == "call" and hasattr(report, "wasxfail"):
             entry["outcome"] = "xpassed"
 

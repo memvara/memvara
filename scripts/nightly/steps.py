@@ -24,6 +24,9 @@ FAILED = "failed"
 TIMED_OUT = "timed out"
 NOT_BUILT = "not built yet"
 NOT_RUN = "not run"
+#: A step whose run cannot be judged, such as a timing run made on battery or under load.
+#: The design marks such a night invalid rather than failed.
+INVALID = "invalid"
 ERROR = "error"
 
 

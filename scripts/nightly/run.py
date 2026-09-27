@@ -158,8 +158,10 @@ def preflight(context: Night, deadline: float) -> steps.Outcome:
         context.python = python
         notes.append(f"A virtual environment was built in the worktree, with .[{EXTRAS}] "
                      "installed as CI installs it.")
+    context.layout.records.mkdir(parents=True, exist_ok=True)
     context.env = night.step_env(os.environ, worktree=context.worktree, home=home,
-                                 tmp=context.tmp, bin_dir=pathlib.Path(context.python).parent)
+                                 tmp=context.tmp, records=context.layout.records,
+                                 bin_dir=pathlib.Path(context.python).parent)
     if context.filing_on:
         login = context.gh(filing.Command(("gh", "auth", "status")))
         context.dependencies["github"] = "up" if login.returncode == 0 else "down"
@@ -206,7 +208,8 @@ def _build_venv(context: Night, log: pathlib.Path, deadline: float) -> str | Non
         return None
     python = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     env = night.step_env(os.environ, worktree=context.worktree, home=context.layout.home,
-                         tmp=context.tmp, bin_dir=python.parent)
+                         tmp=context.tmp, records=context.layout.records,
+                         bin_dir=python.parent)
     installed = steps.run_command(
         [str(python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-e",
          f"{context.worktree}[{EXTRAS}]"], cwd=context.worktree, env=env, log=log,
@@ -285,6 +288,48 @@ def regressions_step(*, command: Callable[[str, pathlib.Path], list[str]] = regr
     return run
 
 
+def long_run_step(name: str, *,
+                  command: Callable[[str, pathlib.Path, str], list[str]] =
+                  regressions.long_run_command) -> Callable[[Night, float], steps.Outcome]:
+    """The step that runs the long run `name`, one of `regressions.LONG_RUNS`, within its
+    own cap. A failed test is a confirmed break, since a long run is never rerun. A run
+    whose only test skipped, as the timing test does on battery or under load, is invalid
+    rather than passed, and the step gives the reason."""
+    path = regressions.LONG_RUNS[name]
+
+    def run(context: Night, deadline: float) -> steps.Outcome:
+        assert context.worktree is not None and context.python is not None
+        folder_name = name.replace(" ", "-")
+        folder = context.folder / folder_name
+        folder.mkdir(parents=True, exist_ok=True)
+        results_file, log = folder / regressions.RESULTS, folder / regressions.OUTPUT
+        ran = steps.run_command(command(context.python, results_file, path),
+                                cwd=context.worktree, env=context.env, log=log,
+                                deadline=deadline)
+        results = (regressions.read_results(results_file) if results_file.exists()
+                   else regressions.Results([], None))
+        if results.exitstatus is None and not ran.timed_out:
+            results = regressions.Results(results.tests, ran.returncode, results.bad)
+        found = regressions.long_run_failures(results, commit=context.commit,
+                                              folder=folder_name, log_tail=_tail(log))
+        context.failures.extend(found)
+        for layer, counts in regressions.layers(results).items():
+            entry = context.layers.setdefault(layer, {"run": 0, "failed": 0, "flaky": 0})
+            entry["run"] += counts["run"]
+            entry["failed"] += counts["failed"]
+        summary = _summary(results, found)
+        if ran.timed_out:
+            return steps.Outcome(steps.TIMED_OUT, f"The run reached its cap. {summary}")
+        if ran.returncode != 0 or found:
+            return steps.Outcome(steps.FAILED, summary)
+        skipped = [test for test in results.tests if test["outcome"] == "skipped"]
+        if skipped and len(skipped) == len(results.tests):
+            reasons = "; ".join(test.get("message") or "no reason given" for test in skipped)
+            return steps.Outcome(steps.INVALID, f"Not judged: {reasons}")
+        return steps.Outcome(steps.PASSED, summary)
+    return run
+
+
 def _tail(log: pathlib.Path) -> str:
     return log.read_text(encoding="utf-8", errors="replace")[-TAIL:] if log.exists() else ""
 
@@ -332,13 +377,10 @@ STEPS: tuple[steps.Step, ...] = (
     steps.Step("production smoke", 5 * MINUTE, waits_for="tests/live/prod_smoke.py",
                not_built=("The read-mostly smoke test against app.memvara.dev, under a "
                           "dedicated test key, has not landed on main.")),
-    steps.Step("performance", 15 * MINUTE, waits_for="bench/perf_budget.py", not_built=(
-        "bench/perf_budget.py, which measures latency against the design's budget rule, has "
-        "not landed on main. bench/perf.py is an older throughput profile with no budget, so "
-        "it could not pass or fail a night.")),
-    steps.Step("soak", 20 * MINUTE, waits_for="bench/soak.py", not_built=(
-        "bench/soak.py, the 10,000-turn soak with a detector for each silent failure mode, "
-        "has not landed on main.")),
+    # The timing run took 22 minutes once on a laptop that other work kept busy, so its
+    # cap is 30 minutes rather than the design's placeholder of 15.
+    steps.Step("performance", 30 * MINUTE, long_run_step("performance")),
+    steps.Step("soak", 20 * MINUTE, long_run_step("soak")),
     steps.Step("mutation", 15 * MINUTE, waits_for="bench/mutation.py", not_built=(
         "bench/mutation.py, the incremental mutation run over the changed functions, has not "
         "landed on main.")),

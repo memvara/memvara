@@ -119,8 +119,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     claims. It records the machine it ran on, and a run made on battery, under load, or
     where the load cannot be read is reported as invalid rather than as a failure. The
     hooks' time limits apply from the first run. The library budgets are set from 14
-    valid nights by a rule fixed before any number was measured. Two bugs the soak found
-    are pinned as strict expected failures: #332 and #333.
+    valid nights by a rule fixed before any number was measured. The nightly run starts
+    the timing run and the 10,000-turn soak as steps of their own, each with its own time
+    limit and never rerun, and keeps their records in `local/nightly/records/`, outside
+    the night's worktree, so each night is judged against the earlier ones. A timing run
+    on battery or under load is reported as invalid. Two bugs the soak found are pinned as
+    strict expected failures: #332 and #333.
   - **Security properties.** `tests/adversarial/security/` checks the places where a
     defect would be a vulnerability. Stored text that imitates a result row or a header
     comes back harmless through every read tool and both hooks that read the store. Two

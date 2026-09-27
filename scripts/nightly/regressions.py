@@ -44,16 +44,34 @@ EXIT_MEANING = {2: "it was interrupted", 3: "it hit an internal error",
 #: How many failed tests are rerun. Hundreds of failures usually share one cause.
 RERUN_LIMIT = 20
 
+#: The long runs: nightly-tier tests that run as steps of their own, each within its own
+#: cap, rather than inside this step. They are never rerun. The soak is seeded, so a rerun
+#: repeats the same turns, and the timing run measures a regression again before it
+#: reports one, while a rerun would take as long as the run itself.
+LONG_RUNS = {
+    "performance": "tests/adversarial/soak/nightly/test_adv_perf_nightly.py",
+    "soak": "tests/adversarial/soak/nightly/test_adv_soak_nightly.py",
+}
+
 _SEED = re.compile(r"@reproduce_failure\('[^']*', b'[^']*'\)")
 _PYTEST_MARK = re.compile(r"^E(?=\s|$)")
 
 
 def command(python: str, results: pathlib.Path) -> list[str]:
     """The step's command. It keeps going past a test file that fails to import, which
-    plain pytest does not, so one bad import cannot blank the night."""
+    plain pytest does not, so one bad import cannot blank the night. It leaves out the
+    long runs, which run as steps of their own."""
     return [python, str(pathlib.Path(__file__).with_name("pytest_results.py")),
             "--results", str(results), "--", "-q", "-p", "no:cacheprovider",
-            "--tier", TIER, "--continue-on-collection-errors", "--durations=25"]
+            "--tier", TIER, "--continue-on-collection-errors", "--durations=25",
+            *(f"--ignore={path}" for path in LONG_RUNS.values())]
+
+
+def long_run_command(python: str, results: pathlib.Path, path: str) -> list[str]:
+    """The command of the long run whose test file is `path`."""
+    return [python, str(pathlib.Path(__file__).with_name("pytest_results.py")),
+            "--results", str(results), "--", "-q", "-p", "no:cacheprovider",
+            "--tier", TIER, path]
 
 
 @dataclass(frozen=True)
@@ -177,11 +195,33 @@ def failures(results: Results, *, commit: str,
     return found
 
 
-def _finding(test: Mapping[str, Any], commit: str) -> Finding:
+def long_run_failures(results: Results, *, commit: str, folder: str,
+                      log_tail: str = "") -> list[Failure]:
+    """A long run's failures. A failed test is a confirmed break as it stands, because a
+    long run is never rerun (see LONG_RUNS); a strict expected failure that passed, and a
+    run that failed outside any test, are reported as the regressions step reports them.
+    `folder` is the step's folder, which the findings' artifacts name."""
+    artifacts = {"log": f"{folder}/{OUTPUT}", "results": f"{folder}/{RESULTS}"}
+    found: list[Failure] = []
+    for test in results.tests:
+        if test["outcome"] == "xpass-strict":
+            found.append(Failure(_finding(test, commit, artifacts), "xpass-strict", (),
+                                 "unconfirmed"))
+        elif test["outcome"] in ("failed", "error"):
+            found.append(Failure(_finding(test, commit, artifacts), "finding", (),
+                                 "confirmed"))
+    status = results.exitstatus
+    if status not in (None, 0) and (status != 1 or not found):
+        found.append(_session(status, commit, log_tail, log=artifacts["log"]))
+    return found
+
+
+def _finding(test: Mapping[str, Any], commit: str,
+             artifacts: Mapping[str, str] = ARTIFACTS) -> Finding:
     text = str(test.get("longrepr", ""))
     return Finding(layer=flakes.layer_of(test["nodeid"]), surface="suite",
                    invariant=test["nodeid"], ops=program_of(text), seed=seed_of(text),
-                   artifacts=ARTIFACTS, commit=commit, title=_title(test), detail=text)
+                   artifacts=dict(artifacts), commit=commit, title=_title(test), detail=text)
 
 
 def _title(test: Mapping[str, Any]) -> str:
@@ -197,7 +237,8 @@ def _title(test: Mapping[str, Any]) -> str:
     return title if len(title) <= 240 else title[:237] + "..."
 
 
-def _session(status: int, commit: str, log_tail: str) -> Failure:
+def _session(status: int, commit: str, log_tail: str,
+             log: str = ARTIFACTS["log"]) -> Failure:
     if status == 1:
         title = ("pytest exited with status 1 but reported no failed test, so a check "
                  "outside the tests failed; the end of its output says which")
@@ -205,6 +246,6 @@ def _session(status: int, commit: str, log_tail: str) -> Failure:
         title = (f"pytest exited with status {status}, which means "
                  f"{EXIT_MEANING.get(status, 'an unknown failure')}")
     finding = Finding(layer="suite", surface="pytest", invariant=f"exit status {status}",
-                      artifacts={"log": ARTIFACTS["log"]}, commit=commit, title=title,
+                      artifacts={"log": log}, commit=commit, title=title,
                       detail=log_tail)
     return Failure(finding, "session", (), "unconfirmed")
