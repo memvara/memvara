@@ -61,6 +61,7 @@ memvara {__version__} — memory for AI agents. https://memvara.dev
   memvara logout     remove a stored API key from this machine
   memvara whoami     say what the stored credential is, and what it authorizes
   memvara encrypt    encrypt a local store in place, or print its key for a backup
+  memvara --version  print the version and exit
 
 Each command takes --help. The first three take --credentials PATH, which is how one
 machine holds keys for two projects: the default file, {_DEFAULT_CREDENTIALS},

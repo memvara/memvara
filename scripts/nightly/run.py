@@ -145,6 +145,7 @@ def preflight(context: Night, deadline: float) -> steps.Outcome:
     context.tmp = pathlib.Path(tempfile.mkdtemp(prefix="memvara-nightly-"))
     home = context.layout.home
     home.mkdir(parents=True, exist_ok=True)
+    context.layout.records.mkdir(parents=True, exist_ok=True)
     if context.given_python:
         assert context.python is not None
         notes.append(f"The steps ran with the given interpreter, {context.python}, not a "
@@ -159,7 +160,8 @@ def preflight(context: Night, deadline: float) -> steps.Outcome:
         notes.append(f"A virtual environment was built in the worktree, with .[{EXTRAS}] "
                      "installed as CI installs it.")
     context.env = night.step_env(os.environ, worktree=context.worktree, home=home,
-                                 tmp=context.tmp, bin_dir=pathlib.Path(context.python).parent)
+                                 tmp=context.tmp, records=context.layout.records,
+                                 bin_dir=pathlib.Path(context.python).parent)
     if context.filing_on:
         login = context.gh(filing.Command(("gh", "auth", "status")))
         context.dependencies["github"] = "up" if login.returncode == 0 else "down"
@@ -206,7 +208,8 @@ def _build_venv(context: Night, log: pathlib.Path, deadline: float) -> str | Non
         return None
     python = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     env = night.step_env(os.environ, worktree=context.worktree, home=context.layout.home,
-                         tmp=context.tmp, bin_dir=python.parent)
+                         tmp=context.tmp, records=context.layout.records,
+                         bin_dir=python.parent)
     installed = steps.run_command(
         [str(python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-e",
          f"{context.worktree}[{EXTRAS}]"], cwd=context.worktree, env=env, log=log,
@@ -245,22 +248,9 @@ def regressions_step(*, command: Callable[[str, pathlib.Path], list[str]] = regr
         assert context.worktree is not None and context.python is not None
         python, worktree = context.python, context.worktree
         folder = context.folder / regressions.FOLDER
-        folder.mkdir(parents=True, exist_ok=True)
-        results_file, log = folder / regressions.RESULTS, folder / regressions.OUTPUT
         reserve = min(RERUN_RESERVE, (deadline - time.monotonic()) / 5)
-        ran = steps.run_command(command(python, results_file), cwd=worktree, env=context.env,
-                                log=log, deadline=deadline - reserve)
-        results = (regressions.read_results(results_file) if results_file.exists()
-                   else regressions.Results([], None))
-        if results.exitstatus is None and not ran.timed_out:
-            # pytest died before it recorded its own exit status, for example on an import
-            # error in a conftest file. The process's status is the next best thing, and
-            # without it the night would have no failure to show.
-            results = regressions.Results(results.tests, ran.returncode, results.bad)
-        if results.bad:
-            context.warnings.append(
-                f"Lines {', '.join(map(str, results.bad))} of regressions/results.jsonl could "
-                "not be read, so the tests they recorded are missing from this report.")
+        ran, results, log = _run_tests(context, regressions.FOLDER,
+                                       lambda file: command(python, file), deadline - reserve)
 
         def one_run(argv: list[str]) -> int | None:
             return steps.run_command(argv, cwd=worktree, env=context.env,
@@ -274,19 +264,90 @@ def regressions_step(*, command: Callable[[str, pathlib.Path], list[str]] = regr
             return flakes.rerun(nodeid, one_run, python=python, tier=regressions.TIER,
                                 command=rerun_command).results
 
-        context.failures = regressions.failures(results, commit=context.commit, rerun=rerun,
-                                                log_tail=_tail(log))
+        found = regressions.failures(results, commit=context.commit, rerun=rerun,
+                                     log_tail=_tail(log))
         context.exitstatus = results.exitstatus
-        context.layers = _with_flakes(regressions.layers(results), context.failures)
-        summary = _summary(results, context.failures)
+        _add_results(context, results, found)
+        summary = _summary(results, found)
         if ran.timed_out:
             return steps.Outcome(steps.TIMED_OUT, f"The test run reached its cap. {summary}")
         return steps.Outcome(steps.PASSED if ran.returncode == 0 else steps.FAILED, summary)
     return run
 
 
+def _run_tests(context: Night, folder_name: str,
+               command: Callable[[pathlib.Path], list[str]], deadline: float
+               ) -> tuple[steps.CommandResult, regressions.Results, pathlib.Path]:
+    """Run a step's tests with `command(results_file)` in the tested worktree, and read
+    what pytest_results.py recorded in the step's folder. It returns the command's result,
+    the test results and the log."""
+    assert context.worktree is not None
+    folder = context.folder / folder_name
+    folder.mkdir(parents=True, exist_ok=True)
+    results_file, log = folder / regressions.RESULTS, folder / regressions.OUTPUT
+    ran = steps.run_command(command(results_file), cwd=context.worktree, env=context.env,
+                            log=log, deadline=deadline)
+    results = (regressions.read_results(results_file) if results_file.exists()
+               else regressions.Results([], None))
+    if results.exitstatus is None and not ran.timed_out:
+        # pytest died before it recorded its own exit status, for example on an import
+        # error in a conftest file. The process's status is the next best thing, and
+        # without it the night would have no failure to show.
+        results = regressions.Results(results.tests, ran.returncode, results.bad)
+    if results.bad:
+        context.warnings.append(
+            f"Lines {', '.join(map(str, results.bad))} of {folder_name}/{regressions.RESULTS} "
+            "could not be read, so the tests they recorded are missing from this report.")
+    return ran, results, log
+
+
+def long_run_step(name: str, *,
+                  command: Callable[[str, pathlib.Path, str], list[str]] =
+                  regressions.long_run_command) -> Callable[[Night, float], steps.Outcome]:
+    """The step that runs the long run `name`, one of `regressions.LONG_RUNS`, within its
+    own cap. A failed test is a confirmed break, since a long run is never rerun. A run
+    whose only test skipped, as the timing test does on battery or under load, is invalid
+    rather than passed, and the step gives the reason."""
+    path = regressions.LONG_RUNS[name]
+
+    def run(context: Night, deadline: float) -> steps.Outcome:
+        assert context.python is not None
+        python = context.python
+        ran, results, log = _run_tests(context, name, lambda file: command(python, file, path),
+                                       deadline)
+        found = regressions.failures(results, commit=context.commit, rerun=None,
+                                     log_tail=_tail(log), folder=name)
+        _add_results(context, results, found)
+        summary = _summary(results, found)
+        if ran.timed_out:
+            return steps.Outcome(steps.TIMED_OUT, f"The run reached its cap. {summary}")
+        if ran.returncode != 0 or found:
+            return steps.Outcome(steps.FAILED, summary)
+        if not results.tests:
+            return steps.Outcome(steps.FAILED, "The run recorded no test, so it checked "
+                                 f"nothing. {summary}")
+        skipped = [test for test in results.tests if test["outcome"] == "skipped"]
+        if skipped and len(skipped) == len(results.tests):
+            reasons = "; ".join(test.get("message") or "no reason given" for test in skipped)
+            return steps.Outcome(steps.INVALID, f"Not judged: {reasons}")
+        return steps.Outcome(steps.PASSED, summary)
+    return run
+
+
 def _tail(log: pathlib.Path) -> str:
     return log.read_text(encoding="utf-8", errors="replace")[-TAIL:] if log.exists() else ""
+
+
+def _add_results(context: Night, results: regressions.Results,
+                 found: Sequence[regressions.Failure]) -> None:
+    """Add one step's failures and per-layer counts to the night's. Each step that runs
+    tests adds to them, so the order of the steps cannot make one step's results replace
+    another's."""
+    context.failures.extend(found)
+    for layer, counts in _with_flakes(regressions.layers(results), found).items():
+        entry = context.layers.setdefault(layer, {"run": 0, "failed": 0, "flaky": 0})
+        for key in entry:
+            entry[key] += counts[key]
 
 
 def _with_flakes(layers: dict[str, dict[str, int]],
@@ -332,13 +393,10 @@ STEPS: tuple[steps.Step, ...] = (
     steps.Step("production smoke", 5 * MINUTE, waits_for="tests/live/prod_smoke.py",
                not_built=("The read-mostly smoke test against app.memvara.dev, under a "
                           "dedicated test key, has not landed on main.")),
-    steps.Step("performance", 15 * MINUTE, waits_for="bench/perf_budget.py", not_built=(
-        "bench/perf_budget.py, which measures latency against the design's budget rule, has "
-        "not landed on main. bench/perf.py is an older throughput profile with no budget, so "
-        "it could not pass or fail a night.")),
-    steps.Step("soak", 20 * MINUTE, waits_for="bench/soak.py", not_built=(
-        "bench/soak.py, the 10,000-turn soak with a detector for each silent failure mode, "
-        "has not landed on main.")),
+    # The timing run took 22 minutes once on a laptop that other work kept busy, so its
+    # cap is 30 minutes rather than the design's placeholder of 15.
+    steps.Step("performance", 30 * MINUTE, long_run_step("performance")),
+    steps.Step("soak", 20 * MINUTE, long_run_step("soak")),
     steps.Step("mutation", 15 * MINUTE, waits_for="bench/mutation.py", not_built=(
         "bench/mutation.py, the incremental mutation run over the changed functions, has not "
         "landed on main.")),

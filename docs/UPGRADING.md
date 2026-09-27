@@ -7,6 +7,65 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## The stdio MCP server reads its input as UTF-8
+
+### What changed
+
+`memvara-mcp` and `python -m memvara.server` used to read requests in the encoding of the
+locale they ran in. They now read UTF-8 always, which is what the MCP stdio transport
+specifies. A line that holds a byte that is not UTF-8 gets a JSON-RPC parse error
+(`-32700`), and the server carries on with the next line. The server's standard error,
+and the usage `--help` prints to standard output, are written as UTF-8 too.
+
+### Who this changes
+
+**A client that writes non-ASCII text in an encoding other than UTF-8**, for example
+cp1252 on Windows. Its requests used to be decoded in the locale's encoding, and now get a
+parse error at the first byte that is not UTF-8. MCP clients write UTF-8, and a client that
+escapes non-ASCII characters as `\uXXXX`, as Python's `json.dumps` does by default, is not
+affected at all.
+
+**On Windows**, UTF-8 text from a client that does not escape it, such as a Node client, is
+now stored as sent. Before, it was decoded as cp1252 and stored wrongly.
+
+### How to find your own instances
+
+Look for replies with `"code":-32700` whose message reads `invalid JSON: Invalid control
+character at: line 1 column N`. The server puts a NUL character in place of each run of
+bytes that is not UTF-8, so that the line cannot parse, and column N is where the first
+one was.
+
+---
+
+## The MCP server refuses argument values it used to accept by mistake
+
+### What changed
+
+The MCP server's argument validator now refuses these values, which it used to accept:
+
+- NaN for a number argument, such as `confidence` or `min_score`. A NaN `min_score` used
+  to act as no floor at all.
+- A metadata filter key that ends in a newline, such as `"team\n"`, in the `filters`
+  argument of `memory_search` or `memory_recall`.
+- A lone surrogate, half of a character, in the key of an object argument, such as a
+  key of `memory_add_document.metadata`. A lone surrogate in a string value was already
+  refused.
+
+Each refusal is an ordinary tool result with `isError: true` whose message names the
+argument, like every other argument the validator refuses.
+
+### Who this changes
+
+Only a client that sends one of these values. None of them was ever valid under the
+tools' schemas.
+
+### How to find your own instances
+
+Look in your client's logs for a tool result that starts with the tool's name and one of
+its arguments, such as `memory_search.min_score must be a number, got NaN`.
+
+---
+
 ## A store whose embedder record is missing or unreadable warns when it opens
 
 ### What changed
