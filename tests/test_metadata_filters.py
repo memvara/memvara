@@ -171,6 +171,7 @@ def test_a_stored_meta_column_that_is_not_an_object_matches_nothing_rather_than_
 # -- invariant 7: the limit applies after the filter, in every store method --------------
 
 
+@pytest.mark.covers("inv:I7")
 def test_a_filtered_search_returns_k_matches_when_many_non_matching_rows_rank_higher():
     """The assertion the invariant asks for, end to end.
 

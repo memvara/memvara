@@ -246,6 +246,7 @@ def test_the_document_delete_tool_retires_memories_and_touches_only_its_own_docu
     srv.close()
 
 
+@pytest.mark.covers("inv:MS1")
 def test_no_tool_accepts_a_scope_argument():
     """The security property, asserted structurally.
 
@@ -2856,6 +2857,7 @@ def test_the_instant_argument_cannot_be_read_as_transaction_time(server):
     assert "always now" in since and "forge an audit trail" in since
 
 
+@pytest.mark.covers("inv:I8")
 def test_true_since_cannot_be_used_to_set_transaction_time(server):
     """The boundary, asserted behaviourally as well: valid time moves, belief time does not.
 
