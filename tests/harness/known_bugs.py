@@ -72,8 +72,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "and the earlier period is lost"),
     KnownBug("B70", 351, "a different value written twice for a period before the "
              "current one is stored twice"),
-    KnownBug("B55", 337, 'a configured local store that cannot open is reported as "not '
-             'configured"'),
     KnownBug("B56", 338, 'on Codex, Copilot and OpenCode, "not configured" and "no matching '
              'memories" look identical'),
     KnownBug("B57", 339, "session start reports an unreachable hosted store wrongly"),

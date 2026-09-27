@@ -173,6 +173,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A configured local store that cannot open is reported as a failure, not as "not
+  configured".** When `MEMVARA_DB` named a store that exists and fails to open, such as a
+  file that is not a SQLite database, session start and recall reported "not configured",
+  exactly as they do when no store is configured, and wrote no log line, so a person
+  could not tell a broken store from a missing one. Both hooks now report "recall failed"
+  where the host shows a status line, and log `failed reason=open:<exception class>`, in
+  `recall.log` and in `session_start.log`. When the machine also has a hosted login, the
+  hooks still read from the hosted store, as before. #337.
 - **The LlamaIndex retriever's docstring shows an example that runs.** It showed
   `index_or_engine.as_query_engine(retriever=MemvaraRetriever(mem, user="alice"))`, which
   raises `TypeError` in llama-index-core at both memvara's floor, 0.13.0, and 0.14.25:
