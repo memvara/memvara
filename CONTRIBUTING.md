@@ -38,6 +38,31 @@ the full suite instead and prints which file made it do so. It measures
 no coverage. The full suite, coverage and mypy run in CI on your pull request, on every
 interpreter, so a green local run is a quick check and not the gate.
 
+**Tests that fail only on your machine.** If tests pass in CI and fail locally on an
+untouched `main`, check these two things about the Python you run them with. Both were
+found on a Mac whose system `python3` failed 18 tests that CI passes.
+
+- **The installed memvara must be this checkout.** The examples under `examples/` and the
+  getting-started pages are run in a subprocess against the installed package, because that
+  is how a reader runs them (`tests/test_examples.py`, and in `tests/test_docs.py` the
+  getting-started pages and the README's coding-agent transcript). The examples are run
+  with `PYTHONPATH` removed, and the pages from a temporary directory, so a relative
+  `PYTHONPATH=.` does not reach them. If this
+  Python has an editable install of another checkout, those tests run that checkout's
+  code, and if that checkout has been deleted they fail with `No module named 'memvara'`.
+  To check, run `python3 -c "import memvara; print(memvara.__file__)"` from outside the
+  repository, and `python3 -m pip show memvara`, which names the editable project's
+  location. To fix it, run the install command above from this checkout, or use a virtual
+  environment for each checkout.
+- **The `encrypt` extra must be installed.** A new store is encrypted by default, so a
+  test that opens a store the way the server does fails with a `ConfigError` asking for
+  `memvara[encrypt]` when `sqlcipher3` is missing. That refusal is the correct behaviour
+  of the default configuration, so the tests are not changed to avoid it. To check, run
+  `python3 -c "import sqlcipher3"`. To fix it, install the extras the command above names.
+
+Having a provider SDK installed, such as `anthropic` or `openai`, does not change any
+result: the one test that needs an SDK to be absent removes it itself.
+
 **Pass `embedder=` at every `Memvara()` you construct in a test.** `tests/conftest.py`
 fails the run otherwise, naming the file and line. `default_embedder()` returns a
 sentence-transformers model as soon as that package is importable — and it is importable
