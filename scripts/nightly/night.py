@@ -33,10 +33,10 @@ from typing import Any, Mapping
 # The prefixes of the variables no child process of the suite may inherit: the
 # harness's own list, so the two can never disagree.
 from harness.env import _DROPPED as DROPPED_PREFIXES
-from harness.env import NIGHTLY_RECORDS
+# The nightly folder and its records folder, relative to the main checkout. The soak
+# tests use the records folder too, which is why both live in the harness.
+from harness.env import NIGHTLY, NIGHTLY_RECORDS
 
-#: The nightly folder, relative to the main checkout.
-NIGHTLY = ("local", "nightly")
 HEARTBEAT = "heartbeat.json"
 HISTORY = "history.jsonl"
 REPORT_JSON = "report.json"
