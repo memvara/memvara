@@ -512,6 +512,7 @@ def test_the_wheel_carries_every_module_in_the_package() -> None:
 # -- the dependency floor ------------------------------------------------------------
 
 
+@pytest.mark.covers("inv:TB5")
 def test_the_core_declares_exactly_one_runtime_dependency() -> None:
     """Core requiring numpy and nothing else is a headline claim, not a default.
 
@@ -521,6 +522,7 @@ def test_the_core_declares_exactly_one_runtime_dependency() -> None:
     assert _toml_table("project")["dependencies"] == ["numpy>=1.24"]
 
 
+@pytest.mark.covers("inv:TB5")
 def test_nothing_but_numpy_is_imported_while_the_package_is_being_imported() -> None:
     """`import memvara` must not touch an optional SDK, on any path, in any module.
 

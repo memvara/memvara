@@ -1025,6 +1025,7 @@ def test_recall_flattens_every_line_break_form(payload):
             assert len(block.splitlines()) == 2, block
 
 
+@pytest.mark.covers("inv:RT1")
 def test_recall_cannot_resurrect_retired_claims():
     """`include_invalidated` is an audit affordance. Reachable from recall() it is an
     un-delete straight into a live system prompt."""
