@@ -187,6 +187,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A ranked read whose model call fails now serves the plain read.** On a retriever with
+  a `read_selector`, `search(ranked=True)` gathers up to `rerank_top_n` turns for the
+  selector. When the selector failed (outcome `fallback`, `key_rejected` or `disabled`),
+  that larger pool was still interleaved with the claims, so the read returned more turns
+  than a plain read takes, and they pushed out facts the plain read shows. For example, a
+  read that took 3 turns returned 8 and lost the fact "user lives in Berlin" from its
+  `recall()` block. Every outcome but `applied` now returns exactly the plain read, as
+  `docs/INTERNALS.md` already said. `disabled` still spends nothing on the cross-encoder,
+  so it skips the plain read's reranker pass. A rewritten read follows the same rule for
+  its reranker pass over the fused list. #308.
 - **The MCP server refuses a store from a newer version in one line.** Started on a store
   written by a newer version of memvara, `memvara-mcp` and `python -m memvara.server`
   exited with status 1 and a full Python traceback. The store's refusal was already clear;

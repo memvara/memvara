@@ -762,9 +762,13 @@ class HybridRetriever:
                         rerank_final=False, qvec=vectors[0])
             kept, fused = self._fuse(main, [f.result() for f in pending])
             # The reranker runs once, on the fused list, rather than once per phrasing.
-            # A ranked read reranked its turns inside the ranked stage and never runs it
-            # here, exactly as without a rewrite.
-            reranker = (None if ranked and self.selector is not None
+            # A ranked read the model ranked reranked its turns inside the ranked stage
+            # and never runs it here, exactly as without a rewrite, and a `disabled` one
+            # spends nothing on the cross-encoder. Any other outcome served the plain
+            # read, and gets the plain read's reranker pass.
+            skip = (main.selection is not None
+                    and main.selection.outcome in ("applied", "disabled"))
+            reranker = (None if skip
                         else None if self.rerank_ranked_only else self.reranker)
             if reranker is not None:
                 fused = rerank(reranker, query, fused, top_n=self.rerank_top_n)
@@ -1017,6 +1021,28 @@ class HybridRetriever:
                                           cap=self.rerank_top_n)
                 selection, kept_turns, tail = self._run_ranked_stage(
                     rec, self.selector, query, episodes, now)
+                if selection.outcome != "applied":
+                    # Every outcome but `applied` serves the plain read (INTERNALS,
+                    # invariant 1). The pool above was gathered for the selector, at
+                    # `rerank_top_n` turns and a depth widened to match, so interleaving
+                    # it here returned more turns than a plain read takes, and they
+                    # pushed out facts the plain read shows (#308). The plain read runs
+                    # again, from the same query vector, and is timed from `t0`, because
+                    # the caller waited through the failed stage as well. `disabled` is
+                    # the operator's switch for shedding load, and the design spec says
+                    # it spends nothing on the cross-encoder, so it skips the plain
+                    # read's reranker pass.
+                    plain = list(self._retrieve(
+                        query, scope=scope, k=k, valid_at=valid_at, known_at=known_at,
+                        wanted_states=wanted_states, memory_types=memory_types,
+                        min_score=min_score, anchored=anchored,
+                        include_episodes=include_episodes, now=now, ranked=False,
+                        observe=False,
+                        rerank_final=rerank_final and selection.outcome != "disabled",
+                        where=where))
+                    if rec is not None and observe:
+                        self._observe(rec, query, plain, (perf_counter() - t0) * 1000.0)
+                    return SearchResults(plain, selection=selection)
                 merged = self._interleave(claims, tail, depth)[:k]
                 hits = [*kept_turns, *merged]
             else:
@@ -1639,11 +1665,11 @@ class HybridRetriever:
 
         Returns `(selection, kept_turns, tail)`. `kept_turns` carries `explain.selected`
         and `.span`, in reranked order, and is empty unless `selection.outcome` is
-        `applied`. `tail` is what the caller interleaves with claims exactly as an
-        unranked read does: the reranked turn list minus whatever was kept, when the
+        `applied`. `tail` is the reranked turn list minus whatever was kept, when the
         reranker actually ran (every outcome but `disabled`, since admission — and so the
         reranker call inside it — never happened there), or `episodes` unchanged when it
-        did not.
+        did not. The caller interleaves `tail` with the claims only on `applied`; on
+        every other outcome it serves the plain read instead (#308).
 
         **Admission wraps the reranker call as well as the model call**, deliberately —
         the thread the cap exists to bound is the whole ~5-6s a ranked read can hold one

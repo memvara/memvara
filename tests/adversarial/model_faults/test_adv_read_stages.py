@@ -317,7 +317,7 @@ def test_a_partly_readable_selector_reply_keeps_only_what_it_can_read(
     assert (turns[0].episode.content, turns[0].explain.span) == (numbered.group(1), "tram")
 
 
-# -- a bug these tests found, pinned until its fix lands -------------------------------------
+# -- a bug these tests found, now fixed ------------------------------------------------------
 
 
 def kinds(results: Any) -> list[str]:
@@ -330,13 +330,13 @@ def kinds(results: Any) -> list[str]:
     pytest.param(RateLimitError(), id="rate-limit-429"),
     pytest.param(Text("I would keep the second excerpt."), id="prose"),
 ])
-@known_bugs.xfail("B31")
 def test_a_failed_ranking_serves_the_plain_read(
         scripted: Make, pair: Pair, failure: object) -> None:
     """#308. INTERNALS invariant 1 says a failed stage serves the plain read. A ranked read
-    gathers its turns at the reranker's depth whatever its outcome, so when the selector
-    fails it interleaves more turns than a plain read takes, and they push out facts the
-    plain read shows. Only the last line, which names the outcome, may differ."""
+    gathers its turns at the reranker's depth whatever its outcome, and when the selector
+    failed it used to interleave all of them, more turns than a plain read takes, which
+    pushed out facts the plain read shows. It now serves the plain read. Only the last
+    line, which names the outcome, may differ."""
     model = scripted(chat=[failure, failure])
     plain, mem = pair(model)
     got = mem.recall(QUERY, include_episodes=True, ranked=True,
