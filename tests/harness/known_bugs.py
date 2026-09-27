@@ -55,8 +55,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
 
     KnownBug("B26", 303, "malformed model output makes add() raise instead of dropping the "
              "item"),
-    KnownBug("B27", 304, "one claim with an overflowing confidence makes add() drop the "
-             "whole batch"),
     KnownBug("B28", 305, "a claim the trust boundary drops still costs a model call and "
              "leaves a learned predicate"),
     KnownBug("B29", 306, "a claim with no subject is filed under the user, and a list "
