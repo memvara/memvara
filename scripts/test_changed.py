@@ -11,20 +11,27 @@ and untracked files, and runs pytest on:
 
 * the test files that changed;
 * the test files and doctest modules that import a changed Python file, directly or
-  through other modules. A doctest module is any module under memvara/, and any other
-  module under tests/ that holds a doctest example, because pyproject.toml passes
-  --doctest-modules;
+  through other modules, or through a conftest.py file above them, which pytest imports
+  before them. A doctest module is any module under memvara/ or tests/ other than a
+  conftest file, because pyproject.toml passes --doctest-modules and pytest imports each
+  of those modules to look for examples;
 * the test files that name a changed file in a string, such as `ROOT / "docs"` or
-  `"-m", "memvara.server"`, directly or through a module they import. That is how a test
-  reaches a document, a data file or a script it runs as a separate process;
+  `"-m", "memvara.server"`, or match it with a glob pattern, such as the "*.md" of
+  `ROOT.rglob("*.md")`. The string can be in the test file, in a module it imports, or in
+  a conftest file whose fixtures it uses. That is how a test reaches a document, a data
+  file or a script it runs as a separate process;
+* the files in WHOLE_TREE_READERS, whenever a Python file changed, because they collect
+  every test module in a child process;
 * the tests that failed on the last run in this checkout, from pytest's own cache.
 
-It runs the full suite instead in two cases. The first is a file in FULL_SUITE or
+It runs the full suite instead in three cases. The first is a file in FULL_SUITE or
 DATA_FOLDERS below: a file that reaches the tests by a route this cannot see, such as a
-conftest.py file, pyproject.toml, the test harness or test data. The second is any other
-changed file that no test imports or names and that is not prose (see PROSE_EXTENSIONS),
-such as a new tool's configuration file: nothing shows what reads it, so the safe answer
-is everything. Every run prints which mode it chose and which file decided it.
+conftest.py file, pyproject.toml or test data. The second is a file outside the library
+that tests/conftest.py imports, such as the skip ledger, because that conftest registers
+it for every test in the run. The third is any other changed file that no test imports
+or names and that is not prose (see PROSE_EXTENSIONS), such as a new tool's
+configuration file: nothing shows what reads it, so the safe answer is everything. Every
+run prints which mode it chose and which file decided it.
 
 Only fast-tier tests are run, which is what a plain `pytest` and CI run. A changed test in
 a nightly, weekly, local or quarantine folder is named in the output, with the command to
@@ -67,16 +74,12 @@ FULL_SUITE: tuple[tuple[tuple[str, ...], str], ...] = (
     (("requirements*.txt", "*/requirements*.txt", "*.lock", "*-lock.json", "*-lock.yaml"),
      "a lockfile or requirements file changes the installed packages every test runs "
      "against"),
-    (("tests/harness/*",),
-     "the test harness is shared by every layer of the adversarial suite, and the root "
-     "conftest.py loads its tiers module from a path rather than by import"),
+    (("tests/harness/tiers.py",),
+     "the root conftest.py loads the tiers module from a path rather than by import"),
     (("tests/fixtures/*", "tests/scenarios/*"),
      "test data is read from its path, and a data file is not something a test imports"),
     ((".github/*",),
      "CI configuration decides what CI runs, which only a full run can stand in for"),
-    (("plugin/*",),
-     "the plugin's hooks run as separate processes and load each host's module by name "
-     "at run time, which the import graph cannot follow"),
 )
 
 #: Folders whose non-Python files run the full suite, with the reason. Python files there
@@ -95,6 +98,16 @@ DATA_FOLDERS: dict[str, str] = {
 PROSE_EXTENSIONS = (".md", ".rst", ".txt")
 NOT_PROSE_FOLDERS = ("memvara/", "tests/", "plugin/", "npm/")
 
+#: Test files that run `pytest --collect-only` over the whole repository in a child
+#: process, for every tier. They import every test module there is, so a Python file that
+#: fails to import fails them, and no import or string connects them to that file. They
+#: run whenever a Python file changes. A new test of this kind has to be added here.
+WHOLE_TREE_READERS = ("tests/adversarial/test_adv_tiers.py",)
+
+#: The reason printed for a changed file that tests/conftest.py imports.
+SESSION_WIDE = ("tests/conftest.py imports it and registers it as a plugin that sees every "
+                "test in the run")
+
 #: The reason printed for a changed file that no test reaches and that is not prose.
 UNKNOWN = ("no test imports or names it, and it is not prose, so nothing shows what reads "
            "it and every test may")
@@ -112,9 +125,6 @@ NAMED_THROUGH_IMPORTS = ("memvara/", "tests/")
 #: messages and addresses such as https://memvara.dev/docs/, and every test imports the
 #: library, so one of them would make every test look as if it read the docs/ folder.
 LIBRARY = "memvara/"
-
-#: pytest's default test file names, which this repository does not change.
-TEST_FILE_PATTERNS = ("test_*.py", "*_test.py")
 
 #: pyproject.toml passes --ignore=memvara/skills, so nothing there is collected.
 NOT_COLLECTED = ("memvara/skills/",)
@@ -198,10 +208,14 @@ class Source:
     #: saying "see docs/claude/testing.md", and reading prose as a path would make every
     #: test that imports a documented helper look as if it read the documents.
     strings: set[str] = field(default_factory=set)
-    #: Whether it holds a doctest example. pyproject.toml passes --doctest-modules, so
-    #: pytest collects the examples in every module under tests/ and memvara/, support
-    #: modules such as tests/adversarial/parity/compare.py included.
-    doctests: bool = False
+    #: The fixtures it defines: every function decorated with something named `fixture`.
+    fixtures: set[str] = field(default_factory=set)
+    #: Whether one of those fixtures is autouse, so that every test below it uses it.
+    autouse: bool = False
+    #: The parameter names of its functions. A test or fixture requests a fixture by
+    #: naming it as a parameter, or by passing its name as a string to `usefixtures`,
+    #: which `strings` already holds.
+    parameters: set[str] = field(default_factory=set)
 
 
 _SEPARATORS = re.compile(r"[/\\]+")
@@ -211,7 +225,7 @@ _DOTTED = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
 def read_source(path: str, text: str) -> Source:
     """Parse one file. A file that does not parse imports nothing, as far as this can tell,
     and still counts as changed if it changed."""
-    source = Source(doctests=">>>" in text)
+    source = Source()
     try:
         tree = ast.parse(text, filename=path)
     except (SyntaxError, ValueError):
@@ -233,6 +247,14 @@ def read_source(path: str, text: str) -> Source:
             for target in [base] + [base / alias.name for alias in node.names]:
                 source.files.add(f"{target}.py".removeprefix("./"))
                 source.files.add(f"{target}/__init__.py".removeprefix("./"))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+            source.parameters.update(argument.arg for argument in arguments)
+            for decorator in node.decorator_list:
+                text = ast.unparse(decorator)
+                if "fixture" in text:
+                    source.fixtures.add(node.name)
+                    source.autouse |= "autouse=True" in text
         elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
               and not any(character.isspace() for character in node.value)):
             source.strings.add(node.value)
@@ -311,38 +333,107 @@ def tokens(path: str) -> tuple[set[str], set[str]]:
     return names, named
 
 
-def is_target(path: str, *, doctests: bool = False) -> bool:
+def is_target(path: str) -> bool:
     """Whether pytest collects `path` as a test file or as a module of doctests.
 
-    Under tests/, that is a test file, or any other module that holds a doctest example
-    (`doctests`). Under memvara/, every module is a target, whether or not it holds an
-    example today, so that a changed library module always selects at least itself."""
+    pyproject.toml passes --doctest-modules, so pytest imports every module under tests/
+    and memvara/ to look for examples, whether or not it holds one. A support module under
+    tests/ that fails to import therefore fails the run even when no test file imports it,
+    so every module there is a target, except the conftest files, which pytest loads
+    rather than collects. Under memvara/, every module is a target too, so that a changed
+    library module always selects at least itself."""
     if path.startswith(NOT_COLLECTED) or not path.endswith(".py"):
         return False
     if path.startswith("tests/"):
-        name = path.rsplit("/", 1)[-1]
-        return doctests or any(fnmatch.fnmatchcase(name, pattern)
-                               for pattern in TEST_FILE_PATTERNS)
+        return not path.endswith("/conftest.py")
     return path.startswith("memvara/")
+
+
+#: A string holding one of these characters is a glob pattern, such as the "*.md" of
+#: `ROOT.rglob("*.md")`. A bare "*" or "**" matches every file, and every glob of that
+#: kind here runs on a folder the same test names, so those two are left out.
+_GLOB = re.compile(r"[*?]")
+_EVERYTHING = {"*", "**"}
+
+
+def globbed(path: str, strings: set[str]) -> bool:
+    """Whether a glob pattern among `strings` matches the file name of `path`. This is how
+    tests/test_docs.py reads every Markdown file in the repository without naming one.
+    Only files that are not Python count, because Python files are followed through
+    imports."""
+    if path.endswith(".py"):
+        return False
+    name = path.rsplit("/", 1)[-1]
+    return any(pattern not in _EVERYTHING and _GLOB.search(pattern)
+               and fnmatch.fnmatchcase(name, pattern.rsplit("/", 1)[-1])
+               for pattern in strings)
+
+
+def conftests_above(graph: Graph, target: str) -> list[str]:
+    """The conftest.py files pytest loads for `target`, outermost first, leaving out the
+    one at the repository root. A change to any conftest file runs the full suite, so
+    what matters here is what these files import."""
+    parts = target.split("/")[:-1]
+    candidates = ("/".join(parts[:end] + ["conftest.py"]) for end in range(1, len(parts) + 1))
+    return [candidate for candidate in candidates if candidate in graph.sources]
+
+
+def closures(graph: Graph, target: str) -> tuple[frozenset[str], frozenset[str]]:
+    """Two closures of `target`: what it imports, and what it can run.
+
+    The first adds every conftest file above the target and everything that conftest
+    imports, because pytest imports each of them before the target, so a module that
+    fails to import there fails the target. The second decides which strings and imported
+    names can reach the target when it runs. It adds a conftest file's closure only when
+    the target can use one of its fixtures: the conftest has an autouse fixture, or the
+    target requests any fixture from a conftest above it. In the second case every
+    conftest above it counts, because one fixture can request another from a conftest
+    further up."""
+    own = graph.closure(target)
+    above = conftests_above(graph, target)
+    imported = set(own)
+    for conftest in above:
+        imported |= graph.closure(conftest)
+    source = graph.sources[target]
+    requested = source.parameters | source.strings
+    uses_any = any(graph.sources[conftest].fixtures & requested for conftest in above)
+    runs = set(own)
+    for conftest in above:
+        if uses_any or graph.sources[conftest].autouse:
+            runs |= graph.closure(conftest)
+    return frozenset(imported), frozenset(runs)
 
 
 def affected(graph: Graph, changed: Sequence[str]) -> dict[str, set[str]]:
     """Each test file or doctest module a change reaches, with the changed files that
-    reach it. A target is reached when a file in its import closure is a changed file,
-    imports a changed module by name, or, outside the library, names a changed file in a
-    string."""
+    reach it. A target is reached when a changed file is in what it imports, including
+    through the conftest files above it, or when a file in what it can run imports a
+    changed module by name or, outside the library, names a changed file in a string or
+    matches it with a glob pattern."""
     wanted = [(path, *tokens(path)) for path in changed]
     found: dict[str, set[str]] = {}
-    for target in sorted(path for path, source in graph.sources.items()
-                         if is_target(path, doctests=source.doctests)):
-        closure = graph.closure(target)
+    for target in sorted(path for path in graph.sources if is_target(path)):
+        imported, runs = closures(graph, target)
         for path, names, named in wanted:
-            if path in closure or any(
+            if path in imported or any(
                     names & graph.sources[each].names
-                    or (named & graph.sources[each].strings and not each.startswith(LIBRARY))
-                    for each in closure):
+                    or (not each.startswith(LIBRARY)
+                        and (named & graph.sources[each].strings
+                             or globbed(path, graph.sources[each].strings)))
+                    for each in runs):
                 found.setdefault(target, set()).add(path)
     return found
+
+
+def session_wide(graph: Graph) -> frozenset[str]:
+    """The files outside the library that tests/conftest.py imports, such as the skip
+    ledger in tests/harness/skips.py. That conftest registers them as plugins that see
+    every test in a run, the doctests in memvara/ included, so a change to one of them
+    runs the full suite."""
+    if "tests/conftest.py" not in graph.sources:
+        return frozenset()
+    return frozenset(path for path in graph.closure("tests/conftest.py")
+                     if not path.startswith(LIBRARY) and path != "tests/conftest.py")
 
 
 def load_tiers(repo: pathlib.Path) -> ModuleType:
@@ -404,12 +495,20 @@ def make_plan(repo: pathlib.Path, changed: Sequence[str], failed: Sequence[str])
     tiers = load_tiers(repo)
     tracked = git("ls-files", "-z", "*.py", cwd=repo).split("\0")
     graph = Graph.build(repo, {path for path in tracked if path} | set(changed))
+    wide = session_wide(graph)
+    registered = [path for path in changed if path in wide]
+    if registered:
+        return Plan("full", [f"{path} changed: {SESSION_WIDE}." for path in registered])
     reached = affected(graph, changed)
     reaching = set().union(*reached.values())
     unknown = [path for path in changed if path not in reaching and not is_prose(path)]
     if unknown:
         return Plan("full", [f"{path} changed: {UNKNOWN}." for path in unknown])
 
+    python = [path for path in changed if path.endswith(".py")]
+    readers = [path for path in WHOLE_TREE_READERS if python and path in graph.sources]
+    for path in readers:
+        reached.setdefault(path, set()).update(python)
     plan = Plan("selected")
     for path in sorted(reached):
         tier = tiers.tier_of(repo / path)
@@ -426,6 +525,9 @@ def make_plan(repo: pathlib.Path, changed: Sequence[str], failed: Sequence[str])
                         f"{_count(len(library), 'library module')} import or name a changed "
                         f"file. Of those files under tests/, {len(changed_tests)} changed "
                         "themselves.")
+    for path in readers:
+        plan.reasons.append(f"{path} runs as well, because it collects every test module "
+                            "in a child process and a Python file changed.")
     selected = set(plan.targets)
     extra = [node for node in failed if node.split("::", 1)[0] not in selected
              and tiers.tier_of(repo / node.split("::", 1)[0]) == "fast"]
