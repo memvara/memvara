@@ -210,6 +210,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   Standard error, where the server writes its startup refusals, is now written as UTF-8
   too, and so is standard output, where `--help` prints a usage that holds em dashes.
   #311.
+- **A claim that matches a search is never returned behind claims that do not.**
+  `search()` caps each fact slot (the same owner, subject and predicate) at two places in
+  the head of the list, and moved the slot's third and later claims to the very end,
+  behind results that score 0 and do not match the query at all. So for a user who knows
+  C, C# and C++, a search for "C++" returned "C" last, behind eight unrelated facts, and
+  in a read with one more candidate "C" fell out of the top 10. The demoted claims now go
+  behind the other matching results and ahead of every result that scores 0. The list
+  is in score order except for that demotion. LOCOMO retrieval does not move, because it
+  scores conversation turns and the cap applies to claims. #327.
 - **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
   decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
   interpreter's stack allows, and the server let it escape, so a single such line ended
