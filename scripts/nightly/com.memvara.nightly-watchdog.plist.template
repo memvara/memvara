@@ -13,7 +13,13 @@
     __PYTHON__    a Python 3.10 or later, such as /opt/homebrew/bin/python3
     __CHECKOUT__  the main checkout, such as /Users/you/code/memvara
     __START__     when the nightly run is scheduled to start, as HH:MM
-    __DEADLINE__  when the run must have finished, as HH:MM
+    __DEADLINE__  when the run must have finished, as HH:MM. Make it at least 2 hours
+                  after __START__. A night takes about 1 hour 40 minutes today: the
+                  regressions step took 47 minutes on 2026-09-27, and the performance
+                  and soak steps run up to 30 and 20 minutes. A deadline of 06:00 for a
+                  night that started earlier sent a false DID NOT FINISH alert that
+                  morning. Move it later as the steps that are not built yet are added;
+                  docs/claude/testing.md has the numbers.
     __HOUR__ and __MINUTE__  the deadline's hour and minute, as numbers without a
                   leading zero
   then save it as ~/Library/LaunchAgents/com.memvara.nightly-watchdog.plist, create the

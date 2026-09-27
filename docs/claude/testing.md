@@ -528,7 +528,7 @@ python3 scripts/nightly/watchdog.py --checkout <main checkout> --start 01:30 --d
 Nothing in this repository installs the schedule, the watchdog or anything else. The operator does it once, by hand:
 
 1. Create the scheduled task with `task.md` as its prompt, with the checkout filled in and Filing left at `dry-run`.
-2. Fill in `com.memvara.nightly-watchdog.plist.template` and load it, as its comment describes, with the watchdog's deadline a few hours after the task's start.
+2. Fill in `com.memvara.nightly-watchdog.plist.template` and load it, as its comment describes. Set the watchdog's deadline at least 2 hours after the task's start. A night takes about 1 hour 40 minutes today: on 2026-09-27 the preflight step took 12 seconds and the regressions step 47 minutes 38 seconds, and the performance and soak steps run up to their caps of 30 and 20 minutes. That night's deadline was 06:00, and the watchdog sent a DID NOT FINISH alert for a run that was still working, so the installed deadline was moved to 07:30. The steps that wait for code not written yet (agents, red team, hosted, production smoke, mutation and replay) have caps that add up to 90 minutes, so move the deadline later as they are built. If every step ran to its cap, a night would take 3 hours 55 minutes.
 3. Create the `nightly-break` label in memvara/build-health.
 4. Watch one night as a supervised dry run: the report, the DID NOT RUN path (run the watchdog by hand for a night with no heartbeat), the canary, and filing against a test label (`filing.py issue --label <a test label> --file`). Only then change Filing to `file`.
 
