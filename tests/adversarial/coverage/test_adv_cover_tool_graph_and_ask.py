@@ -12,6 +12,7 @@ from typing import Callable
 
 import pytest
 
+from harness.skips import needs_toml
 from harness.stdio import McpProcess
 
 Start = Callable[..., McpProcess]
@@ -61,6 +62,7 @@ def test_memory_ask_answers_in_prose_now_and_as_of_an_earlier_valid_time(
     assert server.close() == 0
 
 
+@needs_toml
 @pytest.mark.covers("tool:memory_paths")
 def test_memory_paths_returns_the_route_between_two_entities_or_says_the_search_found_none(
         mcp: Start) -> None:
@@ -71,7 +73,8 @@ def test_memory_paths_returns_the_route_between_two_entities_or_says_the_search_
 
     Only a predicate declared as linking two entities makes an edge the walk can follow,
     so the server loads the engineering pack, whose `depends_on` and `deploys_to` are
-    declared that way."""
+    declared that way. A predicate pack is TOML, so this test needs Python 3.11 or
+    later."""
     server = mcp(env={"MEMVARA_PREDICATES": "engineering"})
     server.initialize()
     for subject, predicate, obj in (("billing", "depends_on", "ledger"),
