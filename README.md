@@ -806,7 +806,7 @@ against another vendor's hosted service.
 ## Development
 
 ```bash
-python3 -m pytest -q                              # 9,453 passing, 12 skipped, 110 expected failures, no API key
+python3 -m pytest -q                              # 9,460 passing, 12 skipped, 108 expected failures, no API key
 python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
 python3 -m benchmarks.agent_memory --system memvara --compare   # the agent memory benchmark
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families

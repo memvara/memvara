@@ -15,9 +15,11 @@ anyone. See `init.py`.
 
 from __future__ import annotations
 
+import codecs
+import io
 import os
 import sys
-from typing import Mapping, Sequence, TextIO
+from typing import Mapping, Sequence, TextIO, cast
 
 from .. import __version__
 from ..core import EmbedderMismatchError
@@ -33,6 +35,53 @@ from .init import init
 from .mcp import MemvaraMCPServer
 
 __all__ = ["main"]
+
+#: The decoding error handler for standard input. It puts one NUL in place of each run of
+#: bytes that is not UTF-8. JSON allows a NUL nowhere, not even inside a string, so the
+#: line then fails to parse and gets the parse error (-32700) any other malformed line
+#: gets, at the column of the first NUL, and the server carries on. Replacing the bytes
+#: with U+FFFD instead would parse, and store text the client never sent.
+_NOT_UTF8 = "memvara-not-utf8"
+
+
+def _nul_for_each_bad_byte(exc: UnicodeError) -> tuple[str, int]:
+    # Registered for decoding only, so `exc` is always a UnicodeDecodeError.
+    return "\x00", cast(UnicodeDecodeError, exc).end
+
+
+codecs.register_error(_NOT_UTF8, _nul_for_each_bad_byte)
+
+
+def _utf8_stdin() -> tuple[TextIO, io.TextIOWrapper | None]:
+    """Standard input, read as UTF-8 whatever the locale says.
+
+    The MCP stdio transport is UTF-8. Python opens standard input in the locale's
+    encoding, so under a strict UTF-8 locale one byte that is not UTF-8 raised
+    UnicodeDecodeError and ended the server, and under cp1252, a Windows pipe's default,
+    "Zürich" sent as UTF-8 was stored as "ZÃ¼rich" (#311). Returns the stream to read,
+    and the wrapper this made, if any, which the caller detaches when it is done so that
+    closing the wrapper does not close the process's standard input.
+    """
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is None:
+        # A text stream with no bytes under it, such as a test's StringIO. There is no
+        # encoding to get wrong.
+        return sys.stdin, None
+    wrapper = io.TextIOWrapper(buffer, encoding="utf-8", errors=_NOT_UTF8)
+    return wrapper, wrapper
+
+
+def _utf8_output(stream: TextIO) -> None:
+    """Write one of the process's output streams as UTF-8, as standard input is read.
+
+    The server's startup refusals go to standard error, and a client reads them as UTF-8.
+    On Windows, an em dash in a refusal arrived as a cp1252 byte that such a client cannot
+    decode (#311). Replies to a client are pure ASCII, but `--help` prints the usage to
+    standard output, and it holds em dashes, which an ASCII standard output cannot encode.
+    """
+    if (isinstance(stream, io.TextIOWrapper)
+            and codecs.lookup(stream.encoding).name != "utf-8"):
+        stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
 def _feature_defaults() -> str:
@@ -225,6 +274,10 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
     """Serve until stdin closes. Returns a process exit status."""
     args = list(sys.argv[1:] if argv is None else argv)
     env = os.environ if env is None else env
+    if stdout is None:
+        _utf8_output(sys.stdout)
+    if stderr is None:
+        _utf8_output(sys.stderr)
     out = sys.stdout if stdout is None else stdout
     err = sys.stderr if stderr is None else stderr
 
@@ -298,10 +351,13 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
     server = MemvaraMCPServer(memory, read_only=config.read_only,
                               anchored=config.anchored, features_off=config.features_off,
                               **config.scope_kwargs)
+    source, made = (stdin, None) if stdin is not None else _utf8_stdin()
     try:
-        server.serve(sys.stdin if stdin is None else stdin, out)
+        server.serve(source, out)
     finally:
         # Closing the store matters even on the way out: the vector index is a file this
         # process may have been extending, and other processes share it.
         server.close()
+        if made is not None:
+            made.detach()
     return 0
