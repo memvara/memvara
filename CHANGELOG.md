@@ -186,6 +186,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   character, such as `"a\ud800b"`, was stored. Every key of every object argument is now
   checked like a string argument, and a lone surrogate in one is refused with the same
   "unpaired surrogate" message a string value gets. #315.
+- **The command-line help names everything the command line and the server's
+  configuration accept.** `memvara --help` and `memvara-mcp --help` now name `--version`.
+  The server's help now lists `'openai'` among the `MEMVARA_LLM` backends, describes all
+  22 feature switches instead of 12, and describes the twelve variables it left out:
+  `MEMVARA_SERVER_URL`, `MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_CLAIMS`,
+  `MEMVARA_LLM_MAX_TOKENS`, `MEMVARA_LLM_TIMEOUT`, `MEMVARA_LLM_EXTRA_BODY`,
+  `MEMVARA_LLM_EXTRACT_SYSTEM`, `MEMVARA_LLM_TERSE_CLAIMS`, `MEMVARA_EXTRACT_GUIDANCE`,
+  `MEMVARA_ADVISE_REPLACEMENTS`, `MEMVARA_CLOSED_VOCABULARY` and
+  `MEMVARA_NAT64_PREFIXES`. New tests fail when the help leaves out a variable the
+  configuration reads, a feature, or a model backend. #297.
 - **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
   decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
   interpreter's stack allows, and the server let it escape, so a single such line ended
