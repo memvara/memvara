@@ -202,6 +202,18 @@ def test_recall_sends_valid_at_to_the_recall_route(recorded):
     assert "valid_at" not in json.loads(recorded.calls[-1].content)
 
 
+def test_a_memory_type_that_does_not_exist_is_refused_before_anything_is_sent(recorded):
+    """The service refuses an unknown memory type with a 422. The client refuses it first,
+    in the words the library uses (#289), so the error does not depend on the server."""
+    mem = recorded({"text": "x", "empty": False})
+    for read in (lambda: mem.search("q", memory_types=["procedurel"]),
+                 lambda: mem.recall("q", memory_types=["procedurel"])):
+        with pytest.raises(ValueError, match="memory_type must be one of episodic, "
+                                             "semantic, procedural, not 'procedurel'"):
+            read()
+    assert not recorded.calls, "refused before any request was sent"
+
+
 def test_recall_refuses_a_budget_rather_than_dropping_it(recorded):
     """The endpoint renders server-side and takes no budget. Ignoring one would ship an
     oversized prompt with nothing to notice it by."""
