@@ -181,6 +181,8 @@ def parser() -> argparse.ArgumentParser:
     again.add_argument("--python", required=True, help="the interpreter the night used")
     again.add_argument("--tier", default="nightly", help="the tier the night ran")
     again.add_argument("--home", help="HOME for the reruns; the nightly home by default")
+    again.add_argument("--records", help="the records folder of the timing run and the "
+                       "soak; the one beside the home by default")
     again.add_argument("--cap", type=float, default=600.0,
                        help="seconds each rerun may take")
     again.add_argument("nodeids", nargs="+", metavar="NODEID")
@@ -202,10 +204,13 @@ def _rerun(args: argparse.Namespace) -> int:
     worktree = pathlib.Path(args.worktree).resolve()
     home = (pathlib.Path(args.home) if args.home
             else night.Layout(night.main_checkout(worktree)).home)
+    # The nightly home and the records folder sit side by side in local/nightly/.
+    records = pathlib.Path(args.records) if args.records else home.parent / "records"
     home.mkdir(parents=True, exist_ok=True)
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="memvara-rerun-"))
     try:
-        env = night.step_env(os.environ, worktree=worktree, home=home, tmp=tmp)
+        env = night.step_env(os.environ, worktree=worktree, home=home, tmp=tmp,
+                             records=records)
         log = worktree / "local" / "flake-reruns.log"
 
         def run(command: list[str]) -> int | None:

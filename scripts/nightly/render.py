@@ -148,9 +148,14 @@ def _lead(report: Mapping[str, Any], fresh: list[Any], known: list[Any], flakes:
         # night with one must never read as quiet.
         all_steps = report.get("steps", [])
         stalled = [f"{step['name']} {step['status']}" for step in all_steps
-                   if step["status"] not in ("passed", "not built yet")]
+                   if step["status"] not in ("passed", "not built yet", "invalid")]
         if stalled:
             counts.append(f"steps that did not pass: {', '.join(stalled)}")
+        # An invalid step, such as a timing run made on battery, is neither a pass nor a
+        # failure, so it has its own phrase; it still keeps the night from reading as quiet.
+        unjudged = [step["name"] for step in all_steps if step["status"] == "invalid"]
+        if unjudged:
+            counts.append(f"steps that could not be judged: {', '.join(unjudged)}")
         ran = sum(step["status"] not in ("not built yet", "not run") for step in all_steps)
         headline = (f"**{'; '.join(counts)}.**" if counts else
                     f"**Nothing broke in the {ran} {'step' if ran == 1 else 'steps'} that ran.**")
