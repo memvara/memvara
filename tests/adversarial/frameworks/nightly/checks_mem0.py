@@ -32,8 +32,9 @@ if TYPE_CHECKING:
 #: mem0's entity ids. The shim's handling of them has checks of its own.
 ENTITY_IDS = frozenset({"user_id", "agent_id", "run_id"})
 
-#: Methods of mem0's `Memory` that no call site can depend on, with the reason.
-NOT_A_SURFACE = {"chat": "mem0's own chat() raises NotImplementedError"}
+#: Methods of mem0's `Memory` that no call site can depend on. chat() is the only one:
+#: mem0's own chat() raises NotImplementedError.
+NOT_A_SURFACE = frozenset({"chat"})
 
 #: Defaults the shim changes on purpose, with where the change is documented.
 DOCUMENTED_DEFAULTS = {
@@ -66,7 +67,8 @@ def _surface(cls: Any) -> list[str]:
 
 def check_the_shim_takes_every_method_and_argument_mem0_takes(ctx: Context) -> None:
     """Every public method of mem0's Memory, and the with-statement protocol, exists on
-    the shim, and every argument mem0's method names is one the shim's method names too.
+    the shim, and the shim's method takes every argument that mem0's method takes, by
+    the same name.
     The entity ids have checks of their own, and chat() is left out because mem0's own
     raises NotImplementedError."""
     real = _real()

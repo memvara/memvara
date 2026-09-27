@@ -36,7 +36,10 @@ def artifacts(folder: str) -> dict[str, str]:
     return {"log": f"{folder}/{OUTPUT}", "results": f"{folder}/{RESULTS}"}
 
 
-ARTIFACTS = artifacts(FOLDER)
+#: How the timing test's skip reason starts when its run is invalid, as
+#: `skip_reason` in bench/perf_budget.py writes it. A long run with a test that skipped
+#: for this reason is invalid, not passed.
+INVALID_RUN = "the performance run is invalid: "
 
 #: The tier the step runs, and the tier each failed test is rerun in.
 TIER = "nightly"
@@ -211,7 +214,7 @@ def failures(results: Results, *, commit: str,
 
 
 def _finding(test: Mapping[str, Any], commit: str,
-             artifacts: Mapping[str, str] = ARTIFACTS) -> Finding:
+             artifacts: Mapping[str, str]) -> Finding:
     text = str(test.get("longrepr", ""))
     return Finding(layer=flakes.layer_of(test["nodeid"]), surface="suite",
                    invariant=test["nodeid"], ops=program_of(text), seed=seed_of(text),
@@ -231,8 +234,7 @@ def _title(test: Mapping[str, Any]) -> str:
     return title if len(title) <= 240 else title[:237] + "..."
 
 
-def _session(status: int, commit: str, log_tail: str,
-             log: str = ARTIFACTS["log"]) -> Failure:
+def _session(status: int, commit: str, log_tail: str, log: str) -> Failure:
     if status == 1:
         title = ("pytest exited with status 1 but reported no failed test, so a check "
                  "outside the tests failed; the end of its output says which")

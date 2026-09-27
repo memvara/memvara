@@ -85,18 +85,28 @@ def _memory(storage: Any, llm: Any = None) -> Iterator[Any]:
     `Memory(storage=storage, embedder=storage.embedder)`, closed when the block ends.
 
     Unless the check hands it another model, it gets one that must not be called, and the
-    block fails when it ends if anything called that model."""
+    block fails when it ends if anything called that model. When the block raised as well,
+    the failure names both, so the call to the model is not hidden behind the error."""
     calls: list[str] = []
     memory = _ca(".memory").Memory(storage=storage, embedder=storage.embedder,
                                    llm=llm if llm is not None else _no_model(calls))
+
+    def called() -> str:
+        return (f"CrewAI called its model, which no check here allows. Calls: "
+                f"{len(calls)}. The last one ended with: {calls[-1]}")
+
     try:
         yield memory
+    except Exception as exc:
+        if calls:
+            raise AssertionError(f"{called()}\nThe check also failed with "
+                                 f"{type(exc).__name__}: {exc}") from exc
+        raise
     finally:
         close = getattr(memory, "close", None)
         if close is not None:
             close()
-    assert calls == [], (f"CrewAI called its model, which no check here allows. Calls: "
-                         f"{len(calls)}. The last one ended with: {calls[-1]}")
+    assert calls == [], called()
 
 
 def _record(content: str, **fields: Any) -> Any:

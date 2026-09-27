@@ -33,6 +33,7 @@ import sys
 import tempfile
 import time
 import traceback
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Iterator, Mapping, Sequence
@@ -247,10 +248,10 @@ def regressions_step(*, command: Callable[[str, pathlib.Path], list[str]] = regr
     def run(context: Night, deadline: float) -> steps.Outcome:
         assert context.worktree is not None and context.python is not None
         python, worktree = context.python, context.worktree
-        folder = context.folder / regressions.FOLDER
         reserve = min(RERUN_RESERVE, (deadline - time.monotonic()) / 5)
-        ran, results, log = _run_tests(context, regressions.FOLDER,
-                                       lambda file: command(python, file), deadline - reserve)
+        ran, results, folder = _run_tests(context, regressions.FOLDER,
+                                          lambda file: command(python, file),
+                                          deadline - reserve)
 
         def one_run(argv: list[str]) -> int | None:
             return steps.run_command(argv, cwd=worktree, env=context.env,
@@ -265,12 +266,12 @@ def regressions_step(*, command: Callable[[str, pathlib.Path], list[str]] = regr
                                 command=rerun_command).results
 
         found = regressions.failures(results, commit=context.commit, rerun=rerun,
-                                     log_tail=_tail(log))
+                                     log_tail=_tail(folder / regressions.OUTPUT))
         context.exitstatus = results.exitstatus
         _add_results(context, results, found)
         summary = _summary(results, found)
         if ran.timed_out:
-            return steps.Outcome(steps.TIMED_OUT, f"The test run reached its cap. {summary}")
+            return _capped("test run", summary)
         return steps.Outcome(steps.PASSED if ran.returncode == 0 else steps.FAILED, summary)
     return run
 
@@ -280,7 +281,7 @@ def _run_tests(context: Night, folder_name: str,
                ) -> tuple[steps.CommandResult, regressions.Results, pathlib.Path]:
     """Run a step's tests with `command(results_file)` in the tested worktree, and read
     what pytest_results.py recorded in the step's folder. It returns the command's result,
-    the test results and the log."""
+    the test results and the step's folder, which holds the log."""
     assert context.worktree is not None
     folder = context.folder / folder_name
     folder.mkdir(parents=True, exist_ok=True)
@@ -298,40 +299,49 @@ def _run_tests(context: Night, folder_name: str,
         context.warnings.append(
             f"Lines {', '.join(map(str, results.bad))} of {folder_name}/{regressions.RESULTS} "
             "could not be read, so the tests they recorded are missing from this report.")
-    return ran, results, log
+    return ran, results, folder
 
 
 def long_run_step(name: str, *,
                   command: Callable[[str, pathlib.Path, str], list[str]] =
                   regressions.long_run_command) -> Callable[[Night, float], steps.Outcome]:
     """The step that runs the long run `name`, one of `regressions.LONG_RUNS`, within its
-    own cap. A failed test is a confirmed break, since a long run is never rerun. A run
-    whose only test skipped, as the timing test does on battery or under load, is invalid
-    rather than passed, and the step gives the reason."""
+    own cap. A failed test is a confirmed break, since a long run is never rerun. A run is
+    invalid rather than passed when any of its tests skipped because its run is invalid,
+    as the timing test does on battery or under load, or when every test in it skipped.
+    The step then gives the reason of every test that skipped."""
     path = regressions.LONG_RUNS[name]
 
     def run(context: Night, deadline: float) -> steps.Outcome:
         assert context.python is not None
         python = context.python
-        ran, results, log = _run_tests(context, name, lambda file: command(python, file, path),
-                                       deadline)
+        ran, results, folder = _run_tests(context, name,
+                                          lambda file: command(python, file, path), deadline)
         found = regressions.failures(results, commit=context.commit, rerun=None,
-                                     log_tail=_tail(log), folder=name)
+                                     log_tail=_tail(folder / regressions.OUTPUT), folder=name)
         _add_results(context, results, found)
         summary = _summary(results, found)
         if ran.timed_out:
-            return steps.Outcome(steps.TIMED_OUT, f"The run reached its cap. {summary}")
+            return _capped("run", summary)
         if ran.returncode != 0 or found:
             return steps.Outcome(steps.FAILED, summary)
         if not results.tests:
             return steps.Outcome(steps.FAILED, "The run recorded no test, so it checked "
                                  f"nothing. {summary}")
         skipped = [test for test in results.tests if test["outcome"] == "skipped"]
-        if skipped and len(skipped) == len(results.tests):
-            reasons = "; ".join(test.get("message") or "no reason given" for test in skipped)
+        invalid = [test for test in skipped
+                   if str(test.get("message") or "").startswith(regressions.INVALID_RUN)]
+        if invalid or all(test["outcome"] == "skipped" for test in results.tests):
+            reasons = "; ".join(test.get("message") or "no reason given"
+                                for test in skipped)
             return steps.Outcome(steps.INVALID, f"Not judged: {reasons}")
         return steps.Outcome(steps.PASSED, summary)
     return run
+
+
+def _capped(what: str, summary: str) -> steps.Outcome:
+    """The outcome of a step whose `what` was stopped at the step's cap."""
+    return steps.Outcome(steps.TIMED_OUT, f"The {what} reached its cap. {summary}")
 
 
 def _tail(log: pathlib.Path) -> str:
@@ -345,9 +355,10 @@ def _add_results(context: Night, results: regressions.Results,
     another's."""
     context.failures.extend(found)
     for layer, counts in _with_flakes(regressions.layers(results), found).items():
-        entry = context.layers.setdefault(layer, {"run": 0, "failed": 0, "flaky": 0})
-        for key in entry:
-            entry[key] += counts[key]
+        # `update` adds and keeps a count of zero, which `+` between two Counters drops.
+        merged = Counter(context.layers.get(layer, {}))
+        merged.update(counts)
+        context.layers[layer] = dict(merged)
 
 
 def _with_flakes(layers: dict[str, dict[str, int]],
