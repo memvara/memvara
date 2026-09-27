@@ -33,9 +33,7 @@ inv:CG5
 inv:CG6
 inv:I1
 inv:I2
-inv:I3
 inv:I4
-inv:I5
 inv:I6
 inv:I7
 inv:I8
@@ -64,7 +62,6 @@ inv:RP6
 inv:RP7
 inv:RT1
 inv:RT2
-inv:RT3
 inv:RT4
 inv:RT5
 inv:RT6
