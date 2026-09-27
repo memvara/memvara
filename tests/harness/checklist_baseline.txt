@@ -12,9 +12,7 @@ inv:CG5
 inv:CG6
 inv:I1
 inv:I2
-inv:I3
 inv:I4
-inv:I5
 inv:I6
 inv:I7
 inv:I8
@@ -43,7 +41,6 @@ inv:RP6
 inv:RP7
 inv:RT1
 inv:RT2
-inv:RT3
 inv:RT4
 inv:RT5
 inv:RT6
@@ -67,17 +64,3 @@ inv:WP6
 inv:WP7
 inv:WP8
 inv:WP9
-switch:agentic_capture
-switch:agentic_extraction
-switch:extraction_chunks
-switch:extraction_guidance
-switch:index_command
-switch:ingest_media
-switch:ingest_urls
-switch:project_scope
-switch:recall_mark
-switch:research_agent
-switch:retrieval_chunks
-switch:status_line
-tool:memory_ask
-tool:memory_paths
