@@ -413,12 +413,14 @@ def test_the_environment_turns_advice_on_and_passes_extra_body(monkeypatch):
     ("{not json", "not valid JSON"),
     ("[1, 2]", "must be a JSON object"),
 ])
+@pytest.mark.covers("env:MEMVARA_LLM_EXTRA_BODY")
 def test_an_unusable_extra_body_is_refused_at_startup(raw, match):
     with pytest.raises(ConfigError, match=match):
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",
                                "MEMVARA_LLM_EXTRA_BODY": raw})
 
 
+@pytest.mark.covers("env:MEMVARA_ADVISE_REPLACEMENTS")
 def test_advice_with_no_model_is_refused_at_startup():
     with pytest.raises(ConfigError, match="needs a model to ask, and MEMVARA_LLM is 'none'"):
         ServerConfig.from_env({"MEMVARA_DB": ":memory:",

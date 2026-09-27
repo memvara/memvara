@@ -1124,6 +1124,7 @@ def test_switching_documents_off_hides_the_four_tools():
     assert "memory_recall" in names
 
 
+@pytest.mark.covers("env:MEMVARA_NAT64_PREFIXES")
 def test_the_server_fetches_through_the_operators_nat64_prefixes_and_switches():
     from memvara.ingest import SafeFetcher
     from memvara.server.config import ServerConfig, build_memvara

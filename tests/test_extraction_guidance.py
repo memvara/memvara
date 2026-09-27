@@ -272,6 +272,7 @@ def _env(tmp_path, **extra: str) -> dict[str, str]:
 
 
 @needs_toml
+@pytest.mark.covers("env:MEMVARA_EXTRACT_GUIDANCE")
 def test_the_server_reads_the_guidance_path_and_checks_the_file_at_startup(
         tmp_path, guidance_file):
     config = ServerConfig.from_env(_env(tmp_path, MEMVARA_LLM="openai",

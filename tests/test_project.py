@@ -433,6 +433,7 @@ def test_switching_project_scope_off_stops_the_derivation_only(derive):
 
 
 @pytest.mark.derives_project
+@pytest.mark.covers("env:MEMVARA_PROJECT")
 def test_an_explicit_project_wins_and_must_be_canonical(derive):
     config = ServerConfig.from_env({**LOCAL, "MEMVARA_PROJECT": " path:0123456789abcdef "})
     assert config.project == "path:0123456789abcdef" and derive.asked == []
@@ -550,6 +551,7 @@ def test_a_fact_about_one_repository_stays_there_and_a_preference_follows_the_us
         "the default-off features")
 
 
+@pytest.mark.covers("env:MEMVARA_PROJECT")
 def test_the_command_line_binds_the_project_and_the_switches(tmp_path):
     """`main()` is the path a client takes, so the project and the switches have to reach
     the server through it rather than only through `ServerConfig`."""
