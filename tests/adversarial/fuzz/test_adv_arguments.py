@@ -125,7 +125,7 @@ def test_a_nan_confidence_is_refused_and_leaves_the_slot_as_it_was(
 def _surrogate_cases() -> list[Any]:
     """Each place in a tool's arguments where its schema says a string goes, holding a
     lone surrogate: a string argument, a string item of an array, a string value of an
-    object, and an object's key where the schema declares `propertyNames` for its keys.
+    object, and an object's key.
     Each case carries the label the refusal must start with."""
     cases = []
     for tool in TOOLS:
@@ -148,9 +148,8 @@ def _surrogate_cases() -> list[Any]:
                 elif "array" in _types(values):
                     cases.append(pytest.param(tool, name, {"team": [LONE]},
                                               f"{label}.team[0]", id=f"{label} value item"))
-                if "propertyNames" in spec:
-                    cases.append(pytest.param(tool, name, {LONE: "tea"},
-                                              f"{label} key {LONE!r}", id=f"{label} key"))
+                cases.append(pytest.param(tool, name, {LONE: "tea"},
+                                          f"{label} key {LONE!r}", id=f"{label} key"))
     return cases
 
 
