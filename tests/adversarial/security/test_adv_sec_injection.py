@@ -221,8 +221,8 @@ def test_both_reading_hooks_neutralise_forged_structure(
     # The session-start hook injected the procedural payload, so the check saw real text.
     assert SENTINEL in _injected(start)
     # recall can also carry the standing block (it adds the block when session start did
-    # not show it or the set has changed since, and PAYLOAD's own sentinel would ride
-    # along with it), so a bare
+    # not show it or the set has changed since the session last saw it, and PAYLOAD's own
+    # sentinel would ride along with it), so a bare
     # "SENTINEL in text" check here would pass even if recall's search had matched
     # nothing. The working_on claim's own wording, "lisbon report", is not in
     # PAYLOAD, so finding it proves recall rendered the claim it actually matched.
