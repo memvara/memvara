@@ -173,6 +173,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Recall answers a prompt that holds half of a surrogate pair.** A client written in
+  JavaScript can send one, an emoji cut in two, which `JSON.stringify` escapes as
+  `\ud83d`. Python decodes it into a string that cannot be encoded, the store hashes each
+  query with `text.encode()`, and the recall hook reported the whole recall as failed
+  although the store was healthy. The hook now drops the half character from the prompt
+  before it searches. #347.
 - **The LlamaIndex retriever's docstring shows an example that runs.** It showed
   `index_or_engine.as_query_engine(retriever=MemvaraRetriever(mem, user="alice"))`, which
   raises `TypeError` in llama-index-core at both memvara's floor, 0.13.0, and 0.14.25:
