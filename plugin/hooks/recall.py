@@ -906,11 +906,14 @@ def _main() -> int:
         # retrying without it (`lib.hosted.HostedRecall.recall`).
         if time.monotonic() - start < OVERALL_BUDGET_SEC:
             try:
-                # Plain: a rewrite here would be a second model call on one prompt.
+                # Plain: a rewrite here would be a second model call on one prompt. And no
+                # daemon: the first read already started one when none was serving, and it
+                # is usually not listening yet, so a second start would be a second daemon
+                # for the same store (#344).
                 wider, wider_ok, _ = fast_recall(query, k=EPISODE_K, budget=EPISODE_BUDGET,
                                                  header=HEADER, include_episodes=True,
                                                  min_score=_min_score(),
-                                                 query_rewrite=False)
+                                                 query_rewrite=False, spawn=False)
             except Exception:
                 wider, wider_ok = "", False
             if wider_ok and wider:

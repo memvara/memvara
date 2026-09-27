@@ -187,6 +187,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **One prompt starts at most one recall daemon, and a daemon that loses the race cannot
+  strand the winner.** When no daemon was running and a prompt's first read found nothing
+  fresh, the recall hook read a second time, wider, and each read started a daemon. The
+  widening read no longer starts one. When two daemons did start together, the one that
+  bound the socket first listened only after sweeping the other sockets in its folder, so
+  the other could take its refused probe for a dead owner, remove its socket file and
+  bind its own. The first daemon then kept the store open for its 30-minute idle timeout
+  on a socket nothing could reach. A daemon now listens as soon as it binds, and on exit
+  removes the socket file only if the path still names its own socket. The fix is in
+  `plugin/hooks/daemon.py` and `plugin/hooks/recall.py`; the seven plugin repositories
+  pick it up at their next sync. #344.
 - **A ranked read whose model call fails now serves the plain read.** On a retriever with
   a `read_selector`, `search(ranked=True)` gathers up to `rerank_top_n` turns for the
   selector. When the selector failed (outcome `fallback`, `key_rejected` or `disabled`),

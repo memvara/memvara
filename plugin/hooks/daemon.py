@@ -253,15 +253,21 @@ class Daemon:
                 server.bind(self.path)
             except OSError:
                 return 0
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass
-        self._sweep_stale()
-
+        # Listen at once. A second daemon whose `bind()` fails probes this path, and takes
+        # a refused probe to mean the owner is dead: a socket that is bound and not yet
+        # listening refuses too, so listening only after the sweep below let a loser
+        # unlink this path and bind its own, leaving this daemon on a socket nothing
+        # could reach (#344). The socket is private before `chmod` as well, because its
+        # directory is 0700 (`lib.ipc.runtime_dir`).
         server.listen(16)
-        server.settimeout(30.0)
+        ours = os.stat(self.path)
         try:
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
+            self._sweep_stale()
+            server.settimeout(30.0)
             while True:
                 try:
                     conn, _ = server.accept()
@@ -280,10 +286,18 @@ class Daemon:
                 threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
         finally:
             server.close()
-            try:
+            self._release(ours)
+
+    def _release(self, ours: os.stat_result) -> None:
+        """Remove the socket file, if the path still names this daemon's socket. Another
+        daemon may have replaced it, and removing that daemon's socket would leave it
+        serving an address no client can reach."""
+        try:
+            now = os.stat(self.path)
+            if (now.st_dev, now.st_ino) == (ours.st_dev, ours.st_ino):
                 os.unlink(self.path)
-            except OSError:
-                pass
+        except OSError:
+            pass
 
 
 def main() -> int:

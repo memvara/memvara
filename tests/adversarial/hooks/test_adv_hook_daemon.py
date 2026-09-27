@@ -12,7 +12,7 @@ stderr, which is how these tests tell the two routes apart. The second recall is
 same session as the first, because the first prompt of a session refreshes the standing
 preferences in the hook's own process, whichever route serves the recall itself.
 
-A recall whose first read finds nothing starts two daemons, which B62 (#344) pins.
+A recall whose first read finds nothing starts one daemon, not two (B62, #344).
 """
 
 from __future__ import annotations
@@ -89,25 +89,21 @@ def test_a_hook_with_no_daemon_imports_the_library_itself(
     assert runner.daemon_sockets() == []
 
 
-# -- known bugs --------------------------------------------------------------------------
+# -- a bug these tests found, now fixed ----------------------------------------------------
 
-@known_bugs.xfail("B62")
 def test_a_recall_whose_first_read_finds_nothing_starts_one_daemon(
         hooks: Make, tmp_path: pathlib.Path) -> None:
     """lib/fast.py, `recall`, starts the daemon after every read it makes in its own
     process, and recall.py reads a second time, wider, when the first read finds nothing
-    fresh. So a prompt that matches nothing, with no daemon running, starts two daemons
-    for one store. This counts the starts, which does not depend on which of the two ends
-    up listening.
+    fresh. So a prompt that matches nothing, with no daemon running, used to start two
+    daemons for one store (#344). The widening read now starts none. This counts the
+    starts, which does not depend on which daemon ends up listening.
 
     Each daemon records its pid as soon as its Python starts, long before either daemon
-    listens. In 40 of 40 measured runs, 20 of them with four extra processes keeping the
-    cores busy, both pids were recorded by the time `wait_for_daemon` returned. The test
-    still waits up to 5 seconds for a second pid, so that a start delayed by load cannot
-    make the strict pin pass. While the bug is present, the wait ends as soon as the second
-    pid appears and costs nothing. Once the bug is fixed, only one pid ever appears, so the
-    test waits the whole 5 seconds on every run. The fix should then shorten the wait or
-    move the test to the nightly tier."""
+    listens. In 40 of 40 measured runs while the bug was present, 20 of them with four
+    extra processes keeping the cores busy, both pids were recorded by the time
+    `wait_for_daemon` returned. So the test waits one more second for a second pid, which
+    covers a start delayed by load, and costs that second on every run."""
     db = support.make_store(tmp_path / "empty.db", memory=False)
     runner = hooks("claude", daemon=True, env=support.store_env(db))
     result = runner.run("recall", session="one", prompt=support.UNRELATED)
@@ -115,8 +111,8 @@ def test_a_recall_whose_first_read_finds_nothing_starts_one_daemon(
         "no matching memories")
     runner.wait_for_daemon()
     # A second daemon, if the hook started one, records its pid as its Python starts. The
-    # docstring says what this wait costs once the bug is fixed.
-    deadline = time.monotonic() + 5.0
+    # docstring says why one second is enough.
+    deadline = time.monotonic() + 1.0
     while len(runner.daemon_pids()) < 2 and time.monotonic() < deadline:
         time.sleep(0.05)
     pids = runner.daemon_pids()
