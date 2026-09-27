@@ -29,7 +29,14 @@ from harness.report import Finding
 FOLDER = "regressions"
 OUTPUT = "output.log"
 RESULTS = "results.jsonl"
-ARTIFACTS = {"log": f"{FOLDER}/{OUTPUT}", "results": f"{FOLDER}/{RESULTS}"}
+
+
+def artifacts(folder: str) -> dict[str, str]:
+    """The files a step that runs tests writes into its folder, as a finding names them."""
+    return {"log": f"{folder}/{OUTPUT}", "results": f"{folder}/{RESULTS}"}
+
+
+ARTIFACTS = artifacts(FOLDER)
 
 #: The tier the step runs, and the tier each failed test is rerun in.
 TIER = "nightly"
@@ -166,53 +173,40 @@ class Failure:
 
 
 def failures(results: Results, *, commit: str,
-             rerun: Callable[[str], Sequence[str] | None], limit: int = RERUN_LIMIT,
-             log_tail: str = "") -> list[Failure]:
-    """The night's failures, in the order pytest ran them.
+             rerun: Callable[[str], Sequence[str] | None] | None, limit: int = RERUN_LIMIT,
+             log_tail: str = "", folder: str = FOLDER) -> list[Failure]:
+    """The failures of one step's test run, in the order pytest ran them.
 
     Each failed test is rerun through `rerun(nodeid)`, which returns the reruns' results,
     or None once the caller's rerun budget is spent. After `limit` tests, or once the
-    budget is spent, a failed test is reported unconfirmed. A strict expected failure that
-    passed is not rerun. A run that exits 1 with no failed test, or with any status other
-    than 0 and 1, adds one session failure carrying `log_tail`.
+    budget is spent, a failed test is reported unconfirmed. With no `rerun` at all, as for
+    a long run (see LONG_RUNS), a failed test is a confirmed break as it stands. A strict
+    expected failure that passed is not rerun. A run that exits 1 with no failed test, or
+    with any status other than 0 and 1, adds one session failure carrying `log_tail`.
+    `folder` is the step's folder, which the findings' artifacts name.
     """
+    names = artifacts(folder)
     found: list[Failure] = []
     reruns_asked = 0
     for test in results.tests:
         outcome = test["outcome"]
         if outcome == "xpass-strict":
-            found.append(Failure(_finding(test, commit), "xpass-strict", (), "unconfirmed"))
+            found.append(Failure(_finding(test, commit, names), "xpass-strict", (),
+                                 "unconfirmed"))
+        elif outcome in ("failed", "error") and rerun is None:
+            found.append(Failure(_finding(test, commit, names), "finding", (), "confirmed"))
         elif outcome in ("failed", "error"):
+            assert rerun is not None
             answer: Sequence[str] | None = None
             if reruns_asked < limit:
                 reruns_asked += 1
                 answer = rerun(test["nodeid"])
             said = tuple(answer or ())
-            found.append(Failure(_finding(test, commit), "test", said, flakes.verdict(said)))
+            found.append(Failure(_finding(test, commit, names), "test", said,
+                                 flakes.verdict(said)))
     status = results.exitstatus
     if status not in (None, 0) and (status != 1 or not found):
-        found.append(_session(status, commit, log_tail))
-    return found
-
-
-def long_run_failures(results: Results, *, commit: str, folder: str,
-                      log_tail: str = "") -> list[Failure]:
-    """A long run's failures. A failed test is a confirmed break as it stands, because a
-    long run is never rerun (see LONG_RUNS); a strict expected failure that passed, and a
-    run that failed outside any test, are reported as the regressions step reports them.
-    `folder` is the step's folder, which the findings' artifacts name."""
-    artifacts = {"log": f"{folder}/{OUTPUT}", "results": f"{folder}/{RESULTS}"}
-    found: list[Failure] = []
-    for test in results.tests:
-        if test["outcome"] == "xpass-strict":
-            found.append(Failure(_finding(test, commit, artifacts), "xpass-strict", (),
-                                 "unconfirmed"))
-        elif test["outcome"] in ("failed", "error"):
-            found.append(Failure(_finding(test, commit, artifacts), "finding", (),
-                                 "confirmed"))
-    status = results.exitstatus
-    if status not in (None, 0) and (status != 1 or not found):
-        found.append(_session(status, commit, log_tail, log=artifacts["log"]))
+        found.append(_session(status, commit, log_tail, log=names["log"]))
     return found
 
 

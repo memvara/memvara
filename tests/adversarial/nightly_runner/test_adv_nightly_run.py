@@ -636,15 +636,19 @@ def test_a_torn_line_in_the_test_results_is_a_warning_in_the_report(
     canned.write_text(json.dumps(PASSED) + "\n" + '{"nodeid": "tests/test_api.py::t", "ou\n'
                       + json.dumps({"exitstatus": 0}) + "\n")
 
-    def torn(python: str, results: pathlib.Path) -> list[str]:
+    def torn(python: str, results: pathlib.Path, *paths: str) -> list[str]:
         return [python, "-c", "import shutil, sys; shutil.copyfile(sys.argv[1], sys.argv[2])",
                 str(canned), str(results)]
 
-    table = _table(tmp_path, [], 0, regressions=steps.Step(
-        "regressions", 600.0, run.regressions_step(command=torn)))
+    table = _table(tmp_path, [], 0,
+                   regressions=steps.Step("regressions", 600.0,
+                                          run.regressions_step(command=torn)),
+                   soak=steps.Step("soak", 600.0, run.long_run_step("soak", command=torn)))
     _night(repo, "2026-09-27", table, notify=Notifications())
     warnings = _report(repo, "2026-09-27")["warnings"]
-    assert any("results.jsonl" in warning and "2" in warning for warning in warnings), warnings
+    for folder in ("regressions", "soak"):
+        assert any(f"{folder}/results.jsonl" in warning and "2" in warning
+                   for warning in warnings), warnings
 
 
 def test_a_breach_during_a_night_that_crashed_is_still_recorded(
@@ -695,3 +699,20 @@ def test_every_command_the_nightly_session_is_told_to_run_is_one_the_scripts_acc
         if name == "filing":
             filed.add(args[0])
     assert filed == {"issue", "advisory", "pr"}
+
+
+def test_a_long_run_before_the_regressions_step_keeps_its_failures_and_counts(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    """Every step that runs tests adds to the night's failures and layer counts, so the
+    order of the steps cannot make one step's results replace another's."""
+    table = _table(tmp_path, [FAILED], 1, soak=_long_step(
+        tmp_path, "soak", {"outcome": "failed", "message": "the recency detector fired"}, 1))
+    soak = next(step for step in table if step.name == "soak")
+    reordered = (table[0], soak, *(step for step in table[1:] if step.name != "soak"))
+    _night(repo, "2026-09-27", reordered, notify=Notifications())
+    report = _report(repo, "2026-09-27")
+    assert sorted(entry["finding"]["invariant"] for entry in report["failures"]) == sorted(
+        [NODEID, f"{regressions.LONG_RUNS['soak']}::test_it"])
+    # The soak layer holds the timing run too, which passed after the regressions step.
+    assert report["tests"]["layers"]["soak"] == {"run": 2, "failed": 1, "flaky": 0}
+    assert report["tests"]["layers"]["model"] == {"run": 1, "failed": 1, "flaky": 0}

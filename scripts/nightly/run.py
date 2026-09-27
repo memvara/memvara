@@ -248,22 +248,9 @@ def regressions_step(*, command: Callable[[str, pathlib.Path], list[str]] = regr
         assert context.worktree is not None and context.python is not None
         python, worktree = context.python, context.worktree
         folder = context.folder / regressions.FOLDER
-        folder.mkdir(parents=True, exist_ok=True)
-        results_file, log = folder / regressions.RESULTS, folder / regressions.OUTPUT
         reserve = min(RERUN_RESERVE, (deadline - time.monotonic()) / 5)
-        ran = steps.run_command(command(python, results_file), cwd=worktree, env=context.env,
-                                log=log, deadline=deadline - reserve)
-        results = (regressions.read_results(results_file) if results_file.exists()
-                   else regressions.Results([], None))
-        if results.exitstatus is None and not ran.timed_out:
-            # pytest died before it recorded its own exit status, for example on an import
-            # error in a conftest file. The process's status is the next best thing, and
-            # without it the night would have no failure to show.
-            results = regressions.Results(results.tests, ran.returncode, results.bad)
-        if results.bad:
-            context.warnings.append(
-                f"Lines {', '.join(map(str, results.bad))} of regressions/results.jsonl could "
-                "not be read, so the tests they recorded are missing from this report.")
+        ran, results, log = _run_tests(context, regressions.FOLDER,
+                                       lambda file: command(python, file), deadline - reserve)
 
         def one_run(argv: list[str]) -> int | None:
             return steps.run_command(argv, cwd=worktree, env=context.env,
@@ -277,15 +264,41 @@ def regressions_step(*, command: Callable[[str, pathlib.Path], list[str]] = regr
             return flakes.rerun(nodeid, one_run, python=python, tier=regressions.TIER,
                                 command=rerun_command).results
 
-        context.failures = regressions.failures(results, commit=context.commit, rerun=rerun,
-                                                log_tail=_tail(log))
+        found = regressions.failures(results, commit=context.commit, rerun=rerun,
+                                     log_tail=_tail(log))
         context.exitstatus = results.exitstatus
-        context.layers = _with_flakes(regressions.layers(results), context.failures)
-        summary = _summary(results, context.failures)
+        _add_results(context, results, found)
+        summary = _summary(results, found)
         if ran.timed_out:
             return steps.Outcome(steps.TIMED_OUT, f"The test run reached its cap. {summary}")
         return steps.Outcome(steps.PASSED if ran.returncode == 0 else steps.FAILED, summary)
     return run
+
+
+def _run_tests(context: Night, folder_name: str,
+               command: Callable[[pathlib.Path], list[str]], deadline: float
+               ) -> tuple[steps.CommandResult, regressions.Results, pathlib.Path]:
+    """Run a step's tests with `command(results_file)` in the tested worktree, and read
+    what pytest_results.py recorded in the step's folder. It returns the command's result,
+    the test results and the log."""
+    assert context.worktree is not None
+    folder = context.folder / folder_name
+    folder.mkdir(parents=True, exist_ok=True)
+    results_file, log = folder / regressions.RESULTS, folder / regressions.OUTPUT
+    ran = steps.run_command(command(results_file), cwd=context.worktree, env=context.env,
+                            log=log, deadline=deadline)
+    results = (regressions.read_results(results_file) if results_file.exists()
+               else regressions.Results([], None))
+    if results.exitstatus is None and not ran.timed_out:
+        # pytest died before it recorded its own exit status, for example on an import
+        # error in a conftest file. The process's status is the next best thing, and
+        # without it the night would have no failure to show.
+        results = regressions.Results(results.tests, ran.returncode, results.bad)
+    if results.bad:
+        context.warnings.append(
+            f"Lines {', '.join(map(str, results.bad))} of {folder_name}/{regressions.RESULTS} "
+            "could not be read, so the tests they recorded are missing from this report.")
+    return ran, results, log
 
 
 def long_run_step(name: str, *,
@@ -298,25 +311,13 @@ def long_run_step(name: str, *,
     path = regressions.LONG_RUNS[name]
 
     def run(context: Night, deadline: float) -> steps.Outcome:
-        assert context.worktree is not None and context.python is not None
-        folder_name = name.replace(" ", "-")
-        folder = context.folder / folder_name
-        folder.mkdir(parents=True, exist_ok=True)
-        results_file, log = folder / regressions.RESULTS, folder / regressions.OUTPUT
-        ran = steps.run_command(command(context.python, results_file, path),
-                                cwd=context.worktree, env=context.env, log=log,
-                                deadline=deadline)
-        results = (regressions.read_results(results_file) if results_file.exists()
-                   else regressions.Results([], None))
-        if results.exitstatus is None and not ran.timed_out:
-            results = regressions.Results(results.tests, ran.returncode, results.bad)
-        found = regressions.long_run_failures(results, commit=context.commit,
-                                              folder=folder_name, log_tail=_tail(log))
-        context.failures.extend(found)
-        for layer, counts in regressions.layers(results).items():
-            entry = context.layers.setdefault(layer, {"run": 0, "failed": 0, "flaky": 0})
-            entry["run"] += counts["run"]
-            entry["failed"] += counts["failed"]
+        assert context.python is not None
+        python = context.python
+        ran, results, log = _run_tests(context, name, lambda file: command(python, file, path),
+                                       deadline)
+        found = regressions.failures(results, commit=context.commit, rerun=None,
+                                     log_tail=_tail(log), folder=name)
+        _add_results(context, results, found)
         summary = _summary(results, found)
         if ran.timed_out:
             return steps.Outcome(steps.TIMED_OUT, f"The run reached its cap. {summary}")
@@ -332,6 +333,18 @@ def long_run_step(name: str, *,
 
 def _tail(log: pathlib.Path) -> str:
     return log.read_text(encoding="utf-8", errors="replace")[-TAIL:] if log.exists() else ""
+
+
+def _add_results(context: Night, results: regressions.Results,
+                 found: Sequence[regressions.Failure]) -> None:
+    """Add one step's failures and per-layer counts to the night's. Each step that runs
+    tests adds to them, so the order of the steps cannot make one step's results replace
+    another's."""
+    context.failures.extend(found)
+    for layer, counts in _with_flakes(regressions.layers(results), found).items():
+        entry = context.layers.setdefault(layer, {"run": 0, "failed": 0, "flaky": 0})
+        for key in entry:
+            entry[key] += counts[key]
 
 
 def _with_flakes(layers: dict[str, dict[str, int]],
