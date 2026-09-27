@@ -261,18 +261,22 @@ def test_a_timing_run_on_battery_or_under_load_is_invalid_not_failed(
 def test_a_long_run_is_invalid_when_any_of_its_tests_skipped_as_an_invalid_run(
         repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
     """A long-run file may hold more than one test. One test that skipped because its run
-    is invalid makes the step invalid, even when another test in the file passed."""
+    is invalid makes the step invalid, even when another test in the file passed, and the
+    step gives the reason of every test that skipped."""
     reason = "the performance run is invalid: the machine was under load"
-    skipped = {**_long_passed("performance"),
-               "nodeid": f"{regressions.LONG_RUNS['performance']}::test_other",
-               "outcome": "skipped", "message": reason}
+    other = "needs a second core"
+    path = regressions.LONG_RUNS["performance"]
+    skipped = ({**_long_passed("performance"), "nodeid": f"{path}::test_other",
+                "outcome": "skipped", "message": reason},
+               {**_long_passed("performance"), "nodeid": f"{path}::test_third",
+                "outcome": "skipped", "message": other})
     table = _table(tmp_path, [PASSED], 0, performance=_long_step(
-        tmp_path, "performance", {}, 0, others=(skipped,)))
+        tmp_path, "performance", {}, 0, others=skipped))
     assert _night(repo, "2026-09-27", table, notify=Notifications()) == 0
     [step] = [step for step in _report(repo, "2026-09-27")["steps"]
               if step["name"] == "performance"]
     assert step["status"] == "invalid"
-    assert reason in step["summary"]
+    assert reason in step["summary"] and other in step["summary"]
 
 
 def test_the_invalid_run_prefix_is_the_one_the_timing_test_skips_with() -> None:

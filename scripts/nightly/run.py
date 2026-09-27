@@ -307,9 +307,9 @@ def long_run_step(name: str, *,
                   regressions.long_run_command) -> Callable[[Night, float], steps.Outcome]:
     """The step that runs the long run `name`, one of `regressions.LONG_RUNS`, within its
     own cap. A failed test is a confirmed break, since a long run is never rerun. A run is
-    invalid rather than passed, and the step gives the reason, when any of its tests
-    skipped because its run is invalid, as the timing test does on battery or under load,
-    or when every test in it skipped."""
+    invalid rather than passed when any of its tests skipped because its run is invalid,
+    as the timing test does on battery or under load, or when every test in it skipped.
+    The step then gives the reason of every test that skipped."""
     path = regressions.LONG_RUNS[name]
 
     def run(context: Night, deadline: float) -> steps.Outcome:
@@ -333,7 +333,7 @@ def long_run_step(name: str, *,
                    if str(test.get("message") or "").startswith(regressions.INVALID_RUN)]
         if invalid or all(test["outcome"] == "skipped" for test in results.tests):
             reasons = "; ".join(test.get("message") or "no reason given"
-                                for test in (invalid or skipped))
+                                for test in skipped)
             return steps.Outcome(steps.INVALID, f"Not judged: {reasons}")
         return steps.Outcome(steps.PASSED, summary)
     return run
