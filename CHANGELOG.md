@@ -173,6 +173,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The MCP server refuses a store from a newer version in one line.** Started on a store
+  written by a newer version of memvara, `memvara-mcp` and `python -m memvara.server`
+  exited with status 1 and a full Python traceback. The store's refusal was already clear;
+  the command line caught the configuration and embedder errors but not this one. It now
+  exits with status 2 and one `memvara-mcp:` line carrying the store's message, as it does
+  for an embedder mismatch. Any other error at startup still ends in a traceback. #299.
 - **Recall answers a prompt that holds half of a surrogate pair.** A client written in
   JavaScript can send one, an emoji cut in two, which `JSON.stringify` escapes as
   `\ud83d`. Python decodes it into a string that cannot be encoded, the store hashes each

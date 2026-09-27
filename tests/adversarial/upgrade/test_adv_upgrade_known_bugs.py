@@ -20,7 +20,6 @@ from . import golden
 from .test_adv_upgrade_refusals import NEWER, newer_store, serve
 
 
-@known_bugs.xfail("B22")
 def test_the_server_refuses_a_store_from_a_newer_version_without_a_traceback(
         tmp_path: pathlib.Path, home: pathlib.Path) -> None:
     """The server should exit with status 2 and one `memvara-mcp:` line, as it does for
