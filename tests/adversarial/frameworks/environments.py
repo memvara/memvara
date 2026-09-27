@@ -52,7 +52,8 @@ from harness.env import REPO, child_env
 
 if str(REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO / "scripts"))
-from nightly.steps import kill_tree  # noqa: E402 - scripts/ is not on the path until above
+# scripts/ is not on the path until the lines above put it there.
+from nightly.steps import kill_tree, run_command  # noqa: E402
 
 from . import probe
 
@@ -317,7 +318,10 @@ def _tail(text: str, lines: int = 40) -> str:
 
 def _run_in_group(command: Sequence[str | Path], *, timeout: float,
                   **options: Any) -> subprocess.CompletedProcess[bytes]:
-    """Run `command` the way `subprocess.run` does, in a process group of its own.
+    """Run `command` the way `subprocess.run` does, in a process group of its own, with
+    its output in pipes. `run_command` in scripts/nightly/steps.py does the same for a
+    command whose output goes to a log, and `run_probe` uses that; `Pip._run` needs the
+    output itself, so it uses this.
 
     Past `timeout`, the command and every process it started are stopped, not the
     command alone, and `subprocess.TimeoutExpired` is raised. On POSIX, whatever the
@@ -684,22 +688,18 @@ def run_probe(prepared: Prepared, work: Path, *, checks: Path | None = None,
     home = work / f"{name}-home"
     home.mkdir(exist_ok=True)
     report.unlink(missing_ok=True)
+    log.unlink(missing_ok=True)
     started = time.monotonic()
-    with open(log, "w", encoding="utf-8") as output:
-        try:
-            done = _run_in_group(
-                [prepared.python, "-I", "-B", PROBE,
-                 checks or prepared.wanted.framework.checks, report],
-                timeout=timeout, cwd=work, env=probe_env(home), stdin=subprocess.DEVNULL,
-                stdout=output, stderr=subprocess.STDOUT)
-            code: int | None = done.returncode
-        except subprocess.TimeoutExpired:
-            code = None
-        except OSError as exc:
-            raise BuildError(f"the probe could not start with {prepared.python}: "
-                             f"{exc}") from exc
+    try:
+        done = run_command(
+            [str(part) for part in (prepared.python, "-I", "-B", PROBE,
+                                    checks or prepared.wanted.framework.checks, report)],
+            cwd=work, env=probe_env(home), log=log, deadline=started + timeout)
+    except OSError as exc:
+        raise BuildError(f"the probe could not start with {prepared.python}: "
+                         f"{exc}") from exc
     printed = log.read_text(encoding="utf-8", errors="replace")
-    return ProbeRun(probe.read(report), code, _tail(printed, 60),
+    return ProbeRun(probe.read(report), done.returncode, _tail(printed, 60),
                     time.monotonic() - started)
 
 

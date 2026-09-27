@@ -88,6 +88,13 @@ def network_access(event: str, args: tuple[Any, ...]) -> str | None:
         if sock.family == getattr(socket, "AF_UNIX", object()):
             return None
         verb = "connect to" if event == "socket.connect" else "send to"
+        if address is None:
+            # sendmsg on a connected socket names no address, because it sends to the
+            # socket's peer.
+            try:
+                address = sock.getpeername()
+            except OSError:
+                return "send on a socket with no peer"
         return f"{verb} {_address(address)}"
     if event in _LOOKUPS:
         host = args[0]

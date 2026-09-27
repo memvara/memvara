@@ -58,6 +58,14 @@ class Symptom:
         return result.message == self.text if self.whole else self.text in result.message
 
 
+def _both_pins(name: str, check: str, bug: str,
+               symptom: Symptom) -> dict[tuple[str, str, str], tuple[pytest.MarkDecorator,
+                                                                    Symptom]]:
+    """The PINNED entries for a check that fails the same way at both pins."""
+    return {(name, pin, check): (known_bugs.xfail(bug), symptom)
+            for pin in environments.PINS}
+
+
 #: Checks that fail today because of a known bug: (framework, pin, check) -> the bug's
 #: strict expected failure, and its symptom.
 PINNED: dict[tuple[str, str, str], tuple[pytest.MarkDecorator, Symptom]] = {
@@ -78,20 +86,11 @@ PINNED: dict[tuple[str, str, str], tuple[pytest.MarkDecorator, Symptom]] = {
                 "copies remain", whole=True)),
     # mem0 2.x's add() requires one of the entity ids and its delete_all() takes them,
     # and its search() and get_all() refuse them with ValueError, not TypeError.
-    ("mem0", "floor", "add_and_delete_all_take_the_entity_ids_mem0_takes"): (
-        known_bugs.xfail("B80"),
-        Symptom("TypeError", "mem0 2.x moved entity ids into filters=")),
-    ("mem0", "latest", "add_and_delete_all_take_the_entity_ids_mem0_takes"): (
-        known_bugs.xfail("B80"),
-        Symptom("TypeError", "mem0 2.x moved entity ids into filters=")),
-    ("mem0", "floor", "search_and_get_all_refuse_entity_ids_as_mem0_does"): (
-        known_bugs.xfail("B80"),
-        Symptom("AssertionError", "the shim's search raises TypeError where mem0 raises "
-                "ValueError", whole=True)),
-    ("mem0", "latest", "search_and_get_all_refuse_entity_ids_as_mem0_does"): (
-        known_bugs.xfail("B80"),
-        Symptom("AssertionError", "the shim's search raises TypeError where mem0 raises "
-                "ValueError", whole=True)),
+    **_both_pins("mem0", "add_and_delete_all_take_the_entity_ids_mem0_takes", "B80",
+                 Symptom("TypeError", "mem0 2.x moved entity ids into filters=")),
+    **_both_pins("mem0", "search_and_get_all_refuse_entity_ids_as_mem0_does", "B80",
+                 Symptom("AssertionError", "the shim's search raises TypeError where mem0 "
+                         "raises ValueError", whole=True)),
     # What mem0 has and the shim lacks grew between 2.0.0 and the newest release, so each
     # pin lists its own.
     ("mem0", "floor", "the_shim_takes_every_method_and_argument_mem0_takes"): (
@@ -104,28 +103,15 @@ PINNED: dict[tuple[str, str, str], tuple[pytest.MarkDecorator, Symptom]] = {
                 "add(expiration_date=), add(timestamp=), close(), from_config(config_dict=), "
                 "get_all(show_expired=), search(reference_date=), search(show_expired=), "
                 "update(expiration_date=), update(metadata=)", whole=True)),
-    ("mem0", "floor", "every_row_carries_mem0s_memoryitem_fields"): (
-        known_bugs.xfail("B81"),
-        Symptom("AssertionError", "fields mem0's rows carry and the shim's do not: "
-                "{'get': ['score']}", whole=True)),
-    ("mem0", "latest", "every_row_carries_mem0s_memoryitem_fields"): (
-        known_bugs.xfail("B81"),
-        Symptom("AssertionError", "fields mem0's rows carry and the shim's do not: "
-                "{'get': ['score']}", whole=True)),
-    ("mem0", "floor", "update_and_from_config_refuse_with_mem0compaterror"): (
-        known_bugs.xfail("B81"),
-        Symptom("TypeError", "got an unexpected keyword argument 'metadata'")),
-    ("mem0", "latest", "update_and_from_config_refuse_with_mem0compaterror"): (
-        known_bugs.xfail("B81"),
-        Symptom("TypeError", "got an unexpected keyword argument 'metadata'")),
-    ("mem0", "floor", "defaults_match_mem0s_except_the_documented_threshold"): (
-        known_bugs.xfail("B82"),
-        Symptom("AssertionError", "defaults that differ from mem0's: get_all(top_k=100, "
-                "mem0 20), search(top_k=10, mem0 20)", whole=True)),
-    ("mem0", "latest", "defaults_match_mem0s_except_the_documented_threshold"): (
-        known_bugs.xfail("B82"),
-        Symptom("AssertionError", "defaults that differ from mem0's: get_all(top_k=100, "
-                "mem0 20), search(top_k=10, mem0 20)", whole=True)),
+    **_both_pins("mem0", "every_row_carries_mem0s_memoryitem_fields", "B81",
+                 Symptom("AssertionError", "fields mem0's rows carry and the shim's do not: "
+                         "{'get': ['score']}", whole=True)),
+    **_both_pins("mem0", "update_and_from_config_refuse_with_mem0compaterror", "B81",
+                 Symptom("TypeError", "got an unexpected keyword argument 'metadata'")),
+    **_both_pins("mem0", "defaults_match_mem0s_except_the_documented_threshold", "B82",
+                 Symptom("AssertionError", "defaults that differ from mem0's: "
+                         "get_all(top_k=100, mem0 20), search(top_k=10, mem0 20)",
+                         whole=True)),
 }
 
 
@@ -253,7 +239,9 @@ def test_nothing_in_the_environment_reached_the_network(
 def test_the_environments_fit_the_disk_budget(frameworks: environments.Session) -> None:
     """The environments must fit in the disk budget the plan sets, 8 GB. A new release
     that grows past it fails here, with each environment's size, before the disk fills.
-    An environment that failed to build is left out: its own tests report that."""
+    An environment that failed to build is left out: its own tests report that. When none
+    built there is nothing to measure, and the test fails rather than passing on an empty
+    list."""
     ready = []
     for name in CHECKS:
         for pin in environments.PINS:
@@ -261,6 +249,7 @@ def test_the_environments_fit_the_disk_budget(frameworks: environments.Session) 
                 ready.append(frameworks.prepare(name, pin))
             except environments.BuildError:
                 continue
+    assert ready, "no environment was built, so the disk budget was not checked"
     problem = environments.over_budget(ready)
     assert problem is None, problem
 
