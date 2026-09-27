@@ -191,6 +191,7 @@ def test_an_interpreter_that_cannot_name_itself_falls_back_to_python3(
     assert _entry(tmp_path)["command"] == "python3"
 
 
+@pytest.mark.covers("inv:MS4")
 def test_the_written_entry_and_the_documented_example_do_not_drift(tmp_path) -> None:
     """`EXAMPLE_CONFIG` is what the server prints when it refuses to start.
 
@@ -594,6 +595,7 @@ def test_the_skill_says_what_the_inferred_marker_means() -> None:
     assert "memory_why" in body, "a reader given the marker needs the way to check it"
 
 
+@pytest.mark.covers("inv:MS5")
 def test_the_skill_does_not_restate_a_tool_description() -> None:
     """The one prohibition the spec is explicit about, enforced the only way prose can be.
 

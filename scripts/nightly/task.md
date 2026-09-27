@@ -67,7 +67,8 @@ each command below as written: it prints what it would send and sends nothing. R
 `triage.md` what would have been filed, and go no further with that break: there is no
 issue number for a strict expected failure to cite.
 
-**A security-class break** goes to a private draft advisory, and nowhere else:
+**A security-class break** goes to a private draft advisory in memvara/memvara, and
+nowhere else:
 
 ```bash
 python3 scripts/nightly/filing.py advisory --night <date> --fingerprint <fingerprint>
@@ -77,19 +78,24 @@ Write nothing about it anywhere else: no issue, no branch, no commit, no pull re
 comment, and nothing in any file that is committed. Its failing test lands together with
 its fix, and the maintainer handles that.
 
-**Any other break** gets one issue, labelled `nightly-break`:
+**Any other break** gets one issue, labelled `nightly-break`, in the private repository
+memvara/build-health. It goes there rather than to memvara/memvara because memvara/memvara
+is public, and every issue in it is public too:
 
 ```bash
 python3 scripts/nightly/filing.py issue --night <date> --fingerprint <fingerprint> --severity <data-loss|wrong-result|crash>
 ```
 
 With Filing on, it prints the new issue's number. Then pin the break with a strict expected
-failure that cites the issue:
+failure that cites the issue. The pin and its pull request go to memvara/memvara, because
+they carry code:
 
 1. Add a worktree at the commit the night tested, which is `commit` in `report.json`:
    `git worktree add --detach local/nightly/<date>/pin-<first 12 characters of the fingerprint> <commit>`.
 2. In it, append one `KnownBug` to `tests/harness/known_bugs.py`, with the next free id,
-   the issue's number and a one-line title. Append only; never change an existing entry.
+   the issue's number, a one-line title and `repo="memvara/build-health"`, so the marker
+   cites the issue as `memvara/build-health#<number>`. Append only; never change an
+   existing entry.
 3. Mark the failing test with `@known_bugs.xfail("<id>")`, and make the test raise
    `known_bugs.Reproduced` only after it has seen this bug's own symptom, as the testing
    guide's section on known bugs describes. A marker that absorbs any failure would hide
@@ -101,7 +107,9 @@ failure that cites the issue:
    Then run it without, and check that pytest reports it as an expected failure.
 5. Commit the files by name, never with `git add -A`, `git add .` or `git commit -a`. The
    message says what the commit adds, in a plain sentence.
-6. Push the commit and open the draft pull request:
+6. Push the commit and open the draft pull request. It cites the issue by its full
+   reference, `memvara/build-health#<number>`, because a bare `#<number>` in memvara/memvara
+   would point at a different item:
 
 ```bash
 python3 scripts/nightly/filing.py pr --night <date> --fingerprint <fingerprint> --worktree <worktree>

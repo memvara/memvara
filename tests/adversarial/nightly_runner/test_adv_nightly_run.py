@@ -385,10 +385,12 @@ def test_a_break_back_after_its_issue_was_closed_is_reopened_not_left_as_filed(
     _night(repo, "2026-09-27", table, notify=Notifications())
     fingerprint = _report(repo, "2026-09-27")["failures"][0]["fingerprint"]
     history = night.Layout(repo).history
-    for what, number in (("issue", 301), ("pr", 302)):
+    for what, number, url in (
+            ("issue", 301, "https://github.com/memvara/build-health/issues/301"),
+            ("pr", 302, "https://github.com/memvara/memvara/pull/302")):
         night.append_jsonl(history, {"kind": "filed", "date": "2026-09-27", "what": what,
                                      "fingerprint": fingerprint, "severity": "wrong-result",
-                                     "number": number, "url": f"https://x/{number}",
+                                     "number": number, "url": url,
                                      "state": "OPEN", "existing": False})
     github, notify = GitHub(fingerprint), Notifications()
     started = datetime(2026, 9, 28, 1, 30, tzinfo=ZONE)
@@ -403,6 +405,34 @@ def test_a_break_back_after_its_issue_was_closed_is_reopened_not_left_as_filed(
     assert [(record["fingerprint"], record["number"]) for record in reopened] == [
         (fingerprint, 301)]
     assert [message for _, message in notify.sent if "recurred" in message]
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("https://github.com/memvara/memvara/issues/301", "memvara/memvara"),
+    ("https://github.com/memvara/build-health/issues/301", "memvara/build-health"),
+], ids=["filed before the move", "filed in build-health"])
+def test_a_closed_issue_is_reopened_in_the_repository_it_was_filed_in(
+        repo: pathlib.Path, tmp_path: pathlib.Path, url: str, expected: str) -> None:
+    """Issues moved from memvara/memvara to memvara/build-health on 2026-09-27. A break
+    whose issue was filed before that must be reopened where its issue is: reopened by
+    number in the other repository, it would fail, or reopen an unrelated issue with the
+    same number. The stored address says which repository it is."""
+    table = _table(tmp_path, [FAILED], 1)
+    _night(repo, "2026-09-27", table, notify=Notifications())
+    fingerprint = _report(repo, "2026-09-27")["failures"][0]["fingerprint"]
+    night.append_jsonl(night.Layout(repo).history, {
+        "kind": "filed", "date": "2026-09-27", "what": "issue", "fingerprint": fingerprint,
+        "severity": "wrong-result", "number": 301, "url": url, "state": "OPEN",
+        "existing": False})
+    github = GitHub(fingerprint)
+    assert run.main(["--checkout", str(repo), "--date", "2026-09-28", "--python",
+                     sys.executable, "--file"], steps=table, notify=Notifications(),
+                    gh=github, clock=lambda: datetime(2026, 9, 28, 1, 30, tzinfo=ZONE)) == 0
+    [reopen] = [command.argv for command in github.calls
+                if command.argv[:3] == ("gh", "issue", "reopen")]
+    assert reopen[:6] == ("gh", "issue", "reopen", "301", "--repo", expected)
+    [record] = [record for record in _history(repo) if record.get("what") == "reopen"]
+    assert record["url"] == url
 
 
 def test_a_flake_is_counted_and_never_planned(repo: pathlib.Path,

@@ -11,6 +11,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
+- **`scripts/test_changed.py` runs the tests a change can affect, before you push.** It
+  runs the changed test files, the tests that import or name a changed file, and the tests
+  that failed last time, and it runs the full suite when a change touches something it
+  cannot follow, such as a `conftest.py` or `pyproject.toml`. It replaces running the full
+  suite with coverage and mypy locally before every push; CI still runs all of that on every
+  pull request, and again on `main` after each merge, where a failure now opens an issue in
+  the private repository memvara/build-health. `docs/claude/working-here.md` describes the
+  five testing tiers. None of it changes the library.
 - **An adversarial test suite that tries to break memvara the way agents use it.** It
   lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
   scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
@@ -90,7 +98,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     worktree of `main`, with a time limit on every step, and writes a report that says
     what ran, what broke and what is new. It gives each break a fingerprint, so a break
     seen again is not reported as new. A new break whose severity a step declared gets
-    one public issue, or a private security advisory when its class is security. An
+    one issue in the private repository memvara/build-health, or a private security
+    advisory in this repository when its class is security. Issues go to
+    memvara/build-health because every issue in this public repository is public. The
+    draft pull request that pins the break is opened here, and it cites the issue as
+    `memvara/build-health#<number>`. An
     unclassified break waits for the scheduled session that follows the run, which
     classifies it. A watchdog started by launchd writes a "did not run" report when a
     night is missed. Nothing in the run merges anything.
@@ -185,6 +197,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   happened, with an ADD first when two share an instant. `HistoryRow.updated_at` is now
   a `datetime`, as its type always said, and `HistoryRow.at` gives the time of the
   event. #365.
+- **Recall answers a prompt that holds half of a surrogate pair.** A client written in
+  JavaScript can send one, an emoji cut in two, which `JSON.stringify` escapes as
+  `\ud83d`. Python decodes it into a string that cannot be encoded, the store hashes each
+  query with `text.encode()`, and the recall hook reported the whole recall as failed
+  although the store was healthy. The hook now drops the half character from the prompt
+  before it searches. #347.
 - **The LlamaIndex retriever's docstring shows an example that runs.** It showed
   `index_or_engine.as_query_engine(retriever=MemvaraRetriever(mem, user="alice"))`, which
   raises `TypeError` in llama-index-core at both memvara's floor, 0.13.0, and 0.14.25:
