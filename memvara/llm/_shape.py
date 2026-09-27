@@ -88,8 +88,8 @@ def parse_json_object(text: str) -> dict[str, Any]:
 def finite_amount(value: Any) -> float | None:
     """A measured quantity, or `None` for anything that cannot be one.
 
-    The last unguarded field in this module, and it is guarded for the reasons its
-    neighbours are. `isinstance(True, int)` is True in Python, so a stray boolean would
+    Guarded for the reasons its neighbours are, and `clamp_confidence` reads a
+    confidence through it. `isinstance(True, int)` is True in Python, so a stray boolean would
     land as `amount=1.0` — a measurement nobody took, the same slip `source_index` refuses
     a few lines down.
 
@@ -116,13 +116,21 @@ def finite_amount(value: Any) -> float | None:
 
 
 def clamp_confidence(value: Any) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    """A confidence between 0 and 1, or `UNKNOWN_CONFIDENCE` for one that cannot be read.
+
+    NaN loses every comparison, so clamping it would silently yield 0.0 and bury the claim
+    at the bottom of the ranking rather than admit the field could not be read. An integer
+    of a few hundred digits cannot become a float at all, and the `OverflowError` it
+    raised used to escape this function and cost every claim in the batch, not only its
+    own (#304). Both are read through `finite_amount`, which answers `None` for either.
+
+        >>> clamp_confidence(2), clamp_confidence(float("nan")), clamp_confidence(10 ** 400)
+        (1.0, 0.5, 0.5)
+    """
+    number = finite_amount(value)
+    if number is None:
         return UNKNOWN_CONFIDENCE
-    # NaN loses every comparison, so clamping it silently yields 0.0 and buries the claim
-    # at the bottom of the ranking rather than admitting we could not read the field.
-    if not math.isfinite(value):
-        return UNKNOWN_CONFIDENCE
-    return min(1.0, max(0.0, float(value)))
+    return min(1.0, max(0.0, number))
 
 
 def source_index(value: Any, n: int) -> int | None:

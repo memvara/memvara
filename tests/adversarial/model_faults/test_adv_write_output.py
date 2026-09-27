@@ -356,14 +356,15 @@ def test_a_malformed_item_is_dropped_and_the_write_returns_a_receipt(
     assert receipt.llm_calls == model.count()
 
 
-@known_bugs.xfail("B27")
 def test_an_overflowing_confidence_costs_only_its_own_claim(scripted: Make) -> None:
     """#304. One claim's confidence is an integer of 401 digits in the provider's JSON.
-    The backends' shaping raises on it, which the write path catches around the whole call,
-    so every claim of the batch is lost and the batch is deferred. `finite_amount` in
-    `llm/_shape.py` was hardened against this for `amount` and describes the failure."""
+    The backends' shaping used to raise on it, and the write path catches that around the
+    whole call, so every claim of the batch was lost and the batch deferred. Shaping now
+    reads the confidence as unknown, and only that claim's confidence changes."""
     huge = "1" + "0" * 400
-    moved = json.dumps(claim("team", "moved_in", "summer", confidence=0.5)).replace(
+    # A predicate of its own, so that the two claims do not share a slot: `moved_in` is
+    # an alias of `lives_in`, like `based_in`, and summer would then end Porto.
+    moved = json.dumps(claim("team", "zqx_moved_season", "summer", confidence=0.5)).replace(
         '"confidence": 0.5', f'"confidence": {huge}')
     reply = Text('{"claims": [' + json.dumps(PORTO) + ", " + moved + "]}")
     model = scripted(extract=[reply], resolve=[Forever(NEW_MANY)])
@@ -377,7 +378,7 @@ def test_an_overflowing_confidence_costs_only_its_own_claim(scripted: Make) -> N
                 f"B27: shaping raised OverflowError in clamp_confidence ({error}), and the "
                 "whole batch was deferred")
     assert not receipt.deferred
-    assert "Porto" in model_claims(mem)
+    assert model_claims(mem) == ["Porto", "summer"]
 
 
 @pytest.mark.parametrize("item", [

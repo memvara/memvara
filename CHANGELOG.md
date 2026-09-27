@@ -185,6 +185,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **One claim with an unreadable confidence no longer costs the whole batch.** When a
+  model's answer gave one claim a confidence written as an integer of a few hundred
+  digits, the shared shaping in `memvara/llm/_shape.py` raised `OverflowError` while
+  reading it. The write path catches errors around the whole extraction call, so every
+  claim in that batch was lost and the batch was marked deferred. The confidence is now
+  read as unknown (0.5), the way a NaN or a word already was, and the other claims are
+  stored. #304.
 - **The MCP server refuses a store from a newer version in one line.** Started on a store
   written by a newer version of memvara, `memvara-mcp` and `python -m memvara.server`
   exited with status 1 and a full Python traceback. The store's refusal was already clear;
