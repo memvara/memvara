@@ -73,7 +73,11 @@ HOST = Host(
     supports_async=False,
     detach_capture=True,
     timeouts={"session_start": 20, "capture": 120, "approve": 5},
-    client_configs=("~/.cursor/hooks.json", "~/.cursor/cli-config.json"),
+    #: `~/.cursor/mcp.json` is where Cursor keeps the MCP servers a user configures, and so
+    #: where a local store is named (#341). The other two are kept from before, first, so a
+    #: setup that already named the store there reads the same.
+    client_configs=("~/.cursor/hooks.json", "~/.cursor/cli-config.json",
+                    "~/.cursor/mcp.json"),
     config_format="json",
     #: Claude Code's `message.content` blocks, with the speaker under `role` rather than
     #: `type`. One field, not a reader.
