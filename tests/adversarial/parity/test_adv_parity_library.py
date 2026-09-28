@@ -41,9 +41,9 @@ registered as B52). The program makes the writes that fill those lists, and thei
 step-by-step comparison on the hosted clients is a strict expected failure that raises
 `known_bugs.Reproduced` only when those emptied lists are the whole difference; anything
 else in the same receipt still fails the run. `test_adv_parity_known_bugs.py` pins #334
-on its own, and the two other bugs these tests found: #335, a hosted receipt that always
-reports 0 for `ungrounded` and `polluted`, and #336, documentation that does not list
-every method only one client has, `end()` among them.
+on its own, and shows the two other bugs these tests found, both fixed: #335, a hosted
+receipt that reported 0 for `ungrounded` and `polluted`, and #336, documentation that did
+not list every method only one client has.
 """
 
 from __future__ import annotations
