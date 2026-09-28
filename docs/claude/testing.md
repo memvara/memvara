@@ -318,7 +318,7 @@ Each session starts a server, which takes about 0.2 seconds on a laptop and long
 - **What it found.** Six bugs, each pinned as a strict expected failure in `test_adv_fuzz_known_bugs.py`:
   - #311: the server reads its input in the locale's encoding rather than UTF-8. Under a strict UTF-8 stream, one byte that is not UTF-8 ends the server, and under another encoding, UTF-8 text is stored wrongly.
   - #312: NaN passes the bounds on `confidence` and `min_score`.
-  - #313: a refusal, and the reply to a read that finds nothing, quote the whole argument, however long it is.
+  - #313: a refusal, and the reply to a read that finds nothing, quoted the whole argument, however long it was. Each now quotes at most 80 characters of it and says how long the whole was.
   - #314: a filter key that ends in a newline passes the key pattern.
   - #315: a lone surrogate in an object argument's key is stored.
   - #316: `memory_recall` reports `ranked` without `include_episodes` as a `ValueError` from the catch-all instead of an argument error.

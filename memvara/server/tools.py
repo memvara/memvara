@@ -92,7 +92,7 @@ from ..types import (CUSTOM_ID_CHARS, DOCUMENT_STATES, LINK_RELATIONS, REASON_CH
                      ForgetPreview, MemoryType, RecallResult, RefusedProposal, Retype, Row,
                      SearchResults, WriteReceipt, closure_reason, closure_reasons, utcnow)
 from .memory_api import MemoryAPI
-from .validate import ToolError, validate
+from .validate import ToolError, shown, validate
 
 __all__ = ["FEATURE_ARGUMENTS", "TOOLS", "Tool", "ToolContext", "ToolError",
            "anchoring_by_default", "for_a_hosted_deployment", "safe_detail", "safe_line",
@@ -781,16 +781,20 @@ def _filter_refusal(tool: str, exc: FilterError) -> ToolError:
 # -- handlers ----------------------------------------------------------------
 
 def _no_match(query: str, day: str | None = None) -> str:
+    # The query is the caller's own text, so quoting it leaks nothing, but a query of any
+    # length would be copied whole into the model's context a second time (#313), so a
+    # long one is shortened the way a refusal shortens a value (`validate.shown`).
+    quoted = shown(safe_line(query))
     if day is not None:
         # A dated miss is not the same fact as a present one: something may well be
         # recorded about it now, and the block is empty because nothing held that day.
         return (
-            f"No stored memory matched {safe_line(query)!r} as things were on "
+            f"No stored memory matched {quoted} as things were on "
             f"{safe_line(day)}. Nothing recorded held on that day, so answer from the "
             "conversation instead of retrying with a reworded query."
         )
     return (
-        f"No stored memory matched {safe_line(query)!r}. Nothing is recorded about that, "
+        f"No stored memory matched {quoted}. Nothing is recorded about that, "
         "so answer from the conversation instead of retrying with a reworded query."
     )
 

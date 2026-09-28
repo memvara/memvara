@@ -11,6 +11,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A refusal, or a reply to a read that finds nothing, quotes at most 80 characters of
+  the argument.** Both quoted the whole value, so a long argument was copied into the
+  model's context a second time: `memory_recall` with a `k` of 100,000 characters was
+  refused in 100,053 characters, and `memory_search` for a 100,000-character query that
+  matched nothing answered in 100,135. Both now quote the first 80 characters of the
+  value as Python spells it and add `(shortened from N characters)`. A value short enough
+  is quoted whole, as before. #313 (B36).
 - **Capture logs a line on every path where it decides to do nothing.** It returned
   without a line when a hook had triggered the Stop, when the payload named no
   transcript, when the transcript path named no file, when the transcript's size could

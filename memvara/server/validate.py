@@ -96,6 +96,27 @@ def _describe(value: Any) -> str:
     return "an object"
 
 
+#: Longest part of a refused value, as `repr` spells it, that a refusal quotes. A refusal
+#: is read by a model, so a value of any length would be copied whole into its context a
+#: second time (#313); this is enough to recognise the value and see what is wrong with it.
+QUOTE_LIMIT = 80
+
+
+def shown(value: Any) -> str:
+    """`repr(value)`, shortened past `QUOTE_LIMIT` characters, saying that it was.
+
+    >>> shown("tea")
+    "'tea'"
+    >>> long = shown("y" * 100_000)
+    >>> long.endswith("… (shortened from 100,002 characters)"), len(long) < 130
+    (True, True)
+    """
+    text = repr(value)
+    if len(text) <= QUOTE_LIMIT:
+        return text
+    return f"{text[:QUOTE_LIMIT]}… (shortened from {len(text):,} characters)"
+
+
 def _suggest(key: str, vocabulary: Sequence[str]) -> str:
     """One rejected argument name, with the nearest real one when there is a plausible one.
 
@@ -104,8 +125,8 @@ def _suggest(key: str, vocabulary: Sequence[str]) -> str:
     """
     close = difflib.get_close_matches(key, vocabulary, n=2, cutoff=0.6)
     if not close:
-        return repr(key)
-    return f"{key!r} (did you mean {' or '.join(repr(c) for c in close)}?)"
+        return shown(key)
+    return f"{shown(key)} (did you mean {' or '.join(repr(c) for c in close)}?)"
 
 
 def _kind_of(value: Any, allowed: Sequence[str]) -> str | None:
@@ -148,7 +169,7 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
         chosen = _kind_of(value, kind)
         if chosen is None:
             raise ToolError(
-                f"{label} must be {_one_of(kind)}, got {_describe(value)} ({value!r})")
+                f"{label} must be {_one_of(kind)}, got {_describe(value)} ({shown(value)})")
         return _checked(label, value, {**spec, "type": chosen}, siblings)
     if kind in ("integer", "number"):
         # `bool` is a subclass of `int` in Python, so an unguarded isinstance check would
@@ -156,7 +177,7 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
         ok = isinstance(value, int) if kind == "integer" else isinstance(value, (int, float))
         if isinstance(value, bool) or not ok:
             raise ToolError(
-                f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
+                f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({shown(value)})")
         # The server's JSON parser accepts the bare token NaN. Every comparison with NaN
         # is false, so the bounds below would let it through, and a NaN min_score then
         # acts as no floor at all. It is refused here, whether or not the argument has
@@ -165,9 +186,9 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
             raise ToolError(f"{label} must be a number, got NaN")
         low, high = spec.get("minimum"), spec.get("maximum")
         if low is not None and value < low:
-            raise ToolError(f"{label} must be >= {low}, got {value!r}")
+            raise ToolError(f"{label} must be >= {low}, got {shown(value)}")
         if high is not None and value > high:
-            raise ToolError(f"{label} must be <= {high}, got {value!r}")
+            raise ToolError(f"{label} must be <= {high}, got {shown(value)}")
     elif kind == "boolean":
         # Only a real `bool`. Not `1`, which `isinstance(value, int)` would wave through
         # the way the integer branch above has to guard against in the other direction --
@@ -177,14 +198,14 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
         # `bool(...)`, where a non-empty string is True. The strict check is the point.
         if not isinstance(value, bool):
             raise ToolError(
-                f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
+                f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({shown(value)})")
         # Returned here rather than falling through, as `array` does: `enum` and
         # `maxLength` have no meaning on two values, and `len()` on a bool raises.
         return value
     elif kind == "array":
         if not isinstance(value, list):
             raise ToolError(
-                f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
+                f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({shown(value)})")
         return [_checked(f"{label}[{i}]", item, spec["items"])
                 for i, item in enumerate(value)]
     elif kind == "object":
@@ -194,7 +215,7 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
         # predicate names is refused here with its name in the message.
         if not isinstance(value, dict):
             raise ToolError(
-                f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
+                f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({shown(value)})")
         # The keys are names the caller chose, such as a metadata field, so each one is
         # checked like a string argument, against `propertyNames` when the schema
         # declares it. The check runs when it does not, too, because it is also what
@@ -202,12 +223,12 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
         # pattern, and a key holding half of a character was stored.
         names = spec.get("propertyNames", {})
         for key in value:
-            _checked(f"{label} key {key!r}", key, {"type": "string", **names})
+            _checked(f"{label} key {shown(key)}", key, {"type": "string", **names})
         return {key: _checked(f"{label}.{key}", item, spec["additionalProperties"])
                 for key, item in value.items()}
     elif not isinstance(value, str):
         raise ToolError(
-            f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({value!r})")
+            f"{label} must be {_ARTICLES[kind]}, got {_describe(value)} ({shown(value)})")
     else:
         # A lone surrogate is a `str` that cannot be encoded. Python's JSON parser
         # accepts `"\ud800"` and hands back exactly that, so it arrives here looking like
@@ -235,12 +256,12 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
     # ^[A-Za-z0-9_.-]{1,64}$. Every pattern the tools declare is anchored at both ends,
     # so a full match means the same thing as the schema's pattern.
     if pattern is not None and not re.fullmatch(pattern, value):
-        raise ToolError(f"{label} must match the pattern {pattern}, got {value!r}")
+        raise ToolError(f"{label} must match the pattern {pattern}, got {shown(value)}")
 
     allowed = spec.get("enum")
     if allowed is not None and value not in allowed:
         raise ToolError(
-            f"{label} must be one of {', '.join(repr(a) for a in allowed)}, got {value!r}")
+            f"{label} must be one of {', '.join(repr(a) for a in allowed)}, got {shown(value)}")
 
     # The string counterpart of `maximum`, and it exists for the same reason a numeric
     # bound does: an argument nothing checks is one every later turn pays for. A subject

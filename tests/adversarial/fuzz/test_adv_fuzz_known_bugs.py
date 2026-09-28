@@ -116,9 +116,8 @@ def test_a_nan_floor_sent_over_the_pipe_is_refused(shared_server: McpProcess,
     assert "error" in reply or reply["result"]["isError"] is True, reply
 
 
-# -- B36: a refusal or a no-match reply quotes the whole argument -------------------------
+# -- B36, fixed: a refusal or a no-match reply quoted the whole argument ------------------
 
-@known_bugs.xfail("B36")
 def test_a_refusal_quotes_only_a_short_part_of_the_value_it_refuses(
         shared_server: McpProcess) -> None:
     """A refusal is read by a model. `safe_detail` caps the detail of other failures at
@@ -128,12 +127,10 @@ def test_a_refusal_quotes_only_a_short_part_of_the_value_it_refuses(
     assert len(replies) == 1 and replies[0]["result"]["isError"] is True, replies
     assert changed(before, rows(shared_server.db)) == []
     text = text_of(replies[0])
-    if LONG in text:
-        raise known_bugs.Reproduced(f"a refusal of {len(text)} characters")
+    assert LONG not in text and "(shortened from 100,002 characters)" in text, text[:300]
     assert len(text) < 2_000, len(text)
 
 
-@known_bugs.xfail("B36")
 def test_a_read_that_finds_nothing_quotes_only_a_short_part_of_the_query(
         mcp: Start) -> None:
     server = mcp()
@@ -143,9 +140,8 @@ def test_a_read_that_finds_nothing_quotes_only_a_short_part_of_the_query(
         replies = exchange(server, call_line(1, tool, {"query": LONG}))
         assert len(replies) == 1 and replies[0]["result"]["isError"] is False, replies
         texts[tool] = text_of(replies[0])
-    whole = sorted(tool for tool, text in texts.items() if LONG in text)
-    if whole:
-        raise known_bugs.Reproduced(f"{whole} quote the whole query")
+    assert not any(LONG in text for text in texts.values()), texts.keys()
+    assert all("(shortened from 100,002 characters)" in text for text in texts.values())
     assert all(len(text) < 2_000 for text in texts.values()), {
         tool: len(text) for tool, text in texts.items()}
 
