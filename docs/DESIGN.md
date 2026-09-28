@@ -357,7 +357,7 @@ structured integration, declaring cardinality is always the caller's job.
 A ticketing system, a CRM or a billing table already holds these as columns and needs no
 model to read them back out of its own prose. That path needs no API key, exercises the
 whole bitemporal machine, and is the one the
-[answer-quality run](BENCHMARKS.md#answer-quality-end-to-end-an-authored-corpus-an-agent-as-the-reader)
+[answer-quality run](BENCHMARKS.md#answer-quality-end-to-end-an-authored-corpus-a-model-as-the-reader)
 measures as `memvara_structured`.
 
 ### Retrieval is hybrid, time-aware, and explains itself

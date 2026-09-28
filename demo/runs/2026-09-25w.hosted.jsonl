@@ -1,0 +1,24 @@
+{"scope": "demo-2026-09-25w-s1-memvara-20260813T0900", "status": "started", "at": "2026-09-25T17:18:49.001336+00:00"}
+{"scope": "demo-2026-09-25w-s1-memvara-20260813T0900", "status": "complete", "turns": 64, "facts": 0, "at": "2026-09-25T17:18:50.945974+00:00"}
+{"scope": "demo-2026-09-25w-s1-memvara-20260420T0900", "status": "started", "at": "2026-09-25T17:18:50.946328+00:00"}
+{"scope": "demo-2026-09-25w-s1-memvara-20260420T0900", "status": "complete", "turns": 32, "facts": 0, "at": "2026-09-25T17:18:51.340919+00:00"}
+{"scope": "demo-2026-09-25w-s1-memvara-20260501T0900", "status": "started", "at": "2026-09-25T17:18:51.341239+00:00"}
+{"scope": "demo-2026-09-25w-s1-memvara-20260501T0900", "status": "complete", "turns": 32, "facts": 0, "at": "2026-09-25T17:18:51.731301+00:00"}
+{"scope": "demo-2026-09-25w-s1-memvara_structured-20260813T0900", "status": "started", "at": "2026-09-25T17:18:51.731682+00:00"}
+{"scope": "demo-2026-09-25w-s1-memvara_structured-20260813T0900", "status": "complete", "turns": 64, "facts": 17, "at": "2026-09-25T17:19:04.311943+00:00"}
+{"scope": "demo-2026-09-25w-s1-memvara_structured-20260420T0900", "status": "started", "at": "2026-09-25T17:19:04.313854+00:00"}
+{"scope": "demo-2026-09-25w-s1-memvara_structured-20260420T0900", "status": "complete", "turns": 32, "facts": 11, "at": "2026-09-25T17:19:11.252125+00:00"}
+{"scope": "demo-2026-09-25w-s1-memvara_structured-20260501T0900", "status": "started", "at": "2026-09-25T17:19:11.254763+00:00"}
+{"scope": "demo-2026-09-25w-s1-memvara_structured-20260501T0900", "status": "complete", "turns": 32, "facts": 11, "at": "2026-09-25T17:19:18.277524+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara-20260813T0900", "status": "started", "at": "2026-09-25T17:19:24.237956+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara-20260813T0900", "status": "complete", "turns": 640, "facts": 0, "at": "2026-09-25T17:19:33.760311+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara-20260420T0900", "status": "started", "at": "2026-09-25T17:19:33.760876+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara-20260420T0900", "status": "complete", "turns": 296, "facts": 0, "at": "2026-09-25T17:19:36.297691+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara-20260501T0900", "status": "started", "at": "2026-09-25T17:19:36.298017+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara-20260501T0900", "status": "complete", "turns": 334, "facts": 0, "at": "2026-09-25T17:19:39.289922+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara_structured-20260813T0900", "status": "started", "at": "2026-09-25T17:19:39.290666+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara_structured-20260813T0900", "status": "complete", "turns": 640, "facts": 17, "at": "2026-09-25T17:20:00.775199+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara_structured-20260420T0900", "status": "started", "at": "2026-09-25T17:20:00.777697+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara_structured-20260420T0900", "status": "complete", "turns": 296, "facts": 11, "at": "2026-09-25T17:20:11.429845+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara_structured-20260501T0900", "status": "started", "at": "2026-09-25T17:20:11.432106+00:00"}
+{"scope": "demo-2026-09-25w-s10-memvara_structured-20260501T0900", "status": "complete", "turns": 334, "facts": 11, "at": "2026-09-25T17:20:22.533327+00:00"}
