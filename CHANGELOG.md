@@ -30,6 +30,28 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     `config_dict` and still refuses. #360 (B81).
   - `search()` and `get_all()` defaulted to `top_k` 10 and 100, where mem0 defaults to 20
     for both. Both now default to 20. #361 (B82).
+- **An open that refuses a store's embedder leaves an older store file as it was.**
+  `SQLiteStore` upgrades a file an older version wrote as it opens it, and commits the
+  upgrade; `Memvara` then checked its embedder and refused one of another width. So the
+  refused file had already been upgraded, and the release that wrote it could no longer
+  open it. The width check now also runs before the upgrade: `SQLiteStore` takes a new
+  keyword, `before_upgrade`, which it calls with the width of the stored vectors before it
+  writes anything to an older file, and `Memvara` refuses there with the same
+  `EmbedderMismatchError`. This covers an embedder you pass and the default one.
+  `reembed=True` still upgrades the file and re-encodes it. #300.
+- **A store whose open fails closes its database connection.** A store refused because a
+  newer version wrote it released its lock but left its SQLite connection open until
+  garbage collection, so on Windows the caller could not delete or replace the file, and
+  Python 3.13 warned about an unclosed database. #301.
+- **A model reply with thousands of invented predicates no longer stalls a write.** Past
+  the cap of 200 learned predicates, each new spelling is folded onto the nearest known
+  predicate as an alias. Each alias rebuilt the registry's whole index, and each search
+  for the nearest predicate read every alias again, so one `add()` took time that grew
+  with the square of the number of invented spellings: 100 to 130 seconds for 5,000 on a
+  laptop. An alias is now added to the index in place, and each predicate's words are kept
+  once, so the same write takes about 6 seconds. The model is still called 201 times,
+  and every predicate resolves as before. #309.
+
 - **A hook answers a payload nested too deeply to decode as it answers an empty one.**
   `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
   Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
