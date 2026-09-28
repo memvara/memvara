@@ -41,6 +41,7 @@ from memvara.select import (
     SelectorRefused,
 )
 from memvara.select.model import MAX_COMPLETION_TOKENS, SYSTEM, ModelSelector, _clean_span, _ts
+from memvara.select.stages import QueryRewriter
 from memvara.store import SQLiteStore
 from memvara.telemetry import (
     RETRIEVAL_MODEL_FALLBACK,
@@ -956,6 +957,7 @@ def test_unkept_seen_turns_get_selected_false_claims_stay_none(store, embedder) 
     (_status_exc(429), "provider", 429),
     (ConnectionError("down"), "error", None),
 ])
+@pytest.mark.covers("inv:TB6")
 def test_a_failed_model_call_falls_back_with_the_reranked_order(
     store, embedder, exc, reason, status,
 ) -> None:
@@ -996,6 +998,65 @@ def test_disabled_serves_unranked_with_no_reranker_call_and_no_select_ms(store, 
     assert reranker.calls == [], "nothing is spent on the cross-encoder"
     assert telemetry.total(RETRIEVAL_MODEL_REFUSED, reason="disabled") == 1
     assert telemetry.values(RETRIEVAL_SELECT_MS) == []
+
+
+class _RewriteChat:
+    """A `Chat` that answers every rewrite with the same other phrasing."""
+
+    def chat(self, system: str, prompt: str, *, json_object: bool,
+             max_completion_tokens: int, timeout: float,
+             usage: Usage | None = None) -> str:
+        return json.dumps({"queries": ["kayak trips"], "date_range": None})
+
+
+def _ids(results) -> list[str]:
+    return [(r.episode if isinstance(r, EpisodeResult) else r.claim).id for r in results]
+
+
+def test_a_fallback_serves_the_plain_read_with_its_reranker_pass(store, embedder) -> None:
+    """#308. The ranked stage gathers `rerank_top_n` turns for the selector. When the
+    selector fails, the read is the plain read: `max_episodes` turns, the claims a plain
+    read shows, and the plain read's reranker pass. It is observed once."""
+    eps = _seed(store, embedder, texts=[f"kayak turn {i}" for i in range(10)])
+    for text in ("kayak club on Sundays", "kayak stored in the garage"):
+        _add_claim(store, embedder, text)
+    reranker = ScoreReranker([e.content for e in eps])
+    telemetry = MemoryRecorder()
+    r = _engine(store, embedder, FakeSelector(top_n=5, select_raises=TimeoutError()),
+                reranker=reranker, rerank_top_n=20, max_episodes=3, telemetry=telemetry)
+
+    plain = r.search("kayak", EP_SCOPE, k=5, include_episodes=True)
+    failed = r.search("kayak", EP_SCOPE, k=5, include_episodes=True, ranked=True)
+
+    assert failed.selection.outcome == "fallback"
+    assert _ids(failed) == _ids(plain)
+    assert sum(isinstance(x, EpisodeResult) for x in failed) <= 3
+    assert telemetry.total(RETRIEVAL_QUERY) == 2
+
+
+@pytest.mark.parametrize("admit_raises, select_raises, passes", [
+    pytest.param(SelectorRefused("disabled"), None, 0, id="disabled"),
+    pytest.param(None, TimeoutError(), 2, id="fallback"),
+])
+def test_a_rewritten_read_that_failed_ranking_reranks_as_the_plain_read_does(
+        store, embedder, admit_raises, select_raises, passes) -> None:
+    """A rewritten plain read runs the reranker once, over the fused list. A read whose
+    ranking failed is the plain read and gets that pass, after the one the ranked stage
+    already spent ordering the turns for the selector. `disabled` spends nothing on the
+    cross-encoder: admission refused it before the stage's pass."""
+    eps = _seed(store, embedder, texts=[f"kayak turn {i}" for i in range(6)])
+    reranker = ScoreReranker([e.content for e in eps])
+    selector = FakeSelector(top_n=3, admit_raises=admit_raises, select_raises=select_raises)
+    r = HybridRetriever(store, embedder, PredicateRegistry(), reranker=reranker,
+                        rerank_top_n=20, selector=selector,
+                        rewriter=QueryRewriter(_RewriteChat()))
+
+    result = r.search("kayak", EP_SCOPE, k=5, include_episodes=True, ranked=True,
+                      query_rewrite=True)
+
+    assert result.rewrite.outcome == "applied"
+    assert result.selection.outcome == ("fallback" if passes else "disabled")
+    assert len(reranker.calls) == passes
 
 
 def test_key_rejected_401_carries_its_status_and_still_made_the_call(store, embedder) -> None:
@@ -1109,6 +1170,7 @@ def test_k_at_or_below_zero_on_an_unconfigured_retriever_still_says_unconfigured
 # --- token series: only when Usage.reported > 0, and retrieval.model_query -------------
 
 
+@pytest.mark.covers("inv:TB6")
 def test_tokens_and_model_query_emitted_when_usage_reports_something(store, embedder) -> None:
     _seed(store, embedder)
     selector = FakeSelector(top_n=3, keep=1, usage_tokens=(10, 5))

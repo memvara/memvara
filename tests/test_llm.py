@@ -7,6 +7,7 @@ and the `anthropic` package is not installed.
 from __future__ import annotations
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -128,8 +129,13 @@ def test_exported_from_the_package_without_the_sdk_installed():
         pkg.NotAThing
 
 
-def test_missing_sdk_raises_a_clear_install_hint():
-    """The SDK is genuinely absent here, which is the configuration this must survive."""
+def test_missing_sdk_raises_a_clear_install_hint(monkeypatch):
+    """An install without the SDK gets an install hint, not a bare import error.
+
+    CI does not install the SDK, but a developer's Python may have it, so the test takes it
+    away itself: a `None` entry in `sys.modules` makes `import anthropic` raise ImportError
+    whether or not the package is installed."""
+    monkeypatch.setitem(sys.modules, "anthropic", None)
     with pytest.raises(ImportError, match="pip install"):
         AnthropicLLM()
 
@@ -761,6 +767,7 @@ def test_an_unconvertible_amount_does_not_cost_the_whole_batch() -> None:
 # -- truncation ------------------------------------------------------------------------
 
 
+@pytest.mark.covers("inv:WP7")
 def test_a_truncated_response_raises_rather_than_returning_no_claims():
     """The same silence `test_llm_openai.py` describes at length, under this provider's
     name for it. Anthropic reports it as `stop_reason="max_tokens"` on the response

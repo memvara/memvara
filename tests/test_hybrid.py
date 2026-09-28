@@ -814,6 +814,7 @@ def personal(store: SQLiteStore, embedder: HashingEmbedder) -> dict[str, Claim]:
     }
 
 
+@pytest.mark.covers("inv:RT4")
 def test_a_query_of_pure_stopwords_makes_the_lexical_leg_abstain(
     store: SQLiteStore, retriever: HybridRetriever, personal: dict[str, Claim]
 ) -> None:
@@ -1203,6 +1204,29 @@ def test_diversity_does_not_reorder_within_a_slot(
     assert ids(capped) == ids(uncapped)
 
 
+def test_a_demoted_claim_never_falls_behind_a_result_that_scores_zero(
+    store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever,
+    cluster: dict[str, list[Claim]]
+) -> None:
+    """The cap moves a slot's third and later claims behind the other topics that match.
+    A result that scores 0 does not match at all, so a claim that does must stay ahead of
+    it, or one more non-matching candidate pushes a relevant claim out of the top k
+    (#327)."""
+    scope = Scope("acme", "alice")
+    for text, predicate in (("alice lives in lisbon", "lives_in"),
+                            ("alice works at acme corp", "works_at"),
+                            ("alice likes the colour blue", "favorite_color")):
+        add(store, embedder, text, scope, predicate=predicate)
+    dupe_ids = {c.id for c in cluster["dupes"]}
+
+    results = retriever.search("standup format rating", scope, k=12)
+
+    zero = [i for i, r in enumerate(results) if r.score <= 0]
+    demoted = [i for i, r in enumerate(results) if r.claim.id in dupe_ids][2:]
+    assert zero and demoted, [(r.claim.text, round(r.score, 3)) for r in results]
+    assert max(demoted) < min(zero), [(r.claim.text, round(r.score, 3)) for r in results]
+
+
 # ===========================================================================
 # Degenerate and adversarial input
 # ===========================================================================
@@ -1251,6 +1275,7 @@ def test_adversarial_queries_return_cleanly(
 
 
 @pytest.mark.parametrize("query", ["", "   ", "*", "!!!", "🙂"])
+@pytest.mark.covers("inv:RT4")
 def test_signal_free_queries_return_nothing_rather_than_arbitrary_order(
     store: SQLiteStore, embedder: HashingEmbedder, retriever: HybridRetriever, query: str
 ) -> None:
@@ -1803,12 +1828,12 @@ def test_an_empty_result_set_is_reported_rather_than_omitted(
 def test_the_quality_factor_is_bounded_by_the_normalization_it_reports_on(
     store: SQLiteStore, embedder: HashingEmbedder
 ) -> None:
-    """Salience overriding relevance was the failure. The design intent is that quality
-    can only pull a result *down* from its evidence, by at most `1/span` — and the one
-    way past 1.0 is a salience reinforced beyond 1.0, which `quality_boost` deliberately
-    does not clamp. So above 1.0 is the alarm, and the series has to be able to report
-    it: the claim below is pinned at the top of the range reported from a production
-    store, and its factor must come back greater than one rather than clipped to it."""
+    """Salience overriding relevance was the failure (#333). Quality can only pull a
+    result *down* from its evidence, by at most `1/span`, and the series reports the
+    factor the ranking actually used. The claim below is reinforced to 2.6, the top of
+    the range reported from a production store. The ranking's factor stops at 1.0, so
+    this claim's factor is exactly 1.0, and a value above 1.0 would mean the ranking
+    had stopped doing so."""
     rec = MemoryRecorder()
     scope = Scope("acme", "alice")
     now = datetime.now(timezone.utc)
@@ -1822,10 +1847,8 @@ def test_the_quality_factor_is_bounded_by_the_normalization_it_reports_on(
     span = 1.0 + reader.w_recency + reader.w_confidence + reader.w_salience
     factors = sorted(rec.values(RETRIEVAL_QUALITY_FACTOR))
     assert len(factors) == 2
-    assert all(f >= 1.0 / span for f in factors)
-    assert factors[0] < 1.0 < factors[1], (
-        "the over-reinforced claim's factor was clipped, which is the one value worth "
-        "seeing")
+    assert all(1.0 / span <= f <= 1.0 for f in factors)
+    assert factors[1] == pytest.approx(1.0)
     # Fresh, confident and heavily reinforced against stale, unconfident and faded:
     # the spread is what makes the distribution worth plotting.
     assert factors[1] - factors[0] > 0.1
@@ -2019,6 +2042,7 @@ def test_the_reading_is_cached_and_retaken_on_a_counter_not_a_clock(tmp_path):
     mem.close()
 
 
+@pytest.mark.covers("inv:CG5")
 def test_a_backend_that_cannot_measure_is_not_read_as_a_store_with_no_joins(tmp_path):
     """`{}` means it did not look. Reading that as zero would switch a working graph leg
     off on every third-party store at once, on a measurement nobody took.
@@ -2034,6 +2058,7 @@ def test_a_backend_that_cannot_measure_is_not_read_as_a_store_with_no_joins(tmp_
     mem.close()
 
 
+@pytest.mark.covers("inv:CG5")
 def test_a_store_without_connectivity_at_all_keeps_its_graph_leg(tmp_path):
     mem = _joined_store(tmp_path, star=True)
     r = HybridRetriever(mem.store, mem.embedder, mem.registry, w_graph=1.0,
@@ -2313,6 +2338,7 @@ def _rows(results) -> list[tuple[str, str, float]]:
              r.score) for r in results]
 
 
+@pytest.mark.covers("inv:RT9")
 def test_on_a_file_each_stage_runs_its_vector_leg_on_another_thread(
         tmp_path, embedder, monkeypatch) -> None:
     """Both stages hand their vector leg to a pool thread and run the lexical leg
@@ -2333,6 +2359,7 @@ def test_on_a_file_each_stage_runs_its_vector_leg_on_another_thread(
     store.close()
 
 
+@pytest.mark.covers("inv:RT9")
 def test_inside_a_batch_every_leg_reads_on_the_calling_thread(tmp_path, embedder) -> None:
     """Inside `batch()` the calling thread reads its own uncommitted rows, and no other
     thread's connection can see them. A turn written in the batch must reach the
@@ -2347,6 +2374,7 @@ def test_inside_a_batch_every_leg_reads_on_the_calling_thread(tmp_path, embedder
     store.close()
 
 
+@pytest.mark.covers("inv:RT9")
 def test_a_database_with_no_file_runs_every_leg_on_the_calling_thread(
         store, embedder, monkeypatch) -> None:
     """One connection serves every read, so a second thread would only wait for it."""
@@ -2380,6 +2408,7 @@ def test_a_search_that_finds_every_leg_thread_busy_runs_the_leg_itself(
     store.close()
 
 
+@pytest.mark.covers("inv:RT9")
 def test_the_query_is_embedded_once_and_on_the_thread_that_searched(tmp_path) -> None:
     """The vector legs run on a pool thread, and the embedder is still called once per
     pass and only from the thread that called `search()`, as it always was: an embedder

@@ -9,6 +9,13 @@ from typing import Mapping
 #: The checkout under test. This file is tests/harness/env.py, two levels below it.
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
+#: The nightly run's folder, relative to a checkout (scripts/nightly/night.py).
+NIGHTLY = ("local", "nightly")
+#: Where the timing run and the soak keep their records between runs, relative to a
+#: checkout. The nightly run's `Layout.records` and the soak tests' `records_dir` fixture
+#: both use it, so a local run and the nightly share one history.
+NIGHTLY_RECORDS = (*NIGHTLY, "records")
+
 
 def _real_home() -> pathlib.Path:
     """The account's home directory, read from the password database on POSIX when
@@ -74,3 +81,17 @@ def child_env(home: pathlib.Path, extra: Mapping[str, str] | None = None) -> dic
     })
     env.update(extra or {})
     return env
+
+
+def feature_env(features: Mapping[str, bool]) -> dict[str, str]:
+    """The MEMVARA_FEATURE_<NAME> variables that switch each named feature on or off.
+
+    One spelling of the convention for everything that sets it: a server's environment
+    (`stdio.McpProcess`) and the client config the hooks read (the scripted scenarios).
+    The names are not checked here; McpProcess refuses one the server does not know.
+
+    >>> feature_env({"documents": False})
+    {'MEMVARA_FEATURE_DOCUMENTS': '0'}
+    """
+    return {f"MEMVARA_FEATURE_{name.upper()}": "1" if on else "0"
+            for name, on in features.items()}

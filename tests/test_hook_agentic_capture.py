@@ -1048,8 +1048,9 @@ def test_new_claim_id_reads_both_receipt_shapes():
 
 
 def test_a_hook_write_to_a_local_store_lands_with_its_memory_type():
-    """Every hook write to a local store used to fail: the library takes the memory type's
-    enum and the hook passed its name, which raised `AttributeError` inside the store."""
+    """Every hook write to a local store used to fail: the library took only the memory
+    type's enum and the hook passed its name, which raised `AttributeError` inside the
+    store (#270)."""
     mem = _mem()
     stored, failed = write.store_facts(
         mem, [extract.Fact("user", "prefers", RUFF, "procedural")], TURN)

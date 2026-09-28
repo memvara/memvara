@@ -48,7 +48,9 @@ Reads taken that way see the snapshot as of their own statement, so a reader obs
 sweep's windows as they commit rather than waiting for the end of one. The exception is
 a thread inside `batch()`, which must see its own uncommitted rows — `competing_claims`
 during a write is what makes contradiction detection exact — so it stays on the writer's
-connection. See `_read`.
+connection. See `_read`. That connection holds the database's write lock from the first
+statement of the batch, so no other writer can commit between a lookup and the write it
+decides; see `batch`.
 """
 
 from __future__ import annotations
@@ -57,9 +59,11 @@ import gc
 import json
 import math
 import os
+import re
 import sqlite3
 import struct
 import threading
+import time
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -88,10 +92,11 @@ from ..types import (
     Scope,
     as_utc,
     resolved_entity,
+    stored_scope,
     utcnow,
 )
 from .base import (BELIEVED, resolve_states, state_predicate, stored_state_predicate,
-                   unexpired_predicate)
+                   unended_predicate, unexpired_predicate)
 from .encryption import (EncryptionError, EncryptionWarning, VectorSealer, file_kind,
                          require_sqlcipher, resolve_key)
 
@@ -190,7 +195,11 @@ if TYPE_CHECKING:  # pragma: no cover
 #    "the", so "the the band" keys as `band` and folds to itself. No column changes. The
 #    version exists so that an older file re-derives every key once with the new fold,
 #    which `_migrate_to_v12` does on every upgrade; `_migrate` says why that is enough.
-SCHEMA_VERSION = 16
+# 17: `erasures` gained `vector_slot`, the row of `<db>.vecs` an erased claim's vector
+#    held, so that `residue` can read that row from the file and check that the erasure
+#    blanked it. Nullable and nothing is backfilled: no earlier version recorded the row,
+#    and the proof of such an erasure answers from the database, as it did before.
+SCHEMA_VERSION = 17
 
 # The two document tables, created by `_migrate_to_v14`.
 #
@@ -315,8 +324,10 @@ CREATE TABLE IF NOT EXISTS predicates (
 );
 """
 
-SCHEMA = """
-PRAGMA journal_mode=WAL;
+# Settings of a connection rather than of the file. Every open applies them to its writer
+# connection: through `SCHEMA` when it runs the schema step, and on their own when it
+# skips the step (`_needs_schema_step`).
+_CONNECTION_PRAGMAS = """
 PRAGMA synchronous=NORMAL;
 -- Overwrite the content of a deleted row rather than merely marking its space free.
 -- `erase()` and `purge()` promise the text is gone, and without this it is still sitting
@@ -325,7 +336,11 @@ PRAGMA synchronous=NORMAL;
 -- run and +9% on `erase_claim`, which is the right side of that trade for the one
 -- operation in this library whose entire purpose is that the data stops existing.
 PRAGMA secure_delete=ON;
+"""
 
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+""" + _CONNECTION_PRAGMAS + """
 CREATE TABLE IF NOT EXISTS episodes (
     id       TEXT PRIMARY KEY,
     tenant   TEXT NOT NULL,
@@ -498,6 +513,10 @@ CREATE TABLE IF NOT EXISTS erasures (
     erased_at  REAL NOT NULL,
     sources    INTEGER NOT NULL DEFAULT 0,
     counts     TEXT NOT NULL DEFAULT '{}',
+    -- The row of `<db>.vecs` the claim's vector held, or NULL when it had none or was
+    -- erased before schema 17. A number, not content: it is what lets `residue` read
+    -- that row from the file and check that the erasure blanked it.
+    vector_slot INTEGER,
     -- Keyed on the pair, not on the claim. An id can be erased, restored from a backup,
     -- and erased again, and those are two events: keying on `claim_id` alone made the
     -- second silently overwrite the first, so an append-only trail lost exactly the entry
@@ -601,6 +620,12 @@ CREATE INDEX IF NOT EXISTS ep_cover ON episodes(tenant, usr, project, agent, ses
 -- for 100,000 claims. Down here because `expires_at` does not exist on a pre-v15 file
 -- until `_migrate_to_v15` adds it.
 """ + f"CREATE INDEX IF NOT EXISTS cl_last_change ON claims(tenant, {_LAST_CHANGE});\n"
+
+# The names of the indexes `_LATE_INDEXES` creates. An open skips the schema step only
+# when every one of them exists (`_needs_schema_step`), because an index added there
+# without a version bump reaches an older file only through that step.
+_LATE_INDEX_NAMES = frozenset(
+    re.findall(r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)\s+ON\s", _LATE_INDEXES))
 
 _CLAIM_FIELDS = (
     "id", "tenant", "usr", "agent", "session", "subject", "predicate", "object", "text",
@@ -1060,9 +1085,46 @@ def _lock_path(db_path: str) -> str | None:
     return None if db_path in (":memory:", "") else db_path + ".lock"
 
 
-# How long a store that is opening waits for another store's `clear_embeddings` to finish
-# before it gives up.
+def _write_refusal(path: str) -> str | None:
+    """Why this process may not open `path` for writing, or None when it may.
+
+    SQLite opens a file it may not write read-only, without an error, and on a read-only
+    connection `BEGIN IMMEDIATE` and `BEGIN EXCLUSIVE` start only a read transaction, again
+    without an error. A lock taken that way keeps nobody out, so a store asks here before
+    it relies on one. Only a refused permission counts. A missing file is no refusal,
+    because SQLite creates it for writing, and any other problem with the path is left to
+    SQLite, which reports it when it opens the file, as it always has.
+    """
+    try:
+        os.close(os.open(path, os.O_RDWR))
+    except PermissionError as exc:
+        return exc.strerror or str(exc)
+    except OSError:
+        return None
+    return None
+
+
+# How long a store that is opening waits, in `_hold_presence`, for another store's
+# `clear_embeddings` to finish before it gives up. Waiting for another store's schema
+# step is `_SCHEMA_STEP_WAIT`.
 _PRESENCE_WAIT = 60.0
+
+# How long a store that is opening waits, in `_creating`, for another store to finish
+# creating or upgrading the same file before it gives up. An upgrade that re-derives
+# every claim's keys took 26.6 seconds for 300,000 claims on a loaded laptop, 88.5 us a
+# claim, so ten minutes covers about 6.8 million claims at that rate. A process that dies
+# lets go of the lock at once, so the wait runs this long only while the holder is alive.
+_SCHEMA_STEP_WAIT = 600.0
+# How long each try for that lock waits inside SQLite (`_reserve`). Python acts on Ctrl-C
+# only between calls into SQLite, so an interrupt ends the wait within about this long.
+_LOCK_TRY = 0.25
+
+# How long a statement waits for another connection's lock before SQLite gives up with
+# "database is locked". It is `sqlite3.connect`'s own default, named here so that
+# `_run_schema`, which has to wait by hand, waits exactly as long as every other write.
+_BUSY_TIMEOUT = 5.0
+# How long `_run_schema` sleeps before it tries again.
+_SCHEMA_RETRY_PAUSE = 0.01
 
 
 class StoreInUseError(RuntimeError):
@@ -1367,18 +1429,32 @@ class _VecIndex:
         erases, because the name-to-row map is loaded lazily: a process that erases
         before it has searched has no entry for the item, and without the slot the row
         would stay in the file with the vector in it.
+
+        The row can also lie beyond the part of the file this index has mapped, because
+        another process wrote it after this one last mapped the file. It is then blanked
+        through the file itself. Only the mapped part used to be blanked, so an erasure
+        in one process of a vector another process had written left it on disk.
         """
         with self._lock:
             mapped = self._row.pop(item_id, None)
             slot = mapped if mapped is not None else slot
-            if slot is not None and self._mat is not None and slot < self._rows:
+            if slot is None:
+                return None
+            if self._mat is not None and slot < self._rows:
                 self._mat[slot] = 0.0
-            if slot is not None and self._sealer is not None and self._fh is not None:
+            if self._fh is None or self.dim is None:
+                return slot
+            if self._sealer is not None:
                 # The ciphertext goes too. It is encrypted, but whoever holds the key
                 # could still decrypt it, and "erased" has to mean gone from the file.
                 offset, size = self._record(slot)
-                if offset < os.fstat(self._fh.fileno()).st_size:
-                    _write_at(self._fh.fileno(), bytes(size), offset)
+            elif self._mat is None or slot >= self._rows:
+                offset, size = _VEC_HEADER + slot * self.dim * 4, self.dim * 4
+            else:
+                return slot
+            end = os.fstat(self._fh.fileno()).st_size
+            if offset < end:
+                _write_at(self._fh.fileno(), bytes(min(size, end - offset)), offset)
             return slot
 
     def reset(self) -> None:
@@ -1768,13 +1844,24 @@ class SQLiteStore:
         # Before this store writes to the database or opens the vector file; see
         # `_hold_presence`.
         self._alone = False
+        #: Why this process could not open `<db>.lock` for writing when it opened its
+        #: presence connection, or None. A clear refuses while it is set; `_claim_alone`.
+        self._presence_refusal: str | None = None
         self._presence = self._hold_presence()
         try:
             with self._lock:
-                self._db.executescript(SCHEMA)
-                self._migrate()
-                self._db.executescript(_LATE_INDEXES)
-                self._db.commit()
+                if self._needs_schema_step():
+                    # Nothing may ever be written through `_creating`'s connection to the
+                    # lock file. A commit there would have to write the file's first page,
+                    # and that waits for every other open store's shared lock to go, which
+                    # happens only when they close.
+                    with self._creating():
+                        self._run_schema()
+                        self._migrate()
+                        self._db.executescript(_LATE_INDEXES)
+                        self._db.commit()
+                else:
+                    self._db.executescript(_CONNECTION_PRAGMAS)
                 if sealer is not None:
                     # Read after the first commit: a new database has no salt on disk
                     # until its first page is written, and this is the value every other
@@ -1793,7 +1880,7 @@ class SQLiteStore:
 
     def _connect(self) -> sqlite3.Connection:
         """A new connection to this store's file, with the key applied if it has one."""
-        conn = self._sql.connect(self.path, check_same_thread=False)
+        conn = self._sql.connect(self.path, timeout=_BUSY_TIMEOUT, check_same_thread=False)
         if self._key is not None:
             # The raw-key form, `x'<hex>'`, which skips SQLCipher's password stretching:
             # the key is already 32 random bytes, and stretching it would cost every new
@@ -1841,14 +1928,122 @@ class SQLiteStore:
         works between two stores in one process too. It is taken before this store writes
         to the database or opens the vector file, so a store that opens during a clear
         waits here, not after it has mapped the file.
+
+        Reading the file is enough to hold the shared lock, so a lock file this process
+        may not write is no reason to refuse an open. But SQLite then opens it read-only,
+        and a clear could not take it exclusively (#350), so `_present` records whether
+        this process may write it, for `_claim_alone`.
         """
+        return self._take_lock_file(
+            self._present, _PRESENCE_WAIT, "is having its vectors cleared by another store",
+            "that re-embedding has finished")
+
+    def _present(self, conn: sqlite3.Connection) -> None:
+        """Hold the shared lock on a new presence connection, whose journal is in memory,
+        and record whether this process may write the lock file.
+
+        The record is taken here, once SQLite has opened the file, so it describes the
+        connection SQLite opened. Taken before, it found no file when this store was the
+        first to open, and if another account created the file in that moment, SQLite
+        opened that file read-only while the record said nothing was wrong.
+
+        A clear later asks this same connection for the lock exclusively (`_try_alone`),
+        and on the empty lock file `BEGIN EXCLUSIVE` starts a first page, as
+        `BEGIN IMMEDIATE` does for the creation lock (`_reserve`). With SQLite's default
+        journal that needed a new `<db>.lock-journal`, which a directory the account may
+        not add files to refuses. Nothing is ever written through this connection either,
+        so its rollback journal is kept in memory too.
+        """
+        path = _lock_path(self.path)
+        self._presence_refusal = None if path is None else _write_refusal(path)
+        conn.execute("PRAGMA journal_mode=MEMORY").fetchone()
+        self._share(conn)
+
+    @contextmanager
+    def _creating(self) -> Iterator[None]:
+        """Hold `<db>.lock`'s write lock while this store runs its schema and migrations.
+
+        Two stores that ran them at the same moment on one new file got in each other's
+        way. One failed at the switch to WAL mode (#281). With that switch retried
+        (`_run_schema`), one could still fail inside a migration with "vtable constructor
+        failed" when it opened a text index while the other was still creating tables and
+        indexes. So one store at a time runs this step, and a store that opens while
+        another is creating or upgrading the file waits here, for up to
+        `_SCHEMA_STEP_WAIT` seconds, and then finds the file finished. The lock is
+        SQLite's reserved lock: one connection holds it at a time, and it leaves every
+        open store's shared lock alone, so a store that is merely open holds nobody up. It
+        is taken on a second connection, so that this store's own shared lock is held
+        throughout.
+
+        The reserved lock needs a lock file this process may write. SQLite opens a file
+        it may not write read-only, and `BEGIN IMMEDIATE` on a read-only connection takes
+        only a shared lock, without an error, so the lock would keep nobody out. Such a
+        file is refused here, with `PermissionError`, before anything is created or
+        upgraded. `_hold_presence` has already created the file if it was missing.
+        """
+        path = _lock_path(self.path)
+        # Asked again although `_present` asked it for the presence connection: this lock
+        # is taken on a connection of its own, and SQLite decides that connection's mode
+        # when it opens the file, which is next.
+        refusal = None if path is None else _write_refusal(path)
+        if refusal is not None:
+            raise PermissionError(
+                f"{self.path} has to be created or upgraded, and a store does that only "
+                f"while it holds a write lock on {path}, so that one process at a time "
+                f"does it. This process may not write that file ({refusal}). Give this "
+                "user permission to write it, or delete it while nothing has the store "
+                "open; the next open creates it again.")
+        conn = self._take_lock_file(
+            lambda c: self._reserve(c, _SCHEMA_STEP_WAIT), _SCHEMA_STEP_WAIT,
+            "is being created or upgraded by another store", "that has finished")
+        try:
+            yield
+        finally:
+            if conn is not None:
+                # Closing rolls the transaction back, which lets go at once. A commit
+                # would not: on the empty lock file, BEGIN IMMEDIATE starts a first page
+                # in memory, and writing it needs every other store's shared lock gone.
+                conn.close()
+
+    @staticmethod
+    def _reserve(conn: sqlite3.Connection, wait: float) -> None:
+        """Take SQLite's reserved lock on `conn` without making a file beside it, waiting
+        up to `wait` seconds for another store to let go of it.
+
+        On the empty lock file, `BEGIN IMMEDIATE` starts a first page, and with SQLite's
+        default journal that made `<db>.lock-journal`, which a directory the account may
+        not add files to refuses. Nothing is ever written through this connection, so its
+        rollback journal is kept in memory, where it costs nothing.
+
+        The wait can run for `_SCHEMA_STEP_WAIT`, ten minutes, and Python acts on Ctrl-C
+        only between calls into SQLite. One long wait inside SQLite would hold an
+        interrupt back until it ended, so the lock is asked for in tries of `_LOCK_TRY`
+        seconds, and an interrupt ends the wait within one try. When `wait` has passed,
+        the last "database is locked" is raised, and `_take_lock_file` reports it.
+        """
+        conn.execute("PRAGMA journal_mode=MEMORY").fetchone()
+        conn.execute(f"PRAGMA busy_timeout = {int(_LOCK_TRY * 1000)}")
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                return
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+
+    def _take_lock_file(self, take: Callable[[sqlite3.Connection], Any], wait: float,
+                        doing: str, done: str) -> sqlite3.Connection | None:
+        """A new connection to `<db>.lock` that holds the lock `take` asks for, or None
+        when the store has no file. SQLite waits up to `wait` seconds for it, and a store
+        still in the way after that is named by `doing` and `done`."""
         path = _lock_path(self.path)
         if path is None:
             return None
-        conn = sqlite3.connect(path, timeout=_PRESENCE_WAIT, isolation_level=None,
+        conn = sqlite3.connect(path, timeout=wait, isolation_level=None,
                                check_same_thread=False)
         try:
-            self._share(conn)
+            take(conn)
         except sqlite3.DatabaseError as exc:
             conn.close()
             if "locked" not in str(exc):
@@ -1857,9 +2052,13 @@ class SQLiteStore:
                     "no data: delete it while nothing has the store open, and open the "
                     "store again.") from exc
             raise StoreInUseError(
-                f"{self.path} is having its vectors cleared by another store, and it "
-                f"has not finished in {_PRESENCE_WAIT:.0f} seconds. Open it again when "
-                "that re-embedding has finished.") from None
+                f"{self.path} {doing}, and it has not finished in {wait:g} seconds. "
+                f"Open it again when {done}.") from None
+        except BaseException:
+            # Anything else, an interrupt included: the connection may already hold its
+            # lock, and left open it would keep it until Python freed the connection.
+            conn.close()
+            raise
         return conn
 
     @staticmethod
@@ -1874,10 +2073,24 @@ class SQLiteStore:
         Only possible when no other store, in any process, has the database open, because
         each holds the lock shared. Held until `_share_again`, so a store that opens in the
         meantime waits in `_hold_presence`.
+
+        A presence connection SQLite opened read-only, because this process may not write
+        the lock file, cannot take it exclusively: `BEGIN EXCLUSIVE` there starts only a
+        read transaction, without an error, and the clear would go ahead while another
+        store had the database open (#350). So such a store raises `PermissionError`
+        instead, naming the file, with nothing changed.
         """
         conn = self._presence
         if conn is None or self._alone:
             return
+        if self._presence_refusal is not None:
+            raise PermissionError(
+                f"The vectors of {self.path} were not cleared. A store clears them only "
+                f"while it holds a write lock on {_lock_path(self.path)}, which shows that "
+                "no other store has the database open, and this process may not write "
+                f"that file ({self._presence_refusal}). Give this user permission to write "
+                "it and open the store again, or delete it while nothing has the store "
+                "open; the next open creates it again. Nothing was changed.")
         if not self._try_alone(conn):
             # A store that nothing refers to any more holds its lock until Python frees
             # it, and a store sits in a reference cycle, so that waits for the cycle
@@ -1902,6 +2115,10 @@ class SQLiteStore:
         between the two locks at once. Without that, two clears at once could each find
         the other gone, and the one refused would go on mapping a file the other had
         truncated.
+
+        Only "database is locked" means another store holds the file. Any other error is
+        raised as itself, after this store holds the file shared again, so that a fault
+        is never reported as another process to go and stop.
         """
         began = not self._db.in_transaction
         if began:
@@ -1910,11 +2127,13 @@ class SQLiteStore:
         conn.execute("PRAGMA busy_timeout = 0")
         try:
             conn.execute("BEGIN EXCLUSIVE")
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
             conn.execute(f"PRAGMA busy_timeout = {int(_PRESENCE_WAIT * 1000)}")
             self._share(conn)
             if began:
                 self._db.rollback()
+            if "database is locked" not in str(exc):
+                raise
             return False
         conn.execute(f"PRAGMA busy_timeout = {int(_PRESENCE_WAIT * 1000)}")
         self._alone = True
@@ -2040,6 +2259,57 @@ class SQLiteStore:
             self._local.db = conn
         return conn
 
+    def _needs_schema_step(self) -> bool:
+        """Whether this open must run the schema step, which creates or upgrades the file.
+
+        A file this version has finished with needs none: its version stamp is this
+        version's, it is in WAL mode, and every index in `_LATE_INDEXES` exists. Its open
+        skips the step and the creation lock (`_creating`), so opens of an established
+        store never wait for one another. Every other file takes the step under the lock:
+        a new file, one an older version wrote, one a tool switched out of WAL mode, and
+        one that lacks an index `_LATE_INDEXES` gained without a version bump. So does a
+        file a newer version wrote, and `_migrate` refuses it.
+        """
+        if int(self._db.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+            return True
+        if self._db.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+            return True
+        indexes = {r[0] for r in self._db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'")}
+        return not _LATE_INDEX_NAMES <= indexes
+
+    def _run_schema(self, wait: float = _BUSY_TIMEOUT) -> None:
+        """Run `SCHEMA`, waiting for another connection's write lock as every write does.
+
+        This runs inside `_creating`, so no other memvara store is running its schema
+        step at the same time. The retry here is for a connection from outside memvara
+        that holds the database's write lock, such as the `sqlite3` shell or a backup
+        tool, which `_creating` cannot hold back.
+
+        `SCHEMA` starts by switching the database to WAL mode. On a file that is not in
+        WAL mode yet, which is every new store, the switch needs a stronger lock than the
+        connection holds, and while another connection holds the write lock SQLite
+        refuses that lock at once instead of calling the busy handler, because waiting
+        for it there could deadlock. So the open used to fail within a few milliseconds
+        with "database is locked" (#281), where every other write waits for up to
+        `_BUSY_TIMEOUT` seconds.
+
+        So "database is locked", and only that error, is tried again until `wait` seconds
+        have passed, which is the busy timeout unless a test shortens it. By then the
+        other connection has usually let go, and a file already in WAL mode needs no
+        stronger lock. Every statement in `SCHEMA` is a pragma or an `IF NOT EXISTS`, so
+        running it again changes nothing. Any other error is raised at once.
+        """
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                self._db.executescript(SCHEMA)
+                return
+            except self._sql.OperationalError as exc:
+                if "database is locked" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+            time.sleep(_SCHEMA_RETRY_PAUSE)
+
     def _migrate(self) -> None:
         """Stamp or upgrade the schema version.
 
@@ -2068,6 +2338,7 @@ class SQLiteStore:
             self._migrate_to_v13()
             self._migrate_to_v14()
             self._migrate_to_v15()
+            self._migrate_to_v17()
             # No `_migrate_to_v16`: version 16 changed the entity fold and nothing else,
             # and `_migrate_to_v12` above already re-derived every claim's keys and both
             # hashes from its surface text with the fold this build runs. Alias stamps are
@@ -2129,6 +2400,20 @@ class SQLiteStore:
             self._db.execute("ALTER TABLE claims ADD COLUMN expires_at REAL")
         if "expire_reason" not in have:
             self._db.execute("ALTER TABLE claims ADD COLUMN expire_reason TEXT")
+
+    def _migrate_to_v17(self) -> None:
+        """Add `erasures.vector_slot`, and backfill nothing into it.
+
+        Shape-driven like `_migrate_to_v15`: a new file already has the column from
+        `SCHEMA`, and running this twice changes nothing. No earlier version recorded
+        which row of the vector file an erased claim's vector held, and the row cannot be
+        recovered once the vector is gone, so every erasure already on record keeps NULL.
+        `residue` then has no row to read, and the proof of that erasure is the database
+        count it always was.
+        """
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(erasures)")}
+        if "vector_slot" not in have:
+            self._db.execute("ALTER TABLE erasures ADD COLUMN vector_slot INTEGER")
 
     def _migrate_to_v12(self) -> None:
         """Add the project and type columns, re-fold both keys, and rehash both hashes.
@@ -2795,6 +3080,19 @@ class SQLiteStore:
         benefit, since the whole sweep is one logical operation. Reentrant, so nesting
         is harmless.
 
+        A batch is also a write transaction that holds the database's write lock from its
+        first statement. The outermost `batch()` begins with `BEGIN IMMEDIATE`, so every
+        read inside the block runs under the lock and sees what every other writer has
+        committed. Python's `sqlite3` module would otherwise begin the transaction only at
+        the first write statement, and a lookup made before it could be out of date by
+        the time the write landed: two writers on one file each looked up a single-valued
+        slot, each found it empty, and both values stayed live. Now a second writer, on
+        another handle or in another process, waits at its own `BEGIN IMMEDIATE` until
+        this batch commits, and then reads what it wrote. A writer that waits longer than
+        SQLite's busy timeout of five seconds gets `OperationalError: database is locked`
+        from the `with` statement, before anything in its block has run. Readers on their
+        own connections are not held up; they keep reading the last commit.
+
         Durability caveat, stated precisely because it is easy to assume otherwise: this
         store runs `synchronous=NORMAL` in WAL mode, so a commit survives a *process*
         crash but not a machine or power loss until the next checkpoint. Set
@@ -2804,6 +3102,11 @@ class SQLiteStore:
         vectors SQLite holds if it is ever found stale.
         """
         with self._lock:
+            if self._batch_depth == 0 and not self._db.in_transaction:
+                # The write lock before the block's first read; see the docstring. A
+                # transaction already open here is one a write outside any batch began and
+                # has not committed, and it holds the lock already.
+                self._db.execute("BEGIN IMMEDIATE")
             self._batch_depth += 1
             try:
                 yield self
@@ -2899,20 +3202,32 @@ class SQLiteStore:
                       alias: str = "") -> tuple[str, list]:
         """SQL and binds for "in one of `states` at these two instants".
 
-        The general filter every read here routes through, and the only place in this
-        repository that binds the state predicate's markers. `_live_clause` below is this
+        The general filter every read here routes through. `_live_clause` below is this
         with the two-valued alias applied; `base.state_predicate` is the SQL, which is
-        deliberately not written out again here.
+        deliberately not written out again here, and `_bind_axes` binds its markers.
 
         The binding is the half with a silent failure mode — a belief instant bound onto
         a world column answers identically to a correct one on every `as_of` call, since
         those pass the two axes equal. So it is no longer remembered: `state_predicate`
-        returns the axis behind each marker, and this reads that list. Transposing the
-        pair is not a mistake this method can express any more, whatever subset of the
+        returns the axis behind each marker, and `_bind_axes` reads that list. Transposing
+        the pair is not a mistake this method can express any more, whatever subset of the
         states is asked for and however many markers that subset happens to need.
         """
+        return self._bind_axes(state_predicate("?", states=states, alias=alias),
+                               valid_at, known_at, alias)
+
+    def _bind_axes(self, predicate: tuple[str, tuple[str, ...]],
+                   valid_at: datetime | None, known_at: datetime | None,
+                   alias: str = "") -> tuple[str, list]:
+        """Bind a predicate's markers from its axis list, and add the expiry clause.
+
+        `predicate` is the pair `state_predicate` and `unended_predicate` return: the SQL
+        with a `?` at every marker, and the clock behind each marker in order. This is the
+        one place in this repository those markers are bound, for `_state_clause` and for
+        `unended_claims` alike, so both read the axis list rather than knowing it.
+        """
         v, k = _clock(valid_at, known_at)
-        clause, axes = state_predicate("?", states=states, alias=alias)
+        clause, axes = predicate
         params = [k if axis == "known" else v for axis in axes]
         if not self.hide_expired:
             return clause, params
@@ -3015,8 +3330,8 @@ class SQLiteStore:
     def _row_to_episode(self, r: sqlite3.Row) -> Episode:
         return Episode(
             id=r["id"],
-            scope=Scope(r["tenant"], r["usr"], r["agent"], r["session"],
-                        project=r["project"]),
+            scope=stored_scope(r["tenant"], r["usr"], r["agent"], r["session"],
+                               project=r["project"]),
             role=r["role"],
             content=r["content"],
             ts=_dt(r["ts"]),  # type: ignore[arg-type]
@@ -3319,8 +3634,8 @@ class SQLiteStore:
     def _row_to_claim(r: sqlite3.Row) -> Claim:
         return Claim(
             id=r["id"],
-            scope=Scope(r["tenant"], r["usr"], r["agent"], r["session"],
-                        project=r["project"]),
+            scope=stored_scope(r["tenant"], r["usr"], r["agent"], r["session"],
+                               project=r["project"]),
             subject=r["subject"], predicate=r["predicate"], object=r["object"],
             text=r["text"], polarity=r["polarity"],
             memory_type=MemoryType(r["memory_type"]),
@@ -3502,6 +3817,10 @@ class SQLiteStore:
         self._db.execute(f"DELETE FROM {fts} WHERE rowid=?", (row["rowid"],))
         held = self._db.execute(
             f"SELECT slot FROM {t.name} WHERE {t.key}=?", (item_id,)).fetchone()
+        if held is not None:
+            # Before the vector's row goes: a store that held no vector when it opened
+            # has not opened the vector file yet, and learns its width from these rows.
+            self._ensure_dim()
         self._db.execute(
             f"INSERT OR IGNORE INTO vec_free (slot) SELECT slot FROM {t.name} "
             f"WHERE {t.key}=? AND slot IS NOT NULL", (item_id,))
@@ -3584,10 +3903,12 @@ class SQLiteStore:
 
         Which turns may go is decided by two set queries rather than two per turn, and
         the erasure itself runs in one transaction, so erasing a document's hundred
-        chunks is one write rather than a hundred.
+        chunks is one write rather than a hundred. The decision is made inside that
+        transaction, under the write lock, so a claim that another writer made cite one of
+        the turns in the meantime keeps it.
         """
         ids = list(dict.fromkeys(episode_ids))
-        with self._lock:
+        with self.batch():
             keep = self._held(ids) | (set() if cited else self._cited(ids))
             erased = 0
             for episode_id in ids:
@@ -3595,7 +3916,6 @@ class SQLiteStore:
                     gone, _ = self._erase_row("episodes", "episodes_fts",
                                               _EPISODE_VECS, episode_id)
                     erased += gone
-            self._maybe_commit()
         return erased
 
     def erase_claim(self, claim_id: str, *, sources: bool = False) -> dict[str, int]:
@@ -3628,19 +3948,25 @@ class SQLiteStore:
         where the claim was, because that is what erasure means.
 
         **The text is overwritten, not merely unlinked**, and neither half of that is
-        automatic in SQLite. `PRAGMA secure_delete=ON` (see `SCHEMA`) covers the ordinary
-        rows, whose bytes would otherwise sit in a free page; FTS5's `secure-delete` (see
-        `_migrate_to_v7`) covers the text indexes, where a delete writes a marker and
-        keeps the terms as live rows that no `VACUUM` reclaims. Without both, this method
-        returned a count of what it had deleted while the words were still greppable in
-        the file. `tests/test_erasure_residue.py` checks the file rather than the store.
+        automatic in SQLite. `PRAGMA secure_delete=ON` (see `_CONNECTION_PRAGMAS`) covers
+        the ordinary rows, whose bytes would otherwise sit in a free page; FTS5's
+        `secure-delete` (see `_migrate_to_v7`) covers the text indexes, where a delete
+        writes a marker and keeps the terms as live rows that no `VACUUM` reclaims.
+        Without both, this method returned a count of what it had deleted while the words
+        were still greppable in the file. `tests/test_erasure_residue.py` checks the file
+        rather than the store.
 
         What *is* recorded is that it happened: one row in `erasures`, written before the
         delete and in the same transaction, holding no text, subject, predicate or object.
         See the table's own comment for why it holds none of those, and for what the
         ordering does and does not guarantee.
+
+        The whole method is one `batch()`, so the claim is read under the write lock. Two
+        erasures of one claim at once, from two handles or two processes, take turns: the
+        second finds nothing, returns zeroes and records nothing. Read outside the lock,
+        both found the row, and the second recorded an erasure it did not make.
         """
-        with self._lock:
+        with self.batch():
             row = self._db.execute(
                 "SELECT tenant, usr, project, agent, session, sources FROM claims "
                 "WHERE id=?",
@@ -3678,14 +4004,19 @@ class SQLiteStore:
                 # succeed and its record fail, which is exactly the state that cannot be
                 # detected afterwards. Counts are patched in below, once they are known.
                 stamp = utcnow().timestamp()
+                # Which row of the vector file the vector held, so that `residue` can
+                # read that row later and check the erasure blanked it.
+                held = self._db.execute(
+                    "SELECT slot FROM embeddings WHERE claim_id=?", (claim_id,)).fetchone()
                 self._db.execute(
                     "INSERT OR REPLACE INTO erasures "
-                    "(claim_id, tenant, scope, erased_at, sources, counts) "
-                    "VALUES (?,?,?,?,?,?)",
+                    "(claim_id, tenant, scope, erased_at, sources, counts, vector_slot) "
+                    "VALUES (?,?,?,?,?,?,?)",
                     (claim_id, tenant,
-                     Scope(tenant, row["usr"], row["agent"], row["session"],
-                           project=row["project"]).key(),
-                     stamp, len(json.loads(row["sources"])), "{}"))
+                     stored_scope(tenant, row["usr"], row["agent"], row["session"],
+                                  project=row["project"]).key(),
+                     stamp, len(json.loads(row["sources"])), "{}",
+                     held["slot"] if held is not None else None))
                 # Before the claim row goes, and not as housekeeping afterwards: these rows
                 # are what `_orphan` reads three lines below to decide whether the turns this
                 # claim cited still have a citer. Left behind, the claim being erased votes
@@ -3732,7 +4063,6 @@ class SQLiteStore:
                     # the compensation would bury it.
                     pass
                 raise
-            self._maybe_commit()
         return counts
 
     def residue(self, claim_id: str) -> dict[str, int]:
@@ -3750,15 +4080,27 @@ class SQLiteStore:
         that name it. A non-zero anywhere means the erasure did not complete, whatever it
         reported.
 
+        And one file, `vector_file`: the claim's row of `<db>.vecs`, read from the file
+        itself rather than through this store's mapping of it. The row is the one the
+        claim holds, or the one its erasure recorded in `erasures.vector_slot`, and the
+        count is 1 when that row still holds anything. A row the store has since given to
+        another vector holds that vector, not this one, and a row that was never recorded
+        (an erasure from before schema 17) cannot be read, so both count 0. A database
+        count alone certified erasures that left the vector on disk.
+
         `erasures` is deliberately not among them. It is the record that the erasure
         happened and it is *supposed* to survive; counting it would make every proof fail.
 
+        Runs in one `batch()`, holding the write lock, so that no other writer is between
+        taking a freed row for a new vector and committing: the file row read here then
+        belongs to exactly the owner the database names.
+
         >>> store = SQLiteStore(":memory:")
         >>> store.residue("nothing-was-ever-stored-here")
-        {'claims': 0, 'claims_fts': 0, 'embeddings': 0, 'claim_sources': 0, 'claim_links': 0}
+        {'claims': 0, 'claims_fts': 0, 'embeddings': 0, 'claim_sources': 0, 'claim_links': 0, 'vector_file': 0}
         >>> store.close()
         """
-        with self._lock:
+        with self.batch():
             def count(sql: str) -> int:
                 return int(self._db.execute(sql, (claim_id,)).fetchone()[0])
             return {
@@ -3773,7 +4115,46 @@ class SQLiteStore:
                 "claim_links": int(self._db.execute(
                     "SELECT COUNT(*) FROM claim_links WHERE from_id=? OR to_id=?",
                     (claim_id, claim_id)).fetchone()[0]),
+                "vector_file": self._vector_residue(claim_id),
             }
+
+    def _vector_residue(self, claim_id: str) -> int:
+        """1 when the claim's row of the vector file still holds anything, else 0. See
+        `residue`; the caller holds the write lock."""
+        path = self._vec.path
+        if path is None:
+            return 0
+        held = self._db.execute(
+            "SELECT slot FROM embeddings WHERE claim_id=?", (claim_id,)).fetchone()
+        if held is not None:
+            slot = held["slot"]
+        else:
+            record = self._db.execute(
+                "SELECT vector_slot FROM erasures WHERE claim_id=? "
+                "ORDER BY erased_at DESC LIMIT 1", (claim_id,)).fetchone()
+            slot = record["vector_slot"] if record is not None else None
+            if slot is not None and any(
+                    self._db.execute(f"SELECT 1 FROM {name} WHERE slot=?",
+                                     (slot,)).fetchone() is not None
+                    for name in _VEC_TABLE_NAMES):
+                return 0
+        if slot is None:
+            return 0
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        except FileNotFoundError:
+            return 0
+        try:
+            head = _read_at(fd, _VEC_HEADER, 0)
+            if len(head) < 16:
+                return 0
+            (dim,) = struct.unpack_from("<I", head, 12)
+            sealer = self._vec._sealer
+            size = sealer.record_size(dim) if sealer is not None else dim * 4
+            row = _read_at(fd, size, _VEC_HEADER + int(slot) * size)
+        finally:
+            os.close(fd)
+        return 1 if row.strip(b"\0") else 0
 
     def erasure_record(self, claim_id: str) -> dict[str, Any] | None:
         """The `erasures` row for `claim_id`, or `None` if nothing here erased it.
@@ -3857,8 +4238,8 @@ class SQLiteStore:
     def _row_to_document(r: sqlite3.Row) -> Document:
         return Document(
             id=r["id"],
-            scope=Scope(r["tenant"], r["usr"], r["agent"], r["session"],
-                        project=r["project"]),
+            scope=stored_scope(r["tenant"], r["usr"], r["agent"], r["session"],
+                               project=r["project"]),
             custom_id=r["custom_id"], title=r["title"], filepath=r["filepath"],
             source_uri=r["source_uri"], mime=r["mime"], content_hash=r["content_hash"],
             status=r["status"], error=r["error"], meta=json.loads(r["meta"]),
@@ -3885,11 +4266,19 @@ class SQLiteStore:
         return self._row_to_document(r) if r else None
 
     def find_document(self, scope: Scope, custom_id: str) -> Document | None:
+        """The document at exactly `scope` whose `custom_id` is this, or None.
+
+        The scope's columns are compared as well as its stored key, as every other read
+        compares them (`_scope_clause`). Up to 0.16.0 a scope holding '*' or '' at some
+        level stored the key of the scope above it, so a name lookup by key alone found
+        that row for a caller in the scope above.
+        """
+        sc, params = self._scope_clause([scope], "d")
         with self._read() as conn:
             r = conn.execute(
                 _DOCUMENT_SELECT.format(
-                    where="d.tenant = ? AND d.scope_key = ? AND d.custom_id = ?"),
-                (scope.tenant, scope.key(), custom_id)).fetchone()
+                    where=f"d.tenant = ? AND d.scope_key = ? AND d.custom_id = ? AND {sc}"),
+                (scope.tenant, scope.key(), custom_id, *params)).fetchone()
         return self._row_to_document(r) if r else None
 
     def list_documents(self, scopes: Sequence[Scope], *,
@@ -3988,6 +4377,11 @@ class SQLiteStore:
         a project is user-wide rather than the repository's, so it stays. An unset
         project is a wildcard like every other unset field, so a purge with none still
         takes every project.
+
+        The whole purge is one `batch()`, so it holds the write lock from its first read.
+        That read lists the vectors to blank in the vector file, while the deletes that
+        follow select their rows by scope; taken before the lock, a claim written in
+        between lost its row and kept its vector, where the text can be recovered.
         """
         conds = ["tenant = ?"]
         params: list = [scope.tenant]
@@ -3998,7 +4392,7 @@ class SQLiteStore:
                 params.append(val)
         where = " AND ".join(conds)
 
-        with self._lock:
+        with self.batch():
             # Set-based, not a statement pair per row: erasing a user with 50k claims
             # is one request, and 100k round trips through the SQL layer made it look
             # like the store had hung.
@@ -4011,6 +4405,10 @@ class SQLiteStore:
                     f"WHERE {t.key} IN ({doomed})",
                     params2,
                 ).fetchall()
+                if rows:
+                    # Before the rows go, for `_erase_row`'s reason: this store may not
+                    # have opened the vector file yet.
+                    self._ensure_dim()
                 self._db.execute(
                     f"INSERT OR IGNORE INTO vec_free (slot) SELECT slot FROM {t.name} "
                     f"WHERE {t.key} IN ({doomed}) AND slot IS NOT NULL", params2)
@@ -4055,9 +4453,6 @@ class SQLiteStore:
                 f"DELETE FROM episodes WHERE {where}", params
             ).rowcount
             entities = self._gc_entities(scope.tenant)
-            # `_maybe_commit`, not `commit`: an unconditional commit here would end an
-            # enclosing `batch()` early and silently void its rollback guarantee.
-            self._maybe_commit()
         return {"claims": claims, "episodes": episodes, "embeddings": gone,
                 "entities": entities, "documents": documents,
                 "document_chunks": chunk_rows}
@@ -4100,7 +4495,7 @@ class SQLiteStore:
             "SELECT usr, agent, session, subject, object FROM claims WHERE tenant=?",
             (tenant,),
         ):
-            owner = owner_key(Scope(tenant, c["usr"], c["agent"], c["session"]))
+            owner = owner_key(stored_scope(tenant, c["usr"], c["agent"], c["session"]))
             for surface in (c["subject"], c["object"]):
                 if surface:
                     live.add(entity_id(owner, typed_entity_key(surface)))
@@ -4223,6 +4618,25 @@ class SQLiteStore:
                 "SELECT * FROM claims WHERE tenant=? AND fact_key=? "
                 "ORDER BY recorded_at ASC, id ASC",
                 (tenant, fact_key),
+            ).fetchall()
+        return [self._row_to_claim(r) for r in rows]
+
+    def unended_claims(self, tenant: str, fact_key: str, *,
+                       valid_at: datetime | None = None,
+                       known_at: datetime | None = None) -> list[Claim]:
+        """Claims in one slot believed at `known_at` and not ended by `valid_at`.
+
+        `slot_history`'s lookup and order, narrowed by `base.unended_predicate` in the
+        same query, so the rows of a slot that have ended are never read. Bound by
+        `_bind_axes`, which also leaves an expired claim out, as `competing_claims` does.
+        See `Store.unended_claims`.
+        """
+        unended, params = self._bind_axes(unended_predicate("?"), valid_at, known_at)
+        with self._read() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM claims WHERE tenant=? AND fact_key=? AND {unended} "
+                "ORDER BY recorded_at ASC, id ASC",
+                [tenant, fact_key] + params,
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
 
@@ -4432,7 +4846,9 @@ class SQLiteStore:
         vector search. Inside `batch()` the store stays its own until the batch ends,
         because a store that opened before the commit would map vectors the batch is
         about to delete. A store that nothing refers to any more does not count: the
-        clear collects garbage once before it refuses.
+        clear collects garbage once before it refuses. When this process may not write
+        `<db>.lock`, the clear cannot tell whether another store has the database open,
+        so it raises `PermissionError` naming that file, again having changed nothing.
         """
         with self._lock:
             self._claim_alone()

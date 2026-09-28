@@ -30,6 +30,8 @@ import os
 import os.path
 from collections.abc import Callable, Iterator
 
+from .private import private_dir, private_open
+
 try:
     import fcntl
 except ImportError:  # Windows
@@ -73,15 +75,12 @@ def _replace(path: str, data: dict, prefix: str) -> None:
 def write_json(path: str, data: dict, prefix: str = ".state-") -> bool:
     """Write `data` atomically. `True` when it landed, `False` for any failure.
 
-    The directory is created only when the first attempt finds it missing, so the common
-    case, a directory that already exists, costs no extra system call.
+    The file is 0600, being the rename of a temporary file created 0600, and its directory
+    is made private (`lib.private`), which a process does once per directory.
     """
     try:
-        try:
-            _replace(path, data, prefix)
-        except FileNotFoundError:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            _replace(path, data, prefix)
+        private_dir(os.path.dirname(path) or ".")
+        _replace(path, data, prefix)
     except (OSError, ValueError, TypeError):
         return False
     return True
@@ -91,13 +90,11 @@ def write_json(path: str, data: dict, prefix: str = ".state-") -> bool:
 def locked(lock_path: str) -> Iterator[None]:
     """Hold an exclusive lock on `lock_path` for the body. Raises `OSError` or `ValueError`.
 
-    The lock file's directory is created only when opening the file finds it missing.
+    The lock file is 0600 and its directory private (`lib.private`); a lock file used to
+    take the default mode, 0644 under the usual umask.
     """
-    try:
-        handle = open(lock_path, "a", encoding="utf-8")
-    except FileNotFoundError:
-        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-        handle = open(lock_path, "a", encoding="utf-8")
+    private_dir(os.path.dirname(lock_path) or ".")
+    handle = private_open(lock_path, "a")
     with handle:
         if fcntl is not None:
             with contextlib.suppress(OSError):

@@ -50,7 +50,7 @@ from ..filters import SearchFilter
 from ..remote.client import HttpClient
 from ..remote.errors import refuse_project_purge
 from ..types import (Claim, Derivation, Document, DocumentChunk, Episode, Link, MemoryType,
-                     Scope)
+                     Scope, stored_scope)
 
 if TYPE_CHECKING:
     import httpx
@@ -217,8 +217,9 @@ class RemoteStore:
         function, and until it lands this is a real difference between a local store and
         a hosted one rather than an oversight in the conversion.
         """
-        scope = Scope(tenant=body["scope"]["tenant"], user=body["scope"].get("user"),
-                      agent=body["scope"].get("agent"), session=body["scope"].get("session"))
+        # `stored_scope`, as `hydrate.scope` explains: a row the deployment holds.
+        scope = stored_scope(body["scope"]["tenant"], body["scope"].get("user"),
+                             body["scope"].get("agent"), body["scope"].get("session"))
         vt, tt = body["valid_time"], body["transaction_time"]
 
         claim = Claim(
@@ -379,6 +380,14 @@ class RemoteStore:
                 "surface strings from the hash, so this exact call cannot be made. A "
                 "caller that already has (subject, predicate) rather than fact_key "
                 "should call GET /v1/history directly instead of going through Store."))
+
+    def unended_claims(self, tenant: str, fact_key: str, *,
+                       valid_at: datetime | None = None,
+                       known_at: datetime | None = None) -> list[Claim]:
+        raise NotImplementedError(_NO_ENDPOINT.format(
+            method="unended_claims",
+            why="See competing_claims: the same missing lookup by fact_key. POST "
+                "/v1/forget runs the deployment's own selection of what to close."))
 
     def adjacent(self, tenant: str, keys: Sequence[str], *,
                  outgoing: bool = True, incoming: bool = True,

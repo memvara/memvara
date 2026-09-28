@@ -22,7 +22,7 @@ JSON, under a header that names the text as data rather than instruction.
 - Fusion: `memvara/retrieve/fusion.py` — `reciprocal_rank_fusion()`, with `rrf_k` of 60.
 - Scoring: `memvara/retrieve/scoring.py` — `final_score()`, `relevance()`,
   `lexical_relevance()`, `vector_relevance()`, `recency_factor()`, `quality_boost()`,
-  `normalized_score()`.
+  `ranking_quality()`, `normalized_score()`.
 - Filters: `memvara/filters.py` — `search_filter()`, `SearchFilter` and `meta_matches()`,
   the SQL function `SQLiteStore` evaluates metadata filters with. Tests:
   `tests/test_metadata_filters.py`.
@@ -90,7 +90,11 @@ JSON, under a header that names the text as data rather than instruction.
 3. `reciprocal_rank_fusion()` merges the ranked lists by position rather than by raw score,
    which is what lets two incomparable scoring scales be combined at all.
 4. `final_score()` re-scores the fused list using the claim's own properties: how fresh it
-   is for its predicate's volatility, its confidence, and its salience.
+   is for its predicate's volatility, its confidence, and its salience. Then `_rank()`
+   sorts by that score and keeps at most `max_per_slot` claims (2 by default) of one fact
+   slot in the head of the list. It moves the slot's other claims behind the remaining
+   matching results, and ahead of every result that scores 0, so a claim that matches is
+   never returned behind one that does not (#327).
 5. If a reranker is configured, `rerank()` reorders the top `rerank_top_n` items.
    `CrossEncoderReranker` is a cross-encoder, not a generative model. It is off by default.
 6. `recall()` renders the survivors into text under `RECALL_HEADER`, or under
@@ -142,7 +146,9 @@ JSON, under a header that names the text as data rather than instruction.
   `docs/INTERNALS.md`, which carries the measurements). Scope and state filtering happen
   in the store, not in a comprehension afterwards, or the top of the list is silently wrong.
   `HybridRetriever` filters `memory_types` after fusion on purpose and pays for it with a
-  bounded retry when the pool came back full. The caller's metadata and file-path filter
+  bounded retry when the pool came back full. It refuses a name that is not a memory type
+  before it reads anything (`known_memory_types`, #289), because a misspelled type would
+  keep no claim and answer nothing, with no error. The caller's metadata and file-path filter
   (`filters`, `filepath_prefix`, checked in `memvara/filters.py`) is a store parameter,
   `where`, on every capped store method, and the graph leg does not run when it is set.
   One store read cuts before it filters: `_episode_text_first` ranks turns before the
@@ -157,6 +163,21 @@ JSON, under a header that names the text as data rather than instruction.
   message naming the width to use. `reembed()` is the way through. `Memvara()` with no
   embedder, and the MCP server's bare `local`, load the local model the store's fingerprint
   names, because the default model changed after 0.15 to one of the same width.
+- **A store whose record is lost says so, and records the embedder again.** When
+  `<db>.embedder.json` is missing or unreadable on a store that holds vectors, or names
+  another width than those vectors have, the width still has to match, but nothing can
+  tell whether the embedder in use wrote them. So `_check_embedder` warns with
+  `EmbedderChangedWarning`, and then, if the open goes on, writes the record naming that
+  embedder, so the next change is caught (#280). The warning comes first so that, raised as
+  an error, it stops the open before the record names an embedder that may be the wrong
+  one. The rewrite has a cost: with no `embedder=`, the embedder it records is
+  `_default_embedder`'s guess from the width, and when that guess is wrong, no later open
+  warns again, so after the one warning only `reembed()` fixes it. A store with no file
+  beside it, such as an in-memory one, has no record to lose, and is not warned about.
+  `write_fingerprint` writes a temporary file and renames it over the record, so a crash
+  never leaves half a record. It follows a record kept as a link, so the link stays, and
+  in a directory that refuses new files it writes the record in place instead, where a
+  crash can still tear it.
 - **A cosine threshold belongs to an embedding space.** The grounding rescue, the
   duplicate merge and the write path's near-duplicate check read theirs through
   `calibration_of()`. A new default model, or any model a deployment adopts widely, needs

@@ -189,14 +189,21 @@ def test_a_cloud_server_lists_the_same_tools_a_local_one_does(deployment):
         server.close()
 
 
-def test_a_dated_recall_against_a_hosted_deployment_is_refused_as_a_tool_error(deployment):
+def test_a_dated_recall_against_a_hosted_deployment_sends_the_day(deployment, monkeypatch):
     """End to end through the real client: `memory_recall` with `valid_at` on a cloud
-    server reaches `RemoteMemvara.recall`, which raises because `POST /v1/recall` has no
-    time axis. The model has to see that as this tool's error, with the reason, and not
-    as a dropped keyword answered with the present. No request leaves the process: the
-    refusal is before the transport."""
+    server reaches `RemoteMemvara.recall`, which sends the day to `POST /v1/recall`
+    (#298), and the tool answers with the block the deployment rendered. Only the
+    transport is replaced, so the request is the one the client builds."""
     import json
 
+    sent = []
+
+    def read(self, path, *, body=None, **kw):
+        sent.append((path, body))
+        return {"text": "Known about the user as things were on 1 March 2026:\n- a plan",
+                "empty": False}
+
+    monkeypatch.setattr(RemoteMemvara, "_read", read)
     server = MemvaraMCPServer(build_memvara(_cloud()), user="alice")
     try:
         line = server.handle_line(json.dumps({
@@ -204,11 +211,12 @@ def test_a_dated_recall_against_a_hosted_deployment_is_refused_as_a_tool_error(d
             "params": {"name": "memory_recall",
                        "arguments": {"query": "what plan", "valid_at": "2026-03-01"}}}))
         body = json.loads(line)["result"]
-        assert body["isError"] is True
-        text = body["content"][0]["text"]
-        assert "valid_at" in text and "time axis" in text
+        assert body.get("isError") is not True, body
+        assert "as things were on 1 March 2026" in body["content"][0]["text"]
     finally:
         server.close()
+    [(path, request)] = [call for call in sent if call[0] == "/v1/recall"]
+    assert request["valid_at"].startswith("2026-03-01"), request
 
 
 def test_cloud_mode_without_httpx_fails_where_the_configuration_was_made(monkeypatch):
@@ -385,6 +393,41 @@ def test_a_local_engine_asks_nothing_and_reports_its_own_extractor(tmp_path):
         assert server.read_only is False
     finally:
         server.close()
+
+
+# -- what the slot form of memory_forget and memory_end promises ------------------------
+
+
+class _ClosingNothing(_Answering):
+    """A deployment whose slot closures close nothing, for the reply that says so."""
+
+    def forget(self, subject, predicate, *, at=None, close="retired", reason=None):
+        return []
+
+
+@pytest.mark.parametrize("name, verb", [("memory_forget", "forget"), ("memory_end", "end")])
+def test_a_hosted_server_promises_only_what_every_deployment_closes(name, verb):
+    """Given a predicate, a local engine's `forget()` also closes a value stored to begin
+    later (#282). A hosted deployment runs its own `forget`, and one on a release from
+    before that fix closes only the current values. This server cannot tell which release
+    it speaks to, so its description, its argument error and its reply when nothing was
+    closed promise only the current values, which every release closes."""
+    from memvara.server.tools import BY_NAME, ToolError
+    from memvara.types import Scope
+
+    server = MemvaraMCPServer(_ClosingNothing(_ENVELOPE, Scope("acme", "alice", None, None)),
+                              user="alice")
+    tool = server._tools[name]
+    with pytest.raises(ToolError) as refused:
+        tool.run(server._ctx, {})
+    reply = tool.run(server._ctx, {"predicate": "lives_in"})
+
+    assert "stored to begin later" in BY_NAME[name].description, "a local server says it"
+    for said in (tool.description, str(refused.value), reply):
+        assert "stored to begin later" not in said
+    assert "every current value of that fact" in tool.description
+    assert "every current value of that fact" in str(refused.value)
+    assert f"Nothing to {verb}: user/lives_in has no current value." in reply
 
 
 # -- the fold note, with no registry anywhere -------------------------------------------

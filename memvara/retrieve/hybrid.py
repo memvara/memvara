@@ -125,7 +125,7 @@ from .scoring import (
     final_score,
     lexical_relevance,
     normalized_score,
-    quality_boost,
+    ranking_quality,
     recency_factor,
     relevance,
     vector_relevance,
@@ -317,6 +317,41 @@ GATE_RECHECK_EVERY = 256
 _LEG_THREADS = MAX_QUERIES
 
 _T = TypeVar("_T")
+
+
+def known_memory_types(
+        memory_types: Sequence[MemoryType | str] | None) -> list[MemoryType] | None:
+    """`memory_types` as `MemoryType` members, refusing a name that is not one (#289).
+
+    The filter keeps only the kinds it names, so a misspelled name kept no claim at all,
+    and the search answered nothing with no error, which a caller cannot tell from a
+    store with nothing relevant in it. The refusal has the words `remember()` uses for
+    the same mistake (`core._as_memory_type`, #288).
+
+        >>> known_memory_types(["semantic"])
+        [<MemoryType.SEMANTIC: 'semantic'>]
+        >>> known_memory_types(["procedurel"])
+        Traceback (most recent call last):
+        ...
+        ValueError: memory_type must be one of episodic, semantic, procedural, not 'procedurel'
+    """
+    if memory_types is None:
+        return None
+    known = []
+    for value in memory_types:
+        try:
+            known.append(MemoryType(value))
+        except ValueError:
+            raise ValueError(
+                "memory_type must be one of "
+                + ", ".join(t.value for t in MemoryType) + f", not {value!r}") from None
+    return known
+
+#: The ranked-read outcomes that spend nothing on the final reranker pass. `applied`
+#: already reranked its turns inside the ranked stage. `disabled` is the operator's switch
+#: for shedding load, and the design spec says it spends nothing on the cross-encoder.
+#: Every other outcome serves the plain read, with the plain read's reranker pass.
+_NO_RERANK = frozenset({"applied", "disabled"})
 
 
 class HybridRetriever:
@@ -709,6 +744,7 @@ class HybridRetriever:
         have ranked above them. The graph leg does not run on a filtered search; see
         `_graph_search`.
         """
+        memory_types = known_memory_types(memory_types)
         if ranked and (not include_episodes or memory_types is not None):
             raise ValueError(
                 "ranked=True needs turns to rank: it requires include_episodes=True and "
@@ -762,9 +798,11 @@ class HybridRetriever:
                         rerank_final=False, qvec=vectors[0])
             kept, fused = self._fuse(main, [f.result() for f in pending])
             # The reranker runs once, on the fused list, rather than once per phrasing.
-            # A ranked read reranked its turns inside the ranked stage and never runs it
-            # here, exactly as without a rewrite.
-            reranker = (None if ranked and self.selector is not None
+            # A ranked read whose outcome is in `_NO_RERANK` never runs it here, exactly
+            # as without a rewrite. Any other outcome served the plain read, and gets the
+            # plain read's reranker pass.
+            skip = main.selection is not None and main.selection.outcome in _NO_RERANK
+            reranker = (None if skip
                         else None if self.rerank_ranked_only else self.reranker)
             if reranker is not None:
                 fused = rerank(reranker, query, fused, top_n=self.rerank_top_n)
@@ -1017,6 +1055,28 @@ class HybridRetriever:
                                           cap=self.rerank_top_n)
                 selection, kept_turns, tail = self._run_ranked_stage(
                     rec, self.selector, query, episodes, now)
+                if selection.outcome != "applied":
+                    # Every outcome but `applied` serves the plain read (INTERNALS,
+                    # invariant 1). The pool above was gathered for the selector, at
+                    # `rerank_top_n` turns and a depth widened to match, so interleaving
+                    # it here returned more turns than a plain read takes, and they
+                    # pushed out facts the plain read shows (#308). The plain read runs
+                    # again and is timed from `t0`, because the caller waited through the
+                    # failed stage as well. It calls `_retrieve` rather than
+                    # `_search_once`, which would reset this pass's cached query vector
+                    # and embed the query a second time. `disabled` skips the plain
+                    # read's reranker pass; see `_NO_RERANK`.
+                    plain = list(self._retrieve(
+                        query, scope=scope, k=k, valid_at=valid_at, known_at=known_at,
+                        wanted_states=wanted_states, memory_types=memory_types,
+                        min_score=min_score, anchored=anchored,
+                        include_episodes=include_episodes, now=now, ranked=False,
+                        observe=False,
+                        rerank_final=rerank_final and selection.outcome not in _NO_RERANK,
+                        where=where))
+                    if rec is not None and observe:
+                        self._observe(rec, query, plain, (perf_counter() - t0) * 1000.0)
+                    return SearchResults(plain, selection=selection)
                 merged = self._interleave(claims, tail, depth)[:k]
                 hits = [*kept_turns, *merged]
             else:
@@ -1129,7 +1189,6 @@ class HybridRetriever:
         rec.gauge(RETRIEVAL_RESULTS, float(len(results)))
         rec.timing(RETRIEVAL_LATENCY_MS, elapsed_ms)
 
-        span = 1.0 + self.w_recency + self.w_confidence + self.w_salience
         counts: list[float] = []
         for r in results:
             if not isinstance(r, Result):
@@ -1139,19 +1198,17 @@ class HybridRetriever:
                 # `observation_count` for something nothing observed.
                 continue
             counts.append(float(r.claim.observation_count))
-            # Unclamped on purpose. Quality is *supposed* to be able only to pull a
-            # result down from its evidence, and the single way past 1.0 is a salience
-            # reinforced beyond 1.0 - so a value above 1.0 is the direct evidence that
-            # freshness and salience are promoting rather than demoting, which is the
-            # failure this series exists to catch. Clamping would hide it.
-            rec.gauge(RETRIEVAL_QUALITY_FACTOR, quality_boost(
+            # The factor the ranking used, from the same function, so a value above
+            # 1.0 means the ranking has started to let quality promote a result past
+            # its evidence, which is the failure this series exists to catch (#333).
+            rec.gauge(RETRIEVAL_QUALITY_FACTOR, ranking_quality(
                 recency=r.explain.recency,
                 confidence=r.explain.confidence,
                 salience=r.explain.salience,
                 w_recency=self.w_recency,
                 w_confidence=self.w_confidence,
                 w_salience=self.w_salience,
-            ) / span)
+            ))
 
         correlation = rank_correlation(counts)
         if correlation is not None:
@@ -1639,11 +1696,11 @@ class HybridRetriever:
 
         Returns `(selection, kept_turns, tail)`. `kept_turns` carries `explain.selected`
         and `.span`, in reranked order, and is empty unless `selection.outcome` is
-        `applied`. `tail` is what the caller interleaves with claims exactly as an
-        unranked read does: the reranked turn list minus whatever was kept, when the
+        `applied`. `tail` is the reranked turn list minus whatever was kept, when the
         reranker actually ran (every outcome but `disabled`, since admission — and so the
         reranker call inside it — never happened there), or `episodes` unchanged when it
-        did not.
+        did not. The caller interleaves `tail` with the claims only on `applied`; on
+        every other outcome it serves the plain read instead (#308).
 
         **Admission wraps the reranker call as well as the model call**, deliberately —
         the thread the cap exists to bound is the whole ~5-6s a ranked read can hold one
@@ -1882,6 +1939,13 @@ class HybridRetriever:
         diversifies the wrong axis. Slot identity is what it was trying to approximate,
         and the store already knows it exactly: capping on it gives 7.04 with the
         ranking otherwise untouched.
+
+        The demoted claims go behind the other results that match, and never behind a
+        result that scores 0, which does not match at all. They used to go to the very
+        end, so a user who knows C, C# and C++ got "C" last, behind eight facts that do
+        not mention a language, and one more such candidate pushed it out of the top `k`
+        (#327). So the list is in score order except in one place: a slot's third and
+        later claims come after the other matching results, even ones that score lower.
         """
         # `value_key` before `id`, and the difference is the whole promise in this
         # module's docstring. A claim id is `uuid4`, minted fresh at ingest — so breaking
@@ -1907,7 +1971,8 @@ class HybridRetriever:
                 head.append(r)
             else:
                 overflow.append(r)
-        return (head + overflow)[:k]
+        matching = next((i for i, r in enumerate(head) if r.score <= 0), len(head))
+        return (head[:matching] + overflow + head[matching:])[:k]
 
     def _vector_search(
         self,

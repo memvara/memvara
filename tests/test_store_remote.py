@@ -481,6 +481,7 @@ CLAIM = Claim(subject="user", predicate="lives_in", object="Lisbon", scope=SCOPE
     lambda s: s.find_by_value("acme", "vk"),
     lambda s: s.claims_citing("acme", "ep_1"),
     lambda s: s.slot_history("acme", "fk"),
+    lambda s: s.unended_claims("acme", "fk"),
     lambda s: s.adjacent("acme", ["k1"]),
     lambda s: s.episodes_near(T0, [SCOPE], 5),
     lambda s: s.residue("clm_1"),
@@ -508,6 +509,7 @@ CLAIM = Claim(subject="user", predicate="lives_in", object="Lisbon", scope=SCOPE
     lambda s: s.all_entities("acme"),
     lambda s: list(s.iter_claims("acme")),
 ])
+@pytest.mark.covers("inv:RC4")
 def test_unmapped_methods_raise_with_an_explanatory_message(call):
     store = _store()
     with pytest.raises(NotImplementedError) as caught:

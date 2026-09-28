@@ -204,8 +204,8 @@ class Context:
     #: noise that hides the finding. The harness reports it once, loudly.
     degraded: bool = False
     #: How the block was read: `"recall"` for the rendering an integration drops into a
-    #: prompt, or `"search"` for a dated question against a hosted deployment, whose
-    #: recall has no time axis — see `demo/hosted.py`. Counted in the report, because a
+    #: prompt, or `"search"` for a dated question against a hosted deployment, which the
+    #: arm reads through search — see `demo/hosted.py`. Counted in the report, because a
     #: row built partly one way and partly the other is two measurements.
     read: str = "recall"
     #: Claims the hosted scope held when it was read, or `None` for a local arm. A hosted

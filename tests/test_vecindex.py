@@ -601,6 +601,40 @@ def test_an_erasure_before_any_search_still_blanks_the_row_on_disk(tmp_path, how
     assert raw not in open(path + ".vecs", "rb").read()
 
 
+@pytest.mark.parametrize("how", ["erase_claim", "purge"])
+@pytest.mark.parametrize("mapped", [False, True])
+def test_an_erasure_blanks_a_row_another_store_wrote_after_this_one_mapped_the_file(
+        tmp_path, how, mapped):
+    """Two stores on one file, as the MCP server and the hooks' daemon are. The one that
+    erases opened first, so its mapping of `<db>.vecs` either covers no row at all
+    (`mapped=False`: the store held no vector when it opened) or ends before the row the
+    other store wrote later (`mapped=True`: the file grew past it). Erasure blanked a row
+    only inside the erasing store's own mapping, so the vector stayed in the file, where
+    the text can be recovered from it by inversion, while the erasure reported success."""
+    path = str(tmp_path / "e.db")
+    vec = np.arange(1, 9, dtype=np.float32)
+    with SQLiteStore(path) as early:
+        if mapped:
+            embed(early, onehot(8, 0), predicate="early")
+            assert early._vec._rows == _VecIndex._INITIAL_ROWS
+        with SQLiteStore(path) as late:
+            if mapped:
+                for i in range(_VecIndex._INITIAL_ROWS):
+                    embed(late, onehot(8, i), predicate=f"filler{i}")
+            target = embed(late, vec)
+            raw = late.get_embedding(target.id).tobytes()
+            slot = late._db.execute("SELECT slot FROM embeddings WHERE claim_id=?",
+                                    (target.id,)).fetchone()[0]
+        assert slot >= early._vec._rows if mapped else early._vec._mat is None
+        assert raw in open(path + ".vecs", "rb").read()
+        if how == "erase_claim":
+            assert early.erase_claim(target.id)["claims"] == 1
+        else:
+            assert early.purge(SCOPE)["claims"] == (2 + _VecIndex._INITIAL_ROWS
+                                                    if mapped else 1)
+    assert raw not in open(path + ".vecs", "rb").read(), "the erased vector is on disk"
+
+
 def test_a_bare_index_reuses_the_slot_it_removed():
     idx = _VecIndex()
     idx.add("a", onehot(4, 0))

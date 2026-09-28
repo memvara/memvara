@@ -51,6 +51,7 @@ import os
 import sys
 import time
 
+from . import deadline
 from .ipc import CLIENT_TIMEOUT_SEC, log_line, send, socket_path, store_key
 
 #: Set in a spawned daemon's environment so a daemon can never spawn a daemon.
@@ -197,6 +198,11 @@ QUOTA = "quota"
 DAILY = "daily"
 
 
+#: The reason token for a local store that is configured and could not open, followed by
+#: the exception's class after a colon, such as `open:DatabaseError`.
+OPEN = "open"
+
+
 def _reason(exc: "BaseException") -> str:
     """The short token for a failure, or `""` when there is nothing useful to add.
 
@@ -233,8 +239,8 @@ def _reason(exc: "BaseException") -> str:
 
 def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = None,
            include_episodes: bool = False, memory_types: "list[str] | None" = None,
-           min_score: float = 0.0, query_rewrite: bool = False,
-           rewrite_wait: float = REWRITE_WAIT_SEC,
+           min_score: float = 0.0, hosted_min_score: "float | None" = None,
+           query_rewrite: bool = False, rewrite_wait: float = REWRITE_WAIT_SEC,
            spawn: bool = True) -> "tuple[str, bool | None, str]":
     """Recall text for `query`, by whatever route is available.
 
@@ -254,7 +260,9 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
 
     The third slot is `reason`: `""` when there is nothing to add, else a short token the
     caller can turn into words: `"quota"` for a spent monthly allowance and `"daily"` for a
-    spent daily one, each with its reset after a colon when the refusal said. It exists
+    spent daily one, each with its reset after a colon when the refusal said, and
+    `"open:<exception class>"` for a local store that is configured and could not open,
+    which comes with `ok=False` where "nothing configured" comes with `ok=None`. It exists
     because `False` alone sent a user to read a log about a store that was answering
     perfectly and telling him, in the body of a 402, exactly which allowance was spent and
     when it resets.
@@ -265,6 +273,12 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
 
     `query_rewrite=True` asks a library store to rewrite the query first, and the read is
     abandoned for the plain one after `rewrite_wait` seconds. See the module docstring.
+
+    `min_score` is the floor for a store read through the library, directly or through the
+    daemon. `hosted_min_score` is the floor for the hosted client, directly or through a
+    daemon that serves it, and `None` means the same as `min_score`. They are separate because the two routes usually score with
+    different embedders, and a floor measured on one embedder's scores is wrong for the
+    other's; `recall.py` explains the values it passes.
     """
     if not query.strip():
         return "", True, ""
@@ -276,6 +290,16 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
     except Exception:
         path = None
 
+    # The hook's deadline bounds the daemon's wait as it bounds a hosted call's (see
+    # `lib.deadline`): a hook that used most of its time on earlier calls must not spend
+    # this wait on top, and one that used all of it goes straight to the fallbacks below.
+    left = deadline.left()
+    if left is not None and left <= 0:
+        path = None
+    if left is not None:
+        # The same for the in-process rewrite below, which waits `rewrite_wait` for a model.
+        rewrite_wait = min(rewrite_wait, max(left, 0.0))
+
     if path is not None:
         request = {"q": query, "k": k, "budget": budget}
         if min_score:
@@ -283,6 +307,11 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
             # floor. A daemon is an optimisation and never a dependency: the two routes
             # returning different text for one query is the failure that rule exists for.
             request["min_score"] = min_score
+        if hosted_min_score is not None:
+            # The daemon may be serving the hosted client, on an install with no local
+            # store, and then it applies this floor instead. It is sent even when it is 0,
+            # so that a floor of 0 on the hosted route is not replaced by `min_score`.
+            request["hosted_min_score"] = hosted_min_score
         if header:
             request["header"] = header
         if include_episodes:
@@ -294,6 +323,8 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
             # plain read.
             request["query_rewrite"] = True
         wait = rewrite_wait if query_rewrite else CLIENT_TIMEOUT_SEC
+        if left is not None:
+            wait = min(wait, left)
         began = _clock()
         answer = send(path, request, timeout=wait)
         served = _served(answer)
@@ -318,15 +349,22 @@ def recall(query: str, *, k: int = 6, budget: int = 700, header: str | None = No
 
         client = open_hosted()
         if client is None:
-            # Nothing is configured at all -- no local database, no library to read one
-            # with, and no credentials file. Distinct from a store that would not answer.
+            # No hosted store either. That is "nothing configured" -- no local database, no
+            # library to read one with, and no credentials file -- only when the local
+            # store was not configured, rather than configured and unable to open (#337).
+            from . import open as opener  # noqa: PLC0415 - already imported by _local_store
+
+            if opener.failure is not None:
+                return "", False, f"{OPEN}:{type(opener.failure).__name__}"
             return "", None, ""
         try:
             # No `query_rewrite` here, whatever the caller asked: the hosted client always
             # asks its server for a plain read. See `lib.read_model`.
             text = client.recall(query, k=k, budget=budget, header=header,
                                  include_episodes=include_episodes,
-                                 memory_types=memory_types, min_score=min_score)
+                                 memory_types=memory_types,
+                                 min_score=(min_score if hosted_min_score is None
+                                            else hosted_min_score))
         except Exception as exc:
             # Including HostedError. Nothing below this to fall through to -- but the
             # caller still has a banner to print, and "could not ask" is not "nothing

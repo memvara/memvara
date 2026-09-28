@@ -18,66 +18,12 @@ import threading
 
 import pytest
 
+from harness.fakes.url_fetch import FakeResolver, FakeResponse, FakeTransport
 from memvara.ingest import IngestError, SafeFetcher
 from memvara.ingest import url as url_module
 from memvara.ingest.url import USER_AGENT, _pinned_transport, _resolve, refusal
 
 PUBLIC = "93.184.216.34"
-
-
-class FakeResponse:
-    def __init__(self, status=200, headers=None, chunks=(b"body",), read_error=None):
-        self.status = status
-        self.headers = dict(headers or {})
-        self.chunks = list(chunks)
-        self.read_error = read_error
-        self.closed = False
-        self.timeouts: list[float] = []
-
-    def getheader(self, name, default=None):
-        return self.headers.get(name, default)
-
-    def read(self, amt):
-        if self.read_error is not None:
-            raise self.read_error
-        return self.chunks.pop(0) if self.chunks else b""
-
-    def settimeout(self, seconds):
-        self.timeouts.append(seconds)
-
-    def close(self):
-        self.closed = True
-
-
-class FakeTransport:
-    """Answers each URL from a table and records every request it was asked to make."""
-
-    def __init__(self, answers=None, error=None):
-        self.answers = answers or {}
-        self.error = error
-        self.calls: list[tuple[str, str, float]] = []
-        self.responses: list[FakeResponse] = []
-
-    def __call__(self, url, address, timeout):
-        self.calls.append((url, address, timeout))
-        if self.error is not None:
-            raise self.error
-        response = self.answers[url]
-        self.responses.append(response)
-        return response
-
-
-class FakeResolver:
-    def __init__(self, table=None, error=None):
-        self.table = table or {}
-        self.error = error
-        self.asked: list[tuple[str, int]] = []
-
-    def __call__(self, host, port):
-        self.asked.append((host, port))
-        if self.error is not None:
-            raise self.error
-        return self.table.get(host, [PUBLIC])
 
 
 class Clock:
@@ -536,6 +482,7 @@ def test_a_prefix_that_cannot_carry_an_ipv4_address_is_refused(prefix, problem):
 _ENV = {"MEMVARA_DB": ":memory:", "MEMVARA_FEATURE_PROJECT_SCOPE": "0"}
 
 
+@pytest.mark.covers("env:MEMVARA_NAT64_PREFIXES")
 def test_the_server_reads_operator_prefixes_from_the_environment():
     from memvara.server.config import ServerConfig
 
@@ -555,6 +502,7 @@ def test_the_server_has_no_operator_prefixes_by_default():
     assert config.url_fetcher().refusal(HIDDEN_PRIVATE) is None
 
 
+@pytest.mark.covers("env:MEMVARA_NAT64_PREFIXES")
 def test_a_bad_prefix_in_the_environment_is_refused_at_startup():
     from memvara.server.config import ConfigError, ServerConfig
 

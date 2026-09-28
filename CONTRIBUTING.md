@@ -18,10 +18,56 @@ point of the project and it is also the development setup:
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install -e ".[dev,cloud,ingest,encrypt]"
 
-python3 -m pytest -q                                              # 4,757 tests
+python3 -m pytest -q                                              # 9,972 passing, 12 skipped, 91 expected failures
 python3 -m coverage run -m pytest && python3 -m coverage report    # gated at 100%
 python3 -m mypy -p memvara                                         # must be clean
 ```
+
+**Before you push, run the tests your change can affect, not the three commands above:**
+
+```bash
+python3 scripts/test_changed.py            # compares with origin/main; --base <ref> for another
+python3 scripts/test_changed.py --dry-run  # prints what it would run, and runs nothing
+```
+
+It runs the test files you changed, the tests that import a changed Python file or name a
+changed file in a string, and the tests that failed on your last run. When you change
+something it cannot follow, such as a `conftest.py`, `pyproject.toml`, the test harness,
+test data, or any file that is not documentation and that no test imports or names, it runs
+the full suite instead and prints which file made it do so. It measures
+no coverage. The full suite, coverage and mypy run in CI on your pull request, on every
+interpreter, so a green local run is a quick check and not the gate.
+
+**Tests that fail only on your machine.** If tests pass in CI and fail locally on an
+untouched `main`, check these two things about the Python you run them with. Both were
+found on a Mac whose system `python3` failed 18 tests that CI passes.
+
+- **The installed memvara must be this checkout.** Some tests run code the way a reader
+  would, in a subprocess that imports the installed package:
+  - `tests/test_examples.py` runs each example under `examples/`, with `PYTHONPATH`
+    removed.
+  - `tests/test_docs.py` runs the getting-started pages from a temporary directory, so a
+    relative `PYTHONPATH=.` points at that directory rather than at the checkout.
+  - `tests/test_docs.py` also runs the coding-agent example to check the transcript the
+    README quotes, with `PYTHONPATH` removed.
+
+  If this Python has an editable install of another checkout, those tests run that
+  checkout's code, and if that checkout has been deleted they fail with
+  `No module named 'memvara'`. To check, run
+  `python3 -c "import memvara; print(memvara.__file__)"` from outside the repository, and
+  `python3 -m pip show memvara`, which names the editable project's
+  location. To fix it, run the install command above from this checkout, or use a virtual
+  environment for each checkout.
+- **The `encrypt` extra must be installed.** The MCP server's configuration creates a new
+  store encrypted by default; `Memvara()` itself does not. So a test that opens a store
+  through the server's configuration fails with a `ConfigError` asking for
+  `memvara[encrypt]` when `sqlcipher3` is missing. That refusal is the correct behaviour
+  of the default configuration, so the tests are not changed to avoid it. To check, run
+  `python3 -c "import sqlcipher3"`. To fix it, install the extras the command above names.
+
+Having a provider SDK installed, such as `anthropic` or `openai`, does not change any
+result. Each provider has one test that needs its SDK to be absent, and each of those
+tests hides the SDK itself.
 
 **Pass `embedder=` at every `Memvara()` you construct in a test.** `tests/conftest.py`
 fails the run otherwise, naming the file and line. `default_embedder()` returns a
@@ -59,6 +105,14 @@ lookup and points `HOME` at a temporary directory for every test. The suite runs
 entirely offline against `HashingEmbedder` and `NullLLM`; a test that needs a model uses a
 fake that counts its own calls. **If a test you add reaches the network, it is wrong.**
 
+**An autouse fixture, which runs for every test, must not call `tmp_path_factory.mktemp()`.**
+To number the directory it makes, `mktemp()` lists every directory the session has made so
+far, so a call for every test makes the suite's run time grow with the square of its size.
+Make the directory with `tempfile.mkdtemp(dir=...)` inside one directory the session makes
+once, as the `_homes` fixture in `tests/conftest.py` does. A fixture that only the tests
+asking for it run, such as `mcp` in `tests/adversarial/conftest.py`, adds one listing per
+such test, which is fine.
+
 **Slow tests go in a tier folder.** A test under a folder named `nightly/`, `weekly/`, `local/` or `quarantine/` is left out of a plain `python3 -m pytest -q`, which is what CI runs. `--tier nightly`, `--tier weekly`, `--tier local` and `--tier quarantine` collect them, and every run prints which tier folders it left out. `docs/claude/testing.md` has the details.
 
 **Every skip needs a rule.** A test that skips for a reason with no rule in `tests/harness/skips.py` fails the run. So when you add a skip, add a rule that says why the skip is legitimate. `docs/claude/testing.md` explains the rule, and the test tiers that keep slow tests out of the default run without skipping them.
@@ -72,6 +126,10 @@ CI runs 3.10–3.13 on Linux plus 3.13 on macOS and Windows, a separate coverage
 mypy job, and a fourth that installs the package with **no extras** and imports every
 module — a top-level `import anthropic` anywhere in the tree fails that job, which is the
 whole reason it exists.
+
+The same CI runs again on every push to `main`. When it fails there, it opens an issue in
+the maintainers' private repository, memvara/build-health, and the fix goes in through an
+ordinary pull request rather than a revert.
 
 It also runs LOCOMO retrieval and fails when a published figure moves, in either
 direction, by more than 0.1 points overall or 1.1 in a category, which is one question's

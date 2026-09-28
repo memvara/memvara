@@ -38,7 +38,8 @@ expect, and `deprecate` leaves the version installable.
 ## How the pieces fit
 
 A release starts by bumping the version in both places, closing out `CHANGELOG.md`, and
-tagging the commit the local gate went green on. The publishing scripts delete and rebuild the
+tagging a commit on `main` whose CI run passed; `release.yml` runs CI again on the tagged
+commit. The publishing scripts delete and rebuild the
 build directory every run, because `twine upload dist/*` ships whatever is in it and a stale
 artifact is a wrong release nobody can take back. Credentials are read from the environment
 and never written, prompted for, or logged.

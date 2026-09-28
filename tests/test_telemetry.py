@@ -209,6 +209,7 @@ def test_rank_correlation_reports_absence_rather_than_zero(values):
 # The recorders
 # ===========================================================================
 
+@pytest.mark.covers("inv:TB5")
 def test_memory_recorder_accumulates_counters_and_keeps_every_observation():
     rec = MemoryRecorder()
     rec.counter("a.b")
@@ -381,7 +382,7 @@ def test_nothing_is_computed_for_telemetry_when_it_is_unset(monkeypatch):
     monkeypatch.setattr("memvara.write.pipeline.script_of", boom)
     monkeypatch.setattr("memvara.retrieve.hybrid.script_of", boom)
     monkeypatch.setattr("memvara.retrieve.hybrid.rank_correlation", boom)
-    monkeypatch.setattr("memvara.retrieve.hybrid.quality_boost", boom)
+    monkeypatch.setattr("memvara.retrieve.hybrid.ranking_quality", boom)
     monkeypatch.setattr("memvara.consolidate.sweep.Sweep._observe_slots", boom)
 
     rig = Rig(None, FakeLLM([

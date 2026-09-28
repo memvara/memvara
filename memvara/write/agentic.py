@@ -608,7 +608,8 @@ class ProposalPlan:
         self._reasons = {p.ref: p.reason for p in self.supersedes}
         self._ref_of: dict[int, str] = {}
         self._closed: dict[str, set[str]] = {}
-        #: The stored claim each ref ended up as: the new row, or the row it repeated.
+        #: The stored claim each ref ended up as: the new row, or the row it repeated. For
+        #: a restatement with an earlier start, the live claim on record (see `observe`).
         self.stored: dict[str, str] = {}
 
     def items(self) -> list[dict[str, Any]]:
@@ -626,13 +627,22 @@ class ProposalPlan:
         return self._reasons.get(self._ref_of.get(id(claim), ""))
 
     def observe(self, claim: Claim, action: str, stored: Claim | None,
-                closed: Sequence[Claim]) -> None:
-        """What the reconciler did with one candidate."""
+                closed: Sequence[Claim], restated: Claim | None = None) -> None:
+        """What the reconciler did with one candidate.
+
+        `restated` is `ReconcileResult.restated`: the live claim on record when the
+        candidate restated its value with an earlier start. `stored` is then the claim
+        for the earlier period, which is over and answers only about that period, so the
+        proposal's ref names the claim on record instead, and a link proposed for it
+        lands where a plain repeat's link does.
+        """
         ref = self._ref_of.get(id(claim))
         if ref is None:
             return
         self._closed[ref] = {c.id for c in closed}
-        if stored is not None and action in ("add", "supersede", "reinforce"):
+        if restated is not None:
+            self.stored[ref] = restated.id
+        elif stored is not None and action in ("add", "supersede", "reinforce"):
             self.stored[ref] = stored.id
 
     def unapplied_supersedes(self) -> list[SupersedeProposal]:

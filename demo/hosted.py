@@ -33,11 +33,14 @@ left to be noticed:
   block carries each claim's own sentence, so the reader sees the same words; anything
   keyed on the predicate name does not. `folded_predicates()` computes the folds from the
   vocabulary rather than listing them, and the report prints them.
-* **Dated reads.** `POST /v1/recall` has no time axis and the client refuses `valid_at`.
-  The four questions that carry `about` are read with `search(valid_at=)` instead and
-  rendered by `render_dated`, which is the library's own recall renderer called on those
-  results — byte-identical to local `recall(valid_at=)` on the same store, which a test
-  pins. Nothing here formats a block of its own.
+* **Dated reads.** The four questions that carry `about` are read with
+  `search(valid_at=)` and rendered by `render_dated`, which is the library's own recall
+  renderer called on those results — byte-identical to local `recall(valid_at=)` on the
+  same store, which a test pins. Nothing here formats a block of its own. The arm was
+  written this way when `POST /v1/recall` had no time axis and the client refused
+  `valid_at` (memvara/memvara#298). It keeps reading them this way, so its rows stay
+  comparable with the runs already recorded and it still works against a deployment from
+  before the route took `valid_at`.
 * **Extraction and the episode cap.** The deployment runs its own extractor over the
   turns the `memvara` arm writes, possibly in the background, and its own cap on how many
   turns a read may return; the local arm sets `read_max_episodes=k`, which a hosted client

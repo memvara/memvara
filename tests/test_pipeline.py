@@ -143,6 +143,7 @@ def live(store, tenant: str = "acme"):
 
 # --- the headline number -----------------------------------------------------
 
+@pytest.mark.covers("inv:WP5")
 def test_twenty_turns_three_facts_costs_exactly_one_call():
     """20 turns, 3 of which carry facts: one batched extract call, 17 skipped."""
     facts = [
@@ -190,6 +191,7 @@ def test_twenty_turns_three_facts_costs_exactly_one_call():
     store.close()
 
 
+@pytest.mark.covers("inv:WP8")
 def test_pure_chitchat_never_reaches_the_model():
     llm = CountingLLM()
     pipe, store, _ = build(llm)
@@ -347,6 +349,35 @@ def test_near_duplicate_restatement_reinforces_instead_of_adding():
     store.close()
 
 
+def test_the_claims_a_batch_restates_are_read_again_in_one_query(monkeypatch):
+    """The claim transaction reads every claim tier 0 queued for a reinforcement again,
+    under the write lock, before it reinforces it. It read them one `get_claim` at a time,
+    one query under the lock for every restating turn; they are read together, in one
+    `get_claims`. Two turns restating one claim must still both reinforce it, the second
+    building on the first rather than on the copy read before either was applied."""
+    pipe, store, _ = build()
+    berlin = pipe.add([ep("I live in Berlin.")]).added[0]
+    acme = pipe.add([ep("I work at Acme.")]).added[0]
+    asked: list[list[str]] = []
+    real = store.get_claims
+
+    def get_claims(claim_ids: Sequence[str]) -> dict[str, Claim]:
+        asked.append(sorted(claim_ids))
+        return real(claim_ids)
+
+    monkeypatch.setattr(store, "get_claims", get_claims)
+    turns = [ep(berlin.text), ep(berlin.text + "."), ep(acme.text)]
+    receipt = pipe.add(turns)
+
+    assert receipt.skipped == 3 and receipt.added == []
+    assert asked == [sorted([berlin.id, acme.id])]
+    stored = store.get_claim(berlin.id)
+    assert stored.observation_count == 3
+    assert {turns[0].id, turns[1].id} <= set(stored.sources)
+    assert store.get_claim(acme.id).observation_count == 2
+    store.close()
+
+
 def test_near_dup_threshold_of_one_disables_the_shortcut():
     # Guard against the threshold being ignored: at 1.0 only an exact vector match counts.
     pipe, store, _ = build(near_dup_threshold=1.01)
@@ -394,6 +425,7 @@ def test_a_turn_holding_other_numbers_than_the_nearest_claim_is_not_a_restatemen
     ("local:BAAI/bge-small-en-v1.5", 0.995, None, True),
     ("local:BAAI/bge-small-en-v1.5", 0.985, 0.97, True),
 ])
+@pytest.mark.covers("inv:RT8")
 def test_the_near_duplicate_threshold_is_the_one_measured_in_the_embedders_space(
         name, cosine, given, restated):
     """A turn worded like a claim embeds exactly as that claim would, so tier 0 reads it
@@ -520,8 +552,132 @@ def test_a_repeat_does_not_reinforce_a_claim_that_has_been_retired():
     store.close()
 
 
+# Tier 0 finds the claims a repeated turn restates and queues them for a reinforcement
+# that the claim transaction applies after tiers 1 and 2, one of which can call a model.
+# Another handle on the same file can erase or end a queued claim in between, or erase the
+# turn itself; each test does it from inside a patched `_tier1` or `_tier2`, while the
+# adding handle holds no lock.
+
+
+def two_handles(tmp_path: pathlib.Path) -> tuple[Memvara, Memvara]:
+    path = str(tmp_path / "s.db")
+    return (Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="u"),
+            Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="u"))
+
+
+@pytest.mark.covers("inv:WP12")
+def test_a_repeat_does_not_bring_back_a_claim_erased_while_it_extracted(tmp_path,
+                                                                       monkeypatch):
+    """The reinforcement reads the claim again under the write lock and leaves alone one
+    that is gone: writing back the copy tier 0 read brought an erased claim back, text
+    and all."""
+    adder, other = two_handles(tmp_path)
+    try:
+        turn = "I really like green tea in the morning."
+        tea = other.remember("user", "likes", "green tea",
+                             sources=[Episode(content=turn, role="user")]).added[0].id
+        real_tier1 = WritePipeline._tier1
+
+        def tier1(self: WritePipeline, *args: Any, **kwargs: Any) -> Any:
+            assert other.erase(tea)
+            return real_tier1(self, *args, **kwargs)
+
+        monkeypatch.setattr(WritePipeline, "_tier1", tier1)
+        receipt = adder.add(turn)
+        assert receipt.reinforced == []
+        assert other.store.get_claim(tea) is None, "the erased claim is back"
+        assert other.store.erasure_record(tea) is not None
+    finally:
+        adder.close()
+        other.close()
+
+
+@pytest.mark.covers("inv:WP12")
+def test_a_repeat_keeps_an_ending_made_while_it_extracted(tmp_path, monkeypatch):
+    """A claim that another writer ended in the meantime is no longer live, so it is not
+    reinforced, and its ending stays: writing back the copy tier 0 read undid it, and two
+    values of one slot were live."""
+    adder, other = two_handles(tmp_path)
+    try:
+        turn = "I live in Berlin."
+        berlin = other.remember("user", "lives_in", "Berlin",
+                                valid_from=utcnow() - timedelta(days=60),
+                                sources=[Episode(content=turn, role="user")]).added[0].id
+        paris: list[Claim] = []
+        real_tier1 = WritePipeline._tier1
+
+        def tier1(self: WritePipeline, *args: Any, **kwargs: Any) -> Any:
+            paris.extend(other.remember("user", "lives_in", "Paris",
+                                        valid_from=utcnow() - timedelta(days=30)).added)
+            return real_tier1(self, *args, **kwargs)
+
+        monkeypatch.setattr(WritePipeline, "_tier1", tier1)
+        receipt = adder.add(turn)
+        assert receipt.reinforced == []
+        kept = other.store.get_claim(berlin)
+        assert kept is not None and kept.valid_to == paris[0].valid_from
+        assert [c.object for c in other.get_all() if c.predicate == "lives_in"] == ["Paris"]
+    finally:
+        adder.close()
+        other.close()
+
+
+@pytest.mark.covers("inv:WP13")
+def test_an_add_whose_turn_is_purged_while_it_extracts_writes_nothing_read_from_it(
+        tmp_path, monkeypatch):
+    """The claims are written after extraction, which can include a model call. A purge
+    committed in between erased the turn, and the claim read from it was written anyway,
+    citing a turn that no longer existed, after the purge had reported removing it."""
+    adder, other = two_handles(tmp_path)
+    try:
+        real_tier2 = WritePipeline._tier2
+
+        def tier2(self: WritePipeline, *args: Any, **kwargs: Any) -> Any:
+            assert other.purge()["episodes"] == 1
+            return real_tier2(self, *args, **kwargs)
+
+        monkeypatch.setattr(WritePipeline, "_tier2", tier2)
+        receipt = adder.add("I live in Berlin.")
+        stored = list(other.store.iter_claims("default", include_invalidated=True))
+        assert stored == [], "a claim read from the purged turn was written"
+        assert receipt.added == []
+    finally:
+        adder.close()
+        other.close()
+
+
+@pytest.mark.covers("inv:WP13")
+def test_a_restatement_whose_turn_is_purged_before_it_is_applied_reinforces_nothing(
+        tmp_path, monkeypatch):
+    """A turn in a session restates a claim the user holds, so tier 0 queues a
+    reinforcement of that claim, citing the turn. A purge of the session, committed before
+    the claim transaction, erases the turn and leaves the user's claim. The reinforcement
+    then had no turn left to cite, and it was applied anyway: the claim gained an
+    observation and salience with no evidence behind them, and the receipt reported it as
+    reinforced. It is skipped, as a new claim whose every turn is gone is dropped."""
+    adder, other = two_handles(tmp_path)
+    try:
+        tea = other.remember("user", "likes", "green tea").added[0]
+        before = other.store.get_claim(tea.id)
+        real_tier1 = WritePipeline._tier1
+
+        def tier1(self: WritePipeline, *args: Any, **kwargs: Any) -> Any:
+            assert other.scope(session="s1").purge()["episodes"] == 1
+            return real_tier1(self, *args, **kwargs)
+
+        monkeypatch.setattr(WritePipeline, "_tier1", tier1)
+        receipt = adder.scope(session="s1").add(tea.text)
+        assert receipt.skipped == 1, "the turn was not read as a restatement"
+        assert receipt.reinforced == []
+        assert other.store.get_claim(tea.id) == before, "the claim was reinforced"
+    finally:
+        adder.close()
+        other.close()
+
+
 # --- tier 2: schema acquisition is paid for once -----------------------------
 
+@pytest.mark.covers("inv:WP8")
 def test_novel_predicate_is_classified_exactly_once():
     def responder(episodes):
         return [{"subject": "user", "predicate": "collects", "object": obj,
@@ -605,6 +761,7 @@ def test_a_predicate_classified_as_one_does_supersede():
     store.close()
 
 
+@pytest.mark.covers("inv:WP5")
 def test_fast_path_turns_never_reach_the_llm():
     llm = CountingLLM()
     pipe, store, _ = build(llm)
@@ -663,6 +820,7 @@ def test_a_deterministically_foldable_form_never_reaches_the_model():
     store.close()
 
 
+@pytest.mark.covers("inv:WP9")
 def test_a_no_op_backend_is_not_billed_and_reports_the_loss():
     from memvara.llm import NullLLM
 
@@ -674,6 +832,7 @@ def test_a_no_op_backend_is_not_billed_and_reports_the_loss():
     store.close()
 
 
+@pytest.mark.covers("inv:WP9")
 def test_a_no_op_backend_reports_deferred_when_a_worker_will_read_the_turns():
     """The same batch, the other word. `unextracted` says the content is lost; on a
     deployment where a worker runs `reextract()` over stored turns it is not lost, it is
@@ -690,6 +849,7 @@ def test_a_no_op_backend_reports_deferred_when_a_worker_will_read_the_turns():
     store.close()
 
 
+@pytest.mark.covers("inv:WP9")
 def test_deferred_is_off_by_default_so_the_default_configuration_still_says_lost():
     """A caller who never deployed a worker must keep being told the truth."""
     from memvara.llm import NullLLM
@@ -1028,6 +1188,7 @@ def test_malformed_model_output_is_dropped_not_repaired(bad):
 # keeps working with fabricated-but-structurally-valid objects like "tea" against
 # unrelated filler text. These turn the option on explicitly.
 
+@pytest.mark.covers("inv:WP6")
 def test_a_claim_sharing_no_vocabulary_with_its_source_is_dropped():
     """The exact shape the option exists for: a well-formed claim, invented whole.
 
@@ -1149,6 +1310,7 @@ class KeyedEmbedder:
         return out
 
 
+@pytest.mark.covers("inv:WP6")
 def test_auto_rescues_a_paraphrase_the_lexical_check_would_reject():
     """The reason "auto" exists, and the reason it can default on.
 
@@ -1176,6 +1338,7 @@ def test_auto_rescues_a_paraphrase_the_lexical_check_would_reject():
     store.close()
 
 
+@pytest.mark.covers("inv:WP6")
 def test_auto_still_rejects_what_the_embedder_cannot_connect_either():
     """A fabrication fails both checks: no shared vocabulary, orthogonal embedding."""
     llm = CountingLLM(claims=[
@@ -1220,6 +1383,7 @@ class _AngledEmbedder:
     ("local:sentence-transformers/all-MiniLM-L6-v2", True),
     ("local:BAAI/bge-small-en-v1.5", False),
 ])
+@pytest.mark.covers("inv:RT8")
 def test_the_rescue_reads_a_cosine_in_the_space_it_was_measured_in(name, kept):
     """A cosine of 0.5 between an ungrounded claim and its source clears the 0.40 measured
     under MiniLM, where the paraphrases the rescue exists for score. Under bge-small it is
@@ -1317,6 +1481,7 @@ def test_a_broken_embedder_fails_the_rescue_open_and_says_so_once():
     store.close()
 
 
+@pytest.mark.covers("inv:WP6")
 def test_a_fabricated_claim_cannot_retire_a_true_fact_by_default():
     """The stake, stated as behaviour: why this defaults on rather than off.
 
@@ -1372,6 +1537,7 @@ def test_a_mode_nobody_defined_is_a_construction_error():
         build(reject_ungrounded="yes")
 
 
+@pytest.mark.covers("inv:WP6")
 def test_the_default_mode_is_auto():
     pipe, store, _ = build()
     assert pipe.reject_ungrounded == "auto"
@@ -2076,6 +2242,7 @@ def test_an_empty_batch_emits_nothing():
     store.close()
 
 
+@pytest.mark.covers("inv:WP2")
 def test_evidence_roles_reaches_the_gate_from_the_pipeline_constructor():
     """`write_evidence_roles=` on `Memvara` works because this parameter is keyword-only
     here — the facade forwards `write_*` by reading this signature. Pinned so the
@@ -2212,6 +2379,7 @@ def test_a_non_finite_amount_from_a_custom_llm_is_dropped():
 #
 # Off by default, so every test above keeps its invented predicates. These turn it on.
 
+@pytest.mark.covers("inv:WP3")
 def test_an_unregistered_predicate_is_refused_and_counted_under_a_closed_vocabulary():
     """The exact shape the option exists for: a real value under a predicate nobody
     declared. `build_commit` is one of about a hundred spellings one production
@@ -2268,6 +2436,7 @@ def test_a_registered_predicate_and_a_declared_alias_survive_a_closed_vocabulary
     store.close()
 
 
+@pytest.mark.covers("inv:WP3")
 def test_closed_vocabulary_is_off_by_default_and_remember_never_sees_it():
     """Two things the option must not change: an open pipeline still learns a new
     predicate, and a caller asserting a fact through the fast path is never filtered --

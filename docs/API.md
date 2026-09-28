@@ -34,14 +34,27 @@ mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, s
              text=, confidence=, memory_type=, polarity=, extractor=, expires_at=,
              expire_reason=, **meta)
                                                   -> WriteReceipt
+#   recorded_at= left out is the instant the write takes the store's write lock, which is
+#   also the instant it retires anything it displaces. valid_from= left out is
+#   recorded_at= when that was given; with neither given it is that same instant under
+#   the lock, unless valid_to= was given, when it is the instant of the call.
 #   expires_at= is when the claim is ERASED (not ended, not retired): from that instant
 #   no read returns it, and erase_expired() deletes the row, its text index entry and its
 #   vector, with a proof. A repeat carrying an expiry reinforces only a claim in exactly
 #   its own scope; otherwise it is stored as its own claim, so another project's copy is
 #   never given the expiry.
-#   It must be in the future (ValueError otherwise). expire_reason= says why, at most
-#   500 characters, and is a ValueError without expires_at. Repeating a fact the store
-#   holds puts the expiry on the claim on record. Not valid_to, which ends and keeps.
+#   It must be in the future when the call is made and again when the write takes the
+#   store's write lock (ValueError otherwise, and nothing is written). expire_reason=
+#   says why, at most 500 characters, and is a ValueError without expires_at. Repeating
+#   a fact the store holds puts the expiry on the claim on record. Not valid_to, which
+#   ends and keeps.
+#   Repeating a fact with a valid_from before the claim on record begins, and no
+#   expires_at, stores that earlier period as a claim of its own, ending where the
+#   claim on record begins; it is reported under added, and the claim on record is
+#   not changed. Only a claim this scope can see, in its own scope or a broader one,
+#   counts as the claim on record here. A period already stored this way is not stored
+#   twice: repeating it reinforces the claim that holds it, and an even earlier start
+#   stores only the part before that claim begins.
 #   With `Memvara(advise_replacements=True)` and a backend that implements
 #   `llm.ReplacementJudge`, a write that closed nothing fills `receipt.may_replace`
 #   with the nearest live claims in other slots the model judged it to be a newer
@@ -102,6 +115,8 @@ mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False,
 #     `Explanation.anchor` (subject | object | path | None). Needs no number; combines
 #     with min_score. Against a hosted deployment it is sent only when set, so a server
 #     from before the field refuses it rather than quietly answering unfiltered.
+#   memory_types= a list of episodic, semantic or procedural; any other name raises
+#     ValueError before anything is read.
 #   ranked=True runs a configured read_selector over the reranked turns and returns the
 #     ones it named first, whole, with Explanation.selected/.span set — see
 #     memvara.select. Needs include_episodes=True and no memory_types (ValueError
@@ -118,8 +133,10 @@ mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False,
            query_rewrite=True, synthesize=False, header=None, include_episodes=False,
            episode_header=None, include_history=False, history_header=None,
            budget=None, counter=<internal>, valid_at=None, filters=None,
-           filepath_prefix=None, with_ids=False)
+           filepath_prefix=None, memory_types=None, with_ids=False)
                                                   -> str | RecallResult
+#   memory_types= keeps only claims of those types, as on search(), and refuses an
+#     unknown name with ValueError before anything is read.
 #   filters= and filepath_prefix= narrow the facts and the turns as they do on search().
 #     The include_history tail is the past values of the facts that were kept, and is
 #     not filtered again.
@@ -208,6 +225,9 @@ mem.merge_predicate(surface, canonical, *, dry_run=True) -> MergeReport
 #   aliases=...)` is the pass underneath it, for an operator applying a mapping.
 #   Like the two repairs above, this runs against the local engine only; a hosted
 #   deployment has no endpoint for it yet.
+#   All three leave alone a slot that another handle or process changed while they
+#   ran. The report's `written` counts only the rows actually written, and running
+#   the repair again applies the rest.
 
 # maintenance
 mem.consolidate()                                 -> dict[str, int]
@@ -269,6 +289,13 @@ bob.add("I live in Oslo")
 
 Scope filters fail **closed**: a scope that resolves to nothing matches nothing, rather
 than degrading into an unfiltered query across every user.
+
+Leave a level unset (`None`) to leave it unbound. No level accepts `"*"` or the empty
+string: `Scope(user="*")`, `mem.scope(user="")`, a read or write given `session=""`,
+`RemoteMemvara(user="*")` and the server's `MEMVARA_USER=*` all raise `ValueError`
+(`ConfigError` for the server), naming the level and the value. A scope's key writes an
+unbound level as `*`, and a claim filed under either value used to share that key, so
+every other user could read it by id.
 
 ### Swapping backends
 
@@ -415,10 +442,12 @@ an `AttributeError` at the call site and a mypy error before that, where a metho
 raised would compile, ship and fail in production. The same rule decides which *arguments*
 exist. `recall()` takes no `with_ids`, because `POST /v1/recall` returns a rendered string
 and carries no ids at all; `get_all()` takes no `memory_types`, because the endpoint has no
-such filter and would answer with an unfiltered page. `budget` and `valid_at` are the two
-refusals rather than omissions: both stay in `recall()`'s signature so that `None` works,
-and a value raises `ValueError`, because a budget silently ignored is an oversized prompt
-with no signal, and a dated read silently answered with the present is a wrong one.
+such filter and would answer with an unfiltered page. `budget` is the one refusal rather
+than an omission: it stays in `recall()`'s signature so that `None` works, and a value
+raises `ValueError`, because a budget silently ignored is an oversized prompt with no
+signal. `recall(valid_at=...)` is sent to `POST /v1/recall`, which takes it as the world
+clock alone. A deployment from before the field refuses a dated read with a 422, which the
+client raises as `InvalidRequest`.
 
 `search()` and `recall()` send `filters` and `filepath_prefix` only when you set them, and
 check them first with the rules the local engine uses. `RemoteMemvara(metadata_filters=False)`
@@ -445,7 +474,29 @@ Two divergences are real and worth knowing before you write against them:
   `erase()` returns whether anything was erased, and `purge()` returns the per-table rows
   removed as the deployment's own count.
 
-**One method exists here and has no local twin: `service()`.** It returns the whole
+**Four methods exist here and have no local twin: `service()`, `health()`, `whoami()`
+and `end()`.** A caller who may be handed either client should guard these calls.
+
+- `health()` asks `GET /v1/health` whether the deployment is answering. It is the one route
+  that needs no credential, and it does not touch the store, so a 200 does not promise that
+  a read will succeed.
+- `whoami()` asks `GET /v1/whoami` what the presented credential authorizes: its scope, its
+  privilege and its expiry. It is answered from the token alone.
+- `end()` closes a fact that stopped being true, with nothing replacing it: `claim_id=` for
+  one memory, or `predicate=` (with `subject=`, default `"user"`) for every current value in
+  that slot. The local client does the same through `delete(claim_id, close="ended")` and
+  `forget(subject, predicate, close="ended")`, which the hosted client also has.
+- `service()` is described in the next paragraph.
+
+Two methods exist only on the local client, besides the ones without an endpoint listed
+above. `merge_predicate()` moves the claims filed under one predicate spelling to another
+and teaches the registry the alias; the hosted deployment has no endpoint for it. `bind()`
+narrows a `ScopedMemvara` to a smaller scope. A `ScopedRemoteMemvara` has no `bind()`, and
+its `scope` is a property that returns the bound `Scope`, not a method. To narrow a hosted
+view, call `scope()` on the client underneath it, as in `view.memvara.scope(session=...)`.
+A field you leave out keeps the view's value, as it does with `bind()`.
+
+`service()` returns the whole
 `GET /v1/stats` envelope — `scope`, `visible`, `tenant_counts`, `extractor`, `read_only` —
 where `stats()` returns `tenant_counts` alone so that `stats()["claims"]` is a number
 against either engine. Two of those fields have no local answer at all: `extractor` names a
@@ -462,15 +513,19 @@ token, and no `/v1` request parameter names one, so a narrowing cannot widen. Er
 as the exception types in `memvara.remote.errors` — `AuthError`, `ScopeError`, `NotFound`,
 `Conflict`, `QuotaExhausted`, `RateLimited`, `LegalHold`, `ReadOnly`, `InvalidRequest` and
 `ServerError`, all `RemoteError` — and writes carry an `Idempotency-Key` that is held
-constant across their own retries.
+constant across their own retries. A missing or unknown key raises `AuthError`.
 
 Three attempts per call. A call is retried on an error the deployment marked retryable, on
 a 429 — including one an edge proxy returned with no envelope, which is classified from the
-status — and on a connect-phase failure that never reached the server. A `Retry-After` is
-waited for as asked, up to thirty seconds; a longer one raises `RateLimited` straight away
-with the server's own number on `retry_after`, rather than blocking the call (or the event
-loop) for as long as the header says. Waiting an hour is a decision for the caller, who
-knows whether an hour is acceptable.
+status — and on a connect-phase failure that never reached the server. memvara-cloud marks
+an error retryable in the envelope's `detail`, as it does for a write still running under
+the same `Idempotency-Key`, or by the code `unavailable`, which it sends when the store is
+unreachable or overloaded. A 429's `Retry-After` is waited for as asked, up to thirty
+seconds; a longer one raises `RateLimited` straight away with the server's own number on
+`retry_after`, rather than blocking the call (or the event loop) for as long as the header
+says. Waiting an hour is a decision for the caller, who knows whether an hour is
+acceptable. Every other retry waits a short exponential backoff with jitter, starting at
+about a quarter of a second.
 
 **`memvara.remote.aio.AsyncRemoteMemvara` is the same client, awaited.**
 
@@ -501,6 +556,16 @@ The library is synchronous, and reads no longer queue behind writes. Read statem
 per-thread connection, and the slow half of a write — the near-duplicate encode and the
 model call — runs with no transaction open, so the store's write lock is held for the
 database work and nothing else.
+
+Two writers on one store file take turns, whether they are two handles in one process or
+two processes, such as the MCP server and the hooks' daemon. A write holds the write lock
+from its first lookup until it commits, so a second writer waits, then sees the first
+writer's value and supersedes or reinforces it as a single writer would. A method that
+reads a claim before it changes it, such as `delete()`, `forget()`, `supersede()` or
+`erase()`, reads it under the same lock, so it acts on the claim as the other writer left
+it: an ending made while it waited is kept, and a claim erased while it waited stays
+erased. A writer that waits longer than SQLite's five-second busy timeout gets
+`OperationalError: database is locked`.
 
 One reader thread against a 20,000-claim consolidation sweep:
 

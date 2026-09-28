@@ -23,6 +23,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .private import private_dir, private_open
+
 #: One JSON object per line, beside the store rather than inside it. The store is the
 #: user's memory and answers questions about them; this is operational accounting about
 #: the tool, and mixing the two would put "we spent 4,897 tokens" into recall results.
@@ -77,10 +79,11 @@ class JsonlRecorder:
             "tags": dict(tags),
         }
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # 0700 and 0600 (`lib.private`): the ledger says what each run cost and when.
+            private_dir(str(self.path.parent))
             if self.path.exists() and self.path.stat().st_size > MAX_BYTES:
-                self.path.write_text("")
-            with self.path.open("a", encoding="utf-8") as fh:
+                private_open(str(self.path), "w").close()
+            with private_open(str(self.path), "a") as fh:
                 fh.write(json.dumps(record) + "\n")
         except OSError:
             # Unmeasured is survivable. A failed capture because accounting failed is not.

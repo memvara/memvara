@@ -13,7 +13,7 @@ importable from the foundation modules:
 - `memvara/schema.py` — `PredicateRegistry`, `PredicateSpec`, `Cardinality`, `Volatility`
 - `memvara/store/` — `Store` and `SQLStore` protocols, `SQLiteStore`, `STATES`,
   `ClaimState`, `resolve_states()`, `state_predicate()`, `stored_state_predicate()`,
-  `live_predicate()`, `unexpired_predicate()`
+  `live_predicate()`, `unended_predicate()`, `unexpired_predicate()`
 - `memvara/embed/` — `Embedder` protocol, `HashingEmbedder`, `CachedEmbedder`, `default_embedder()`,
   `encode_queries()`, which embeds a search query in the form its model expects, and
   `calibration_of()`, the cosine thresholds measured for each embedding space
@@ -216,6 +216,23 @@ was being read as holding further than it does.
    defaulting to `"ended"` everywhere except `forget`/`delete`, which are belief operations
    by name.
 
+   **A retired claim is never closed again.** `invalidated_at` is when we stopped believing
+   a claim, so moving it later would make every read of the past between the two instants
+   believe the claim again, and moving it earlier would unbelieve what we did believe.
+   Ending it is no better: it gives a claim we stopped believing an end in the world, and
+   history then shows it as a fact that finished rather than one we took back. `close_out`
+   therefore leaves a claim that is already retired exactly as it is, whichever closure it
+   is asked for: no new `invalidated_at`, no `valid_to`, no new `invalidated_by` and no
+   second witness. `delete()` of such a claim writes nothing and returns True, whether it
+   was asked to retire or to end it, and `memory_forget` and `memory_end` say that nothing
+   changed. A second `delete()` used to move the retirement to its own instant, and
+   `delete(close="ended")` used to end the claim. A claim counts as retired once its
+   retirement is recorded, even one `delete(at=...)` dated to take effect later, as
+   `Claim.state` says; until then the store still believes it, so the reconciler, `forget`
+   and `forget_matching` leave it out of what they close instead of reporting it closed.
+   An ending of a claim that is not retired can still move, but only earlier, as
+   `close_out` has always allowed.
+
    **Expiry is not `valid_to`.** A caller who writes a fact with `expires_at` asks for it to
    be **erased** once that instant passes: the row, its text index entry and its vector are
    deleted, the erasure is recorded in `erasures`, and `prove_erased` checks the disk. That
@@ -245,8 +262,8 @@ was being read as holding further than it does.
    > **Sketch.** `close_out` is the single place any claim ends and takes one `Closure`;
    > `Claim.state` derives `live`/`ended`/`retired` from which column is set.
    > `Memvara.erase_expired` lists due claims with `Store.expired_claims`, which reads
-   > `expires_at` and never `valid_to`, re-reads each one, and erases it through
-   > `_erase_proved`, the same code `erase()` runs after its scope check.
+   > `expires_at` and never `valid_to`, and erases each one through `_erase_proved`, the
+   > same code `erase()` runs, which re-reads the claim under the write lock first.
    > **Measured.** `bench/compare.py`: **0 stale values left live** against 7 for a
    > mem0-style baseline, on a transcript where 10 facts are revised. `tests/
    > test_bitemporal.py` holds the two-clock reads. The expiry side is not measured; there
@@ -416,6 +433,16 @@ the tables a claim can survive in (`claims`, `claims_fts`, `embeddings`, `claim_
 and since schema 13 `claim_links`). A re-hash of what was returned, or a cached count,
 would not be evidence.
 
+Since schema 17 it also reads the claim's row of the vector file, as `vector_file`. The
+database counts said nothing about `<db>.vecs`, so an erasure that left the vector in the
+file still got a certificate. `erase_claim` records the row the vector held in
+`erasures.vector_slot`, and `residue` opens the file itself, not this store's mapping of
+it, and reads that row: 1 if it holds anything, 0 if it is blank. A row the store has
+given to another vector since holds that vector and counts 0, and so does an erasure
+recorded before schema 17, whose row nobody recorded. `residue` runs in one `batch()`, so
+no other writer is between taking a freed row for a new vector and committing that, and
+the row read belongs to the owner the database names.
+
 `prove_erased` fails closed. A store with no `residue`, or one whose `residue` raises —
 `RemoteStore`, which a `getattr` guard cannot see — yields `proven=False` with a reason,
 and `erase()` raises `ErasureIncomplete` rather than returning `True`. Unproven and
@@ -439,21 +466,35 @@ queries):
   read out of is a copy of it wearing a different name. Keyed on `(claim_id, erased_at)`,
   so erase, restore from backup and erase again is two records rather than one.
 
+**The store's erasure methods read under the write lock.** `erase_claim`, `erase_episodes`
+and `purge` each run in one `batch()`, which holds the write lock from before their first
+read (see *Two writers on one store*). Before, each read what it was about to erase before
+its first write, outside the lock. Two `erase_claim` calls on one claim at once could both
+find the row, and the second wrote an erasure record, and reported the claim erased,
+although it had erased nothing. `erase_episodes` could decide a turn was uncited just
+before a claim came to cite it, and erase it anyway. `purge` lists the vectors it blanks and
+counts before its set-based deletes, so a claim written in between lost its row while its
+vector was left out of both. Now a second erasure finds nothing, a turn cited in the
+meantime is kept, and the purge's list matches what it deletes.
+
 **Ordering and durability, not tamper-evidence.** Nothing here is chained or signed, so an
 operator with write access can remove a row. A hash-chained log is a different feature and
 is commercial (`docs/ROADMAP.md`); what this defends against is a delete that no record was
 ever written for.
 
 **Erasure on expiry uses the same path.** `erase_expired(now)` lists every claim whose
-`expires_at` is at or before `now` with `Store.expired_claims`, in every tenant, re-reads
-each one, and erases it with `_erase_proved`, which is the part of `erase()` after the
-scope check: `erase_claim` (audit row, then delete, in one transaction) and then
-`prove_erased`. Each erased claim comes back as an `ErasedClaim` with its id, scope,
-`expires_at`, `expire_reason` and proof, and no subject, predicate, object or text. The
-re-read is there because a write between the listing and the delete can move the expiry
-later; that claim is left alone. A failed proof raises `ErasureIncomplete`, and the claims
-erased before it stay erased and recorded. `erase_expired` runs when a `Memvara` opens a
-store, unless `expiry_erasure=False` or `sweep_expired=False`, and hourly while the MCP
+`expires_at` is at or before `now` with `Store.expired_claims`, in every tenant, and erases
+each one with `_erase_proved`, the path `erase()` takes too: it re-reads the claim, checks
+it, and calls `erase_claim` (audit row, then delete) in one transaction that holds the
+database's write lock from before the re-read, and then runs `prove_erased`. For `erase()`
+the check is the caller's scope, and for the sweep it is that the expiry is still due.
+Each erased claim comes back as an `ErasedClaim` with its id, scope, `expires_at`,
+`expire_reason` and proof, and no subject, predicate, object or text. The re-read is
+there because a write between the listing and the delete can move the expiry later, from
+this process or another; that claim is left alone. A failed proof raises
+`ErasureIncomplete`, and the claims erased before it stay erased and recorded.
+`erase_expired` runs when a `Memvara` opens a store, unless `expiry_erasure=False` or
+`sweep_expired=False`, and hourly while the MCP
 server's `serve()` loop runs (`server.mcp.ExpirySweeper`, on a daemon thread, which warns
 and carries on when a sweep fails). A read-only server runs neither, because erasing is a
 write. A store with no `expired_claims` is skipped at open, and so is one whose
@@ -469,18 +510,86 @@ of the write path all leave it out and `k` still counts visible rows (invariant 
 `Memvara._gone` does the same for the reads addressed by id: `get`, `why`, `history`,
 `produced`, and the claims `forget_matching` and `links` hydrate. The reconciler does not
 reinforce such a claim, so writing the fact again stores a new claim rather than one the
-sweep is about to erase. `erase()` by name still finds and erases it. With
-`expiry_erasure=False` the store's `hide_expired` is false and an expiry does nothing.
+sweep is about to erase. A retraction is treated the same way: a repeat is not folded into
+an earlier tombstone whose expiry has passed, so the sweep does not erase the repeat
+together with that tombstone. `erase()` by name still finds and erases an expired claim.
+With `expiry_erasure=False` the store's `hide_expired` is false and an expiry does nothing.
 
-**A repeat with an expiry stays in its own scope.** Writing a fact the store already
-holds normally reinforces the claim on record, which `value_key` finds by owner (tenant
-and user) and not by project, agent or session. A repeat that names an `expires_at`
-reinforces only a claim in exactly its own scope, and puts the expiry on it. With no such
-claim, it is written as its own claim in its own scope, so the expiry never reaches a
-claim another project or session relies on, and the claim beside it is not reported as an
-accumulation. Refusing the write was the other choice; it was not taken because it would
-lose the fact the caller asked to keep until the expiry, and its message would tell one
-project what another project holds.
+**A repeat reinforces only a claim its writer can see.** Writing a fact the store already
+holds reinforces the claim on record instead of storing a second one. `value_key` finds
+that claim by owner (tenant and user), not by project, agent or session, so the lookup
+also returns the same value held in a sibling project or session, or in a scope beneath
+the writer's. The reconciler reinforces only a claim the writer can see, by the rule
+`Scope.sees` states for reads: the writer's own scope and every broader one. Any other
+match is left untouched, and the repeat is written as its own claim in its own scope. That
+claim holds the same value as the one beside it, so it is not reported as an
+accumulation. Two other reinforcement paths follow the same rule: a retraction that
+repeats one already recorded (`Reconciler._retract`), and a word-for-word repeat of a
+turn, which reinforces the claims citing that turn without extracting it again
+(`WritePipeline._reinforcements_from_source`).
+
+The rule is applied through `Scope.visible(items)`, which decides `Scope.sees` once per
+distinct scope. Two store lookups answer for the whole tenant rather than for one scope,
+`Store.find_by_value` and `Store.claims_citing`, and every caller that acts for one scope
+filters their answer through it. Besides the three paths above, those callers are:
+
+- `why()`, which lists only the source turns and superseded claims the caller can see;
+- `pending_extraction()` and `reextract()`, which count a turn as extracted only when a
+  claim its own scope can see cites it;
+- the caller-supplied `sources` of `remember()` and `supersede()` (`Memvara._citable`),
+  where an id of a turn the claim's scope cannot see, or of no turn at all, is left out.
+  A claim therefore cannot be made to cite another scope's text, and the claim returned
+  does not reveal which ids exist. A new `Episode` passed in `sources` is stored with the
+  scope `_cite` gives it.
+
+The near-duplicate path (`WritePipeline._near_duplicate`) needs no filter: its vector
+search is asked only about the turn's own scope and the ones above it.
+
+Before this rule the claim the lookup found was reinforced, whatever its scope. The writer
+then read nothing back, and the other scope's claim gained the writer's turn as a source,
+which `why()` then showed to the other scope's readers. A store written before the rule
+keeps every claim that absorbed a write this way. The rule stops new cases and does not
+move old ones, and `why()` no longer shows a turn from a scope the reader cannot see (see
+`Memvara.why`). Writing the lost fact again with `remember()` in the scope that lost it
+stores it there.
+
+**A write never closes a sibling's claim.** A slot's key names the owner and the project,
+not the agent or session, so the claims competing for one slot include values that sibling
+sessions and agents hold. A supersession or a retraction closes only claims the candidate
+can reach (`Reconciler._in_reach`): those in its own scope, in a broader scope it reads
+(`Scope.sees`), or in a narrower scope beneath it (`Scope.contains`). A sibling's claim is
+left live. Before this rule, a write in session s2 ended the value session s1 held, which
+s2 cannot read, and returned it in s2's receipt, so the `memory_remember` reply showed
+s2 the ended value. Reaching down is unchanged and deliberate, as it is for `forget()`
+and `history()`: a user-level write still ends a value a session holds. The accumulation
+report still counts every live value in the slot, siblings included; it is a count and
+names no value, and counting exactly would mean reading every occupant of the slot.
+
+**A repeat with an expiry stays in exactly its own scope.** A repeat that names an
+`expires_at` reinforces only a claim in exactly its own scope, not one at a broader scope
+it can see, and puts the expiry on it. A claim at the user's own level is read from every
+project and session, so an expiry put on it would have the sweep erase a fact they rely
+on. With no claim in exactly its own scope, the repeat is written as its own claim there,
+so the expiry never reaches a claim another project or session relies on, and the claim
+beside it is not reported as an accumulation. Refusing the write was the other choice; it
+was not taken because it would lose the fact the caller asked to keep until the expiry,
+and its message would tell one project what another project holds.
+
+**Only a caller's repeat moves an expiry onto the claim on record.** The transfer runs
+only when the candidate's `derivation` is `USER`, which is what `remember()` and the
+importers write. A model's expiry is kept only on a claim its proposal creates: a model
+repeating a claim on record reinforces it and leaves its expiry as it was. An expiry
+erases the claim when it passes, and a model may neither retire nor erase anything
+(invariant 1), yet a repeated fact with an expiry used to put the model's instant on the
+caller's claim, and the next sweep after it erased what the caller had asserted.
+Single-call extraction is offered no expiry at all, so `_claim_from_dict` drops one found
+in its output; it used to accept any `datetime`, one in the past included, which hid the
+claim on record at once. An agentic `propose_claim` may still carry one, checked to be in
+the future, and the claim that proposal creates keeps it. A model's restatement is not
+made a repeat by its expiry either. A value restated with an earlier start becomes a
+repeat when it names an expiry only when a caller wrote it, so that the caller's expiry
+reaches the claim on record; a model's restatement is stored for its earlier period like
+any other, and the claim it creates keeps the model's expiry.
 ### `write/reconcile.py`
 
 ```python
@@ -494,14 +603,57 @@ displaces, and `"ended"` is the only answer this class could reach on its own: i
 told "here is the new value" and never "the old one was a mistake". For a candidate
 claim:
 
-1. **Exact duplicate** — a live claim with the same `value_key` exists: do not insert.
+1. **Exact duplicate** — a live claim with the same `value_key` exists, and the
+   candidate's scope can see it: do not insert. A match in a scope the candidate cannot
+   see is left alone, and the candidate goes on to the steps below (see "A repeat
+   reinforces only a claim its writer can see" above).
    Bump `observation_count`, raise the *storage* strength (`Claim.salience_base`) and
    stamp `last_observed`, merge `sources`, return `action="reinforce"`. The bump goes
    on the base, not on `salience`: the nightly pass recomputes `salience` from the
    base, so writing it there was erased once a claim aged past `0.415 * half_life`
    — 2.9 days for a FAST predicate, and permanently, since age only grows.
+
+   **A repeat that begins earlier is not a duplicate.** When every live claim with the
+   same `value_key` that the writer can see begins after the candidate does (`_is_after`,
+   so the precision of a resolved expression counts), the candidate carries a start the
+   store does not have. It is inserted for the earlier period only, and the action is
+   `add`. Nothing is reinforced and the live claims are not touched, so a read at a
+   `known_at` before this write returns what it did. Moving the stored claim's
+   `valid_from` back instead would change that read. A single-valued slot already treats
+   a different value that began before the live one this way. A caller's repeat that
+   names an `expires_at` stays a duplicate, so the expiry lands on the claim on record;
+   see *A repeat with an expiry stays in exactly its own scope*. A model's does not,
+   because a model's expiry never reaches a claim it did not create; see *Only a
+   caller's repeat moves an expiry onto the claim on record*.
+
+   The earlier period ends where the value's stored claims begin (`_earlier_period`):
+   the earliest of those live claims, or an earlier claim of the value that runs up to
+   it without a gap, such as the claim a previous restatement stored for its own earlier
+   period. A `valid_to` the caller gave that is earlier still wins. When one claim of the
+   value that the store believes and the writer can see already holds the whole period,
+   from the candidate's start to that end, the candidate says nothing new: it is a
+   duplicate of that claim, which is reinforced, and nothing is inserted. The claim for
+   an earlier period is already over, so the live duplicate check above cannot find it,
+   and without this the same restatement made twice stored its period twice. So with
+   tea stored from April, restating it from January stores January to April; restating
+   it from January or February again reinforces that claim; and restating it from
+   October stores October to January only. A stored claim that ends before the next one
+   begins leaves a gap and does not move the end, so a restatement from before it still
+   covers the gap, and overlaps that claim. None of this reaches a turn that tier 0 of
+   `add()` takes for a repeat, a near-duplicate of a stored claim or an exact repeat of
+   the turn a claim came from: tier 0 reinforces the claim before the reconciler runs,
+   so such a turn still loses its earlier date (#318).
+
+   "Can see" is `Scope.sees`: the writer's own scope and the broader ones it reads, such
+   as the user-wide scope above a project. `value_key` covers the owner and not the
+   project, agent or session, so the lookup also finds the same value in a sibling
+   project, agent or session. Such a claim is left out of the comparison, because the
+   writer cannot read it and its start says nothing about when the fact began in the
+   writer's scope. `supersede()` writes its new claim through this same step, so the rule
+   holds there too.
 2. **Conflict** — the predicate is `Cardinality.ONE` and live claims share the candidate's
-   `fact_key` with a different `value_key`: insert the new claim, and for each superseded
+   `fact_key` with a different `value_key`, in a scope the candidate can reach (see "A
+   write never closes a sibling's claim" below): insert the new claim, and for each superseded
    claim set `invalidated_by=<new id>` plus `valid_to=<the new claim's valid_from>`,
    leaving `invalidated_at` unset. The old value stopped being true where the new one
    begins; it was not an error, so nothing on the belief clock moves and
@@ -547,9 +699,33 @@ claim:
    `history()` and is returned by no `valid_at`, at any instant. It is not nudged forward
    by a tick, because that would invent an interval nothing witnessed. `Memvara.supersede`
    reports the same outcome from its own path.
-3. **Retraction** — candidate has `polarity == -1`: close out matching live claims and
+
+   **A value scheduled to begin later competes too.** The candidates for this step are
+   every value in the slot that is believed at the time of the write and has been neither
+   retired nor ended by then (`Reconciler._occupants`), which is the values in force and
+   every value written to begin later, and of those only the ones true at some instant the
+   new claim is true (`_overlaps`). Like every closure, they are also limited to the
+   scopes the write can reach (see "A write never closes a sibling's claim" below). A
+   retired value is never a candidate, even one whose retirement takes effect later,
+   because no closure changes a retired claim. The three rules then apply unchanged,
+   whatever the dates: a competing value that begins earlier ends where the new one
+   begins, one that begins at the same instant collapses, and one that begins later ends
+   the new one, which is stored as history. Only the values in force used to compete, so a
+   second value scheduled for a single-valued slot never met the first, and from their
+   start both were live. A value that no longer overlaps the new claim, such as one
+   already ended where the new one begins, is left alone: closing it changed nothing on
+   either clock, yet it was written again, named the new claim as its successor and was
+   listed in `receipt.closed`. The candidates come from `slot_history`, one indexed read
+   of the whole slot, which every store implements; `Store.unended_claims`, which
+   `forget()` uses when a store has it, is optional.
+3. **Retraction** — candidate has `polarity == -1`: close out matching live claims in a
+   scope the candidate can reach (see "A write never closes a sibling's claim" below) and
    store the negative claim as a tombstone (invalidated *and* ended at `now`, so it can
-   never be live) rather than as a live fact. The matches are **ended**, not retired:
+   never be live) rather than as a live fact. Like every other closure
+   (`types.not_before_start`), the tombstone's world clock never closes before its own
+   `valid_from`. So a retraction dated in the future leaves a tombstone whose interval is
+   empty rather than inverted, and its belief clock still closes at `now`. The matches
+   are **ended**, not retired:
    every negative form the write path produces is "no longer" / "used to" / "not any
    more", which is the world moving on. `close="retired"` is the caller saying the
    original was never true.
@@ -571,6 +747,9 @@ class ReconcileResult:
     retyped: Retype | None       # a claim filed under a different memory_type than it
                                  # arrived with: an asserted type on a known claim, or
                                  # procedural refused for a subject other than the user
+    restated: Claim | None       # the live claim a restatement with an earlier start
+                                 # restated; it is not changed, and a link proposed for
+                                 # the candidate is recorded on it
 ```
 
 **Re-filing a claim's `memory_type`.** An identical triple is the same fact, so a
@@ -690,6 +869,29 @@ reconciler does reach it and has already recorded it, and an unconditional appen
 name one claim twice. A write path that closes a claim outside `assert_claim` owns saying
 so.
 
+Both also read the predecessor under the write lock, inside the same transaction. The
+predecessor reaches `_write_claim` through `supersede`, which reads it inside its own
+batch. `write_note` is handed a copy by the mem0 importer, which keeps the claim each
+memory's previous event wrote, and another writer can end, retire or erase that claim
+before the next event. So `write_note` reads the claim again, closes the stored row, and
+retires nothing when the claim is gone or no longer live. Writing back the importer's
+copy undid the other writer's closure, or brought an erased claim back, text and all.
+
+The three repair passes in this module, `backfill_entities`, `backfill_predicates` and
+`split_entity`, read the claims they may change, decide, and write back at the end, and
+another handle or process can end, retire, erase or reinforce one of those claims in
+between. So `_write_back` reads the rows again inside the transaction that writes them,
+which on `SQLiteStore` holds the write lock, and compares each with a 16-byte digest of
+every column taken before the pass changed anything (`store.base.claim_digest`, the same
+check a consolidation pass makes). The claims of one slot, meaning one `fact_key` after
+the pass, are written together, and only if every one of them is unchanged, because the
+pass rebuilds a slot's chain as a whole. Writing half of a slot could retire a duplicate
+into a claim that never received its evidence, or give a claim the evidence of a
+duplicate that is still live beside it. A slot that fails the check is left as the
+other writer left it, the report's `written` count falls short by its rows, and running
+the pass again applies it. Writing back the copy the pass had read used to undo the
+other writer's change, or bring an erased claim back, text and all.
+
 ### `write/pipeline.py`
 
 ```python
@@ -739,7 +941,11 @@ suggestion must not turn it into an exception the caller retries.
   bge-small, losing the value each time; the check now reads none of them that way. The
   bench's 16 first-person turns score at most 0.944 against their claim in all three
   spaces, so on them the check never fires: what it skips are turns worded like a claim,
-  such as an exact repeat of one.
+  such as an exact repeat of one. Tier 0 only queues these reinforcements; the claim
+  transaction applies them after tiers 1 and 2, and reads each claim again first, under
+  the write lock. A claim that another writer erased, ended or retired in the meantime
+  is left alone. Writing back the copy tier 0 had read used to undo that writer's change,
+  or bring an erased claim back, text and all.
 - **Tier 1 (no LLM):** `SalienceGate` drops turns carrying no durable fact
   (count them in `receipt.skipped`), then `FastExtractor` handles what it can.
 - **Tier 2 (LLM):** only the turns that survived both and produced no fast-path claim are
@@ -834,7 +1040,11 @@ suggestion must not turn it into an exception the caller retries.
   `amount` and `unit`, and `propose_claim` also takes `expires_at`: an ISO 8601 date or
   instant the turn names, read as UTC when it has no zone, refused as `invalid` when it
   is not in the future (the rule `remember()` applies), and passed to the reconciler on
-  the claim, whose rule for a repeat that names an expiry then applies unchanged.
+  the claim. The claim the proposal creates keeps it; a proposal that repeats a claim on
+  record reinforces that claim and does not touch its expiry, because only a caller's
+  repeat moves an expiry onto a claim on record (see *A repeat with an expiry stays in
+  its own scope* above). A repeat of a claim that is only in another scope is written as
+  its own claim, under the scope rule, and keeps the expiry.
   `source_index` and `confidence` are not in the design's argument
   list and are required here, because provenance and the authority rule depend on them.
   At most `AGENTIC_MAX_STEPS` (12) answers, `TOOL_STEP_MAX_TOKENS` (8,192) output tokens
@@ -856,7 +1066,13 @@ suggestion must not turn it into an exception the caller retries.
   reported as `not_applied` with the named memory left live. A proposed end becomes a
   retraction of exactly the named value through `Reconciler.apply(close="ended",
   reason=…)`, filed in the named memory's own scope and citing the turn the model named.
-  A proposed link becomes a `claim_links` row when both sides name a stored claim. The
+  A proposed link becomes a `claim_links` row when both sides name a stored claim. A side
+  named by a proposal's ref names the claim that proposal was stored as, or the claim it
+  repeated, with one exception: a proposal that restates a live value with an earlier
+  start is stored as a claim for the earlier period, or repeats one, and that claim is
+  over and answers only about that period. Its ref names the live claim on record instead
+  (`ReconcileResult.restated`), the claim a plain repeat's ref names, so the link is on
+  the claim `recall()` returns and `why()` shows it there. The
   batch falls back to the single call, and says why on `receipt.agentic_fallback`, when
   the backend is not a `ToolChat` (`unsupported`), the run times out (`timeout`), an answer
   cannot be used twice in a row (`malformed`), the model is still calling tools after 12
@@ -890,6 +1106,20 @@ it read on `receipt.episode_ids` and the caller feeds those back as `exclude=`.
 Every produced claim goes through `Reconciler.apply()`, and every stored claim gets its
 embedding written via `store.set_embedding()`.
 
+**A turn erased while it was being read gives nothing to the store.** `add()` stores its
+turns before extraction and `reextract()` reads turns already stored, and both write the
+claims afterwards, in the claim transaction, after a model call when there is one. Another
+handle or process can erase a turn in between: a `purge` of its scope, or the delete of
+the document it is a chunk of. So the claim transaction first reads again, under the write
+lock, which of the turns it cites are still stored (`_erased`, one `get_episodes` call). A
+candidate every one of whose turns is gone is dropped, and so is a reinforcement tier 0
+queued whose every turn is gone, so the claim it restates gains no observation and no
+salience and the receipt does not list it. The other candidates and reinforcements cite
+only the turns still stored, and an end that agentic extraction proposed from a gone turn
+is refused as `not_applied`. Writing them anyway used to leave claims citing turns that no
+longer existed, holding facts read from text that the purge or the delete had just
+reported removing.
+
 ---
 
 ## `memvara/retrieve/`
@@ -920,6 +1150,16 @@ def final_score(fusion: float, *, recency: float, confidence: float, salience: f
 for ninety days still scored as ninety days stale. A `STATIC`
 predicate's 100-year half-life keeps its factor at ~1.0, so birthplaces do not decay out
 of the ranking while "what I'm working on today" does.
+
+`normalized_score` is the ranking: the retrievers' evidence, in [0, 1], times
+`ranking_quality`, which is the quality multiplier `1 + 0.25·recency + 0.15·confidence +
+0.10·salience` divided by its maximum at nominal signals, 1.5, and stopped at 1.0.
+Reinforcement raises salience up to 5.0, which once took the factor to 1.27 and let a
+much-restated fact outrank a claim with clearly more evidence (#333). With the stop,
+quality can only lower a result from its evidence. Salience above 1.0 still makes up for
+freshness or confidence a claim has lost, so a fact restated more often still ranks
+higher among equally good matches. `final_score`, reported as `Explanation.raw_score`,
+has no stop.
 
 ### `retrieve/hybrid.py`
 
@@ -1369,6 +1609,49 @@ it the same way on `remember()` and `supersede()`. Against a hosted deployment,
 sends no header when no project is bound. `Scope.contains()` compares the project like
 every other field, so a slot operation's boundary does not rest on fact keys alone.
 
+### No scope level holds `*` or the empty string
+
+`Scope.key()` writes an unbound level as `*`, and `Scope.sees()`, which authorizes every
+read that looks a claim up by id, compares keys. Up to 0.16.0 a level set to `"*"` or `""`
+was written the same way, so a claim filed by a handle bound to `user="*"` had the key of a
+claim filed for the whole tenant, and every other user's `get()`, `why()`, `links()` and
+`produced()` returned it, while `get_all()` and `search()`, which compare the stored columns
+through `_scope_clause`, did not. `owner_key` and the fact key wrote a user or project of
+`""` like an unbound one too, so such a claim also shared the slots of the scope above it.
+
+`Scope.__post_init__` now refuses both values at every level with a `ValueError` naming the
+level and the value (`check_scope_value`, `REFUSED_SCOPE_VALUES`). Reading them as unbound
+was rejected, because a user who can choose their own id would then write claims every
+user's search returns. Every way a caller names a scope builds a `Scope`, so every entry
+point refuses: the constructors, `scope()`, `bind()`, the scope keywords of each call, a
+hand-built `Episode` or `Claim`, the mem0 layer's filters, the integrations' `bind()` and
+both hosted clients. `ServerConfig.from_env` checks `MEMVARA_TENANT`, `MEMVARA_USER`,
+`MEMVARA_AGENT` and `MEMVARA_SESSION` itself and raises `ConfigError` naming the variable;
+an empty variable still means unset. `memvara-mcp init` refuses a `*` user before writing
+anything.
+
+A store written before this change can hold rows under either value. `stored_scope`
+rebuilds a stored row's scope without the refusal, for the SQLite store's own reads and for
+the hosted client's parsing of a response, so maintenance and reads never fail on such a
+row; a third-party `Store` has to use it for the same reason. A scope derived from such a
+row is built the same way: its ancestors, the scope a global predicate files it in
+(`PredicateRegistry.slot_scope`), the scope a re-extracted turn's claims are counted in
+(`WritePipeline.own_claims`), and the project slot that a read bound to a project checks
+before it hides a user-wide claim (`retrieve/shadow.py`). The first three only clear
+levels, and the slot only replaces the project with the reader's, so none of them holds a
+refused value that neither its source nor the reader held. Re-reading a turn stored under
+either value finishes like any other, and so does a read that returns such a row, such as
+`HybridRetriever.search` given the scope the row is stored under. No scope a caller can
+build reads such a row: `key()` writes a stored `"*"` as `%2A` and a stored `""` as an
+empty component, so no id-addressed read matches it; `contains()` does not let an unbound
+level reach either value, so `history()` and `forget()` leave it out; `find_document`
+compares the scope's columns as well as the stored key, which for such a row is the key of
+the scope above it; and a new turn whose hash matches a stored turn in another scope is not
+taken for a repeat of it. Keys of every scope a caller can build are unchanged. The write
+path still matches rows by `owner_key` and fact key, so a stored row with a user or project
+of `""` can still be reinforced, ended or merged by a write at the unbound level above it;
+`docs/UPGRADING.md` says how to find such rows and what to do with them.
+
 ### A repository's own value shadows the user-wide one
 
 Before project scope, the local server wrote every fact without a project. Inside a
@@ -1453,6 +1736,7 @@ a wrong answer with no error, which is the failure the split exists to remove.
 
 ```python
 competing_claims(tenant, fact_key, *, valid_at=None, known_at=None)
+unended_claims(tenant, fact_key, *, valid_at=None, known_at=None)
 adjacent(tenant, keys, *, outgoing=True, incoming=True, predicates=None,
          valid_at=None, known_at=None, scopes=None, limit=1000)
 candidate_ids(scopes, *, valid_at=None, known_at=None, states=None,
@@ -1531,6 +1815,7 @@ resolve_states(states=None, include_invalidated=None, *, default=("live",))
 state_predicate(at="?", *, states=None, alias="")   -> (sql, axes)
 stored_state_predicate(states=None, *, prefix="")   -> sql
 live_predicate(at="?", *, include_invalidated=False, alias="") -> sql
+unended_predicate(at="?", *, alias="")              -> (sql, axes)
 ```
 
 `resolve_states` is **the one place either spelling is interpreted**, so no surface can
@@ -1546,8 +1831,9 @@ failure at every existing call site.
 apart. It is `("live",)` on the read path and `("live", "ended")` on `iter_claims`.
 
 `_state_clause` is the parameterised form of `state_predicate` and the method every read
-filter in a SQL backend routes through. **It is the binding site** — the only place in
-this repository that binds the state predicate's markers. `state_predicate` returns the
+filter in a SQL backend routes through. Its markers are bound in `SQLiteStore._bind_axes`,
+**the binding site** — the only place in this repository that binds a predicate's
+markers, for `_state_clause` and for `unended_claims` alike. `state_predicate` returns the
 SQL *and* an axis list naming the clock behind each marker in order (`("known", "known",
 "valid", "valid")` for the live-only case), so binding is a comprehension over that list
 rather than a remembered order. That is what makes the one silent error unwritable: a
@@ -1590,6 +1876,18 @@ which readmits that row and leaves `valid_at` with nothing to constrain. That is
 and deliberately, the semantics `include_invalidated=True` has always had, and
 `tests/test_bitemporal.py::test_asking_for_all_three_states_is_the_audit_view_valid_at_cannot_narrow`
 pins it so it cannot drift into a surprise.
+
+One caller needs that row together with the live ones: `forget()`, which closes every
+value in a slot that the store believes and that has not ended, a value stored to begin
+later included. That population has its own predicate, `unended_predicate`: the live
+clause without its valid-time floor, built from the same three clause helpers as
+`state_predicate`, with the axes `("known", "known", "valid")`. `Store.unended_claims`
+runs it inside the slot lookup, ordered as `slot_history` is, and `Claim.is_unended` is
+the same test in Python, which `is_live` now calls after its own valid-time floor.
+`unended_claims` is optional: without it, `forget()` reads `slot_history` and filters
+with `Claim.is_unended`.
+`tests/test_bitemporal.py::test_is_unended_mirrors_the_store_clause_on_both_axes` holds
+the SQL and the Python test to the same answer.
 
 ### The clauses themselves
 
@@ -1819,8 +2117,9 @@ that it can hold both events.
 `"ended"` closes the old claim where the world changed, which is where the new claim
 begins: its `valid_from`, which `remember()` sets from `valid_from`, else `recorded_at`,
 else now. `"retired"` closes belief in the old claim when the new record was made: its
-`recorded_at`. This is the rule ending follows everywhere else, where a closure lands on
-the axis its word names. Before this, `supersede()` closed both readings at the new
+`recorded_at`, which `remember()` takes as the write takes the store's write lock when
+it was given none. This is the rule ending follows everywhere else, where a closure lands
+on the axis its word names. Before this, `supersede()` closed both readings at the new
 claim's `recorded_at`, so a replay whose new value began earlier than it was recorded
 ended the old value at the recording instant instead of the instant the value changed.
 
@@ -1828,10 +2127,19 @@ ended the old value at the recording instant instead of the instant the value ch
 
 `Memvara.forget_matching` is two calls, and the first one writes nothing. Without
 `confirm` it runs an ordinary `search()` and returns the matching ids with their text and
-a token. With `confirm` it checks the token, re-reads each listed claim through `get()`,
-and closes them all in one `batch()` only if every one is still live and visible;
-otherwise it raises `ConfirmationRefused` and writes nothing. The query is not run again
-on the confirming call, so the set closed is the set the caller saw.
+a token. With `confirm` it opens one `batch()`, checks the token, re-reads each listed
+claim through `get()`, and closes them all only if every one is still live and visible;
+otherwise it raises `ConfirmationRefused` and writes nothing. The batch holds the write
+lock from before the re-read, so a claim another writer closed while this call waited is
+refused rather than closed again from an older copy. The query is not run again on the
+confirming call, so the set closed is the set the caller saw.
+
+It closes only claims in force now, which is less than `forget()` closes. The search is
+present tense and the confirming call refuses a claim that is not live, so a value
+stored to begin later is never listed and never closed, where `forget()` closes it with
+its slot. Listing it would need a search over values not yet in force, which `search()`
+does not offer. The docstring, both tool descriptions and
+`tests/test_api.py::test_forget_matching_closes_only_what_is_in_force_now` say so.
 
 The token (`memvara/confirm.py`) is the sorted ids, the closure and an expiry ten minutes
 out, serialised as JSON and followed by an HMAC-SHA256 of those bytes. The ids travel in
@@ -1929,7 +2237,10 @@ one of the document's episodes with one `claims_citing_any` query. A claim whose
 source is among them is retired first, with the closure reason `"source document
 deleted"`; a claim with another source keeps it. Both lose the erased episodes from
 `sources`. Then the document row and its chunk rows are deleted and the episodes erased
-with one `erase_episodes` call, all in one `batch()`. **A chunk episode belongs to its
+with one `erase_episodes` call, all in one `batch()`. The document and its chunk list are
+read inside that `batch()` too, under the write lock. Listed before it, the chunks that a
+concurrent `update_document` stored in between were never erased, and stayed on disk
+belonging to no document. **A chunk episode belongs to its
 document**: while a document lists it, `erase_episode`, `erase_episodes` and
 `erase_claim(sources=True)` keep it, whatever `cited` says, so no erasure path leaves a
 document reporting a digest and a chunk count its text no longer has. `purge` deletes the
@@ -1947,6 +2258,26 @@ the gate refuses, so a later `reextract()` sweep keeps the choice. Adding a `fai
 `stored` document again with extraction on reads the kept chunks no claim cites yet, and
 clears their mark. The chunks are stored and indexed before extraction runs, so a
 document in any state is stored and searchable.
+
+**A status is written onto the row as it stands.** Indexing and extraction run after the
+transaction that stored the chunks, so another handle or process can delete the document,
+or store a new version of it, before its status is recorded. `_put_status` therefore reads
+the row again inside a transaction of its own, under the write lock, changes only
+`status`, `error` and `updated_at`, and writes nothing when the row is gone or its
+`content_hash` is no longer the one the status describes. A document found gone or
+changed when extraction is about to begin is not read at all, because its chunks may be
+erased already. Whenever a status is not written, before extraction or after it, the
+document returned to the caller is the one the store holds (`_as_stored`), with the other
+writer's content, status and chunk count; returning this call's own copy reported a status
+and a chunk count the store never held. A document deleted meanwhile is returned as this
+call last knew it, and one deleted before its extraction began keeps the status `queued`.
+`update_document` reads new content first, outside any transaction, because ingestion can
+fetch a URL or call a model, and then reads the document and its chunk list again inside
+the transaction that writes them, applying the caller's changes to that copy and raising
+`KeyError` for a document deleted in between. The retry of unread chunks reads them inside
+the transaction that clears their mark. Each of these used to write back a copy read
+earlier: a deleted document came back, title and path included, a rename made meanwhile
+was undone, and a retried chunk that a delete had erased was written back, text and all.
 
 **Content that is not plain text** — a URL, `bytes`, HTML or any non-text mime — is handed
 to `memvara.ingest.extract`, with the instance's `url_fetcher` (the MCP server passes
@@ -2066,8 +2397,9 @@ design, and a Postgres implementation that uses `LIKE` must escape `%` and `_`.
 
 Two settings, covering two different halves, and neither is SQLite's default.
 
-`PRAGMA secure_delete=ON` (in `SCHEMA`, so it applies to every writer connection) covers
-ordinary tables: without it a deleted row's bytes sit in a free page, readable in the file.
+`PRAGMA secure_delete=ON` (in `_CONNECTION_PRAGMAS`, which every open applies to its writer
+connection, whether or not it runs the schema step) covers ordinary tables: without it a
+deleted row's bytes sit in a free page, readable in the file.
 
 FTS5's own `secure-delete` option (set once in `_migrate_to_v7`, persistent in the table's
 config) covers the text indexes, and this is the half that is easy to miss.
@@ -2103,6 +2435,17 @@ opened a store and erased a claim before searching used to leave the vector in `
 `tests/test_vecindex.py::test_an_erasure_before_any_search_still_blanks_the_row_on_disk`
 reads the file.
 
+The row can also lie outside the part of the file the erasing process has mapped, because
+another process wrote it later: the file grew past this process's mapping, or this process
+held no vector when it opened and has not opened the file at all. `_erase_row` and `purge`
+therefore open the file first if this store has not (`_ensure_dim`, before the vector's
+row is deleted, since that row is how a store learns the vectors' width), and
+`_VecIndex.forget` blanks a row beyond the mapping through the file itself. Only the mapped
+part used to be blanked, so erasing a vector another process had written reported success
+and left the vector on disk.
+`tests/test_vecindex.py::test_an_erasure_blanks_a_row_another_store_wrote_after_this_one_mapped_the_file`
+reads the file for both cases, through `erase_claim` and through `purge`.
+
 ### Clearing the vectors needs the store to itself
 
 Every process that has an unencrypted store open maps `<db>.vecs`, and they share its
@@ -2122,7 +2465,10 @@ database does not already need, and it works between two stores in one process t
 a clear holds it, a store that is opening waits in `_hold_presence`, for up to
 `_PRESENCE_WAIT` (60 seconds), instead of mapping a file that is about to shrink. Inside
 `batch()` the clear keeps the lock until the batch ends, because a store that opened before
-the commit would map vectors the batch is about to delete.
+the commit would map vectors the batch is about to delete. A store that may not write
+`<db>.lock` cannot take it exclusively, so its clear raises `PermissionError` instead,
+naming the file, with nothing changed (#350; *Opening a store that another process is
+creating* has why the exclusive lock silently failed there).
 
 To ask for the exclusive lock, a store first lets go of its own shared one, and while it
 has let go, a clear elsewhere cannot see it. Two clears that let go at the same moment
@@ -2149,6 +2495,238 @@ its old score, even after the store had been re-embedded at another width. A re-
 the other processes stopped in any case, because each embeds new writes with the model it
 started with. `tests/test_store.py` reproduces the crash with a second process, because a
 SIGBUS in the test process would end the suite.
+
+### Opening a store that another process is creating
+
+When two processes opened one new store at the same moment, one of them could fail at
+startup within a few milliseconds with "database is locked" (#281). That happens on the
+first run after the plugin is installed, when the MCP server and the plugin's hooks open
+the new store together, and when two agent sessions start at once. Two changes stop it.
+
+**One store at a time runs the schema step.** `SQLiteStore.__init__` runs `SCHEMA`, the
+migrations and `_LATE_INDEXES` inside `_creating`, which holds SQLite's reserved lock on
+`<db>.lock` through a second connection. One connection in any process holds that lock at a
+time, so a store that opens while another is creating or upgrading the file waits, for up
+to `_SCHEMA_STEP_WAIT` (ten minutes), and then finds the file finished, so its own schema
+step changes nothing. The wait is its own and not the 60 seconds a store waits for a clear,
+because an upgrade can take far longer: one that re-derived every claim's keys took 26.6
+seconds for 300,000 claims on a loaded laptop, 88.5 microseconds a claim, so ten minutes
+covers about 6.8 million claims. A holder that dies lets go at once, so the wait runs long
+only while the holder is alive. The lock is asked for in tries of a quarter of a second
+(`_LOCK_TRY`, in `_reserve`), because Python acts on Ctrl-C only between calls into SQLite:
+one ten-minute wait inside SQLite would have held an interrupt back until it ended. The
+60-second wait for a clear, in `_hold_presence`, is still one wait inside SQLite, as it was
+before this change. The reserved lock leaves every open store's shared lock alone, so a
+store that is merely open delays nobody. `_creating` lets go by closing its connection,
+which rolls back: on the empty lock file, `BEGIN IMMEDIATE` starts a first page in memory,
+and a commit would have to write it, which needs every shared lock gone.
+
+**An established store skips the step.** `_needs_schema_step` reads three things before the
+step: the version stamp, the journal mode, and the names of the indexes. A file whose stamp
+is this version's, which is in WAL mode, and which has every index `_LATE_INDEXES` creates,
+has nothing left to create or upgrade. Its open runs only `_CONNECTION_PRAGMAS`, the two
+settings that belong to a connection rather than to the file, and takes no creation lock,
+so the opens of an established store never wait for one another. Every other file takes the
+step under the lock: a new one, one an older version wrote, one a tool switched out of WAL
+mode, and one missing an index that `_LATE_INDEXES` gained without a version bump, which is
+how `ep_cover` reached older files. The stamp is committed before the late indexes are
+built, so a store that opens in between sees an index missing, takes the step, and waits
+for the store building it.
+
+**What the lock needs.** Taking it needs one permission: to write `<db>.lock`. Two details
+keep it to that. The lock's connection keeps its rollback journal in memory (`_reserve`),
+because nothing is ever written through it. With SQLite's default journal, `BEGIN
+IMMEDIATE` made `<db>.lock-journal`, so the step needed permission to add a file to the
+store's directory, which no open needed before, and the refusal came back as the misleading
+"cannot be used as this store's lock file". And SQLite opens a file the process may not
+write read-only, and `BEGIN IMMEDIATE` on a read-only connection starts only a read
+transaction, without an error, so a second store could take the same lock at once.
+`_creating` therefore opens the file for writing itself first, and when that is refused it
+raises `PermissionError` naming the file, before anything is created or upgraded. Both
+checks go through `_write_refusal`.
+
+The same silent downgrade let a clear go ahead while another process had the store open
+(#350). A clear takes `<db>.lock` exclusively through this store's presence connection
+(`_try_alone`), and on a connection SQLite had opened read-only, `BEGIN EXCLUSIVE` also
+starts only a read transaction. The clear then believed it had the store to itself,
+truncated the vector file, and the other process died with SIGBUS on its next vector
+search. `_present` now records, as soon as SQLite has opened the presence connection,
+whether this process may write the file. The mode is fixed when the connection opens, so
+the record is taken then and not at the clear: a lock file made writable later does not
+make that connection writable. It is taken after the open rather than before it, because
+before it a store that was the first to open found no file, and if another account created
+the file in that moment, SQLite opened it read-only while the record said nothing was
+wrong. When the record says no, `_claim_alone` raises `PermissionError` naming the file,
+with nothing changed. Opening the store still needs only to read the file. `_creating`
+asks the same question again for the creation lock, because that lock is taken on a
+connection of its own, whose mode SQLite decides when it opens the file.
+
+The same reasoning applies to both lock connections, so both keep their journal in
+memory. A clear upgrades the presence connection with `BEGIN EXCLUSIVE`, and on the empty
+lock file that starts a first page too, so with SQLite's default journal it needed a new
+`<db>.lock-journal`. In a directory that forbids new files every clear then failed with
+"attempt to write a readonly database", and `_try_alone`, which took every error for
+another store holding the file, raised `StoreInUseError` and advised stopping processes
+that did not exist. `_present` gives the presence connection the in-memory journal
+`_reserve` gives the creation lock's, and `_try_alone` now counts only "database is
+locked" as another store: any other error is raised as itself, once the store holds the
+file shared again.
+
+Measured scenario by scenario against the code before this change, what an opener needs is
+the same in every case but one: an open that runs the schema step must be able to write
+`<db>.lock`, where before it needed only to read it. In detail:
+
+- An open of an established store needs to read `<db>.lock`, or to create it when it is
+  missing, which needs the directory to allow a new file. That is as before.
+- An open that runs the step also needs to write `<db>.lock`. A lock file this user may
+  read but not write, such as one another account created, is refused with
+  `PermissionError`, for a new store and for an upgrade. Before, both opened without it.
+- Neither needs permission to add a file to the directory when `<db>.lock` exists, and an
+  upgrade then works in such a directory, as it did before.
+- A lock file this user may not read fails every open with SQLite's "unable to open
+  database file", as before, and so does a missing one in a directory that refuses new
+  files.
+- The database itself needs what it always did. A store in WAL mode needs its `-wal` and
+  `-shm` files, so in a directory that refuses new files it opens only while another
+  connection has them open.
+
+The retry described next was not enough on its own. With it, a store could still fail
+inside `_migrate_to_v3` with "vtable constructor failed: episodes_fts" when it opened the
+text index while the other store was still creating tables and indexes. In a probe of three
+processes opening one new store at once, 3 of 360 opens failed that way, and the nightly
+test failed in 3 of 10 runs. With the schema step run one store at a time, none of 1,100
+opens failed, from three and from five processes at once, and 8 of 8 nightly runs passed.
+
+**The switch to WAL mode is retried, for connections outside memvara.** With `_creating` in
+place, no other memvara store runs its schema step at the same time, so this retry exists
+for a connection from outside memvara that holds the database's write lock, such as the
+`sqlite3` shell or a backup tool, which `_creating` cannot hold back. `SCHEMA` begins with
+`PRAGMA journal_mode=WAL`. On a file that is not in WAL mode yet, the switch needs a
+stronger lock than the connection holds, and while another connection holds the write lock,
+SQLite refuses it at once instead of calling the busy handler, because waiting there could
+deadlock. So `_run_schema` runs `SCHEMA` again after "database is locked", and after no
+other error, every 10 milliseconds, until `_BUSY_TIMEOUT` has passed: five seconds, the busy
+timeout `_connect` gives every connection, so the open waits exactly as long as any write.
+On a file already in WAL mode the switch needs no stronger lock. `SCHEMA` holds only
+pragmas and `IF NOT EXISTS` statements, so running it again changes nothing. Any other error
+is raised at once.
+
+### Two writers on one store
+
+A write holds the database's write lock from its first lookup until it commits, so two
+writers on one file take turns, whether they are two handles in one process or two
+processes, such as the MCP server and the hooks' daemon. The second writer waits for the
+first to commit, and then reads what the first one wrote.
+
+`SQLiteStore.batch()` is where the lock is taken. The outermost batch begins with
+`BEGIN IMMEDIATE`, which takes SQLite's write lock at once. Every read inside a batch goes
+through the writer's connection (see `_read`), so it runs under that lock and sees every
+other writer's last commit. `Memvara.remember()` and `add()` run their slot lookups inside
+a batch: `Reconciler.apply` reads the slot with `find_by_value` and `competing_claims`, and
+then writes, supersedes or reinforces in the same transaction.
+
+Before this, the batch began no transaction of its own. Python's `sqlite3` module begins
+one at the first write statement, so the lookups before it ran without the lock, and
+another writer could commit between a lookup and the write it decided. Two writers could
+each find a single-valued slot empty and each add a value, and both values stayed live,
+with neither ending where the other began. Two writes of one value could store it twice
+in the same way, instead of reinforcing one claim.
+
+**Every `Memvara` method that reads a claim and then writes it does both in one batch.**
+`delete()`, `forget()`, the confirming call of `forget_matching()`, `supersede()` (which
+`remember(replaces=...)` calls), `link()`, `erase()` and the expiry sweep open a batch
+before they read, and read, decide and write inside it. `delete()` used to read the claim
+with `get()` and write the whole row back later with `put_claim`, outside any transaction,
+so whatever another writer did in between was overwritten. An ending that a new value gave
+the claim was lost, and a claim that `erase()` had just removed was written back, text
+and all, beside its own erasure record. Now another writer's change either commits before
+the read, and is seen, or waits until this write has committed. So a delete keeps an
+ending made while it waited, and returns `False` for a claim erased while it waited.
+`forget_matching()` and `supersede()` refuse a claim closed while they waited, `link()`
+refuses a claim erased while it waited, a second `erase()` of one claim finds nothing and
+records nothing, and the sweep leaves a claim whose expiry was moved. `forget()` and
+`forget_matching()` also take their closing instant under the lock, so they never close a
+claim at an instant before it was recorded. The store's own erasure methods,
+`erase_claim`, `erase_episodes` and `purge`, run in one batch the same way, for callers
+that reach the store directly; *Erasure, and the evidence for it* has the details.
+
+A writer waits at its `BEGIN IMMEDIATE` for as long as SQLite's busy timeout allows, five
+seconds, and then gets `OperationalError: database is locked` before anything in its
+batch has run. A writer got the same error before, from its first write statement.
+The write path keeps model calls and hosted-embedder calls outside its transactions (see
+`write/pipeline.py`), so the lock covers the database work. A reader is never held up: a
+thread outside a batch reads through its own connection, which sees the last commit while
+another writer holds the lock.
+
+**A write given no `recorded_at` is recorded when it takes the lock.** `Memvara.remember()`
+used to take `recorded_at` from the clock when it was called, before the lock, while the
+reconciler retired whatever the claim displaced at the instant it ran, under the lock.
+With `close="retired"` the old value's belief then ended later than the new one's began,
+and a read of the past between the two returned both; for a write that waited, the gap
+was the length of the wait. `_write_claim` now reads the clock once, as its transaction
+begins, gives that instant to the claim as `recorded_at` when the caller gave none, and
+passes it to `WritePipeline.assert_claim` as the instant the reconciler retires at, so the
+old value's belief ends exactly where the new one's begins. `remember(replaces=...)`
+retires the claim it names at that instant too. When the caller gave neither
+`recorded_at` nor `valid_from`, the claim takes that instant as its `valid_from` as well,
+so both clocks still come from one reading, and an ending it causes, by the reconciler or
+by `replaces=`, lands exactly where it starts. With a `valid_to` and no `valid_from`, the
+claim still begins at the instant of the call, which is what `valid_to` was checked
+against. A `recorded_at` the caller gives is kept as it is.
+
+`tests/test_store.py::test_a_batch_holds_the_write_lock_before_its_first_read` checks that
+another connection cannot begin a write while a batch is open, even before the batch has
+written anything. `tests/adversarial/concurrency/test_adv_races.py` holds a writer in a
+child process between its slot lookup and its write, and checks that a second writer waits
+and then ends the first writer's value, or reinforces it when the value is the same. It
+also holds a `delete()` between its read and its write while the test writes a new value
+or erases the claim, and holds a supersession while the test deletes. Near the end of
+`tests/test_bitemporal.py`, four tests hold a `remember()` behind another writer's lock
+for a second. They check that a read inside the wait returns one value, and that a write
+given no instants begins, and ends what it replaces, when it gets the lock. The tests
+after them, and those at the end of `tests/test_erasure.py`, run each method listed above
+through a second handle while the first handle holds the lock and changes or erases the
+claim. `tests/adversarial/concurrency/test_adv_threads.py` runs `remember`, `forget`,
+`delete` and `erase` from four threads on one handle and checks that no erased claim comes
+back. The reference model checks the same rules on every step of the state machine: a
+retirement made by a write given no `recorded_at` must equal that write's `recorded_at`,
+and a write given neither instant must begin at its `recorded_at`.
+
+### Which embedder wrote the vectors
+
+Two embedders of the same width write vectors that no width check can tell apart, so a
+store records which embedder wrote its vectors in `<db>.embedder.json`
+(`memvara/embed/fingerprint.py`). `Memvara._check_embedder` reads the record at every open,
+beside the width `stored_dim` reads from the vectors themselves. An opener of another width
+is refused with `EmbedderMismatchError`. A record that names another embedder of the same
+width makes the open warn with `EmbedderChangedWarning`.
+
+**A missing or damaged record.** When the store holds vectors and its record is missing or
+unreadable, or names another width than the vectors have, the open cannot tell whether its
+embedder wrote them. It warns with `EmbedderChangedWarning` first, and then, if the open
+goes on, writes the record naming its embedder, so that the next change of embedder is
+noticed. The order matters. Turned into an error, the warning stops the open before the
+record names an embedder that may be wrong; written first, the record named the wrong
+embedder, and the store's owner, reopening with its own, was told that the wrong one wrote
+its vectors. When the record cannot be written, a second warning says so, and the first
+comes back on every open. A width that is not a JSON integer makes the record unreadable.
+
+**What the rewrite costs.** The record names whatever embedder made that open, which is
+the caller's choice or, with no `embedder=`, `_default_embedder`'s guess from the width.
+For 384-wide vectors and no record, that guess is the local model a default configuration
+loaded through 0.15, and it can be wrong. When it is, the one warning is the only notice:
+from the next open on, the record names the guessed embedder, no open warns again, and
+only `reembed()` fixes the wrong guess, by rebuilding every vector with the embedder in
+use. The rewrite stays anyway, because the common case is the embedder that wrote the store
+opening it again, and without a record nothing could notice a later change at all.
+
+**How the record is written.** `write_fingerprint` writes a temporary file beside the
+record, syncs it to disk and renames it over the record, so a crash or a full disk leaves
+the old record or the new one and never half of one. A record kept as a link is followed,
+so the file it names is replaced and the link stays. A directory where the account may
+write the existing files but may not add new ones refuses the temporary file, and the
+record is then overwritten in place, as it was before the rename, where a crash can still
+tear it.
 
 ### Encryption at rest
 
@@ -2422,8 +3000,19 @@ class Consolidator:
   clock, read once for the whole pass. Pass it to evaluate two passes at the same instant:
   the decay target depends on that instant, so a claim sitting within a pass-duration of a
   rounding boundary otherwise changes on the second call.
+- **The write-back checks every row again.** The stages work on a snapshot, and another
+  handle or process can end, retire or erase a claim while they do. `Sweep.flush` reads
+  each row it is about to write again, inside the window's transaction and so under the
+  write lock, and writes it only if it is still exactly as the snapshot read it, which it
+  tells from a 16-byte digest of every column taken with the snapshot. The two rows one
+  merge changes are one unit, written together or not at all. A unit with a row that
+  changed or disappeared is left as the other writer left it, and the next pass decides
+  about it again. Writing back the snapshot's copy used to undo that writer's ending, so
+  two values of one slot were live, or bring an erased claim back, text and all.
 
-All counts are "number of claims affected". These run off the write path.
+All counts are the number of claims each stage changed in the pass's snapshot, including
+any that `flush` then left unwritten; `consolidate.rows_written` counts only the rows
+written. These run off the write path.
 
 ---
 
@@ -2580,6 +3169,28 @@ under, reply keys, timeouts, config paths, an `ApproveSpec`, an `ExtractorSpec`.
 bodies (`recall`, `session_start`, `capture`, `approve`) read the record and never a
 client. `run.py <hook> --host <id>` binds it before importing a body, because
 `lib/transcript.py` resolves the bound host's noise markers at import time.
+
+**Approval checks the server's key exactly.** `approve.py` is the one hook that grants a
+permission: it tells the host to run memvara's read-only memory tools without asking.
+`ApproveSpec.prefixes` lists the prefixes a host puts on the tools of the server keyed
+`memvara`, which is the key every installer writes: `mcp__memvara__` and
+`mcp__plugin_memvara_memvara__` on Claude Code, `mcp__memvara__` on Codex, `memvara-` on
+Copilot. A tool is approved only when its whole name is one of those prefixes followed by a
+read-only tool's name. `ApproveSpec.matcher` stays wide and only decides when the host
+runs the hook. On OpenCode nothing reads it: the plugin's JavaScript shim asks the hook
+about every permission request, so the prefix check is the whole gate there. The hook
+used to read only the name's last segment, so a tool named `memory_recall` on any server
+whose name contained `memvara` ran without a prompt, and on OpenCode any server's tool
+whose name ended in `__memory_recall` did. A server the user renamed from `memvara` is
+asked about on every read. Cursor and OpenCode list only `mcp__memvara__`, the one form approved there before,
+because how either spells an MCP tool in this event has not been measured.
+
+The key is the only thing the hook can check. A tool's name carries the server's config key
+and nothing about what the key points at, so a different server configured under the key
+`memvara` itself, for example in a project's `.mcp.json`, is approved like memvara's own.
+The host's own prompt before it enables a project's MCP servers is the defence there, and
+`SECURITY.md` lists the case as a known limitation. Claude Code's plugin form,
+`mcp__plugin_memvara_memvara__`, is the one spelling another config cannot produce.
 
 **The record says what a host CANNOT do, not only what it does.** A canonical hook absent
 from `events` is a hook that client has no event for. `context_key = ""` is a host with no
@@ -2781,6 +3392,45 @@ it does not know about — the `__main__` block catches `BaseException`. That is
 that outranks reporting a problem: a hook that fails a prompt is worse than a hook that
 does nothing. The obligation to say something moves to `~/.memvara/.hooks/`, where every
 path that reaches a decision writes a line, including the ones that decide to do nothing.
+
+**What the hooks keep is private to the account that runs them.** The logs quote a
+person's prompts and a model's replies (`capture.log` keeps up to 200 characters of a reply
+it could not use, `recall-sample.log` the start of each prompt), `usage.jsonl` says what
+each run cost, `capture-state.json` names every transcript the capture hook has mined, and
+the state and lock files sit beside them. Every directory from `~/.memvara` down is
+created 0700 and every file 0600 (`lib/private.py`, and `restrict` in `js/shim.mjs` for the
+JavaScript hosts), and a directory or file that already exists loses any permission for
+group and others the first time a hook in a process uses it, which repairs what an earlier
+version left. Those used the process's default modes, 0755 and 0644 under the usual umask,
+so every account on the machine could read them. `memvara-mcp login` and `memvara-mcp
+init`, either of which can be the first to create `~/.memvara`, go through
+`server.init.private_directory`, which does what `lib/private.py` does for the directories
+from `~/.memvara` down to the one they write in: it creates a missing one 0700 and takes
+the permissions for group and others off one that exists, because `mkdir(mode=0o700,
+exist_ok=True)` sets the mode only on a directory it creates. It leaves the home directory,
+and a directory outside `~/.memvara`, as they are. `tests/test_hook_file_modes.py` runs
+every writer under umask 022 and reads the modes back.
+
+**OpenCode's transcript is written privately and removed after its capture.** OpenCode
+hands a plugin no transcript, so `js/opencode.mjs` writes the session's messages, a whole
+conversation, as JSONL for the capture hook to read. It goes to
+`~/.memvara/.hooks/opencode/<session>.jsonl`, 0600 in a 0700 directory, and is removed
+when the last capture reading it is done, whether it finished, failed or was killed; a
+file a stopped server left behind is pruned after a day. It used to go to
+`$TMPDIR/memvara-opencode`, with the default modes, and on Linux that is usually the
+shared `/tmp`, where every account could read it and could have made a directory of that
+fixed name first; it was kept for a day. The plugin removes the files an earlier version
+left there when it loads. A newer transcript is written to a new private file beside the
+session's file and renamed over it (`shim.writePrivate`), so a capture that an earlier idle
+event started, and that is still reading, keeps the transcript it was handed; written in
+place, the file was truncated and rewritten under it. With the file gone after capture,
+the capture hook's watermark, which is keyed on the file, cannot tell a repeated idle event
+from a new reply, so the plugin remembers a SHA-256 digest of the transcript it last handed
+to capture and starts no capture for one with the same content. It remembered the length
+at first, which skipped a different conversation that happened to be exactly as long. A
+session id that is not a plain file name writes nothing.
+`tests/test_opencode_transcripts.py` drives the plugin in Node with a fake client and a
+stub capture.
 
 ## Testing requirements
 

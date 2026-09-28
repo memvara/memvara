@@ -1,0 +1,50 @@
+{
+  "id": "bulk-forget",
+  "description": "The user asks the agent to forget everything about a client. memory_forget_matching first previews the matching facts and hands out a confirm token; confirming retires exactly the listed facts, with the reason, and nothing else. Replaying the same token is refused. The client asks for protocol 2024-11-05.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester", "protocol": "2024-11-05"},
+  "seed": [
+    {"op": "remember", "predicate": "lives_in", "object": "Lisbon"}
+  ],
+  "sessions": [
+    {"turns": [
+      {"user": "Notes on our client Fabrikam: their billing contact is Dana Whitfield, they renew in March, and they're on the Gold support plan.",
+       "script": [
+         {"tool": "memory_remember", "args": {"subject": "Fabrikam", "predicate": "billing_contact", "object": "Dana Whitfield"}},
+         {"tool": "memory_remember", "args": {"subject": "Fabrikam", "predicate": "renewal_month", "object": "March"}},
+         {"tool": "memory_remember", "args": {"subject": "Fabrikam", "predicate": "support_plan", "object": "Gold"}}
+       ]}
+    ]},
+    {"turns": [
+      {"id": "preview", "user": "We no longer work with Fabrikam. Forget everything you know about them.",
+       "script": [
+         {"tool": "memory_forget_matching", "args": {"query": "Fabrikam", "k": 3, "reason": "the user asked to forget everything about Fabrikam"}, "capture": {"token": "^confirm: (\\S+)$"}}
+       ]},
+      {"user": "Yes, those are all of them. Go ahead.",
+       "script": [
+         {"tool": "memory_forget_matching", "args": {"confirm": "{token}", "reason": "the user asked to forget everything about Fabrikam"}},
+         {"tool": "memory_forget_matching", "args": {"confirm": "{token}"}, "expect_error": true}
+       ]},
+      {"id": "ask", "user": "What do you know about Fabrikam now?",
+       "script": [{"tool": "memory_search", "args": {"query": "Fabrikam", "anchored": true}}]},
+      {"id": "audit", "user": "Is any record of their billing contact left?",
+       "script": [{"tool": "memory_history", "args": {"subject": "Fabrikam", "predicate": "billing_contact"}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "contact-retired", "text": "Fabrikam billing contact Dana Whitfield", "state": "retired", "count": 1},
+    {"id": "renewal-retired", "text": "Fabrikam renewal month March", "state": "retired", "count": 1},
+    {"id": "plan-retired", "text": "Fabrikam support plan Gold", "state": "retired", "count": 1},
+    {"id": "unrelated-fact-survives", "text": "user lives in Lisbon", "state": "live", "count": 1}
+  ],
+  "answer_gold": [
+    {"id": "preview-changes-nothing-yet", "turn": "preview", "must_contain": "Nothing has changed yet"},
+    {"id": "preview-lists-only-fabrikam", "turn": "preview", "must_not_contain": "Lisbon"},
+    {"id": "nothing-left-to-find", "turn": "ask", "abstain": true},
+    {"id": "contact-not-shown", "turn": "ask", "must_not_contain": "Dana Whitfield"},
+    {"id": "history-keeps-the-reason", "turn": "audit", "must_contain": "retired because: the user asked to forget everything about Fabrikam"}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}

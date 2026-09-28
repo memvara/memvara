@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+Upgrading notes are in `docs/UPGRADING.md`.
+
 ### Added
 
 - **The benchmark readers take `--timeout SECONDS`.** It sets how long the Anthropic or
@@ -22,6 +24,202 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   run with the same `--hosted-run-id` reads them. The hosted service extracts claims in the
   background and does not say when it has finished, and a run that read its scopes
   straight away on 2026-09-23 found no claims in them.
+- **`bench/mutation.py` measures how many deliberate bugs in a module the tests catch.**
+  It runs mutmut 3.8.0 in a throwaway clone of the checkout, selects the tests that import
+  the module or a public name it defines, and reports a score per module with the diff of
+  every mutant the tests missed. `bench/mutation_equivalents.toml` lists the mutants no
+  test can catch, each with a reason, and they are left out of the score. The first run,
+  on `memvara/write/reconcile.py`, caught 904 of 1,160 counted mutants, 77.9%, which is
+  under the design's floor of 80%. `docs/claude/testing.md` describes the tool and where
+  the missing tests are. mutmut is not a dependency of the package; install it to run the
+  tool. The nightly step that runs it is not written yet.
+- **The packaged skill says when a ranked read is worth its model call.** A ranked recall
+  makes a model call whenever it has turns to rank, so the skill tells an agent to try an
+  ordinary recall first and to ask for a ranked one only when the right conversation came back with the
+  answering turn buried and the answer rests on what somebody said. It also says what to
+  do after each outcome the last line of an unranked block can name: stop asking after
+  `unconfigured` or `disabled`, tell the person after `key_rejected`, and answer from the
+  ordinary read after `fallback`. Both copies of `SKILL.md` change together, and
+  `tests/test_init.py` checks that the guidance stays. Each of the seven plugin
+  repositories gets a pull request with the change at its next sync, and the change
+  reaches that repository when the pull request is merged. #171.
+- **`scripts/test_changed.py` runs the tests a change can affect, before you push.** It
+  runs the changed test files, the tests that import or name a changed file, and the tests
+  that failed last time, and it runs the full suite when a change touches something it
+  cannot follow, such as a `conftest.py` or `pyproject.toml`. It replaces running the full
+  suite with coverage and mypy locally before every push; CI still runs all of that on every
+  pull request, and again on `main` after each merge, where a failure now opens an issue in
+  the private repository memvara/build-health. `docs/claude/working-here.md` describes the
+  five testing tiers. None of it changes the library.
+- **An adversarial test suite that tries to break memvara the way agents use it.** It
+  lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
+  scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
+  covers the suite's foundation and every part of it listed below. None of it changes
+  the library.
+  - **Tiers.** A test's tier comes from its folder. A plain `pytest` runs the fast tier,
+    which includes the doctests in `memvara/`, and the new `--tier nightly`,
+    `--tier weekly`, `--tier local` and `--tier quarantine` options select the others.
+    The option works whatever paths a run is given.
+  - **Skips need a reason on record.** A skip anywhere in the repository must match a rule
+    in `tests/harness/skips.py`, or the run fails.
+  - **Real processes.** The suite drives the MCP server as a real child process and runs
+    the plugin's hook scripts the way each host runs them.
+  - **Known bugs stay visible.** Each bug the suite finds lands at once as a strict
+    expected failure that cites its issue.
+  - **A reference model.** `tests/harness/model.py` is a small model of what a store must
+    hold, over both clocks. A Hypothesis state machine runs random sequences of writes on
+    a real store and on the model, and after every step compares every row and every read,
+    including reads at past instants. `tests/harness/invariants.py` checks a store file
+    for the damage a crash or a bad write leaves.
+  - **Crash and concurrency tests.** A child process stops at one of ten named points
+    inside memvara and is killed. The store it leaves behind must pass the integrity
+    checks, keep every acknowledged write, and take the next write at once. Two handles,
+    four threads and two real MCP servers share one store file. The nightly tier adds
+    random server kills, a lock held past the busy timeout, and a full disk.
+  - **Scripted agent sessions.** `tests/scenarios/` holds agent sessions written as JSON,
+    in one format that the scripted layer runs now and the real-agent layer will run
+    later: what the user says, the tool calls and hook runs a deterministic agent makes,
+    and the gold the store and the answers must match. Fourteen scenarios cover learning
+    a preference, the three kinds of correction, a flip-flop, a restatement, time travel,
+    expiry, project isolation, a document, a bulk forget, read-only mode, a stored
+    instruction and a pasted log. Each gold item is its own test, and each scenario must
+    fail when memvara is switched off. Answers are compared with `phrase_in`, the
+    benchmark's whole-word rule, which `benchmarks/agent_memory/normalization.py` now
+    exports.
+  - **Fakes for the services a client talks to.** `tests/harness/fakes/` stands in for
+    the hosted `/v1` REST API and the hosted `/mcp` endpoint, each answered by a real local
+    store, for an OpenAI-compatible model endpoint, and for the two agent executables the
+    capture hook starts. A test can make any route fail, answer slowly or never answer,
+    and each fake is checked by driving it with the real client code it stands in for.
+  - **Documentation that must match the code.** `tests/adversarial/docs/` checks that the
+    tool descriptions, the server's instructions and the packaged skill name only tools
+    and arguments that exist in each configuration, that a default stated in words equals
+    the schema's, and that each console script's help names what it accepts. Three kinds
+    of drift it found are pinned as strict expected failures: #295, #296 and #297.
+
+  - **Stores from old releases.** `tests/fixtures/stores/` holds a small store written by
+    the first release of every shipped schema version, from v0.1.0 to v0.16.0, each with a
+    golden record of what it holds. Each is opened with today's code, migrated, compared
+    with its record and opened again, and a store from a newer version or another
+    embedder must be refused. The nightly tier rebuilds the stores from their tags and
+    kills a process in the middle of an upgrade. Three bugs they found are pinned as
+    strict expected failures: #299, #300 and #301.
+  - **Protocol and validator fuzzing.** `tests/adversarial/fuzz/` sends the MCP server
+    input a correct client never sends: 500 pipelined requests with shuffled ids, ids of
+    every JSON type, batches, deep nesting, huge integers, NaN and infinities, the string
+    "false" for a boolean, lone surrogates, and calls that Hypothesis generates from each
+    tool's own input schema. Every request must get exactly one reply, a refused call must
+    change nothing in the store, and the server must still answer a ping afterwards. The
+    nightly tier adds lines of 20 MB and servers configured other ways.
+  - **A coverage checklist.** `tests/harness/checklist.py` reads from the code everything
+    the suite must test: every tool, feature switch, pair of a tool and a switch that
+    changes it, `MEMVARA_*` variable, hook on each host, documented invariant, silent
+    failure mode and open bug. A test declares what it covers with
+    `@pytest.mark.covers(...)`. `tests/harness/checklist_baseline.txt` lists today's gaps,
+    and the fast tier fails whenever the baseline and today's gaps differ, for example
+    when a tool is added with no test. A change can still add a line to the baseline, so
+    review, not a test, keeps the baseline from growing. The baseline is empty: every
+    item on the checklist has a test that covers it, apart from four rules for people and
+    two switches that only the plugin repositories act on, which are exempt with a reason.
+  - **A model that misbehaves.** `tests/adversarial/model_faults/` drives the write and
+    read paths with a scripted model that answers badly: malformed or cut-off output,
+    invented predicates, thousands of claims in one reply, timeouts, rate limits, a
+    proposal to retire or erase a stored claim, and a tool loop that never stops. Every
+    turn must still be stored, nothing may be retired or erased on the model's word
+    alone, a read stage that fails must serve the read a store with no model serves, and
+    each operation must make the number of model calls `docs/INTERNALS.md` states.
+  - **A nightly run.** `scripts/nightly/run.py` runs the slow tiers once a night in a clean
+    worktree of `main`, with a time limit on every step, and writes a report that says
+    what ran, what broke and what is new. It gives each break a fingerprint, so a break
+    seen again is not reported as new. A new break whose severity a step declared gets
+    one issue in the private repository memvara/build-health, or a private security
+    advisory in this repository when its class is security. Issues go to
+    memvara/build-health because every issue in this public repository is public. The
+    draft pull request that pins the break is opened here, and it cites the issue as
+    `memvara/build-health#<number>`. An
+    unclassified break waits for the scheduled session that follows the run, which
+    classifies it. A watchdog started by launchd writes a "did not run" report when a
+    night is missed. Nothing in the run merges anything.
+  - **Hook conformance.** `tests/adversarial/hooks/` runs every plugin hook the way each
+    of the five hosts runs it, with the payload that host sends, and checks the reply
+    envelope the host reads, where the hooks find the store, the five outcomes of session
+    start and recall, deduplication, the recall daemon, the generated registration, the
+    time limits, the approve list, and capture's log. Every hook must exit 0 and answer
+    within its limit on hostile payloads: empty or invalid input, 8 MB, and nesting
+    100,000 levels deep. Twelve bugs it found are pinned as strict expected failures,
+    #337 to #348.
+  - **Parity across surfaces.** `tests/adversarial/parity/` runs one program through
+    `Memvara`, `AsyncMemvara`, `RemoteMemvara` and `AsyncRemoteMemvara`, and one session
+    of tool calls through the in-process MCP server and the stdio server in local and in
+    cloud mode, and compares every answer exactly. It sets aside only random ids, clock
+    readings and the order of ids, and every difference a surface is allowed has a test of
+    its own that names where the code documents it. Three differences that nothing
+    documents are pinned as strict expected failures: #334, #335 and #336.
+  - **A soak and a timing run.** `bench/soak.py` drives a store through thousands of
+    seeded turns and has one detector for each failure that raises no error, the ones
+    `memvara/telemetry.py` lists, such as a restatement that refreshes nothing or
+    redaction that stops matching. One more detector checks that the store's current
+    city and employer for the user are the ones the user last named. It runs 10,000
+    turns nightly and 100,000 weekly. `bench/perf_budget.py` times `search`, `recall`,
+    `remember` and the two hooks that read the store, at 1,000, 10,000 and 100,000
+    claims. It records the machine it ran on, and a run made on battery, under load, or
+    where the load cannot be read is reported as invalid rather than as a failure. The
+    hooks' time limits apply from the first run. The library budgets are set from 14
+    valid nights by a rule fixed before any number was measured. The nightly run starts
+    the timing run and the 10,000-turn soak as steps of their own, each with its own time
+    limit and never rerun, and keeps their records in `local/nightly/records/`, outside
+    the night's worktree, so each night is judged against the earlier ones. A timing run
+    on battery or under load is reported as invalid. The soak found two bugs: #332 is
+    pinned as a strict expected failure, and #333 is fixed (see "Fixed").
+  - **Security properties.** `tests/adversarial/security/` checks the places where a
+    defect would be a vulnerability. Stored text that imitates a result row or a header
+    comes back harmless through every read tool and both hooks that read the store. Two
+    servers bound to sibling scopes on one store file answer an id from the other scope
+    exactly as they answer an id that never existed. The URL fetcher refuses every private
+    address class, including spellings and redirects that hide one. A tampered or
+    truncated vector record and a wrong key are detected rather than served. The redactor
+    sees every field before it is stored, confirmation tokens cannot be forged, replayed or
+    carried to another scope, secrets never reach standard error, argv or `memory_stats`,
+    and the vector file, the key file and the daemon socket are owner-only on POSIX.
+  - **Scripted sessions and the tool surface.** `tests/adversarial/sessions/` checks the
+    MCP server's tool list, input schemas, refusals and one minimal call to each tool under
+    every combination of the eleven settings that shape them: in process for all 2,048
+    combinations, and over the real pipe for a 12-run orthogonal array in the fast tier, a
+    covering array of every three settings nightly, and all 2,048 weekly. Ten more
+    scripted scenarios cover recall on every prompt, the three ways to close a fact, time
+    travel, documents, confirmation tokens, the graph tools, the profile at session start,
+    and expiry switched off beside a read-only server. One bug it found is pinned as a
+    strict expected failure: #353.
+  - **Framework adapters against the real packages.** `tests/adversarial/frameworks/`
+    runs the LangChain, LlamaIndex, CrewAI and LangGraph adapters and the mem0 shim and
+    importer in the nightly tier, each against the real framework at the oldest release
+    memvara declares it supports and at the newest release. Every framework and release
+    gets a virtual environment of its own under `~/.cache/memvara-adversarial/`, reused
+    from night to night while nothing it is built from changes, with this checkout's
+    memvara reinstalled on every run. A probe inside each environment blocks and records
+    any network access, so a framework that reaches the network fails the run. Seven bugs
+    it found are pinned as strict expected failures, B80 to B86, filed as #359 to #365.
+    Among them are a mem0 shim that refuses the `user_id` a mem0 `add()` call passes, an
+    importer that dates mem0's updates at the memory's creation, and a CrewAI floor at
+    which nothing can be saved.
+  - **Hypothesis** joins the `dev` extra, and CI type-checks `tests/harness`,
+    `bench/soak.py` and `bench/perf_budget.py`.
+- **`Store.unended_claims`, `store.unended_predicate()` and `Claim.is_unended()`.**
+  `forget()` closes every value in a slot that the store believes and that has not ended
+  (#282), and it now asks the store for those values instead of reading every value the
+  slot has ever held and choosing in Python. `unended_predicate()` is the SQL for that
+  population, with the clock behind each marker, built from the same clauses as
+  `state_predicate()`. `Store.unended_claims` runs it inside the slot lookup, in
+  `slot_history`'s order, and `Claim.is_unended()` is the same test in Python, which
+  `Claim.is_live()` now calls after its own valid-time check. On an in-memory store with
+  one slot of 501 values, the lookup took 102 µs where reading the slot whole and
+  filtering took 7.3 ms (best of 200 runs on a laptop). The method is optional and listed
+  in `OMITTABLE`: a store without it keeps working and closes the same values, reading the
+  slot whole. `docs/UPGRADING.md` says what the new member does to `isinstance(x, Store)`.
+- **`Scope.visible(items)`** returns the items whose `scope` a reader at that scope can
+  see, deciding `Scope.sees` once per distinct scope. `why()` uses it on a claim's source
+  turns, which keeps `why()` on a claim citing 365 turns at 1.7 ms instead of the 6.1 ms a
+  per-turn check cost.
 
 ### Changed
 
@@ -30,6 +228,696 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   and reading it at once. The report prints each scope's age and claim count at read time,
   and says the wait is a fixed delay, not a confirmation that extraction finished. Pass
   `--min-scope-age 0` for the old one-step run.
+
+### Fixed
+
+- **`docs/API.md` names every method that only one client has.** Its section on a hosted
+  deployment did not mention `end()`, `health()` or `whoami()`, which only the hosted client
+  has, or `bind()` and `merge_predicate()`, which only the local client has. A caller who
+  swapped one client for the other had no warning which calls to guard. The section now
+  describes each. It says how the local client ends a fact (`delete(..., close="ended")`
+  and `forget(..., close="ended")`), and how to narrow a hosted scoped view, which has no
+  `bind()`: `view.memvara.scope(...)`. The parity test that pinned this as an expected
+  failure now passes. #336 (B54).
+- **The recall hook has a floor for each route, and the hosted route's is 0.35, so it
+  stops injecting memories into most prompts a hosted store cannot answer.** Both routes
+  used 0.29, measured on the plugin-recall benchmark's seeded store with the hashing
+  embedder. The hosted service embeds with `all-MiniLM-L6-v2`, whose scores run higher:
+  on a real hosted store of 2,407 claims, six of eight questions the store could not
+  answer scored above 0.29 and got memories injected. The hook now applies
+  `HOSTED_MIN_SCORE = 0.35` when it reads the hosted service through its own client,
+  directly or through the daemon that serves that client, which silences all eight. It
+  keeps `MIN_SCORE = 0.29` when it reads a store through the library. One floor could not serve both: on the hashing embedder a scripted session's
+  correct answer scores 0.2997, which 0.35 would drop. `MEMVARA_RECALL_MIN_SCORE` still
+  overrides both. `lib.fast.recall` takes the new `hosted_min_score` argument, and
+  `bench/hosted.py` uses the floor of the route it measures. `docs/BENCHMARKS.md` has the
+  measurements. The floor follows the route rather than the store's embedder, so a local
+  store on `BAAI/bge-small-en-v1.5`, on which 0.29 filters nothing, or on
+  `all-MiniLM-L6-v2`, still gets 0.29; #400 tracks choosing it from the embedder. The seven plugin repositories pick the change up at their next sync.
+  #154.
+- **One prompt starts at most one recall daemon, and a daemon that loses the race cannot
+  strand the winner.** When no daemon was running and a prompt's first read found nothing
+  fresh, the recall hook read a second time, wider, and each read started a daemon. The
+  widening read no longer starts one. When two daemons did start together, the one that
+  bound the socket first listened only after sweeping the other sockets in its folder, so
+  the other could take its refused probe for a dead owner, remove its socket file and
+  bind its own. The first daemon then kept the store open for its 30-minute idle timeout
+  on a socket nothing could reach. A daemon now listens as soon as it binds, and on exit
+  removes the socket file only if the path still names its own socket. The fix is in
+  `plugin/hooks/daemon.py` and `plugin/hooks/recall.py`; the seven plugin repositories
+  pick it up at their next sync. #344.
+- **A fact restated many times no longer outranks the fact a query asks about.** Each
+  restatement raises a claim's salience, up to a cap of 5.0, and the ranking score used
+  the full value. At the cap, the restated claim's quality factor was 1.27 instead of at
+  most 1.0, so it ranked above any claim whose evidence for the query was less than about
+  21% stronger. For example, "tell me where Galphitor lives" returned "Galphitor likes
+  orixtor", restated 200 times, above "Galphitor lives in Viquinix". In the 100,000-turn
+  soak, the right claim ranked first in only 11,019 of 13,852 probes. The quality factor
+  in the ranking score (`Result.score`) now stops at 1.0, so recency, confidence and
+  salience can lower a result from its evidence but never lift it above. Salience above
+  1.0 still makes up for freshness or confidence a claim has lost, so among claims that
+  match a query equally well, the one restated more often still ranks higher. On a
+  30,000-turn soak the right claim now ranks first in 4,183 of 4,183 probes, and
+  restated facts still rank higher (correlation +0.81, against +0.86 before). Scores of
+  claims whose factor was already at most 1.0 do not change. `Explanation.raw_score`
+  still uses the full salience, and the `retrieval.quality_factor` telemetry series now
+  reports the factor the ranking used, so it no longer goes above 1.0. #333.
+- **The hosted client's `recall()` takes `valid_at`.** `RemoteMemvara.recall(valid_at=...)`
+  and `AsyncRemoteMemvara.recall(valid_at=...)` raised `ValueError`, saying that
+  `POST /v1/recall` has no time axis. The route takes `valid_at` now, the world clock alone,
+  so both clients send it, and `memory_recall` with `valid_at` works in cloud mode. A
+  deployment from before the field refuses a dated read with a 422 rather than answering it
+  with the present. `docs/UPGRADING.md` has the details. #298.
+- **`search()` and `recall()` refuse a memory type that does not exist.** A misspelled name
+  in `memory_types`, such as `"procedurel"`, kept no claim, so the call returned nothing
+  and raised no error, which a caller could not tell from a store with nothing relevant.
+  Both now raise `ValueError: memory_type must be one of episodic, semantic, procedural,
+  not 'procedurel'` before reading anything, the words `remember()` uses (#288). The check
+  is in `HybridRetriever.search`, so the async classes refuse too, and the hosted clients
+  refuse before sending the request rather than leaving it to the server's 422. #289.
+- **A ranked read whose model call fails now serves the plain read.** On a retriever with
+  a `read_selector`, `search(ranked=True)` gathers up to `rerank_top_n` turns for the
+  selector. When the selector failed (outcome `fallback`, `key_rejected` or `disabled`),
+  that larger pool was still interleaved with the claims, so the read returned more turns
+  than a plain read takes, and they pushed out facts the plain read shows. For example, a
+  read that took 3 turns returned 8 and lost the fact "user lives in Berlin" from its
+  `recall()` block. Every outcome but `applied` now returns exactly the plain read, as
+  `docs/INTERNALS.md` already said. `disabled` still spends nothing on the cross-encoder,
+  so it skips the plain read's reranker pass. A rewritten read follows the same rule for
+  its reranker pass over the fused list. A failed ranked read now costs one more local
+  retrieval, from the query vector it already has. On `fallback` or `key_rejected`, where
+  plain reads use a reranker, it also costs the plain read's reranker pass, after the one
+  the ranked stage spent ordering the turns for the selector. #308.
+- **One claim with an unreadable confidence no longer costs the whole batch.** When a
+  model's answer gave one claim a confidence written as an integer of a few hundred
+  digits, the shared shaping in `memvara/llm/_shape.py` raised `OverflowError` while
+  reading it. The write path catches errors around the whole extraction call, so every
+  claim in that batch was lost and the batch was marked deferred. The confidence is now
+  read as unknown (0.5), the way a NaN or a word already was, and the other claims are
+  stored. #304.
+- **The MCP server refuses a store from a newer version in one line.** Started on a store
+  written by a newer version of memvara, `memvara-mcp` and `python -m memvara.server`
+  exited with status 1 and a full Python traceback. The store's refusal was already clear;
+  the command line caught the configuration and embedder errors but not this one. It now
+  exits with status 2 and one `memvara-mcp:` line carrying the store's message, as it does
+  for an embedder mismatch. Any other error at startup still ends in a traceback. #299.
+- **Session start says so when the store did not answer, instead of "nothing stored
+  yet".** Session start swallowed each section's failure: the scope line, the standing
+  block and the notes each became empty, and with every section empty it reported
+  "nothing stored yet", a claim about the store's contents it had no basis for, and
+  logged nothing. On a host that shows no status line, an unreachable store looked
+  exactly like no store configured. Session start now keeps each section that failed,
+  logs `failed section=<section> reason=<exception class>` to `session_start.log` on
+  every host, and reports "recall failed" when nothing arrived because a section failed.
+  When some sections arrived and one did not, the status line names it, as in "session
+  opened with 3 memories · notes unavailable". "Nothing stored yet" now means every
+  section answered and was empty. #339.
+- **The standing preferences are injected once when a session opens.** Session start
+  injects them, and the recall hook checks them again every 15 minutes, injecting them
+  only when their digest changed. Session start recorded no digest, so the first prompt
+  of every session found the check due and the digest different, and injected the whole
+  block a second time, with the status "standing preferences updated" although nothing
+  had changed. Session start now records the digest and the time of the block it
+  injected in the session's recall state, and recall computes the digest the same way,
+  so the first prompt finds the block unchanged. #343.
+- **Session start and recall answer within their time limits when the hosted store does
+  not answer.** The hosted client waits up to 6 seconds for each request and retries a
+  request that got no answer once, and a hook makes several calls, so against an endpoint
+  that accepted connections and never answered, session start ran about 60 seconds and
+  recall about 36. The host stops a hook at its limit, 20 seconds for session start and
+  10 for recall, so the turn got no memories and no status line. Both hooks now set one
+  deadline for the whole hook, 1.5 seconds before their host's limit, and every hosted
+  call, and recall's wait for its daemon, waits at most the time left and is not started
+  or retried once it has passed. The hooks then report that the store did not answer, as
+  they do for any other failed call. The daemon and the capture hook set no deadline and
+  are unchanged. #345.
+- **A configured local store that cannot open is reported as a failure, not as "not
+  configured".** When `MEMVARA_DB` named a store that exists and fails to open, such as a
+  file that is not a SQLite database, session start and recall reported "not configured",
+  exactly as they do when no store is configured, and wrote no log line, so a person
+  could not tell a broken store from a missing one. Both hooks now report "recall failed"
+  where the host shows a status line, and log `failed reason=open:<exception class>`, in
+  `recall.log` and in `session_start.log`. When the machine also has a hosted login, the
+  hooks still read from the hosted store, as before. #337.
+- **Recall answers a prompt of any size within its limit.** The recall hook sent the whole
+  prompt to the store as its query, and the store's time grows with the query, about 2
+  to 3 seconds a megabyte on a laptop. So a pasted log file of about 4 MB or more ran
+  past the 10-second limit every host gives recall, and the turn got no memories and no
+  status line. The hook now reads at most 8,000 characters of a prompt: a longer one
+  keeps its first and last 4,000, where a question usually is. A 16 MB prompt is now
+  answered in under a second. #348.
+- **`import_mem0` dates mem0's updates and deletes when they happened.** mem0 writes an
+  UPDATE or DELETE row with its memory's creation time in `created_at` and the time of
+  the event in `updated_at`, and the importer read `created_at`. So every imported update
+  ended the old value on the day the memory was created, and every delete stopped belief
+  on that day too. The importer also sorted the rows by that date, so rows with the same
+  date were replayed in the order of mem0's random row ids, and an update or delete
+  replayed before its ADD left the wrong value live, or brought a deleted memory back.
+  The importer now dates an UPDATE or DELETE by `updated_at`, falling back to
+  `created_at` when the column is missing or empty, and replays events in the order they
+  happened, with an ADD first when two share an instant. `HistoryRow.updated_at` is now
+  a `datetime`, as its type always said, and `HistoryRow.at` gives the time of the
+  event. #365.
+- **Recall answers a prompt that holds half of a surrogate pair.** A client written in
+  JavaScript can send one, an emoji cut in two, which `JSON.stringify` escapes as
+  `\ud83d`. Python decodes it into a string that cannot be encoded, the store hashes each
+  query with `text.encode()`, and the recall hook reported the whole recall as failed
+  although the store was healthy. The hook now drops the half character from the prompt
+  before it searches. #347.
+- **The LlamaIndex retriever's docstring shows an example that runs.** It showed
+  `index_or_engine.as_query_engine(retriever=MemvaraRetriever(mem, user="alice"))`, which
+  raises `TypeError` in llama-index-core at both memvara's floor, 0.13.0, and 0.14.25:
+  `as_query_engine` builds a retriever of its own and passes its keyword arguments on as
+  well, so `retriever` arrives twice. The docstring now shows
+  `RetrieverQueryEngine.from_args(MemvaraRetriever(mem, user="alice"))` and says why
+  `as_query_engine` does not work. #362.
+- **The MCP server refuses NaN for a number argument.** The server's JSON parser accepts
+  the bare token `NaN`, and the validator let it through the bounds on `confidence` and
+  `min_score`, because every comparison with NaN is false. A NaN `min_score` then acted as
+  no floor at all. The validator now refuses NaN for every number argument, with
+  `<tool>.<argument> must be a number, got NaN`, before anything is read or written.
+  #312.
+- **A metadata filter key that ends in a newline is refused.** The key pattern
+  `^[A-Za-z0-9_.-]{1,64}$` was checked with Python's `re.search`, where `$` also matches
+  just before a newline at the end of the value, so `memory_search` and `memory_recall`
+  accepted the filter key `"team\n"`. The validator now matches a pattern against the
+  whole value, which is what `$` means in a JSON Schema pattern. #314.
+- **A lone surrogate in the key of an object argument is refused.** The validator checked
+  a key only when the argument's schema declared a pattern for its keys, and
+  `memory_add_document.metadata` declares none, so a metadata key holding half of a
+  character, such as `"a\ud800b"`, was stored. Every key of every object argument is now
+  checked like a string argument, and a lone surrogate in one is refused with the same
+  "unpaired surrogate" message a string value gets. #315.
+- **The command-line help names everything the command line and the server's
+  configuration accept.** `memvara --help` and `memvara-mcp --help` now name `--version`.
+  The server's help now lists `'openai'` among the `MEMVARA_LLM` backends, describes all
+  22 feature switches instead of 12, and describes the twelve variables it left out:
+  `MEMVARA_SERVER_URL`, `MEMVARA_LLM_MODEL`, `MEMVARA_LLM_MAX_CLAIMS`,
+  `MEMVARA_LLM_MAX_TOKENS`, `MEMVARA_LLM_TIMEOUT`, `MEMVARA_LLM_EXTRA_BODY`,
+  `MEMVARA_LLM_EXTRACT_SYSTEM`, `MEMVARA_LLM_TERSE_CLAIMS`, `MEMVARA_EXTRACT_GUIDANCE`,
+  `MEMVARA_ADVISE_REPLACEMENTS`, `MEMVARA_CLOSED_VOCABULARY` and
+  `MEMVARA_NAT64_PREFIXES`. New tests fail when the help leaves out a variable the
+  configuration reads, a feature, or a model backend. #297.
+- **The stdio MCP server reads UTF-8, whatever the locale says.** The server read its
+  requests in the locale's encoding, but the MCP stdio transport is UTF-8. Under a strict
+  UTF-8 locale, one byte that was not UTF-8 ended the server, so the agent had no memory
+  for the rest of its session. Under another encoding, such as cp1252 on a Windows pipe,
+  UTF-8 text was decoded wrongly, so "Zürich" was stored as "ZÃ¼rich". The server now
+  reads standard input as UTF-8. A line with a byte that is not UTF-8 gets a JSON-RPC
+  parse error (`-32700`) that points at the first such byte, and the server carries on.
+  Standard error, where the server writes its startup refusals, is now written as UTF-8
+  too, and so is standard output, where `--help` prints a usage that holds em dashes.
+  #311.
+- **A claim that matches a search is never returned behind claims that do not.**
+  `search()` caps each fact slot (the same owner, subject and predicate) at two places in
+  the head of the list, and moved the slot's third and later claims to the very end,
+  behind results that score 0 and do not match the query at all. So for a user who knows
+  C, C# and C++, a search for "C++" returned "C" last, behind eight unrelated facts, and
+  in a read with one more candidate "C" fell out of the top 10. The demoted claims now go
+  behind the other matching results and ahead of every result that scores 0. The list
+  is in score order except for that demotion. LOCOMO retrieval does not move, because it
+  scores conversation turns and the cap applies to claims. #327.
+- **One request nested too deeply no longer ends the stdio MCP server.** Python's JSON
+  decoder raises `RecursionError`, not `ValueError`, on nesting deeper than the
+  interpreter's stack allows, and the server let it escape, so a single such line ended
+  the agent's memory for the rest of the session. The line is now answered with a JSON-RPC
+  parse error (`-32700`, "nested too deeply to parse"), and the server carries on. #268.
+- **`memory_standing` and `standing()` refuse a `k` below 1.** With `k=0` the tool replied
+  that no standing preferences were stored, in a scope that held some, and
+  `Memvara.standing(k=0)` returned an empty list; a caller could not tell either from a
+  really empty store. The tool's `k` now has a minimum of 1, like every other tool's `k`,
+  and refuses a smaller value with `memory_standing.k must be >= 1`. `standing()` on
+  `Memvara`, `RemoteMemvara` and their async twins raises `ValueError` for it, as
+  `profile()` already did, and the hosted clients refuse before sending anything. #269.
+- **`remember()` takes `memory_type` as a string.** `memory_type="procedural"`, the
+  spelling `memory_remember` uses, used to fail with `AttributeError: 'str' object has no
+  attribute 'value'` when the claim was stored. `remember()` now accepts a `MemoryType` or
+  its value as a string, and refuses any other string with a `ValueError` that names the
+  argument, before anything is written. #270.
+- **The hosted Python client raises `AuthError` for a bad key, and retries what
+  memvara-cloud marks retryable.** memvara-cloud answers a missing or unknown key with 401
+  and the code `unauthenticated`, and the client mapped only `unauthorized`, so a bad key
+  raised a plain `RemoteError`. The client also read `retryable` beside `code`, where
+  memvara-cloud never puts it. The server sends it inside `detail`, for a write still
+  running under the same `Idempotency-Key` (409 `conflict`), or not at all, for
+  `unavailable` (503), which it documents as retryable. So neither was retried, and a
+  retried write whose first attempt was still running raised instead of returning that
+  attempt's response. `unauthenticated` now maps to `AuthError`, `retryable` is read from
+  `detail` as well, and `unavailable` is a retryable `ServerError`. A bare 503 with no
+  envelope is still not retried.
+- **A retraction dated in the future no longer stores a tombstone that ends before it
+  begins.** The tombstone a retraction writes was closed on the world clock at the
+  instant of the write. So a retraction with a future `valid_from`, such as
+  `remember(..., polarity=-1, valid_from=<next year>)`, stored a row whose `valid_to` came
+  before its `valid_from`, and `history()` and `why()` showed that inverted interval. The
+  tombstone's world clock now closes at the write or at the tombstone's own start,
+  whichever is later, which is the rule every other closure follows. A future-dated
+  tombstone therefore has `valid_to == valid_from`, an empty interval. Its belief clock
+  still closes at the write, and the value it retracts still ends at the retraction's
+  start. `Reconciler.apply` also reads a naive `now` as UTC, as the rest of the library
+  reads an instant built without a time zone, instead of raising `TypeError`. #275.
+- **Restating a fact with an earlier start keeps the earlier start.** Writing a value the
+  store already held live, with a `valid_from` before the stored claim's, was treated as
+  a repeat: the stored claim was reinforced and the earlier start was dropped, so a read
+  of the earlier period returned nothing. The write now stores a claim for the earlier
+  period, ending where the stored claim begins, and reports it under `added`. That is the
+  rule a single-valued slot already applied to a different value that began before the
+  live one, and it applies to every predicate. The stored claim is not changed, so a read
+  of the past as the store believed it before the write returns what it did. #283.
+  - Only stored claims the writer can see are compared: those in its own scope and in
+    the broader scopes it reads, never those of a sibling project, agent or session.
+  - Restating a period the store already holds, such as the same earlier start a second
+    time, reinforces the claim for that period and stores nothing. Restating from an
+    even earlier start stores only the part not yet held.
+  - A caller's repeat that names `expires_at` is still a repeat, so the expiry lands on
+    the claim on record. A model's restatement is stored for its earlier period like
+    any other, and its expiry stays on the claim it creates.
+  - `memory_remember`'s reply no longer says such a fact stopped being true where the
+    stored claim begins; it says the same value is stored from there.
+  - **Not covered yet: a turn that `add()` takes for a repeat in tier 0**, before
+    extraction and so before the reconciler. A turn that embeds as a near-duplicate of a
+    stored claim, or whose text is exactly that of the turn a claim came from, still
+    reinforces that claim, and its earlier date is lost. #318 tracks this.
+- **`forget()` retires a value stored to begin later, as well as the values in force.**
+  It retired only the values in force at the time of the call, so a value stored with a
+  future `valid_from` stayed believed, and the forgotten slot answered again when that
+  value began. `forget()` now retires every value in the slot that the store believes and
+  that has not ended, values stored to begin later included, and returns them with the
+  others. A value that has already ended is left as it is. `forget(close="ended")` closes
+  the same values, and a value that has not begun by `at` is ended at its own start, so
+  it is true at no instant. `memory_forget` and `memory_end` given a `predicate` call
+  `forget()`, so they do the same, and their descriptions, argument errors and replies now
+  say so in one term, "a value stored to begin later". A server started with
+  `MEMVARA_MODE=cloud` does not say it: the hosted deployment runs its own `forget`, which
+  does this only once the deployment runs a release with this fix, so there the two tools
+  promise every current value and nothing more. `forget_matching()` and its two tools
+  are unchanged and still close only what is in force now, because their preview is a
+  present-tense search; their docstring and descriptions now say so, and say to close a
+  value stored to begin later by its id. #282.
+- **`memory_end` no longer says a value it ended before it began is true until then.**
+  Ending a value that has not begun yet, by its `claim_id` or as part of its slot, ends
+  it at its own start, so it is true at no instant. The reply counted its ending as one
+  still in the future: it said the value was true until then, that `memory_recall` kept
+  returning it, and that it still answered about the period before its ending. It now
+  says the value had not begun when it was ended and is true at no instant. A value
+  stored to begin later and ended after its start is true between the two, and the
+  reply now says that too, where it used to say `memory_recall` kept returning it;
+  `memory_remember`'s reply shares that note.
+- **A retraction repeated after the first one's expiry has passed keeps a record of its
+  own.** A retraction that repeated an earlier one was folded into the earlier tombstone
+  even when that tombstone's `expires_at` had passed. The write reported nothing, and
+  when the expiry sweep erased the old tombstone it erased the only record of the new
+  retraction with it, so a retraction written with no expiry disappeared. A tombstone
+  whose expiry has passed is now left out of that lookup, as an expired claim already is
+  when a fact is repeated, so the repeat is handled as a retraction the store has no
+  record of. Where nothing else in the slot is live, it writes a tombstone of its own,
+  which the sweep leaves in place. #284.
+- **Two processes opening a new store at the same moment no longer make one of them fail
+  at startup.** The first open of a store switches its file to WAL mode. While another
+  connection held the file's write lock, SQLite refused that switch at once instead of
+  waiting, so one of the processes failed within a few milliseconds with
+  `sqlite3.OperationalError: database is locked`, where every other write waits for up to
+  five seconds. This happened on the first run after the plugin was installed, when the MCP
+  server and the plugin's hooks open the new store together, and when two agent sessions
+  started at once; when the server was the one that failed, the agent had no memory tools
+  for that session. Now one store at a time runs the schema and the migrations, so a store
+  that opens while another is creating or upgrading the file waits for it, for up to ten
+  minutes, and then opens the finished store. The wait is long because an upgrade can be:
+  one took 26.6 seconds for 300,000 claims. Ctrl-C ends it within about a quarter of a
+  second. Only an open that creates or upgrades the store takes this lock. The open of a
+  store this version has already finished with does not, so established stores never wait
+  for one another. An open that creates or upgrades a store must be able to write
+  `<db>.lock`: if the file exists and this user may not write it, the open raises
+  `PermissionError`, naming the file and the fix. An open of an established store needs
+  only to read the file, as before, and neither kind needs permission to add a file to the
+  store's directory. The switch to WAL mode is also tried again for up to five seconds, for
+  a connection from outside memvara that holds the write lock. #281.
+- **`clear_embeddings()`, and so `reembed()`, refuse when this process may not write
+  `<db>.lock`.** A clear takes that file exclusively to make sure no other store has the
+  database open, because clearing truncates the vector file they map, and a process that
+  still maps it crashes on its next vector search. SQLite opens a file this process may not
+  write read-only, and there the exclusive lock silently became a shared one. So with a
+  read-only lock file, such as one another account created, the clear went ahead while
+  another process had the store open, and that process then died with SIGBUS. The clear
+  now raises `PermissionError`, naming the lock file, and changes nothing. #350.
+- **`clear_embeddings()`, and so `reembed()`, work in a directory where the account may not
+  add files.** A clear asks for `<db>.lock` exclusively, and on that empty file SQLite
+  needed a new `<db>.lock-journal` to do so. In such a directory every clear failed, and
+  the failure was reported as `StoreInUseError`, with advice to stop other processes that
+  did not exist. The lock file's connection now keeps its journal in memory, and a clear
+  reports `StoreInUseError` only when another store really holds the file; any other error
+  is raised as itself. #324.
+- **A `reembed()` that refuses now changes nothing.** It gave the `Memvara` and its writer,
+  reader and consolidator the new embedder before the clear could refuse with
+  `StoreInUseError` or `PermissionError`. So after a refusal the object held the new
+  embedder beside the old vectors, although the refusal said nothing had changed, and with
+  an embedder of the same width every search compared two unrelated vector spaces without
+  an error. The clear now runs first, so a refusal leaves the old embedder everywhere.
+  #324.
+- **The store's erasure methods read what they erase under the write lock.**
+  `SQLiteStore.erase_claim`, `erase_episodes` and `purge` each read what to erase before
+  their first write, outside the write lock. Two `erase_claim` calls on one claim at once,
+  from two handles or two processes, could both find the row, and the second wrote an
+  erasure record, and reported the claim erased, although it had erased nothing.
+  `erase_episodes` could erase a turn that a claim had come to cite in the meantime, so
+  that claim's provenance pointed at nothing. `purge` listed the vectors it blanks and
+  counts before it took the lock, so a claim written in between lost its row while its
+  vector was left out of both. Each now runs in one `batch()`, which holds the lock from
+  before its first read.
+- **A mem0 import no longer brings back a claim another writer erased during it.** The
+  importer keeps the claim each memory's previous event wrote, and an UPDATE event
+  retires that claim by writing the importer's copy back. If another handle or process
+  ended, retired or erased the claim between the two events, the import undid that
+  change; an erased claim came back, text included, beside its own erasure record.
+  `write_note` now reads the claim again under the write lock, closes the stored row, and
+  retires nothing when the claim is gone or no longer live.
+- **Deleting a document erases the chunks a new version stored while it waited.**
+  `delete_document()` listed the document's chunks before its transaction and erased only
+  those. The chunks an `update_document()` from another handle or process stored in
+  between stayed on disk, text and all, belonging to no document, after the delete had
+  reported success. The delete now reads the document and its chunk list inside its
+  transaction, under the write lock.
+
+### Security
+
+- **A repeated value no longer reinforces a claim in a scope its writer cannot see.**
+  Writing a fact the store already holds reinforces the claim on record, and the lookup
+  that finds that claim matched on owner (tenant and user) only. So a fact remembered in
+  project A, when project B already held it, reinforced B's claim: nothing was stored in
+  A, A's reads returned nothing, and the receipt reported the fact as already known. The
+  same happened between two sessions or two agents of one project, and from the user's own
+  level into a project. A repeat now reinforces only a claim in the writer's own scope or
+  a broader one it reads, and is otherwise stored as its own claim in its own scope. A
+  retraction that repeats one already recorded, and a word-for-word repeat of a turn,
+  follow the same rule. GHSA-xcp9-68f5-6g9q.
+- **`why()` and `memory_why` list only the source turns and superseded claims the caller
+  can see.** A claim can cite turns from several scopes: a user-level preference restated
+  in two projects cites a turn from each. `why()` returned all of them, so one project
+  could read another project's turn text through a claim they both see. Turns and
+  superseded claims from a scope the caller cannot see, such as another project or a
+  sibling session, are now left out. This also covers claims that absorbed a write before
+  the first fix. GHSA-xcp9-68f5-6g9q.
+- **A write in one session or agent no longer closes a value a sibling session or agent
+  holds.** The claims competing for a slot include every session and agent of the project.
+  A new value or a retraction in session s2 ended the value session s1 held, which s2
+  cannot read, and returned it in s2's receipt, so `memory_remember` showed s2 the ended
+  value. A supersession or retraction now closes only claims in the writer's own scope, a
+  broader scope it reads, or a narrower scope beneath it. A user-level write still ends a
+  value a session holds. GHSA-xcp9-68f5-6g9q.
+- **A claim can cite only turns its writer can see.** `remember(sources=[...])`,
+  `supersede()` and the `memory_remember` tool's `sources` argument took any turn id and
+  stored it. Ids are not secret, so a caller could make a claim cite another scope's turn,
+  which `erase(sources=True)` could then reach. An id of a turn in a scope the claim
+  cannot see, or of no turn at all, is now left out without an error, so the claim
+  returned does not tell the caller which ids exist. A new `Episode` passed in `sources`
+  is stored as before. GHSA-xcp9-68f5-6g9q.
+- **A turn counts as extracted only when its own scope can see a claim citing it.**
+  `pending_extraction()` and `reextract()` treated a turn as done when any claim in the
+  tenant cited it, including one in another project that had absorbed the write. Such a
+  turn is now pending again, so an extraction worker reads it and stores the fact in the
+  turn's own scope. GHSA-xcp9-68f5-6g9q.
+- **The plugin's approve hook approves only the tools of the server named `memvara`.** The
+  hook answers "allow" for memvara's read-only memory tools, so the agent host skips its
+  permission prompt. It matched a tool by the last segment of its name, such as
+  `memory_recall`, and never checked the server. Claude Code, Codex, Copilot and Cursor
+  run the hook for any tool name that contains `memvara`, so there a tool named
+  `memory_recall` on any MCP server whose name contains `memvara` ran without a prompt.
+  OpenCode's shim asks the hook about every permission request, so there any server's tool
+  whose name ended in `__memory_recall` did. Each host now lists the exact prefixes of the
+  server keyed `memvara`, which every installer writes, and a tool is approved only when
+  its whole name is one of them followed by a read-only tool's name. A server renamed from
+  `memvara` is asked about on every read. The hook sees only the server's key, so a
+  different server configured under the key `memvara` itself is still approved;
+  `SECURITY.md` lists that as a known limitation. GHSA-69rp-jj7j-cgh4.
+- **Two writers on one store no longer both fill a single-valued slot.** A write looked up
+  the slot before it held the database's write lock, because Python's `sqlite3` module
+  begins a transaction only at the first write statement. Two handles on one file, such as
+  the MCP server and the hooks' daemon, could each find the slot empty and each add a
+  value, and both values stayed live, with neither ending where the other began. Two
+  writes of the same value could store it twice in the same way, instead of reinforcing
+  one claim. `SQLiteStore.batch()`, in which `remember()` and `add()` look up the slot,
+  now begins with `BEGIN IMMEDIATE`, so a write holds the lock from before its first
+  lookup. A second writer waits until the first commits, then finds its value and ends it,
+  or reinforces it when the value is the same. A writer that waits longer than SQLite's
+  five-second busy timeout still gets `database is locked`, now before its batch has run.
+  `docs/UPGRADING.md` says who else this changes. GHSA-pmx8-j968-wpqw.
+- **A write that waited for another writer is no longer believed from before its wait.**
+  `remember()` given no `recorded_at` recorded the claim at the instant it was called, but
+  retired whatever the claim displaced at the instant it ran, after it had taken the write
+  lock. With `close="retired"`, the old value's belief ended at the later instant and the
+  new value's began at the earlier one, so a read of the past between the two returned
+  both values. The gap was microseconds for a write that took the lock at once, and as
+  long as the wait for one that waited, up to SQLite's five-second busy timeout. The
+  default `recorded_at` is now the instant the write takes the lock, which is also the
+  instant it retires what it displaces, so the old value's belief ends exactly where the
+  new one's begins. `remember(replaces=...)` does the same. A write given neither
+  `recorded_at` nor `valid_from` also begins at that instant, so its two instants still
+  come from one reading and whatever it ends stops exactly where it starts; with a
+  `valid_to` and no `valid_from`, it still begins at the instant of the call. A
+  `recorded_at` the caller passes is stored as it is. `remember()` refuses an `expires_at`
+  that is not in the future, and it now checks it again at the instant the write takes the
+  lock: a write that waited until after its expiry was stored already expired, and the
+  next sweep erased it. Such a write now raises the same `ValueError` and writes nothing.
+  `docs/UPGRADING.md` says who can notice the difference. GHSA-w7cf-jc6v-fq6h.
+- **`delete()` no longer undoes another writer's ending or brings back an erased claim.**
+  `delete()` read the claim, and then wrote the whole row back later, outside any
+  transaction. If another writer ended the claim in between, for example with a new value
+  that superseded it, the copy `delete()` had read overwrote the ending, so the claim was
+  retired with no end and no pointer to the value that replaced it. If `erase()` removed
+  the claim in between, `erase()` reported success, and the delete then wrote the claim
+  back, its text included, beside its own erasure record. `delete()` now reads and writes
+  the claim in one transaction that holds the database's write lock from before the read,
+  so an ending made in the meantime is kept, and a claim erased in the meantime stays
+  erased and `delete()` returns `False`. The other methods that read a claim before they
+  write it now do the same. `forget()` and `forget_matching()` close the claims as they
+  stand once the lock is held, and `forget_matching()` refuses a claim closed in the
+  meantime. `supersede()` and `remember(replaces=...)` refuse a claim closed in the
+  meantime, `link()` refuses a claim erased in the meantime, a second `erase()` of one
+  claim returns `False` and records nothing, and the expiry sweep leaves a claim whose
+  expiry was moved in the meantime. GHSA-vgpm-hrr4-g649.
+- **A consolidation pass no longer undoes a write made while it ran.** `consolidate()`
+  reads a snapshot of the live claims, decides what to change, and wrote the changed
+  claims back whole. A claim that another handle or process ended, retired or erased
+  between the snapshot and the write was written back as the snapshot held it: the ending
+  was undone, so two values of one slot were live, and an erased claim came back, text
+  included, beside its own erasure record. The pass now reads each row again inside the
+  transaction that writes it, under the write lock, and writes it only if it is still
+  exactly as the snapshot read it. A row that changed is left as the other writer left it,
+  and the next pass decides about it again. The two rows one merge changes are written
+  together or not at all. The counts `consolidate()` returns are still what each stage
+  decided, and the `consolidate.rows_written` metric counts only the rows written.
+  GHSA-xw5r-jx55-x5px.
+- **`add()` of a repeated turn no longer undoes a write made while it ran.** When a turn
+  repeats one already stored, or restates a stored claim closely enough, `add()` reads the
+  claims it restates and reinforces them later, in the transaction that follows
+  extraction, which can include a model call. The reinforcement wrote the copy read
+  earlier back whole, so a claim that another handle or process ended, retired or erased
+  in between had that change undone; an erased claim came back, text included, beside its
+  own erasure record. The reinforcement now reads each claim again under the write lock
+  and leaves alone a claim that is gone or no longer live. GHSA-c96v-h8jv-9jj4.
+- **The identity and predicate repairs no longer undo a write made while they ran.**
+  `backfill_entities()`, `backfill_predicates()` (which `merge_predicate()` runs) and
+  `split_entity()` read the claims they may change, decide, and wrote the changed claims
+  back whole. A claim that another handle or process ended, retired or erased in between
+  was written back as the pass had read it, so the other writer's change was undone; an
+  erased claim came back, text included, beside its own erasure record. Each pass now
+  reads its rows again inside the transaction that writes them, under the write lock, and
+  writes a slot's claims only if every one of them is still exactly as the pass read it. A
+  slot another writer changed is left as that writer left it, and running the pass again
+  applies it. `RekeyReport.written` and `MergeReport.written` count only the rows written,
+  and `SplitReport` has a new `written` count that does the same. GHSA-cvvf-2vpp-cv9w.
+- **A document deleted while it was being extracted or updated no longer comes back.**
+  `add_document()` and `update_document()` store a document's chunks and then index and
+  extract them outside any transaction, which can include a model call. Each status after
+  that was recorded by writing back the whole document as it had been read before. A
+  document that another handle or process deleted in between came back, title and path
+  included, after its delete had reported erasing it, and a title, path or metadata
+  another writer set in between was undone. `update_document()` also wrote back the
+  document it had read before reading new content, so a document deleted in between came
+  back, with the new chunks. Each status is now written onto the row as the store holds
+  it, under the write lock, and only while the row still holds the content the status
+  describes, and a document deleted before its extraction begins is not read.
+  `update_document()` reads the document again under the write lock and raises `KeyError`
+  for one deleted in the meantime. A re-add that retries unread chunks reads them under
+  the write lock as well, so it cannot write back a chunk that a delete erased. When
+  another writer stored new content in between, so that a status is not written,
+  `add_document()` and `update_document()` return the document as the store holds it,
+  rather than their own copy with a status and a chunk count that were never stored.
+  GHSA-3324-rp58-x533.
+- **A turn erased while it was being read no longer leaves facts behind.** `add()` and
+  the extraction of a document's chunks write the claims they read after the model call,
+  if there is one. A `purge()` or a `delete_document()` from another handle or process
+  that erased the turn in between did not stop them: the claims were written anyway,
+  citing a turn that no longer existed, so facts read from the erased text outlived the
+  erasure that had reported removing it. The claim transaction now reads again, under the
+  write lock, which of its turns are still stored. It drops a claim whose every turn is
+  gone, and the others cite only the turns still stored. An end that agentic extraction
+  proposed from a gone turn is reported as `not_applied`. A turn that restates a stored
+  claim reinforces it in the same transaction, and a restatement whose every turn is gone
+  is skipped as well, so the claim gains no observation and the receipt does not list it.
+  GHSA-pw35-phw9-hwm9.
+- **Erasing a vector another process wrote now removes it from the vector file.** A store
+  blanked an erased claim's or turn's row in `<db>.vecs` only inside the part of the file
+  it had mapped. When another process had written the vector after this store mapped the
+  file, or this store held no vector when it opened, `erase()`, `erase_claim()` and
+  `purge()` reported success and the vector stayed on disk, where the text can be
+  recovered from it. They now open the file if needed and blank a row outside the mapping
+  through the file itself. `prove_erased()` certified such an erasure, because it counted
+  only database rows. `erase()` now records which row of the vector file the vector held,
+  and the proof reads that row from the file itself and reports it as `vector_file`, so
+  a vector left on disk makes the proof fail and `erase()` raise `ErasureIncomplete`. The
+  new column moves the SQLite store to schema 17. GHSA-p37g-qr47-wjxj.
+- **A retired claim is no longer closed again.** `delete()` set a claim's
+  `invalidated_at`, the instant the store stopped believing it, again on every call, and
+  added another closure record. A second call moved that instant later, so every read of
+  the past between the two calls believed the claim again. Ending a retired claim did the
+  same from the other clock: `delete(close="ended")`, which is what `memory_end` does for
+  one claim, set `valid_to` on a claim `memory_forget` had retired and added a second
+  closure record, so `memory_history` showed it as a fact that ended rather than one we
+  took back, while the tool replied that nothing had changed. A claim that is already
+  retired is now left exactly as it is, whichever closure is asked for: `delete()` writes
+  nothing and returns `True`, and a `reason` given to that call is not recorded.
+  `close_out`, which every closure goes through, changes neither clock of a retired claim
+  and adds no record. `memory_forget` on a retired claim now says it is already retired
+  and that nothing changed, instead of "Retired claim", and so it does when another writer
+  retired the claim while the call ran, which it tells by reading the claim again after
+  its write and comparing the reason on record with its own. A claim whose retirement is
+  recorded but dated to take effect later is retired too, so a new value, a retraction,
+  `forget()` and `forget_matching()` leave it out of what they close. GHSA-97rw-w92g-4p83.
+- **A second value scheduled for a single-valued slot now replaces the first.** A value
+  written to begin in the future is believed from the moment it is recorded, but the
+  reconciler compared a new value only with the values in force at the time of the
+  write. So a second scheduled value did not end the first, and from their start both
+  were live, as were any later ones. Every value that is believed, not retired and not
+  yet ended now competes, scheduled ones included, by the rules that already applied: one
+  that begins earlier ends where the new value begins, one that begins at the same instant
+  collapses, and one that begins later ends the new value. A value the write leaves
+  unchanged, such as one already ended where the new value begins, is no longer written
+  again, named as replaced by the new value, or listed in `receipt.closed`.
+  GHSA-rc7c-jpmj-jrfc.
+- **A model's expiry can no longer erase a claim the caller asserted.** When a new claim
+  repeated one on record and carried an `expires_at`, the reconciler put that expiry on
+  the claim on record, whoever proposed it. Model output could therefore erase a caller's
+  claim: single-call extraction accepted any instant in its output, one in the past
+  included, which hid the claim at once, and an agentic `propose_claim` that repeated a
+  stored fact put its expiry on it, so the next sweep after that instant erased it. Only a
+  caller's repeat, from `remember()` or an importer, now moves an expiry onto a claim on
+  record. A model's repeat reinforces the claim and leaves its expiry as it was, a model's
+  expiry is kept only on a claim its own proposal creates, and single-call extraction,
+  which is offered no expiry, drops any it returns. GHSA-h9pm-mpg7-8324.
+- **The MCP server no longer writes a reply line that is not JSON.** A request whose `id`
+  was `NaN`, `Infinity` or `-Infinity`, which are not JSON, or a number too large for a
+  double, such as `1e400`, was accepted, and the reply echoed the id as a bare `NaN` or
+  `Infinity`. A strict parser such as JavaScript's `JSON.parse` cannot read that line, so
+  the client lost the reply or its session. A request whose id is, or holds inside an
+  object or array, one of those numbers is now a parse error (-32700), answered with a
+  null id, and the server's encoder refuses to write a number JSON cannot carry. A reply
+  that holds one anywhere is answered instead with a JSON-RPC internal error (-32603)
+  carrying the request's id, the reason is written to standard error, and the server goes
+  on serving. The same numbers anywhere else in a request, such as in a tool's arguments,
+  are read as before and go to the tool's own argument check, because no reply copies
+  them. GHSA-fwrg-wp6q-jcqm.
+- **The files the plugin's hooks keep are now readable by your account only.** The hooks
+  wrote their logs and state under `~/.memvara/.hooks` with the default modes, which
+  under the usual umask are 0755 for a directory and 0644 for a file, so every account
+  on the machine could read them. They hold text a person or a model wrote:
+  `capture.log` keeps up to 200 characters of a model reply it could not use,
+  `recall-sample.log` (when switched on) the first 90 characters of each prompt and 70 of
+  each memory recalled for it, and
+  `capture-state.json` the path of every transcript the capture hook has mined, beside
+  `recall.log`, `hooks.log`, `usage.jsonl` and the lock files. `~/.memvara` itself was
+  0755 when a hook, `memvara-mcp login` or `memvara-mcp init` created it. Every directory
+  from `~/.memvara` down is now created 0700 and every file 0600, by the Python hooks and
+  by the OpenCode plugin's shim, and a hook takes any permission for group and others off
+  a directory or file that already has it, the first time it uses it in a process.
+  `login` and `init` create the directory 0700, and take any permission for group and
+  others off a `~/.memvara` that already has it. GHSA-6vr5-q59v-r6vw.
+- **OpenCode transcripts are written privately and removed after capture.** OpenCode
+  gives a plugin no transcript, so the OpenCode plugin wrote each session's messages, a
+  whole conversation, to `$TMPDIR/memvara-opencode/<session>.jsonl` for the capture hook
+  to read, with the default modes and for a day. On Linux `$TMPDIR` is usually the shared
+  `/tmp`, so every account on the machine could read the conversation, and another
+  account could have made that directory first. The transcript now goes to
+  `~/.memvara/.hooks/opencode`, 0600 in a 0700 directory, and is removed when the capture
+  reading it is done. A newer transcript is written to a new private file and renamed
+  over the old one, so a capture still reading the older transcript keeps reading all of
+  it. The plugin removes the transcripts an earlier version left in `$TMPDIR` when it
+  loads, and remembers a digest of what it last handed to capture, so a repeated idle
+  event still starts no second capture, and a changed conversation of the same length
+  does. GHSA-4x4r-q9f2-rgfc.
+- **The repr of a server configuration no longer shows the hosted API key.**
+  `ServerConfig` kept two of its secrets, `db_key` and `confirm_secret`, out of its repr,
+  but not `api_key`, the bearer token for the hosted service in cloud mode. Anything that
+  printed the configuration as text printed the token with it: a debug log line, an
+  exception message that included the object, or a traceback formatter that shows local
+  variables. `api_key` is now kept out of the repr like the other two.
+  GHSA-jvw9-7mmg-8qcr.
+- **No level of a scope can be `"*"` or the empty string.** A scope's key writes a level
+  that is not bound as `*`, and it wrote a level set to `"*"` or `""` the same way. So a
+  claim written by a handle bound to `user="*"` or `user=""` had the key of a claim
+  written for the whole tenant, and every other user's `get()`, `why()`, `links()` and
+  `produced()` returned it, and the turns behind it, while `get_all()` and `search()` did
+  not. The same held at the project, agent and session levels, and a document's name
+  lookup found such a document for a caller in the scope above it. Building a `Scope` with
+  either value at any level now raises `ValueError`, naming the level and the value, so
+  every constructor, `scope()`, `bind()`, the scope keywords of every call, a hand-built
+  `Episode`, the mem0 layer, the integrations and both hosted clients refuse it. The
+  server refuses `MEMVARA_TENANT`, `MEMVARA_USER`, `MEMVARA_AGENT` or `MEMVARA_SESSION`
+  set to `*` with a `ConfigError` naming the variable, and an empty one still means unset.
+  Rows a store already holds under either value are read back as stored, and no scope a
+  caller can build reads them: their key no longer matches an unbound level, a slot read
+  does not reach them, a document name lookup compares the scope's columns, and a new turn
+  is not taken for a repeat of one of theirs. `docs/UPGRADING.md` says how to find such
+  rows. GHSA-9pxq-xw2r-73hp.
+- **Erasing a memory through the mem0 layer or an adapter erases every version of it.**
+  The mem0 layer's `Memory`, the CrewAI storage and the LangGraph store erase a memory
+  their framework deletes when they are built with `on_delete="erase"`. Each erased only
+  the claim that held the memory's current value. When a value changes, memvara keeps the
+  earlier value as a claim of its own, ended rather than retired, with its own vector and,
+  in the mem0 layer, its own source turn. So after the adapter reported the memory
+  erased, the earlier text was still on disk, and `history()`, `why()` and a search that
+  includes ended claims still returned it. A field that a LangGraph `put` had dropped,
+  which is retired, stayed in the same way. Each adapter now erases every version, each
+  with its vector and its source turns, and each defines a version by what its framework
+  calls one memory. For `Memory.delete()` the versions are the claims the memory's own
+  updates link through `invalidated_by`, in its slot: the claims the named one replaced,
+  back to the first value, and the claims that replaced it, up to the current value. A
+  many-valued fact such as `likes` keeps several memories in one slot, and erasing one of
+  them leaves the others. Naming an earlier version's id now erases the whole memory,
+  its current value included, and the reply lists the ids it erased under `erased`. For
+  a CrewAI record the versions are every claim on the record's slot, and a `reset()` with
+  a `scope_prefix` erases them as `delete()` does; `delete()` still counts records. For a
+  LangGraph item they are every claim that has held one of its fields, a dropped field
+  included. No adapter erases a claim that `Memvara.erase()` would refuse to erase at its
+  scope: each erases in its own scope and in the broader scopes it reads, and never in a
+  sibling session or agent, a narrower scope or another user's scope, even where such a
+  claim shares the slot or is linked into the chain. A record or item with no current
+  value, such as one that an earlier delete retired, is still not found by `delete()`,
+  and `purge()` erases it. A hosted deployment gives `Memory` no store to read the slot
+  from, so there it follows the chain with `history()`, `get()` and `why()`. The
+  LangChain chat history erases only with `clear()` and `on_clear="purge"`, which purges
+  its whole scope and so already took every version, and the LlamaIndex adapter has no
+  deletion. `docs/UPGRADING.md` says who can notice the difference. GHSA-f3q4-8479-2fw4.
+
+- **A store whose embedder record is missing or unreadable now says so when it opens,
+  and records the embedder again.** `<db>.embedder.json` names the embedder that wrote a
+  store's vectors, and it is the only thing that can tell two embedders of the same width
+  apart. When the record was missing or torn on a store that held vectors, opening the
+  store with a different embedder of that width raised nothing and warned nothing, and the
+  record was never written again, so every later change went unnoticed too. Such an open
+  now warns with `EmbedderChangedWarning` that memvara cannot tell whether the embedder in
+  use wrote the vectors, and that `mem.reembed()` rebuilds them if it did not. If the open
+  goes on, it then records the embedder in use, so the next change is noticed; a warning
+  turned into an error stops the open before anything is recorded. Where the record cannot
+  be written, a second warning says so, and the first comes back on every open. A record
+  that names another width than the stored vectors have is treated as damaged in the same
+  way, where before only its name was compared, and so is one whose width is not a JSON
+  integer, such as "128", 128.9 or true. The record itself is now written to a temporary
+  file and renamed into place, so a crash or a full disk during the write leaves the old
+  record or the new one, never half of one. A record kept as a link stays a link, and the
+  file it names is the one replaced. In a directory where the account may write the
+  existing files but may not add new ones, the record is written in place, as it always
+  was. #280.
 
 ## [0.16.0] — 2026-09-25
 

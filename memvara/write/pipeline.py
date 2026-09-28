@@ -69,7 +69,7 @@ from ..llm.guidance import Guidance
 from ..redact import Redactor, redact_claim, redact_episode
 from . import pollution, split
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
-from ..store.base import Store
+from ..store.base import Store, bulk_claims
 from ..telemetry import (
     FAST_HIT,
     FAST_MISS,
@@ -102,7 +102,7 @@ from ..telemetry import (
 )
 from ..types import (
     SELF_SUBJECT, Claim, Closure, Derivation, Episode, Link, MemoryType, WriteReceipt,
-    utcnow,
+    stored_scope, utcnow,
 )
 from .agentic import (
     AGENTIC_SYNC_TIMEOUT, AGENTIC_TIMEOUT, AgenticExtractor, AgenticResult, ProposalPlan,
@@ -426,18 +426,39 @@ class WritePipeline:
         # that nothing inside it can block on a network.
         lock_t0 = perf_counter() if rec is not None else 0.0
         with self._transaction():
-            for claim, sources, observed_at in pending:
+            gone = self._erased(candidates, pending, plan)
+            # Tier 0 read each queued claim before this transaction, and another writer
+            # can have ended, retired or erased it since. So each is read again here,
+            # under the write lock, all of them in one query, and reinforced as it stands;
+            # a claim that is gone or no longer live is left alone. Writing back tier 0's
+            # copy undid the other writer's closure, or brought an erased claim back.
+            stored = bulk_claims(self.store, list(dict.fromkeys(
+                queued.id for queued, _sources, _at in pending)))
+            for queued, sources, observed_at in pending:
+                # Only the turns still stored are evidence; see `_erased`. A restatement
+                # whose every turn was erased since tier 0 found it is skipped, as
+                # `_sourced` drops a new claim in that position. Applied, it raised the
+                # claim's salience and counted an observation with no turn behind it.
+                cited = [s for s in sources if s not in gone]
+                if not cited:
+                    continue
+                current = stored.get(queued.id)
+                if current is None or not current.is_live():
+                    continue
                 # A restated turn does not go through `apply`, so the one rule `apply`
                 # enforces on every candidate is applied here to the claim it restates:
                 # `procedural` is for the user or a `project:` scope, and a misfiled claim
                 # heals the next time it is seen, this way or that.
-                moved = self.reconciler.file_by_subject(claim)
+                moved = self.reconciler.file_by_subject(current)
                 if moved is not None:
                     receipt.retyped.append(moved)
-                receipt.reinforced.append(
-                    self.reconciler.reinforce(claim, sources, observed_at))
+                # The row as this reinforcement wrote it, which a second turn of this batch
+                # restating the same claim reinforces in turn.
+                stored[queued.id] = self.reconciler.reinforce(current, cited, observed_at)
+                receipt.reinforced.append(stored[queued.id])
             to_embed: list[Claim] = []
-            self._reconcile(candidates, plan, receipt, now, to_embed)
+            self._reconcile(self._sourced(candidates, gone), plan, receipt, now, to_embed,
+                            gone)
             self._write_embeddings(to_embed)
 
         receipt.latency_ms = (perf_counter() - t0) * 1000.0
@@ -502,7 +523,8 @@ class WritePipeline:
 
         fresh: list[Episode] = []
         for ep in episodes:
-            if self.store.claims_citing(ep.scope.tenant, ep.id):
+            # Only the turn's own claims count; see `own_claims`.
+            if self.own_claims(ep, self.store.claims_citing(ep.scope.tenant, ep.id)):
                 receipt.already_extracted += 1
                 continue
             fresh.append(ep)
@@ -524,8 +546,10 @@ class WritePipeline:
 
         lock_t0 = perf_counter() if rec is not None else 0.0
         with self._transaction():
+            gone = self._erased(candidates, [], plan)
             to_embed: list[Claim] = []
-            self._reconcile(candidates, plan, receipt, now, to_embed)
+            self._reconcile(self._sourced(candidates, gone), plan, receipt, now, to_embed,
+                            gone)
             self._write_embeddings(to_embed)
 
         receipt.latency_ms = (perf_counter() - t0) * 1000.0
@@ -540,46 +564,82 @@ class WritePipeline:
             # for it, which is the confusion that series was added to end.
         return receipt
 
+    def _erased(self, candidates: Sequence[Claim], pending: Sequence[_Reinforcement],
+                plan: ProposalPlan | None) -> set[str]:
+        """The turns this write cites that are no longer stored, read under the lock.
+
+        Called inside the claim transaction. The turns were stored or found before
+        extraction, which can include a model call, and another handle or process can
+        erase them in the meantime: a `purge`, or the delete of the document they are
+        chunks of. Nothing read from an erased turn may be written after it, so a
+        candidate every one of whose turns is gone is dropped (`_sourced`), and so is a
+        reinforcement tier 0 queued whose every turn is gone. The other candidates and
+        reinforcements cite only the turns still stored, and an end the model proposed
+        from a gone turn is not applied. Writing them used to leave claims citing turns
+        that no longer existed, holding facts read from text the erasure had just
+        reported removing.
+        """
+        cited = {s for claim in candidates for s in claim.sources}
+        cited.update(s for _claim, sources, _at in pending for s in sources)
+        if plan is not None:
+            cited.update(ep.id for ep in plan.episodes)
+        return cited - set(self.store.get_episodes(sorted(cited)))
+
+    @staticmethod
+    def _sourced(candidates: Sequence[Claim], gone: set[str]) -> list[Claim]:
+        """The candidates that still cite a stored turn, each citing only those; see
+        `_erased`."""
+        kept: list[Claim] = []
+        for claim in candidates:
+            sources = [s for s in claim.sources if s not in gone]
+            if claim.sources and not sources:
+                continue
+            claim.sources = sources
+            kept.append(claim)
+        return kept
+
     def _reconcile(self, candidates: Sequence[Claim], plan: ProposalPlan | None,
-                   receipt: WriteReceipt, now: datetime, to_embed: list[Claim]) -> None:
+                   receipt: WriteReceipt, now: datetime, to_embed: list[Claim],
+                   gone: set[str]) -> None:
         """Reconcile every candidate, in order, then apply agentic ends and links.
 
         Called inside the claim transaction. With no plan this is the loop `add()` has
         always run. With one, a proposed replacement passes the model's reason to
         `Reconciler.apply`, which records it on whatever the candidate closes, and the
         plan learns which stored claim each proposal became, so a link can name it.
+        `gone` is the turns erased since extraction began; see `_erased`.
         """
         for claim in candidates:
             claim.recorded_at = now
             reason = plan.reason_for(claim) if plan is not None else None
             res = self.reconciler.apply(claim, now=now, reason=reason)
             if plan is not None:
-                plan.observe(claim, res.action, res.claim, res.invalidated)
+                plan.observe(claim, res.action, res.claim, res.invalidated, res.restated)
             self._absorb(claim, res, receipt, to_embed)
         if plan is not None:
-            self._apply_proposals(plan, receipt, now, to_embed)
+            self._apply_proposals(plan, receipt, now, to_embed, gone)
 
     def _apply_proposals(self, plan: ProposalPlan, receipt: WriteReceipt, now: datetime,
-                         to_embed: list[Claim]) -> None:
+                         to_embed: list[Claim], gone: set[str]) -> None:
         """Apply what an agentic run proposed beyond new memories, and report the rest.
 
         A proposed replacement whose new value the reconciler stored without closing the
         claim it named is reported as `not_applied`; the named claim stays live, because
         whether two values compete is the reconciler's decision. A proposed end becomes a
         retraction of exactly the named value, through `Reconciler.apply` with
-        `close="ended"` and the model's reason, cited to the turn the model named. A
-        proposed link becomes a `claim_links` row, written only when both sides name a
-        stored claim.
+        `close="ended"` and the model's reason, cited to the turn the model named; an end
+        whose turn was erased while the model ran is `not_applied`. A proposed link
+        becomes a `claim_links` row, written only when both sides name a stored claim.
         """
         for sup in plan.unapplied_supersedes():
             plan.refuse("propose_supersede", sup.claim_id, "not_applied")
         name = getattr(self.llm, "name", "llm")
         for end in plan.ends:
             target = self.store.get_claim(end.claim_id)
-            if target is None or not target.is_live(now):
+            turn = plan.episodes[end.source_index]
+            if target is None or not target.is_live(now) or turn.id in gone:
                 plan.refuse("propose_end", end.claim_id, "not_applied")
                 continue
-            turn = plan.episodes[end.source_index]
             # The stored claim's own scope, which `agentic._Session._closable` has already
             # checked is exactly this write's scope, so the retraction addresses the slot
             # the claim is in and closes nothing for any other project or session.
@@ -616,7 +676,8 @@ class WritePipeline:
         return batch() if batch is not None else nullcontext()
 
     def assert_claim(self, claim: Claim, *, close: Closure = "ended",
-                     asserted_type: MemoryType | None = None) -> WriteReceipt:
+                     asserted_type: MemoryType | None = None,
+                     now: datetime | None = None) -> WriteReceipt:
         """Write a caller-supplied claim. Never consults a model, by construction.
 
         `close` is forwarded to `Reconciler.apply` and decides which clock stops on
@@ -624,9 +685,14 @@ class WritePipeline:
         `"retired"` (the record was wrong). `add()` has no such parameter on purpose:
         extraction only ever produces reports about the world, and a model is not
         allowed to decide that something we already stored was a mistake.
+
+        `now` is the instant the reconciler retires displaced claims at, and defaults to
+        the clock. `Memvara.remember()` passes the instant it gave the claim's
+        `recorded_at` under the write lock, so that the displaced value's belief ends
+        exactly where the new one's begins.
         """
         t0 = perf_counter()
-        now = utcnow()
+        now = now if now is not None else utcnow()
         receipt = WriteReceipt()
         if self.redactor is not None:
             # The door `remember()`, `supersede()` and the importer come through, where
@@ -685,6 +751,12 @@ class WritePipeline:
             existing = seen.get(key)
             if existing is None:
                 existing = self.store.find_episode_by_hash(ep.scope.tenant, ep.hash)
+                # A turn stored under '*' or '' before those scope values were refused was
+                # hashed with the key of the scope above it, so it can share this turn's
+                # hash without being in this turn's scope. It is not a repeat of this turn,
+                # and its claims are not this caller's to reinforce.
+                if existing is not None and existing.scope != ep.scope:
+                    existing = None
             if existing is not None:
                 # Byte-identical text we have already extracted from. Re-running any
                 # extractor on it can only reproduce what it produced the first time, so
@@ -697,6 +769,27 @@ class WritePipeline:
             receipt.episode_ids.append(ep.id)
             fresh.append(ep)
         return fresh, pending
+
+    @staticmethod
+    def own_claims(ep: Episode, claims: Iterable[Claim]) -> list[Claim]:
+        """The claims citing `ep` that belong to its own scope's memory.
+
+        Those the turn's scope can see (`Scope.visible`), and those a global predicate
+        filed from it. `PredicateRegistry.slot_scope` clears only the project, so a turn
+        written with a project and an agent or session files a global fact at its own
+        scope without the project, and `Scope.ancestors` does not include that scope. The
+        claim is still the turn's own. A claim in any other scope is not: for example, a
+        claim in another project that absorbed this turn before a repeat could reinforce
+        only what its writer can see. `reextract`, `pending_extraction` and the
+        exact-repeat path all decide with this.
+        """
+        cited = list(claims)
+        # `stored_scope`, because a turn named to `reextract` by id can be one stored
+        # under '*' or '' before those values were refused; see `Scope.ancestors`.
+        filed = stored_scope(ep.scope.tenant, ep.scope.user, ep.scope.agent,
+                             ep.scope.session)
+        seen = {c.id for c in ep.scope.visible(cited)}
+        return [c for c in cited if c.id in seen or c.scope == filed]
 
     def _reinforcements_from_source(self, ep: Episode, now) -> list[_Reinforcement]:
         """Every claim that already cites this episode, queued for a bump.
@@ -735,7 +828,13 @@ class WritePipeline:
         # back up the chain restating the storage strength and the observation stamp of
         # every city the user had ever lived in. Same set as before the change; the
         # predicate is now the one that actually means it.
-        return [(c, [ep.id], at) for c in found if c.is_live(now)]
+        #
+        # And only claims the turn's own scope can see, the rule `Reconciler.apply`
+        # follows for a repeated value. A store written before that rule can hold this
+        # turn in the sources of another project's or session's claim, and a repeat of
+        # the turn must not reach it from here either.
+        live = [c for c in found if c.is_live(now)]
+        return [(c, [ep.id], at) for c in self.own_claims(ep, live)]
 
     def _tier0_near_dupes(self, episodes: Sequence[Episode], receipt: WriteReceipt,
                           now, pending: list[_Reinforcement]) -> list[Episode]:
@@ -918,7 +1017,8 @@ class WritePipeline:
         # second, exactly as it does when one call states a fact twice. One rule for
         # repeats, whichever way the turn was read.
         for item in raw:
-            claim = self._claim_from_dict(item, episodes, now, receipt)
+            claim = self._claim_from_dict(item, episodes, now, receipt,
+                                          agentic=plan is not None)
             if claim is not None:
                 out.setdefault(claim.sources[0], []).append(claim)
                 if plan is not None:
@@ -1277,13 +1377,19 @@ class WritePipeline:
         return best >= calibration_of(self.embedder).grounding_rescue
 
     def _claim_from_dict(self, item: Mapping[str, Any], episodes: Sequence[Episode],
-                         now, receipt: WriteReceipt) -> Claim | None:
+                         now, receipt: WriteReceipt, *, agentic: bool) -> Claim | None:
         """Trust boundary for model output: anything malformed is dropped, not repaired.
 
         `receipt` is threaded through only so a rejection for lack of grounding can be
         counted where the decision is made -- see `reject_ungrounded`. A structurally
         malformed item (missing predicate, out-of-range source) is dropped the same way
         it always was, uncounted; only the new reason has a number attached to it.
+
+        `agentic` is set for the items of an agentic run. Only those may carry an
+        `expires_at`, which `agentic._Session._expiry` has checked is a future UTC
+        instant. Single-call extraction is offered no expiry, so one in its output is
+        dropped: it used to be accepted as it came, even in the past, and a repeat put it
+        on the claim on record.
         """
         idx = item.get("source_index")
         if not isinstance(idx, int) or isinstance(idx, bool) or not 0 <= idx < len(episodes):
@@ -1353,9 +1459,11 @@ class WritePipeline:
             sources=[ep.id],
             derivation=Derivation.LLM_EXTRACT,
             extractor=getattr(self.llm, "name", "llm"),
-            # Only an agentic proposal carries one, already checked to be a future UTC
-            # instant (`agentic._Session._expiry`); single-call output never does.
-            expires_at=expiry if isinstance(expiry := item.get("expires_at"), datetime)
+            # Only an agentic proposal may carry one, already checked to be a future UTC
+            # instant (`agentic._Session._expiry`). `Reconciler.apply` keeps it only on
+            # a claim the proposal creates, never on a claim already on record.
+            expires_at=expiry if agentic and isinstance(expiry := item.get("expires_at"),
+                                                        datetime)
             else None,
         )
 

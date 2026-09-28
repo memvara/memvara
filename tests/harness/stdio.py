@@ -17,11 +17,11 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, Protocol
 
 from memvara.server.config import FEATURES
 
-from .env import child_env
+from .env import child_env, feature_env
 
 #: The protocol version a client asks for when a test does not name one.
 PROTOCOL = "2025-06-18"
@@ -50,6 +50,29 @@ class ToolResult:
     is_error: bool
     raw: dict[str, Any] = field(repr=False)
 
+    @classmethod
+    def parse(cls, result: dict[str, Any]) -> ToolResult:
+        """The `result` member of a tools/call reply, read the way a client reads it: the
+        text of every content block, joined, and the error flag. `McpProcess.call` reads
+        a real server's replies with it, and the tool-surface tests read the replies of a
+        server in their own process with it."""
+        text = "".join(str(block.get("text", "")) for block in result.get("content", []))
+        return cls(text=text, is_error=bool(result.get("isError")), raw=result)
+
+
+def claim_id_of(result: ToolResult) -> str:
+    """The id a `memory_remember` reply names, read from its `+ [cl_...]` line.
+
+    The scope and injection security tests both parsed this out by hand the same way;
+    this is that one parse, shared, so it cannot drift into two spellings of the same
+    rule.
+
+    >>> claim_id_of(ToolResult(text="added 1, ended 0\\n+ [cl_x] user lives_in Lisbon",
+    ...              is_error=False, raw={}))
+    'cl_x'
+    """
+    return result.text.split("+ [")[1].split("]")[0]
+
 
 class McpProcess:
     """`python -m memvara.server` in a child process, spoken to one JSON line at a time.
@@ -73,11 +96,11 @@ class McpProcess:
             if key not in _SCOPE_FIELDS:
                 raise ValueError(f"unknown scope field {key!r}; use one of {_SCOPE_FIELDS}")
             extra[f"MEMVARA_{key.upper()}"] = value
-        for name, on in (features or {}).items():
+        for name in features or {}:
             if name not in FEATURES:
                 raise ValueError(
                     f"unknown feature {name!r}; the server would refuse to start with it")
-            extra[f"MEMVARA_FEATURE_{name.upper()}"] = "1" if on else "0"
+        extra.update(feature_env(features or {}))
         if read_only:
             extra["MEMVARA_READ_ONLY"] = "1"
         extra.update(env or {})
@@ -242,9 +265,8 @@ class McpProcess:
 
     def call(self, name: str, /, **arguments: Any) -> ToolResult:
         """Call one tool. A tool that ran and failed comes back with is_error set."""
-        result = self.request("tools/call", {"name": name, "arguments": arguments})
-        text = "".join(str(block.get("text", "")) for block in result.get("content", []))
-        return ToolResult(text=text, is_error=bool(result.get("isError")), raw=result)
+        return ToolResult.parse(
+            self.request("tools/call", {"name": name, "arguments": arguments}))
 
     # -- ending it -----------------------------------------------------------
 
@@ -294,3 +316,30 @@ class McpProcess:
 
     def __exit__(self, *exc_info: object) -> None:
         self.kill()
+
+
+class Killable(Protocol):
+    """Anything a test started and must stop: an `McpProcess` or a `crash.Child`."""
+
+    def kill(self) -> object: ...
+
+
+def kill_all(processes: Iterable[Killable]) -> None:
+    """Kill every process, then raise the first failure if there was one.
+
+    One process that does not stop in time must not leave the processes after it running:
+    they would hold their store files open, and on Windows the test's temporary directory
+    could then not be deleted. That holds for an interrupt as well: a Ctrl-C that lands
+    during one kill is raised once every process has been asked to stop. Only the first
+    failure is raised; a later one is not reported, since every process has been killed
+    by then either way.
+    """
+    failure: BaseException | None = None
+    for process in processes:
+        try:
+            process.kill()
+        except BaseException as exc:  # noqa: BLE001 - raised below, after the others
+            if failure is None:
+                failure = exc
+    if failure is not None:
+        raise failure

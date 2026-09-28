@@ -7,6 +7,917 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Erasing through the mem0 layer or an adapter erases every version of the memory
+
+### What changed
+
+With `on_delete="erase"`, the mem0 layer's `Memory.delete()`, the CrewAI storage's
+`delete()` and the LangGraph store's `delete()` erase every version of the memory they
+delete, not only the claim that holds its current value. An earlier value that an update
+replaced is stored as a claim of its own, and it used to stay on disk, readable through
+`history()`, `why()` and a search that includes ended claims. A field that a LangGraph
+`put` dropped stayed the same way. The CrewAI storage's `reset()` with a `scope_prefix`
+erases every version of each record under that path.
+
+`Memory.delete()` finds the versions by following the `invalidated_by` pointers that the
+memory's updates wrote, in both directions, so an id that names an earlier version erases
+the whole memory, its current value included. Its reply gains a key: `erased` lists the
+ids of the claims it erased, oldest first.
+
+No adapter erases a claim in a scope it cannot read, such as a sibling session, a
+narrower scope or another user, even when that claim shares the memory's slot.
+
+### Who this changes
+
+**If you delete with an id you kept from before an update**, for example the id that
+`Memory.add()` returned before a later `add()` changed the value, the current value is now
+erased as well. It used to be erased only when you named its own id.
+
+**If you compare `Memory.delete()`'s reply with `{"message": "Memory erased"}`**, the
+comparison fails now, because the reply also carries `erased`. Read `reply["message"]`
+instead.
+
+**If something reads the history of a memory after an erasing delete**, it finds nothing.
+It used to find the earlier versions, and that was the defect this fixes.
+
+**If the `Memory` or the store you erase through is bound to a session**, the earlier
+versions of the memory that it reads at the user level are erased too. The session reads
+the user level, and `Memvara.erase()` would let it erase each of those claims by id. For
+the mem0 layer these are the user-level claims linked into the memory's chain, which
+happens when a write in one of the two scopes ended the value held in the other.
+
+### How to find it in your code
+
+Search for `on_delete="erase"` and `on_delete='erase'`. A deployment built with the
+default, `on_delete="warn"`, or with `"retire"` is not affected.
+
+---
+
+## No scope level accepts `"*"` or the empty string
+
+### What changed
+
+Building a `Scope` with `"*"` or `""` at any level (tenant, user, project, agent or session)
+raises `ValueError`, naming the level and the value. Every way of naming a scope builds
+one, so the constructors, `scope()`, `bind()`, the `tenant`, `user`, `agent` and `session`
+keywords of every call, a hand-built `Episode`, the mem0 layer's `user_id`, `agent_id` and
+`run_id` filters, the integrations and both hosted clients all refuse these values. The
+server refuses `MEMVARA_TENANT`, `MEMVARA_USER`, `MEMVARA_AGENT` or `MEMVARA_SESSION` set to
+`*` at startup with a `ConfigError` naming the variable, and `memvara-mcp init --user '*'`
+writes nothing. An empty variable still means the variable is not set.
+
+A scope's key used to write both values the same way it writes a level that is not bound,
+so a claim filed under either one could be read by id by every other user. Rows a store
+already holds under either value stay where they are and are read back as stored, but no
+scope you can build reads them any more.
+
+### Who this changes
+
+**If you passed `""` to mean "no user"** (or no agent, session or project), for example
+`Memvara(user=os.environ.get("APP_USER", ""))`, pass `None` instead, or leave the keyword
+out. The call now raises where it used to bind the empty string.
+
+**If a store you use was written with `""` meaning "no value"**, those rows are now read by
+no handle. Before this release `""` gave every key the same value that an unset level
+gives, so setting the column to `NULL` makes them exactly what an unset level would have
+written. For example, for the user level:
+
+```sql
+UPDATE claims SET usr = NULL WHERE usr = '';
+UPDATE episodes SET usr = NULL WHERE usr = '';
+UPDATE documents SET usr = NULL WHERE usr = '';
+```
+
+and the same for the `project`, `agent` and `session` columns. Take a copy of the file
+first. Do this only for rows you wrote yourself: a row under `""` that someone else wrote
+would become readable by everyone at the level above it.
+
+**If a store holds rows under `"*"`, or under `""` that you did not write**, remove them with
+the store's own purge, which also removes their vectors, text index entries and documents.
+`stored_scope` builds the scope the rows are stored under, which `Scope` refuses:
+
+```python
+from memvara.types import stored_scope
+
+mem.store.purge(stored_scope("default", "*", None, None))   # tenant, user, agent, session
+```
+
+Until they are removed, a row whose user or project is `""` still shares its slots with
+the level above it on the write path: a new value written there can still reinforce or
+end it.
+
+**If you maintain a `Store`**, build the scope of a row you read back with
+`memvara.types.stored_scope(tenant, user, agent, session, project)` rather than `Scope(...)`.
+`Scope` now raises on a row stored under either value, which would fail the whole read;
+`stored_scope` reads the row as stored, and its key matches no scope a caller can build.
+`SQLiteStore` and the hosted client already do this.
+
+### How to find it in your code
+
+Search your code for scope keywords given `""` or `"*"`, and your MCP client settings for
+`MEMVARA_USER`, `MEMVARA_AGENT`, `MEMVARA_SESSION` and `MEMVARA_TENANT`. To count the rows a
+store holds under either value, run this with `sqlite3` on the database file (a store
+encrypted with `memvara[encrypt]` needs `sqlcipher` and the key):
+
+```sql
+SELECT 'claims', COUNT(*) FROM claims
+ WHERE '*' IN (tenant, usr, project, agent, session) OR '' IN (tenant, usr, project, agent, session)
+UNION ALL SELECT 'episodes', COUNT(*) FROM episodes
+ WHERE '*' IN (tenant, usr, project, agent, session) OR '' IN (tenant, usr, project, agent, session)
+UNION ALL SELECT 'documents', COUNT(*) FROM documents
+ WHERE '*' IN (tenant, usr, project, agent, session) OR '' IN (tenant, usr, project, agent, session);
+
+---
+
+## The recall hook's floor on the hosted route is 0.35
+
+### What changed
+
+The recall hook injects no memory that scores under its floor. It used 0.29 on every
+route. It now uses 0.35 when it reads the hosted service through its own client, and
+still 0.29 when it reads a store through the library. On a real hosted store, 0.29 let
+most questions the store could not answer get memories injected. `docs/BENCHMARKS.md` has
+the measurement.
+
+### Who this changes
+
+**If you use the hosted service and never set `MEMVARA_RECALL_MIN_SCORE`**, the hook
+injects less. Prompts the store knows nothing about stop getting unrelated memories, and a
+weakly matching memory that scored from 0.29 up to 0.35 is no longer injected. To keep the
+old behaviour, set `MEMVARA_RECALL_MIN_SCORE=0.29`.
+
+**If you use a local store**, nothing changes: the floor is still 0.29. That value was
+measured on the hashing embedder, a local store's default. If your store embeds with
+`BAAI/bge-small-en-v1.5` (installed by `memvara[local-embed]`), 0.29 filters nothing, and
+if it embeds with `all-MiniLM-L6-v2`, 0.35 suits it better. Measure it and set
+`MEMVARA_RECALL_MIN_SCORE`; #400 tracks choosing the floor from the store's embedder.
+
+**If you set `MEMVARA_RECALL_MIN_SCORE`**, nothing changes; your value applies to both
+routes.
+
+**If you call `lib.fast.recall` from your own hook**, it takes a new `hosted_min_score`
+argument. Leaving it out keeps the old behaviour: the hosted client gets `min_score`.
+
+### How to find your own instances
+
+Run `bench/hosted.py --min-score 0` against your hosted store with your own probe file and
+compare the scores with 0.35. For a local store, `python -m benchmarks.plugin_recall.calibrate
+--db <store>` reports the floor that suits it.
+
+---
+
+## The hosted client's recall() takes valid_at
+
+### What changed
+
+`RemoteMemvara.recall(valid_at=...)` and `AsyncRemoteMemvara.recall(valid_at=...)` used to
+raise `ValueError` before sending anything, because `POST /v1/recall` had no time axis. The
+route takes `valid_at` now, and both clients send it. The block is what we believe today
+was true on that day, and its header names the day, as with the local `Memvara.recall`.
+Through the MCP server in cloud mode, `memory_recall` with `valid_at` works the same way.
+
+### Who this changes
+
+**If you caught that `ValueError`** and fell back to `search(valid_at=...)`, the fallback no
+longer runs, and you get the dated block from the service instead.
+
+**If your deployment runs a release from before the route took `valid_at`**, it refuses a
+dated read with a 422, which the client raises as `InvalidRequest`, rather than answering
+it with the present. Reads without `valid_at` send the request they always sent.
+
+### How to find your own instances
+
+```bash
+grep -rn "recall(.*valid_at" --include="*.py" .
+```
+
+---
+
+## OpenCode transcripts move out of the temporary directory
+
+### What changed
+
+The OpenCode plugin writes each session's transcript for the capture hook to
+`~/.memvara/.hooks/opencode/<session>.jsonl`, readable by your account only, and removes it
+when the capture that reads it is done. It used to write it to
+`$TMPDIR/memvara-opencode/<session>.jsonl` and keep it for a day. When the plugin loads, it
+removes the transcripts an earlier version left there.
+
+### Who this changes
+
+**If something of yours reads those transcripts**, it finds none in `$TMPDIR`, and at most
+the one being captured in `~/.memvara/.hooks/opencode`. Read the session from OpenCode
+itself instead.
+
+### How to find it in your code
+
+Search for `memvara-opencode`.
+
+---
+
+## The hooks make `~/.memvara` and everything they keep in it private
+
+### What changed
+
+The plugin's hooks create every directory from `~/.memvara` down with mode 0700 and every
+file with mode 0600. The first time a hook runs after the upgrade, it takes any permission
+for group and others off `~/.memvara`, `~/.memvara/.hooks` and each file it uses there.
+`memvara-mcp login` and `memvara-mcp init` create `~/.memvara` 0700 when they are the first
+to create it, and take any permission for group and others off it, and off each directory
+under it on the way to the one they write in, when it already exists. They leave the home
+directory above it, and a directory you name outside it, as they find them.
+
+### Who this changes
+
+**If another account reads your hook logs or state**, for example a monitoring agent that
+runs as a different user and tails `capture.log`, it can no longer read them, and it can
+no longer list `~/.memvara`. Run it as your own account instead.
+
+**If you keep other files in `~/.memvara` for another account to read**, the directory now
+lets only your account in. Move them somewhere else.
+
+### How to find it in your code
+
+Run `ls -la ~/.memvara ~/.memvara/.hooks` before upgrading to see what was readable, and
+look for other accounts or services that read those paths.
+
+---
+
+## A JSON-RPC request whose id JSON cannot carry gets a parse error
+
+### What changed
+
+The MCP server answers a request whose `id` is `NaN`, `Infinity` or `-Infinity`, or a
+number too large for a double such as `1e400`, with a parse error (-32700) and a null
+`id`, the way it answers a line that is not JSON. The same holds for an `id` that is an
+object or an array holding one of those numbers at any depth. The server used to serve
+such a request and copy the id into its reply as a bare `NaN` or `Infinity`, which a
+strict parser such as JavaScript's `JSON.parse` cannot read. The same numbers anywhere
+else in a request, such as in a tool's arguments, are read as before and go to the tool's
+own argument check.
+
+The server also never writes such a number now. A reply that holds one is not sent: the
+request is answered with a JSON-RPC internal error (-32603) that carries its `id`, the
+reason is written to the server's standard error, and the server goes on serving.
+
+### Who this changes
+
+**If your client sends an id that JSON cannot carry**, which no standard JSON encoder
+produces, the request is not served, and its error reply has a null `id`, so it cannot be
+matched to the request. Use a string or a finite number as the id.
+
+**If your client handles JSON-RPC errors by their code**, it can receive -32603 for a
+request whose reply the server could not write. Before, such a reply was written as a line
+that is not JSON, and the client lost it or its session.
+
+### How to find it in your code
+
+Search your client for where it builds request ids, and for how it handles the error codes
+-32700 and -32603.
+
+---
+
+## A value scheduled to begin later competes for its slot
+
+### What changed
+
+A value written with a `valid_from` in the future is believed from the moment it is
+recorded. In a single-valued slot, a new value now competes with such a value as it does
+with the value in force: a scheduled value that begins earlier than the new one ends where
+the new one begins, one that begins at the same instant collapses, and one that begins
+later ends the new one. Before, only the value in force competed, so two scheduled values
+were both live from their start.
+
+### Who this changes
+
+**If you write future-dated values for a single-valued predicate**, a second one now
+replaces the first instead of standing beside it. Read the slot with `history()` to see
+which value holds when.
+
+**If your code reads `receipt.closed` (or `ended` and `retired`)**, a value the write did
+not change is no longer listed. Before, a value already ended where the new one begins was
+listed as closed again, and its `invalidated_by` was set to the new value.
+
+### How to find it in your code
+
+Search for `valid_from=` and `true_since` with a future instant, and for `receipt.closed`.
+
+---
+
+## A retired claim is not closed again
+
+### What changed
+
+Once a claim is retired, no later call changes it. `delete()` of a retired claim writes
+nothing and returns `True`, whether it was asked to retire the claim again or to end it
+with `close="ended"`. It used to move the retirement to its own instant, or give the
+claim an end in the world and a second closure record. A `reason` given to such a call is
+not recorded. `memory_forget` and `memory_end` on a retired claim reply that it is
+already retired and that nothing changed.
+
+A claim whose retirement was recorded with `delete(at=...)` for an instant still to come
+counts as retired from the moment it is recorded, as `Claim.state` already said. The store
+still believes it until that instant, but a new value, a retraction, `forget()` and
+`forget_matching()` now leave it out of what they close, where they used to end it.
+
+### Who this changes
+
+**If you end claims by id**, check what you pass. `delete(id, close="ended")` on a claim
+that is already retired now leaves its `valid_to` empty. `history()` shows it retired, with
+the reason it was retired for, and the reason from the later call is not recorded.
+
+**If you retire claims ahead of time with `delete(at=...)`**, a new value for the same
+single-valued fact no longer ends such a claim, so both are in force until the retirement
+takes effect, and the write's `receipt.closed` does not list it.
+
+**If your code parses the `memory_forget` reply**, a retired claim's reply now starts
+with "Claim <id> is already retired" instead of "Retired claim". So does the reply for a
+claim that another writer retired while the call ran, with a reason other than the one
+the call gave.
+
+### How to find it in your code
+
+Search for `close="ended"` and `delete(` with an `at=` argument, and for code that reads
+the text of `memory_forget` replies.
+
+---
+
+## Stores move to schema 17, and an erasure proof reads the vector file
+
+### What changed
+
+`erase()` now records which row of `<db>.vecs` the erased claim's vector held, in a new
+column of the `erasures` table, and `prove_erased()` reads that row back from the file.
+The proof's `residue` has a sixth key, `vector_file`: 1 when the row still holds the
+vector, 0 when it is blank. Adding the column moves `SQLiteStore` to schema version 17,
+and the first open of an older file adds it. Nothing else in the file changes.
+
+### Who this changes
+
+**If you downgrade**, an earlier version refuses a schema 17 store. Keep a copy of the
+file from before the upgrade if you may need to roll back.
+
+**If your code compares an erasure proof's `residue` with a fixed set of keys**, the set
+now includes `vector_file`.
+
+**If you re-check erasures made before the upgrade**, their proof cannot read the vector
+file, because no earlier version recorded which row the vector held. It answers from the
+database, as it did before, and `vector_file` is 0.
+
+**If your store is large, its first open after the upgrade takes seconds.** When a file is
+below schema 17, the open runs every migration step again, not only the one that adds the
+column, and several of those steps read or rewrite every claim. The step for version 12,
+for example, derives every claim's keys again from its text. On a store of 98,000 claims
+the first open took 5.02 seconds, against 0.06 seconds for an open with nothing to
+upgrade, which is about 50 microseconds a claim, and the time grows with the number of
+claims. Nothing is printed while it runs. It runs once: the file is marked as schema 17
+when it finishes, and every later open is as fast as before.
+
+While the upgrade runs, the opening process holds the lock on `<db>.lock`. Another process
+that opens the store in that time, such as a hook or a second MCP server, waits until the
+upgrade has finished, for up to ten minutes, and then opens at once. A process that already
+had the store open can still read from it, but a write it makes waits for the upgrade to
+finish, and fails with `database is locked` if that takes more than five seconds. To keep
+that wait out of your sessions, open a large store once yourself after upgrading, before
+you start anything else that uses it: for example, run `memvara-mcp < /dev/null` with the
+environment your MCP client gives it, which opens the store, upgrades it, and exits when
+it reaches the end of its input.
+
+### How to find it in your code
+
+Find your stores with `grep -rn MEMVARA_DB ~/.claude.json .mcp.json`, and search for
+`residue` and `prove_erased`. To see how many claims a store holds, and so roughly how long
+its first open will take, run `SELECT COUNT(*) FROM claims;` with `sqlite3` on the file (a
+store encrypted with `memvara[encrypt]` needs `sqlcipher` and the key).
+
+---
+
+## A write's default instants are taken when it takes the write lock
+
+### What changed
+
+`remember()` with no `recorded_at` now records the claim at the instant the write takes
+the store's write lock, rather than the instant `remember()` was called. That is also the
+instant the write retires anything it displaces, so the displaced value's belief ends
+exactly where the new one's begins. Given no `valid_from` either, the claim also begins at
+that instant, so its two instants are still equal and a value it ends stops exactly where
+it starts. `remember(replaces=...)` does the same, and under `close="retired"` it retires
+the claim it names at that instant. A `recorded_at` you pass is stored as it is, as
+before. `remember()` also checks `expires_at` again at that instant, and refuses a write
+whose expiry has passed by then.
+
+### Who this changes
+
+**If your code compares a claim's instants with a clock reading taken before
+`remember()`,** for a claim written with no `recorded_at`: its `recorded_at`, and its
+`valid_from` when that was left out too, now come a moment after the call began:
+microseconds for a write that took the lock at once, and the length of the wait for one
+that waited behind another writer.
+
+**If you pass `valid_to` without `valid_from` or `recorded_at`,** the claim still begins
+at the instant of the call, because that is the instant `valid_to` is checked against, and
+it is recorded when the write takes the lock. Its `valid_from` and `recorded_at` were
+equal before and are not now.
+
+**If your code reads retraction tombstones by `known_at`,** a tombstone's `recorded_at`
+now equals its `invalidated_at`, so it is believed at no instant. Before, it was believed
+for the few microseconds between the call and the write.
+
+**If you pass `remember()` an `expires_at` only a little way ahead,** it is checked again
+when the write takes the lock. A write that waited behind another writer until that
+instant had passed now raises the same `ValueError` as an `expires_at` already past when
+you call, and writes nothing, including the closing of a claim named by `replaces`.
+Before, it stored the claim already expired, and the next sweep erased it.
+
+### How to find it in your code
+
+Search for a claim's `recorded_at` or `valid_from` compared with a time read before the
+write, for `recorded_at` and `valid_from` compared with each other on claims written with
+`valid_to`, for reads that select claims with `polarity == -1` at a `known_at`, and for
+`expires_at=` given an instant less than five seconds ahead, which is the longest a write
+waits for the lock.
+
+---
+
+## A batch takes the database's write lock when it begins
+
+### What changed
+
+`SQLiteStore.batch()` now begins with `BEGIN IMMEDIATE`, so it holds the database's write
+lock from its first statement until it commits. Before, the transaction began at the
+block's first write statement, and anything the block read before that was read without
+the lock. That gap let two writers on one file each look up a single-valued slot, each
+find it empty, and each add a value, so both values stayed live. Closing it is the point
+of the change: the write paths that look something up before they write run in a batch.
+
+### Who this changes
+
+**If your code opens `store.batch()` and does slow work inside it before its first
+write,** such as calling a model or a hosted embedder, no other handle or process can
+write to the store for that time. A writer that waits longer than five seconds gets
+`OperationalError: database is locked`. Do the slow work before you open the batch, as
+memvara's own write path does.
+
+**If your code opens a batch on one handle and then, from the same thread, writes through
+a second handle on the same file,** the second write now waits for a batch that cannot end
+until that write returns, and raises `database is locked` after five seconds. Before, it
+succeeded as long as the batch had not written anything yet. Write through the handle
+that holds the batch.
+
+Reads are not affected. A read outside a batch uses its own connection and sees the last
+commit while a batch holds the lock.
+
+### How to find it in your code
+
+Search for `.batch()` on a `SQLiteStore`, including `mem.store.batch()`, and look at what
+runs inside each block before its first write.
+
+---
+
+## The plugin auto-approves reads only from the server named `memvara`
+
+### What changed
+
+The plugin's approve hook lets memvara's read-only memory tools run without a permission
+prompt. It now does so only for a tool whose full name starts with the exact prefix of the
+server keyed `memvara`, such as `mcp__memvara__memory_search` or
+`mcp__plugin_memvara_memvara__memory_search` on Claude Code. Before, any tool named like a
+memvara read, on any server whose name contained `memvara`, was approved. On OpenCode, whose
+shim asks the hook about every tool, the server's name did not matter at all.
+
+### Who this changes
+
+**If you registered the memvara server under another name,** such as `memvara-local`, your
+agent now asks before each read. Rename the entry to `memvara` in your client's MCP config,
+or allow the tools in the client's own permission settings.
+
+**If you use Cursor or OpenCode,** the hook approves only the `mcp__memvara__` form of a
+tool name there, the one form it approved before as well. How either host spells an MCP
+tool in this event has not been measured, so a memvara read on those hosts may still ask,
+as it may have before.
+
+---
+
+## A repeated value is stored in its writer's own scope, and `why()` shows only what the caller can see
+
+### What changed
+
+Writing a fact the store already holds reinforces the claim on record instead of storing
+a second one. That claim used to be found by owner (tenant and user) alone, so it could sit
+in another project, another session or another agent. Now a repeat reinforces only a claim
+the writer can see, which is a claim in its own scope or a broader one. Otherwise the repeat
+is stored as a new claim in the writer's own scope.
+
+`why()`, and the `memory_why` tool, now list only the source turns and superseded claims in
+scopes the caller can see. The claim itself is returned as before.
+
+### Who this changes
+
+**If you count claims or read receipts after writing the same value in several projects
+or sessions,** expect one claim per scope where there used to be one claim in total, and
+`receipt.added` where there used to be `receipt.reinforced`. A value written at the user's
+own level and repeated inside a project still reinforces the user-level claim, because a
+project reads its user's own level.
+
+**If a store was written before this release,** a fact that one scope wrote while another
+scope already held it was stored only as a reinforcement of the other scope's claim. This
+release does not move those facts. To find them, look for live claims that cite a turn
+written in a scope that cannot read the claim:
+
+```python
+from memvara import SQLiteStore
+
+store = SQLiteStore("memory.db")
+for claim in store.iter_claims():
+    turns = store.get_episodes(claim.sources).values()
+    foreign = [ep for ep in turns if not ep.scope.sees(claim.scope)]
+    if foreign:
+        print(claim.id, claim.scope, claim.subject, claim.predicate, claim.object,
+              sorted({ep.scope.key() for ep in foreign}))
+```
+
+Each line names a claim and the scopes whose turns it absorbed. A repeat written with
+`remember()` and no source turn left no trace in the other scope's claim, apart from a
+higher `observation_count`, so this search cannot find it. To restore a fact in a scope
+that lost it, `remember()` it again there; that write is now stored in that scope. A
+claim you built yourself with an explicit source in a broader scope, such as a tenant-level
+document behind a user-level claim, is listed too, and needs nothing.
+
+**If you show `why()` output to a user,** a claim restated in several projects now shows
+only the turns from the reader's own project and the levels above it.
+
+**If you bind servers or handles to sessions or agents,** a new value or a retraction in
+one session no longer ends the value a sibling session or agent holds; both stay live, each
+visible only in its own session. A value at a level both read, such as the user's own, is
+still ended by either, and a user-level write still ends a value a session holds.
+
+**If you pass turn ids in `sources`,** to `remember()`, `supersede()` or `memory_remember`,
+an id of a turn in a scope the claim cannot see, or of no turn at all, is now left out of
+the claim's `sources` without an error. Check `receipt.added[0].sources` if you need to
+know which ids were kept. A turn in the claim's own scope or a broader one is cited as
+before, and so is a new `Episode` you pass in. A string that is not a stored turn's id was
+kept as a citation before and is now left out, so to attach the source text itself, pass
+`Episode(content=...)`.
+
+**If you run an extraction worker over `pending_extraction()`,** it may now receive turns
+it skipped before: a turn that only a claim in another scope cited counts as not extracted.
+Reading such a turn again stores its fact in the turn's own scope, which is how a store
+written before this release gets those facts back when a model is configured.
+
+---
+
+## search() and recall() refuse a memory type that does not exist
+
+### What changed
+
+A name in `memory_types` that is not `episodic`, `semantic` or `procedural` used to keep
+no claim, so `search()` and `recall()` returned nothing and raised nothing. They now raise
+`ValueError` before reading anything. So do the async classes and the hosted clients.
+
+### Who this changes
+
+**If you pass `memory_types` from configuration or from user input**, a wrong name that
+used to return an empty result now raises. That empty result was never an answer about
+the store: fix the name.
+
+### How to find your own instances
+
+```bash
+grep -rn "memory_types=" --include="*.py" .
+```
+
+---
+
+## import_mem0 dates mem0's updates and deletes by when they happened
+
+### What changed
+
+`import_mem0` used to date each UPDATE and DELETE row of mem0's `history.db` by its
+`created_at`, which mem0 fills with the memory's creation time, and to replay the rows in
+that order. It now dates them by `updated_at`, the time mem0 recorded the event, and
+replays events in the order they happened. `read_history_db` returns
+`HistoryRow.updated_at` as a `datetime` rather than as the raw column text.
+
+### Who this changes
+
+**If you imported a mem0 store that has updates or deletes**, the store you imported holds
+the wrong dates: an updated value ends on the day its memory was created, and a deleted
+memory stops being believed on that day. Where mem0's random row ids put an update or a
+delete before its ADD, the wrong value may be live. Importing the same `history.db` into a
+new store gives the right dates and the right live values. Importing it again into the old
+store does not repair it.
+
+**If you read `HistoryRow.updated_at`**, it is now a `datetime`, or `None`.
+
+### How to find your own instances
+
+Compare the live values in the imported store, from `mem.get_all()`, with what mem0's own
+`get_all()` returns for the same user. A value that mem0 updated or deleted and that is
+still live in memvara is one of these. For the dates, look at `valid_to` on a value that
+mem0 updated: if it is the day the memory was created rather than the day of the update,
+the store was imported before this fix.
+
+---
+
+## search() no longer puts a matching claim behind claims that do not match
+
+### What changed
+
+`search()`, and `memory_search` and `recall()` through it, keep at most two claims of one
+fact slot (the same owner, subject and predicate) in the head of the results, and demote
+the rest. The demoted claims used to go to the very end of the list, behind results that
+score 0. They now go behind the other matching results and ahead of every result that
+scores 0. So a slot that holds three or more matching values, such as three languages a
+user knows, now returns all of them ahead of facts that do not match the query.
+
+### Who this changes
+
+**If you read the top `k` of a search over a slot with three or more values**, the third
+value can now be in your results where it was not before, and a result that scores 0 can
+drop out of them instead.
+
+**If you rely on the results being in score order**, they still are not in one case: a
+slot's third and later claims come after the other matching results, even ones that
+score lower. That was true before, too.
+
+### How to find your own instances
+
+Look for searches whose results used to end with a claim that has a higher `score` than
+the ones before it. That claim now appears earlier.
+
+---
+
+## The stdio MCP server reads its input as UTF-8
+
+### What changed
+
+`memvara-mcp` and `python -m memvara.server` used to read requests in the encoding of the
+locale they ran in. They now read UTF-8 always, which is what the MCP stdio transport
+specifies. A line that holds a byte that is not UTF-8 gets a JSON-RPC parse error
+(`-32700`), and the server carries on with the next line. The server's standard error,
+and the usage `--help` prints to standard output, are written as UTF-8 too.
+
+### Who this changes
+
+**A client that writes non-ASCII text in an encoding other than UTF-8**, for example
+cp1252 on Windows. Its requests used to be decoded in the locale's encoding, and now get a
+parse error at the first byte that is not UTF-8. MCP clients write UTF-8, and a client that
+escapes non-ASCII characters as `\uXXXX`, as Python's `json.dumps` does by default, is not
+affected at all.
+
+**On Windows**, UTF-8 text from a client that does not escape it, such as a Node client, is
+now stored as sent. Before, it was decoded as cp1252 and stored wrongly.
+
+### How to find your own instances
+
+Look for replies with `"code":-32700` whose message reads `invalid JSON: Invalid control
+character at: line 1 column N`. The server puts a NUL character in place of each run of
+bytes that is not UTF-8, so that the line cannot parse, and column N is where the first
+one was.
+
+---
+
+## The MCP server refuses argument values it used to accept by mistake
+
+### What changed
+
+The MCP server's argument validator now refuses these values, which it used to accept:
+
+- NaN for a number argument, such as `confidence` or `min_score`. A NaN `min_score` used
+  to act as no floor at all.
+- A metadata filter key that ends in a newline, such as `"team\n"`, in the `filters`
+  argument of `memory_search` or `memory_recall`.
+- A lone surrogate, half of a character, in the key of an object argument, such as a
+  key of `memory_add_document.metadata`. A lone surrogate in a string value was already
+  refused.
+
+Each refusal is an ordinary tool result with `isError: true` whose message names the
+argument, like every other argument the validator refuses.
+
+### Who this changes
+
+Only a client that sends one of these values. None of them was ever valid under the
+tools' schemas.
+
+### How to find your own instances
+
+Look in your client's logs for a tool result that starts with the tool's name and one of
+its arguments, such as `memory_search.min_score must be a number, got NaN`.
+
+---
+
+## A store whose embedder record is missing or unreadable warns when it opens
+
+### What changed
+
+A store records which embedder wrote its vectors in `<db>.embedder.json`. When a store
+holds vectors and that record is missing or unreadable, or names another width than the
+vectors have, opening it now warns with `EmbedderChangedWarning`: memvara cannot tell
+whether the embedder in use wrote the vectors. Before, such an open said nothing, whatever
+embedder opened it. If the open goes on, it then writes the record naming the embedder in
+use, so later opens are quiet and a later change of embedder is noticed. Where the record
+cannot be written, a second warning says so, and the first comes back on every open.
+
+### Who this changes
+
+**If a store was copied without its `<db>.embedder.json`**, or a crash tore the file, its
+first open after upgrading warns once.
+
+**If you turn warnings into errors** (`python -W error`, or `warnings.simplefilter("error")`),
+that first open raises `EmbedderChangedWarning` and writes nothing, so every later open
+raises it too, until you act.
+
+**If you construct `Memvara()` with no `embedder=`**, the record it writes names the
+embedder chosen from the vectors' width. For 384-wide vectors that is MiniLM, the model a
+default configuration wrote them with. If that guess is wrong, this warning is the only
+notice you get.
+
+**If the MCP server opens the store**, the warning goes to the server's stderr, which a
+client running the server over stdio does not show you.
+
+### What to do
+
+If the embedder in use wrote the vectors, nothing: the record is written and later opens
+are quiet. If it did not, or you cannot tell, run `mem.reembed()` or open the store once
+with `reembed=True`, which rebuilds every vector with the embedder in use; after the
+warning, nothing else will notice the mismatch. With warnings turned into errors, either
+re-embed, or let this warning through once so that the record is written.
+
+### How to find your instances
+
+Look for store files with no `<db>.embedder.json` beside them, or search your logs for
+"is missing or unreadable, so memvara cannot tell".
+
+---
+
+## Creating, upgrading or re-embedding a store needs permission to write `<db>.lock`
+
+### What changed
+
+Only one process at a time now creates a store or upgrades it to a newer schema, so two
+processes that open it at once no longer get in each other's way (#281). The process doing
+it holds a write lock on `<db>.lock` while it works, and it needs permission to write that
+file to take the lock. An open of a store that needs neither only reads the file, as before.
+
+If `<db>.lock` exists and the account that opens the store may not write it, the open that
+would create or upgrade the store raises `PermissionError`. The message names the lock file,
+for `memory.db` the file `memory.db.lock`, and says what to do. Nothing has been created or
+upgraded when it is raised.
+
+`reembed()` and `clear_embeddings()` refuse in the same case, with a `PermissionError` that
+names the same file, having changed nothing (#350). A clear takes that file exclusively to
+make sure no other process has the store open, and without permission to write it, it
+cannot. Before, the clear went ahead, and a process that had the store open could crash on
+its next search.
+
+### Who this changes
+
+**If `<db>.lock` belongs to another account,** for example because an MCP server once ran
+as another user, and the store needs an upgrade. The open that upgrades a store is the first
+open of it after you install a memvara version with a newer schema, or the first open of a
+store an older version wrote, so that is when you meet the refusal.
+
+**If you re-embed a store whose `<db>.lock` belongs to another account.** `reembed()` now
+refuses where it used to go ahead.
+
+### What to do
+
+Make `<db>.lock` writable by the account that opens the store, or delete it while nothing
+has the store open; the next open creates it again. It holds no data. For a refused
+`reembed()`, open the store again afterwards: a store keeps the access it had to the file
+when it opened.
+
+### How to find it in your code
+
+This is about files, not code. `ls -l memory.db.lock` shows the file's owner and mode; the
+account that runs memvara must be able to write it.
+
+---
+
+## `forget()` also closes a value stored to begin later
+
+### What changed
+
+`forget(subject, predicate)` closes every value in the slot that the store believes and
+that has not ended. Before this release it closed only the values in force at the moment
+of the call, so a value stored with a `valid_from` in the future was left alone and began
+answering when its start arrived, in a slot the caller had just forgotten. That value is
+now closed with the others and returned with them. `forget()` returns the values in the
+order they were recorded.
+
+Under `close="ended"`, a value that has not begun by `at` is ended at its own start, so it
+is true at no instant and never begins. `memory_forget` and `memory_end` given a
+`predicate` call `forget()`, so on a local server they do the same. Closing one value by
+its id, with `delete()` or with the tools' `claim_id`, is unchanged.
+
+### Who this changes
+
+**If you store a value ahead of time and then close its slot,** the value you stored
+ahead is now closed too. For example, you record that someone starts at Globex next month
+with `valid_from` set to that date, and later call `forget("user", "works_at")` or
+`memory_end` with `predicate` to close the current employer. Before this release, Globex
+survived and started answering next month. Now `forget()` retires it, and
+`close="ended"` or `memory_end` ends it at its own start, so it never answers. To close
+only the current value, close it by id instead: `delete(claim_id)`,
+`delete(claim_id, close="ended")`, or `memory_forget` or `memory_end` with `claim_id`.
+
+**If you read the list `forget()` returns,** it now includes the values stored to begin
+later, in recorded order.
+
+**`RemoteMemvara` does not change with your client.** A hosted deployment runs its own
+`forget()`, so this reaches a hosted store when the deployment moves to this release. A
+server started with `MEMVARA_MODE=cloud` therefore describes `memory_forget` and
+`memory_end` as closing every current value and does not promise the rest.
+
+**If you implement your own `Store`,** it gains an optional member, `unended_claims`.
+`forget()` asks the store for the values to close with it, so a slot that has held many
+values is not read whole. A backend without the method keeps working and closes the same
+values: `forget()` reads the slot with `slot_history` and filters it with
+`Claim.is_unended`, which costs a read of every value the slot has held. It is listed in
+`store.base.OMITTABLE`. As with `connectivity` below, `isinstance(your_store, Store)`
+turns `False` for a backend that implemented every other member, because `isinstance` on
+a Protocol asks for all of them; check the capability with `getattr` instead. To
+implement it, select with `store.unended_predicate()`, which returns the SQL and the clock
+behind each marker, and order by `recorded_at` and then `id`, as `slot_history` does.
+`SQLiteStore.unended_claims` is the reference.
+
+### How to find it in your code
+
+Search for `forget(` and for `memory_forget` and `memory_end` calls that pass a
+`predicate`, and check whether the slot can hold a value stored to begin later: one
+written by `remember(..., valid_from=<a future instant>)`, or by `memory_remember` with a
+`true_since` in the future. This lists the values stored to begin later that a store holds
+now, each of which would be closed by a `forget()` of its slot:
+
+```python
+from memvara import Memvara
+from memvara.types import utcnow
+
+mem = Memvara("memory.db")
+now = utcnow()
+for c in mem.store.iter_claims():
+    if c.valid_from > now and (c.valid_to is None or c.valid_to > c.valid_from):
+        print(c.id, c.subject, c.predicate, repr(c.object), "begins", c.valid_from)
+```
+
+---
+
+## A restatement with an earlier start is added, not reinforced
+
+### What changed
+
+Writing a value the store already holds live, with a `valid_from` earlier than the start
+of the stored claim, used to count as a repeat. The receipt named the stored claim under
+`reinforced`, and the earlier start was dropped. Now the write stores the earlier period
+as a claim of its own, ending where the stored claim begins, and the receipt names that
+new claim under `added` instead of naming the stored claim under `reinforced`. The store
+holds one more row than it did before. The stored claim itself is not changed, and its
+observation count and salience do not rise.
+
+This applies to `remember()`, `supersede()`, `memory_remember`, and every claim that
+`add()` extracts from a turn. A few related cases:
+
+- Only a stored claim the writer can see counts: one in its own scope or in a broader
+  scope it reads, never one in a sibling project, agent or session.
+- Writing the same earlier start a second time is a repeat of the claim for the earlier
+  period. The receipt names that claim under `reinforced`, and nothing is stored.
+- A write that starts even earlier stores only the part before the stored periods
+  begin.
+- A caller's write that names `expires_at` is still a repeat of the stored claim, as
+  before, so the expiry lands on it. A model's restatement that names one is stored for
+  its earlier period, and the model's expiry stays on that claim.
+- `memory_remember`'s reply for such a write reads `added 1 ... already-known 0` where
+  it read `added 0 ... already-known 1`, followed by a note that the same value is
+  already stored from where the new claim ends.
+- A turn that `add()` takes for a repeat in tier 0, before extraction, is not covered
+  yet and still reinforces the stored claim (#318).
+
+### Who this changes
+
+**If you read `receipt.reinforced` to decide whether a fact was already known,** a
+restatement with an earlier start now shows up in `receipt.added` instead. The claim
+there is already over: its `valid_to` is where the stored claim begins, so it is not a
+new current value. To tell it apart from a value the store did not hold, check whether
+its `valid_to` is set and `history(subject, predicate)` holds the same object from that
+instant.
+
+**If you count stored rows**, such as `stats()["claims"]` or the length of `history()`,
+a restatement with an earlier start adds one. A plain `count()` is unchanged, because
+the added claim is already over; a `count(valid_at=...)` inside the earlier period now
+includes it.
+
+**If you import history with `remember(valid_from=...)`**, a fact restated from an older
+record now keeps the period it covers, so reads at those earlier instants return it.
+
+### How to find it in your code
+
+Search for `.reinforced` and `.added` in code that reads the receipt of `remember(`,
+`supersede(` or `add(`, and for the text `already-known` in code that parses
+`memory_remember` replies, where the write can carry a `valid_from` or `true_since` in
+the past.
+
+---
+
 ## `reembed()` needs the store to itself, and every store keeps a `<db>.lock` file
 
 ### What changed
@@ -387,7 +1298,10 @@ and 0.97.
 **If you construct `Memvara()` with no `embedder=`** and sentence-transformers is
 installed, an existing store opens with the local model its fingerprint names, so nothing
 changes for it. A new store gets bge-small. A store with 384-wide vectors and no
-fingerprint keeps MiniLM, the model a default configuration wrote it with.
+fingerprint keeps MiniLM, the model a default configuration wrote it with. Its open now
+warns with `EmbedderChangedWarning` that memvara cannot tell which model wrote those
+vectors, and writes a fingerprint naming MiniLM, so the next open is quiet; the entry on
+missing embedder records at the top of this file has the details.
 
 **If you run the MCP server with `MEMVARA_EMBEDDER=local`**, the same holds. The server
 reads the model off the store's fingerprint before it starts, so a deployment with an
@@ -1362,8 +2276,8 @@ implementation written against the previous protocol raises `TypeError: unexpect
 keyword argument 'valid_at'` on the first `memory_recall` call. Accept the keyword. If
 your backend cannot read at a past day, raise `ValueError` when the value is not `None`
 rather than ignoring it: a block about the present returned for a question about the
-past is wrong with nothing in the output that says so. `RemoteMemvara.recall` does
-exactly that, because `POST /v1/recall` has no time axis.
+past is wrong with nothing in the output that says so. `RemoteMemvara.recall` did
+exactly that until `POST /v1/recall` took `valid_at` (memvara/memvara#298).
 
 ### How to find your own instances
 

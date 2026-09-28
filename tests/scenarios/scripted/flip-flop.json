@@ -1,0 +1,44 @@
+{
+  "id": "flip-flop",
+  "description": "The user's city goes Berlin, then Paris, then Berlin again. Each move ends the value before it at the instant the new one began, so the slot holds exactly one live value, and a question about a past date still gets the city of that time.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "sessions": [
+    {"turns": [
+      {"user": "I've lived in Berlin since April 2021, but I moved to Paris in May 2023.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "lives_in", "object": "Berlin", "true_since": "2021-04-01"}},
+         {"tool": "memory_remember", "args": {"predicate": "lives_in", "object": "Paris", "true_since": "2023-05-01"}}
+       ]}
+    ]},
+    {"turns": [
+      {"user": "I moved back to Berlin on 10 January 2025.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "lives_in", "object": "Berlin", "true_since": "2025-01-10"}}
+       ]},
+      {"id": "now", "user": "Where do I live now?",
+       "script": [{"tool": "memory_recall", "args": {"query": "where does the user live"}}]},
+      {"id": "in-2024", "user": "Where was I living in June 2024?",
+       "script": [{"tool": "memory_search", "args": {"query": "where does the user live", "valid_at": "2024-06-01"}}]},
+      {"id": "in-2022", "user": "And in June 2022?",
+       "script": [{"tool": "memory_search", "args": {"query": "where does the user live", "valid_at": "2022-06-01"}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "one-live-berlin", "text": "user lives in Berlin", "state": "live", "count": 1},
+    {"id": "paris-ended", "text": "user lives in Paris", "state": "ended", "count": 1},
+    {"id": "paris-not-live", "text": "user lives in Paris", "state": "live", "count": 0}
+  ],
+  "answer_gold": [
+    {"id": "now-berlin", "turn": "now", "must_contain": "Berlin"},
+    {"id": "now-not-paris", "turn": "now", "must_not_contain": "Paris"},
+    {"id": "2024-paris", "turn": "in-2024", "must_contain": "Paris"},
+    {"id": "2024-not-berlin", "turn": "in-2024", "must_not_contain": "Berlin"},
+    {"id": "2022-berlin", "turn": "in-2022", "must_contain": "Berlin"},
+    {"id": "2022-not-paris", "turn": "in-2022", "must_not_contain": "Paris"}
+  ],
+  "forbidden": [{"tool": "memory_forget"}],
+  "requires": ["tools"],
+  "negative_control": true
+}

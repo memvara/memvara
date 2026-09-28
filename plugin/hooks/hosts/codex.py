@@ -108,7 +108,7 @@ HOST = Host(
     #: guessed -- the same pair Claude Code uses.
     approve=ApproveSpec(
         matcher="mcp__.*memvara.*",
-        separators=("__",),
+        prefixes=("mcp__memvara__",),
         decision_key="permissionDecision",
         reason_key="permissionDecisionReason",
         allow="allow",

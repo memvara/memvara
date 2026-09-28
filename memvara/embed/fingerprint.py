@@ -21,15 +21,20 @@ The second is why this module records a *name* and not only a dimension.
 
 Where it is recorded: a small JSON file next to the store file. The `Store` protocol has
 no metadata surface, and inventing one belongs to whoever owns storage — so this is
-deliberately advisory. If the sidecar is missing (an older store, a database copied
-without it, an in-memory store), identity checking degrades to the dimension check,
-which is derived from the stored vectors themselves and cannot be lost.
+deliberately advisory. A store with no file beside it, such as an in-memory store, has no
+record, and identity checking degrades to the dimension check, which is derived from the
+stored vectors themselves and cannot be lost. When a store file's record is missing or
+unreadable (the database was copied without it, or a crash tore it while an older
+version wrote it), nothing can tell whether the store's vectors came from the embedder in
+use. When such a store holds vectors, `Memvara` warns as it opens it, and records the
+embedder in use so that the next change is noticed.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -123,7 +128,12 @@ def _read_sidecar(path: str) -> EmbedderFingerprint | None:
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        return EmbedderFingerprint(str(data["embedder"]), int(data["dim"]))
+        dim = data["dim"]
+        # Only a JSON integer is a width. `int()` would take "128" and 128.9 as well, and
+        # a bool, which Python counts as an int.
+        if not isinstance(dim, int) or isinstance(dim, bool):
+            return None
+        return EmbedderFingerprint(str(data["embedder"]), dim)
     except (OSError, ValueError, KeyError, TypeError):
         # Unreadable, absent or corrupt: all the same answer. A damaged advisory file
         # must never be the reason a memory store refuses to open.
@@ -133,6 +143,19 @@ def _read_sidecar(path: str) -> EmbedderFingerprint | None:
 def write_fingerprint(store: Any, fp: EmbedderFingerprint) -> bool:
     """Record who owns this store's vector space. Best-effort by construction.
 
+    The record is written to a temporary file beside it, which is then renamed over it,
+    so a crash or a full disk during the write leaves the old record or the new one and
+    never half of one. This matters most when `reembed()` rewrites the record, because
+    the store then already holds vectors, and a torn record reads as no record at all. A
+    crash in the middle of the write can leave the temporary file behind; nothing reads
+    it.
+
+    A record kept as a link is followed: the temporary file is made beside the file the
+    link names, and that file is replaced, so the link stays. A directory where the
+    account may write the existing files but may not add new ones refuses the temporary
+    file; the record is then written in place, as it was before the rename, and a crash
+    during that write can tear it.
+
     Returns whether it was written, which is information for tests rather than for
     callers: a read-only directory is a fine place to keep a memory store, and losing
     the identity check there is a smaller harm than refusing to run.
@@ -140,12 +163,44 @@ def write_fingerprint(store: Any, fp: EmbedderFingerprint) -> bool:
     path = sidecar_path(store)
     if path is None:
         return False
+    target = os.path.realpath(path)
+    record = {"embedder": fp.name, "dim": fp.dim}
+    # A name of its own for each write, so two processes writing at once never write
+    # into one temporary file.
+    staged = f"{target}.{uuid.uuid4().hex}.tmp"
+    made = False
+    try:
+        with open(staged, "x", encoding="utf-8") as fh:
+            made = True
+            _dump(record, fh)
+        os.replace(staged, target)
+    except OSError as exc:
+        if not made and isinstance(exc, PermissionError):
+            return _write_in_place(target, record)
+        if made:
+            try:
+                os.remove(staged)
+            except OSError:
+                return False
+        return False
+    return True
+
+
+def _dump(record: dict[str, Any], fh: Any) -> None:
+    """Write `record` to `fh` and make sure it has reached the disk."""
+    json.dump(record, fh)
+    fh.flush()
+    os.fsync(fh.fileno())
+
+
+def _write_in_place(path: str, record: dict[str, Any]) -> bool:
+    """Overwrite the record itself, for a directory that refuses a temporary file."""
     try:
         with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"embedder": fp.name, "dim": fp.dim}, fh)
-        return True
+            _dump(record, fh)
     except OSError:
         return False
+    return True
 
 
 def stored_dim(store: Any) -> int | None:

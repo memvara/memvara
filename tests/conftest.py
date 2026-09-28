@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import tempfile
 import traceback
 from typing import Any
 
@@ -66,11 +67,11 @@ from memvara.server import config as config_module
 from memvara.server import login as login_module
 from memvara.store import encryption as encryption_module
 
-# The adversarial suite's tiers and skip ledger (docs/claude/testing.md). `harness` is
-# importable here because tests/ has no __init__.py, so pytest puts tests/ on sys.path
-# before it imports this file.
+# The adversarial suite's skip ledger (docs/claude/testing.md). `harness` is importable
+# here because tests/ has no __init__.py, so pytest puts tests/ on sys.path before it
+# imports this file. The suite's --tier option is registered in the conftest.py at the
+# repository root, which every run reads.
 from harness import skips as skips_module
-from harness import tiers as tiers_module
 
 #: The two constants as the source defines them, read once before any fixture has
 #: redirected them. `test_credentials_path_constant_matches_logins_own` asserts the
@@ -146,8 +147,24 @@ memvara.core.default_embedder = _guarded_default_embedder
 # the path some way the fixture does not cover -- a subprocess, a second
 # constant nobody redirected, an `expanduser` computed at call time.
 
+@pytest.fixture(scope="session")
+def _homes(tmp_path_factory):
+    """One directory for the whole session that holds every test's fake home directories.
+
+    The two fixtures below each make a directory for every test. They make it here, with
+    `tempfile.mkdtemp`, and not with `tmp_path_factory.mktemp()`. To number a new
+    directory, `mktemp()` lists every entry in the session's base temporary directory,
+    which grows by one entry for every directory it has made. Called for every test, that
+    listing made the suite's run time grow with the square of its size: on CI, the tests
+    that run after the adversarial suite took about 40% longer than on their own.
+    `mkdtemp` picks a random name and needs no listing. `tests/test_suite_homes.py`
+    checks that neither directory is made directly in the base temporary directory.
+    """
+    return tmp_path_factory.mktemp("homes")
+
+
 @pytest.fixture(autouse=True)
-def _credentials_never_touch_home(tmp_path, tmp_path_factory, monkeypatch):
+def _credentials_never_touch_home(tmp_path, _homes, monkeypatch):
     """Point every credentials path at tmp_path, for every test in this repository.
 
     Autouse and in `conftest.py` rather than in the one file that writes today.
@@ -166,11 +183,11 @@ def _credentials_never_touch_home(tmp_path, tmp_path_factory, monkeypatch):
     # replaces put it -- several tests in `test_login.py` read that exact path. Nesting a
     # fake `~/.memvara/` under it would be more lifelike and would buy nothing: what makes
     # this isolation is that the path is not the developer's, not its shape.
-    # The fake home comes from `tmp_path_factory`, not from `tmp_path`. Creating a
-    # directory inside `tmp_path` is visible to the test that owns it, and
+    # The fake home is made in `_homes`, not in `tmp_path`. Creating a directory inside
+    # `tmp_path` is visible to the test that owns it, and
     # `test_bench_eval.py::test_a_download_writes_atomically...` asserts its `tmp_path` is
     # empty -- an isolation fixture that makes another test fail has bought nothing.
-    home = tmp_path_factory.mktemp("home")
+    home = tempfile.mkdtemp(prefix="home-", dir=_homes)
     where = tmp_path / "credentials.json"
     monkeypatch.setattr(login_module, "_CREDENTIALS_PATH", where)
     monkeypatch.setattr(config_module, "CREDENTIALS_PATH", where)
@@ -185,8 +202,8 @@ def _credentials_never_touch_home(tmp_path, tmp_path_factory, monkeypatch):
     # subprocesses; a child computes `Path.home()` itself and the monkeypatch above is
     # invisible to it. `Path.home()` reads HOME on POSIX and USERPROFILE on Windows, so
     # setting both makes the child land in tmp_path as well.
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
     return where
 
 
@@ -210,7 +227,7 @@ def _store_keys_never_touch_the_keychain(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _hook_logs_never_touch_home(tmp_path_factory, monkeypatch):
+def _hook_logs_never_touch_home(_homes, monkeypatch):
     """Point the plugin hooks' home directory at a temporary one, for every test.
 
     `plugin/hooks/lib/ipc.py` reads the home directory once, into `_HOME`, when it is
@@ -229,7 +246,7 @@ def _hook_logs_never_touch_home(tmp_path_factory, monkeypatch):
 
     ipc = sys.modules.get("lib.ipc")
     if ipc is not None and hasattr(ipc, "_HOME"):
-        monkeypatch.setattr(ipc, "_HOME", str(tmp_path_factory.mktemp("hook-home")))
+        monkeypatch.setattr(ipc, "_HOME", tempfile.mkdtemp(prefix="hook-home-", dir=_homes))
 
 
 def pytest_configure(config: Any) -> None:
@@ -237,39 +254,14 @@ def pytest_configure(config: Any) -> None:
         "markers",
         "derives_project: let ServerConfig.from_env() derive the project from a git "
         "remote, which tests/conftest.py otherwise switches off")
+    # Here rather than in tests/adversarial/conftest.py, because tests outside that folder
+    # carry the mark too, and a run of one of their files alone loads only this conftest.
+    # tests/harness/checklist.py reads the marks from each test's source.
+    config.addinivalue_line(
+        "markers",
+        "covers(*items): the checklist items this test covers, such as "
+        "'tool:memory_recall' or 'inv:I3'. See docs/claude/testing.md.")
     config.pluginmanager.register(skips_module.SkipLedger(), "memvara-skip-ledger")
-    tiers_module.load_hypothesis_profile(config.getoption("--tier"))
-
-
-def pytest_addoption(parser: Any) -> None:
-    parser.addoption(
-        "--tier", choices=tiers_module.TIERS, default="fast",
-        help="which tier of tests to collect: fast (the default, and what CI runs), "
-             "nightly, weekly, local or quarantine. See docs/claude/testing.md.")
-
-
-def pytest_ignore_collect(collection_path: pathlib.Path, config: Any) -> bool | None:
-    """Leave out every test whose tier --tier does not select.
-
-    Returns True or None, never False. pytest stops at the first hook that returns a
-    value, so returning False here would overrule --ignore and every other plugin's
-    decision about the same path.
-    """
-    if tiers_module.ignored(collection_path, config.getoption("--tier")):
-        if collection_path.is_dir():
-            config.stash.setdefault(_LEFT_OUT, set()).add(collection_path)
-        return True
-    return None
-
-
-#: The tier folders this run left out, for the line below.
-_LEFT_OUT = pytest.StashKey[set]()
-
-
-def pytest_report_collectionfinish(config: Any) -> str:
-    """Say which tier ran and which tier folders it left out, on every run."""
-    return tiers_module.collection_report(config.getoption("--tier"),
-                                          config.stash.get(_LEFT_OUT, set()))
 
 
 @pytest.fixture(autouse=True)

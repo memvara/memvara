@@ -1,0 +1,33 @@
+{
+  "id": "read-only",
+  "description": "A server started read-only still answers from memory, but it offers no write tools. When the user asks for a change, the write is refused with a message that says why, memory_stats reports that writes are disabled, and the store is unchanged. The client asks for protocol 2025-03-26.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester", "read_only": true, "protocol": "2025-03-26"},
+  "seed": [
+    {"op": "remember", "predicate": "lives_in", "object": "Lisbon"}
+  ],
+  "sessions": [
+    {"turns": [
+      {"id": "where", "user": "Where do I live?",
+       "script": [{"tool": "memory_recall", "args": {"query": "where does the user live"}}]},
+      {"id": "write", "user": "I've moved to Porto. Please update that.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "lives_in", "object": "Porto"}, "expect_error": true}
+       ]},
+      {"id": "status", "user": "Can you store anything on this machine?",
+       "script": [{"tool": "memory_stats"}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "lisbon-unchanged", "text": "user lives in Lisbon", "state": "live", "count": 1},
+    {"id": "porto-not-written", "text": "user lives in Porto", "state": "absent"}
+  ],
+  "answer_gold": [
+    {"id": "recall-still-works", "turn": "where", "must_contain": "Lisbon"},
+    {"id": "refusal-says-why", "turn": "write", "must_contain": "this memory server is read-only"},
+    {"id": "stats-say-writes-are-off", "turn": "status", "must_contain": "writes: disabled"}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}

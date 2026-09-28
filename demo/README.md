@@ -590,10 +590,13 @@ rather than leaving them to be noticed:
   `goal`, so that is where the plan history lands. Reads by slot resolve the alias and the
   prompt carries each claim's own sentence, so the reader sees the same words; anything
   keyed on the predicate name does not. The report names the fold.
-* **Dated questions are read differently.** `POST /v1/recall` has no time axis, so the four
-  questions carrying `about` are read with `search(valid_at=)` and rendered by the
-  library's own recall renderer — byte-identical to local `recall(valid_at=)` on the same
-  store, which a test pins. The report counts how many contexts were read that way.
+* **Dated questions are read differently.** The four questions carrying `about` are read
+  with `search(valid_at=)` and rendered by the library's own recall renderer —
+  byte-identical to local `recall(valid_at=)` on the same store, which a test pins. The
+  report counts how many contexts were read that way. The arm was written this way when
+  `POST /v1/recall` had no time axis, and keeps it so that its rows stay comparable with
+  the recorded runs and it works against a deployment from before the route took
+  `valid_at`.
 
 Extraction and the episode cap are the deployment's: it runs its own extractor over the
 turns both arms write, on its own schedule, and its own limit on how many turns a read

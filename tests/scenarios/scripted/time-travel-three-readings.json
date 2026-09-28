@@ -1,0 +1,60 @@
+{
+  "id": "time-travel-three-readings",
+  "description": "A client's renewal date is recorded wrongly and corrected later, and the store is read on each of its two clocks. memory_ask at the instant the wrong date was recorded gives three readings: what is now known to have been true then, what the store would have said then, and a note that the record was corrected since. The second reading is the known_at reading, which no other tool offers. memory_recall with valid_at gives a block dated to that day, memory_since lists the replacement in both of its lists, and memory_search with as_of shows what was believed then. memory_recall refuses as_of, and memory_search refuses as_of and valid_at together, and each refusal says why.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "sessions": [
+    {"turns": [
+      {"user": "Our client Contoso signed in April 2025, and their contract renews on 31 March 2027.",
+       "script": [
+         {"tool": "memory_remember", "args": {"subject": "Contoso", "predicate": "renewal_date", "object": "31 March 2027", "true_since": "2025-04-01"}},
+         {"mark": "told_then"}
+       ]}
+    ]},
+    {"turns": [
+      {"user": "I misread the contract. Contoso renews on 30 June 2027, and always did.",
+       "script": [
+         {"tool": "memory_search", "args": {"query": "when does the Contoso contract renew"}, "capture": {"march_id": "id=(cl_[0-9a-f]+) [^\\]]*\\] Contoso renewal date 31 March 2027"}},
+         {"tool": "memory_forget", "args": {"claim_id": "{march_id}", "reason": "misread the contract: it renews on 30 June"}},
+         {"tool": "memory_remember", "args": {"subject": "Contoso", "predicate": "renewal_date", "object": "30 June 2027", "true_since": "2025-04-01"}}
+       ]},
+      {"id": "ask-then", "user": "When I first told you, what renewal date did you have for Contoso, and what is the real one?",
+       "script": [{"tool": "memory_ask", "args": {"question": "when does the Contoso contract renew", "at": "{told_then}"}}]},
+      {"id": "recall-dated", "user": "As of June 2025, when was Contoso due to renew?",
+       "script": [{"tool": "memory_recall", "args": {"query": "when does the Contoso contract renew", "valid_at": "2025-06-01"}}]},
+      {"id": "before-signing", "user": "Did Contoso have a renewal date back in January 2025?",
+       "script": [{"tool": "memory_ask", "args": {"question": "when does the Contoso contract renew", "at": "2025-01-15"}}]},
+      {"id": "what-changed", "user": "What has changed in my notes since I first told you about Contoso?",
+       "script": [{"tool": "memory_since", "args": {"since": "{told_then}"}}]},
+      {"id": "recall-as-of", "user": "Just read me back what you believed then.",
+       "script": [{"tool": "memory_recall", "args": {"query": "when does the Contoso contract renew", "as_of": "{told_then}"}, "expect_error": true}]},
+      {"id": "both-clocks", "user": "What did you believe then about June 2025?",
+       "script": [{"tool": "memory_search", "args": {"query": "when does the Contoso contract renew", "as_of": "{told_then}", "valid_at": "2025-06-01"}, "expect_error": true}]},
+      {"id": "believed-then", "user": "So what exactly did you believe then?",
+       "script": [{"tool": "memory_search", "args": {"query": "when does the Contoso contract renew", "as_of": "{told_then}"}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "march-retired", "text": "Contoso renewal date 31 March 2027", "state": "retired", "count": 1},
+    {"id": "june-live", "text": "Contoso renewal date 30 June 2027", "state": "live", "count": 1}
+  ],
+  "answer_gold": [
+    {"id": "ask-true-then", "turn": "ask-then", "must_contain": "Contoso renewal_date: 30 June 2027"},
+    {"id": "ask-would-have-said", "turn": "ask-then", "must_contain": "this store would have said 31 March 2027"},
+    {"id": "ask-names-the-correction", "turn": "ask-then", "must_contain": "it means the record was corrected after that instant"},
+    {"id": "recall-says-which-day", "turn": "recall-dated", "must_contain": "as things were on 1 June 2025"},
+    {"id": "recall-dated-june", "turn": "recall-dated", "must_contain": "30 June 2027"},
+    {"id": "recall-dated-not-march", "turn": "recall-dated", "must_not_contain": "31 March 2027"},
+    {"id": "nothing-before-signing", "turn": "before-signing", "must_contain": "nothing was true on 2025-01-15"},
+    {"id": "since-counts-both", "turn": "what-changed", "must_contain": "1 arrived and 1 left"},
+    {"id": "since-marks-what-left", "turn": "what-changed", "must_contain": "Believed then, not believed now"},
+    {"id": "recall-refuses-as-of", "turn": "recall-as-of", "must_contain": "memory_recall takes valid_at, not as_of"},
+    {"id": "search-refuses-both", "turn": "both-clocks", "must_contain": "memory_search takes as_of or valid_at, not both"},
+    {"id": "believed-march", "turn": "believed-then", "must_contain": "31 March 2027"},
+    {"id": "believed-not-june", "turn": "believed-then", "must_not_contain": "30 June 2027"}
+  ],
+  "forbidden": [{"tool": "memory_end"}],
+  "requires": ["tools"],
+  "negative_control": true
+}

@@ -40,6 +40,11 @@ class SkipRule:
         return self.python_from is None or version >= self.python_from
 
 
+#: The skip mark for a test that needs `tomllib`, which arrives in Python 3.11. Use it
+#: rather than writing a new one: its reason is the one the first rule below explains.
+needs_toml = pytest.mark.skipif(sys.version_info < (3, 11),
+                                reason="tomllib arrives in 3.11, and this test needs it to read TOML")
+
 RULES: tuple[SkipRule, ...] = (
     SkipRule(r"^tomllib arrive[sd] in 3\.11",
              "Python 3.10 has no tomllib. These tests run on 3.11 and later.",
@@ -53,6 +58,11 @@ RULES: tuple[SkipRule, ...] = (
              "These need Node. CI's npm-bridge job runs the bridge's own tests."),
     SkipRule(r"^the renderer is the authority for this test$",
              "Needs memvara-cloud installed, which is a separate repository."),
+    SkipRule(r"^Windows's resolver does not read a host written as one number$",
+             "Windows's getaddrinfo does not read a host written as a single decimal, octal "
+             "or hex number as an IPv4 address, so such a spelling names no private "
+             "address there for the URL fetcher to refuse.",
+             platforms=("win32",)),
     SkipRule(r"^no sub-second headroom exists at this platform's ceiling$",
              "Windows' C runtime stops at the year 3001, so there is no headroom to test.",
              platforms=("win32",)),
@@ -65,10 +75,34 @@ RULES: tuple[SkipRule, ...] = (
              "Windows has no POSIX file modes.", platforms=("win32",)),
     SkipRule(r"^Windows file modes do not express this$",
              "Windows has no POSIX file modes.", platforms=("win32",)),
+    SkipRule(r"^this user may write a read-only file$",
+             "Root, or another account that ignores file modes, cannot be refused a write "
+             "by one, so the test has no way to make the file read-only."),
+    SkipRule(r"^this platform may not make a symbolic link$",
+             "Windows makes a symbolic link only for an account allowed to, which a test "
+             "account may not be.", platforms=("win32",)),
     SkipRule(r"^the password database exists only on POSIX$",
              "Windows has no password database to fall back from.", platforms=("win32",)),
     SkipRule(r"^SIGSTOP exists only on POSIX$",
              "Windows cannot pause a process with a signal.", platforms=("win32",)),
+    SkipRule(r"^a RAM disk is made with hdiutil, which is macOS only$",
+             "The local tier's real full-disk test mounts a RAM disk with macOS's own tools.",
+             platforms=("linux", "win32")),
+    SkipRule(r"^Python before 3\.13 does not report an unclosed SQLite connection$",
+             "The leak is observable only through the ResourceWarning that Python 3.13 "
+             "added for an unclosed sqlite3 connection; earlier versions stay silent.",
+             python_below=(3, 13)),
+    SkipRule(r"^RLIMIT_FSIZE exists only on POSIX$",
+             "Windows has no per-process limit on file size to simulate a full disk with.",
+             platforms=("win32",)),
+    SkipRule(r"^the fake agent CLIs are POSIX shell scripts$",
+             "On Windows a program started without a shell is found on PATH only as an "
+             ".exe, and the fake claude and codex are shell scripts. Linux and macOS run "
+             "these tests.", platforms=("win32",)),
+    SkipRule(r"^the recall daemon listens on a unix socket, which Windows lacks$",
+             "The recall daemon cannot listen on Windows, which has no unix sockets, so "
+             "every prompt there takes the in-process route (plugin/hooks/lib/ipc.py, "
+             "send). Linux and macOS run these tests.", platforms=("win32",)),
     SkipRule(r"^the hooks' copy of the vectors is not in this checkout yet$",
              "A packaging state that the test detects before skipping."),
     SkipRule(r"^git is not installed$",
@@ -81,6 +115,10 @@ RULES: tuple[SkipRule, ...] = (
              "The encrypt extra is optional. CI installs it."),
     SkipRule(r"^no system tz database and no tzdata package$",
              "The time zone tests need a tz database."),
+    SkipRule(r"^the performance run is invalid: ",
+             "A timing run on battery or under load measures the machine, not memvara. The "
+             "design marks such a run invalid rather than failed, and its record keeps the "
+             "reason (bench/perf_budget.py)."),
 )
 
 

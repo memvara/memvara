@@ -157,6 +157,7 @@ def test_a_line_break_ends_a_sentence_without_punctuation():
 # --- adding ---------------------------------------------------------------------
 
 
+@pytest.mark.covers("inv:RT6")
 def test_a_document_is_stored_as_system_episodes_that_search_finds():
     m = mem()
     text = "\n\n".join(prose(12))
@@ -598,6 +599,7 @@ def _extracting(m: Memvara) -> list[str]:
     return seen
 
 
+@pytest.mark.covers("inv:WP1")
 def test_a_document_with_a_clear_fact_yields_a_claim_citing_its_chunk():
     """The design sends new chunks to extraction. A chunk is a system-role episode, and
     the default gate reads only user turns, so without the document path the gate
@@ -619,6 +621,7 @@ def test_a_document_with_a_clear_fact_yields_a_claim_citing_its_chunk():
     assert statuses == ["queued", "extracting", "done"] and doc.status == "done"
 
 
+@pytest.mark.covers("inv:WP1")
 def test_extract_false_is_kept_by_a_later_extraction_sweep():
     """A chunk stored with `extract=False` is not read now, and not by a scheduled
     `reextract()` sweep later either: the caller said not to extract this document."""
@@ -949,7 +952,7 @@ def test_a_version_13_file_gains_the_document_tables_and_keeps_its_rows(tmp_path
     upgraded = mem(path=path)
     try:
         assert int(upgraded.store._db.execute("PRAGMA user_version").fetchone()[0]) == \
-            SCHEMA_VERSION == 16
+            SCHEMA_VERSION == 17
         names = {r[0] for r in upgraded.store._db.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')")}
         assert {"documents", "document_chunks", "doc_custom", "doc_created",
@@ -1124,6 +1127,7 @@ def test_switching_documents_off_hides_the_four_tools():
     assert "memory_recall" in names
 
 
+@pytest.mark.covers("env:MEMVARA_NAT64_PREFIXES")
 def test_the_server_fetches_through_the_operators_nat64_prefixes_and_switches():
     from memvara.ingest import SafeFetcher
     from memvara.server.config import ServerConfig, build_memvara
@@ -1176,3 +1180,297 @@ def test_the_remote_store_names_the_route_to_use_instead():
         with pytest.raises(NotImplementedError, match="RemoteMemvara.add_document"):
             c()
     store.close()
+
+
+# --- another writer while a document is extracted or updated -----------------------------
+#
+# Two handles on one file. The handle under test is held at a point where it has read the
+# document and not yet written it, and the other handle deletes or changes the document
+# there: from inside a patched `reextract`, `_extract` or `require`, which run outside any
+# transaction, or from a thread when the held point is inside one. What the other handle
+# did must survive, and a deleted document must stay deleted.
+
+
+def two_handles(tmp_path) -> tuple[Memvara, Memvara]:
+    path = str(tmp_path / "docs.db")
+    return (Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=64), user="alice"),
+            Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=64), user="alice"))
+
+
+def test_a_document_deleted_while_it_is_extracted_stays_deleted(tmp_path):
+    """The extraction wrote its outcome back as the whole document it had read before it
+    began, so a document deleted during a model call came back, title and path included,
+    with no chunks, after the delete had reported erasing it."""
+    adding, other = two_handles(tmp_path)
+    try:
+        real = adding.writer.reextract
+
+        def reextract(episodes):
+            assert other.delete_document(episodes[0].meta[DOCUMENT_META]).deleted
+            return real(episodes)
+
+        adding.writer.reextract = reextract  # type: ignore[method-assign]
+        doc = adding.add_document("Private notes about the Wray account.",
+                                  title="Wray account notes", filepath="clients/wray.md")
+        assert other.get_document(doc.id) is None, "the deleted document is back"
+        assert other.list_documents().items == []
+    finally:
+        adding.close()
+        other.close()
+
+
+@pytest.mark.covers("inv:WP13")
+def test_no_claim_is_written_from_a_document_deleted_while_it_is_extracted(tmp_path):
+    """The claims the model read from a chunk are written after the model call. A delete
+    committed during the call erased the chunk, and the claim was written anyway, citing a
+    chunk that no longer existed, so the deleted document's fact outlived it."""
+    from test_pipeline import CountingLLM
+    path = str(tmp_path / "docs.db")
+    llm = CountingLLM(responder=lambda eps: [
+        {"subject": "wray_account", "predicate": "moves_to", "object": "Lisbon",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": i}
+        for i, ep in enumerate(eps) if "Lisbon" in ep.content])
+    adding = Memvara(path, llm=llm, embedder=HashingEmbedder(dim=64), user="alice")
+    other = Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=64), user="alice")
+    try:
+        real = adding.writer._tier2
+
+        def tier2(gated, *args, **kwargs):
+            assert other.delete_document(gated[0].meta[DOCUMENT_META]).deleted
+            return real(gated, *args, **kwargs)
+
+        adding.writer._tier2 = tier2  # type: ignore[method-assign]
+        doc = adding.add_document("The Wray account moves to Lisbon next spring.")
+        stored = list(other.store.iter_claims("default", include_invalidated=True))
+        assert stored == [], "a claim read from the deleted document was written"
+        assert llm.extract_calls == 1 and other.get_document(doc.id) is None
+    finally:
+        adding.close()
+        other.close()
+
+
+def test_a_document_deleted_before_its_extraction_begins_is_not_read(tmp_path):
+    """Deleted after its chunks were stored and before extraction marked it `extracting`:
+    the mark brought the document back, and its erased chunks were then read."""
+    from memvara.types import WriteReceipt
+
+    adding, other = two_handles(tmp_path)
+    try:
+        real_extract, read = adding._documents._extract, []
+
+        def extract(doc, episodes):
+            assert other.delete_document(doc.id).deleted
+            return real_extract(doc, episodes)
+
+        adding._documents._extract = extract  # type: ignore[method-assign]
+        adding.writer.reextract = (  # type: ignore[method-assign]
+            lambda episodes: (read.append(episodes), WriteReceipt())[1])
+        doc = adding.add_document("Private notes about the Wray account.")
+        assert other.get_document(doc.id) is None, "the deleted document is back"
+        assert read == [] and doc.status == "queued"
+    finally:
+        adding.close()
+        other.close()
+
+
+def test_a_rename_made_while_a_document_is_extracted_is_kept(tmp_path):
+    """The extraction records only its status, onto the row as it stands."""
+    adding, other = two_handles(tmp_path)
+    try:
+        real = adding.writer.reextract
+
+        def reextract(episodes):
+            other.update_document(episodes[0].meta[DOCUMENT_META], title="Renamed")
+            return real(episodes)
+
+        adding.writer.reextract = reextract  # type: ignore[method-assign]
+        doc = adding.add_document("Refunds are paid within 14 days.", title="Refunds")
+        stored = other.get_document(doc.id)
+        assert (stored.title, stored.status) == ("Renamed", "done")
+    finally:
+        adding.close()
+        other.close()
+
+
+#: A second version long enough to be stored as several chunks, where the first is one.
+SECOND_VERSION = " ".join(f"Clause {n} of the second version moves the Wray account to "
+                          "Lisbon." for n in range(60))
+
+
+@pytest.mark.parametrize("extract, point", [(True, "before extraction"),
+                                            (True, "during extraction"),
+                                            (False, "before its status")])
+def test_an_add_returns_the_document_as_stored_when_a_new_version_lands_meanwhile(
+        tmp_path, extract, point):
+    """Another handle stores a new version of the document after this add stored its
+    chunks and before it records their status. The status is then not written, because it
+    describes content the row no longer holds, and the add returned its own copy anyway:
+    a status and a chunk count the store never held, which `memory_add_document` reported
+    as what was stored. It returns the document as the store holds it."""
+    adding, other = two_handles(tmp_path)
+    try:
+        def new_version(doc_id: str) -> None:
+            other.update_document(doc_id, content=SECOND_VERSION)
+
+        if point == "during extraction":
+            real_reextract = adding.writer.reextract
+
+            def reextract(episodes):
+                new_version(episodes[0].meta[DOCUMENT_META])
+                return real_reextract(episodes)
+
+            adding.writer.reextract = reextract  # type: ignore[method-assign]
+        else:
+            real_finish = adding._documents._finish
+
+            def finish(stored):
+                new_version(stored.doc.id)
+                return real_finish(stored)
+
+            adding._documents._finish = finish  # type: ignore[method-assign]
+        returned = adding.add_document("First draft about the Wray account.",
+                                       custom_id="wray", extract=extract)
+        stored = other.get_document(returned.id)
+        assert stored.chunks > 1, "the new version was not stored"
+        assert (returned.content_hash, returned.status, returned.chunks) == (
+            stored.content_hash, stored.status, stored.chunks)
+    finally:
+        adding.close()
+        other.close()
+
+
+@pytest.mark.parametrize("change", [{"title": "Renamed"},
+                                    {"content": "Second version: the account moves."}])
+def test_an_update_does_not_bring_back_a_document_deleted_since_it_was_read(tmp_path,
+                                                                            change):
+    """`update_document` wrote back the document it had read before the change, so a
+    document deleted in between came back, and with new content its new chunks too."""
+    updating, other = two_handles(tmp_path)
+    try:
+        doc = updating.add_document("First draft about the Wray account.", title="Wray")
+        real = updating._documents.require
+        deleted: list[str] = []
+
+        def require(scope, ref):
+            found = real(scope, ref)
+            if not deleted:
+                assert other.delete_document(found.id).deleted
+                deleted.append(found.id)
+            return found
+
+        updating._documents.require = require  # type: ignore[method-assign]
+        refused = False
+        try:
+            updating.update_document(doc.id, **change)
+        except KeyError:
+            refused = True
+        assert other.get_document(doc.id) is None, "the deleted document is back"
+        assert [ep.id for ep in other.store.iter_episodes(other.default_scope.tenant)] == []
+        assert refused, "an update of a document deleted while it waited is a KeyError"
+    finally:
+        updating.close()
+        other.close()
+
+
+def test_a_rename_keeps_the_content_another_writer_stored_since_it_was_read(tmp_path):
+    """A rename changes the title. It wrote back the digest and status it had read too,
+    so a new version stored in between was left under the old version's digest."""
+    renaming, other = two_handles(tmp_path)
+    try:
+        doc = renaming.add_document("First draft about the Wray account.", title="Wray")
+        real = renaming._documents.require
+        newer: list = []
+
+        def require(scope, ref):
+            found = real(scope, ref)
+            if not newer:
+                newer.append(other.update_document(
+                    found.id, content="Second version: the account moves."))
+            return found
+
+        renaming._documents.require = require  # type: ignore[method-assign]
+        renamed = renaming.update_document(doc.id, title="Renamed")
+        stored = other.get_document(doc.id)
+        assert stored.content_hash == newer[0].content_hash != doc.content_hash
+        assert (stored.title, renamed.title) == ("Renamed", "Renamed")
+    finally:
+        renaming.close()
+        other.close()
+
+
+def test_a_retry_does_not_bring_back_a_chunk_its_document_lost_meanwhile(tmp_path):
+    """A re-add retries the chunks a skipped extraction left unread, and clears their mark
+    by writing each episode back. It read them before its transaction, so a chunk the
+    document's delete erased in between was written back, text and all."""
+    import threading
+
+    retrying, other = two_handles(tmp_path)
+    try:
+        text = "Refunds are paid within 14 days of the request."
+        doc = retrying.add_document(text, custom_id="r", extract=False)
+        chunk = retrying.store.document_chunks("default", doc.id)[0].episode_id
+        real = retrying.store.get_episodes
+        deleter: list[threading.Thread] = []
+
+        def get_episodes(ids):
+            found = real(ids)
+            if not deleter:
+                # On a thread, and waited for for a second: where the chunks are read
+                # under the write lock, the delete cannot run until the retry commits.
+                deleter.append(threading.Thread(
+                    target=lambda: other.delete_document(doc.id)))
+                deleter[0].start()
+                deleter[0].join(timeout=1.0)
+            return found
+
+        retrying.store.get_episodes = get_episodes  # type: ignore[method-assign]
+        retrying.add_document(text, custom_id="r")
+        deleter[0].join()
+        assert other.store.get_episode(chunk) is None, "the erased chunk is back"
+        assert other.get_document(doc.id) is None
+    finally:
+        retrying.close()
+        other.close()
+
+
+def test_a_delete_erases_the_chunks_a_new_version_stored_while_it_waited(tmp_path):
+    """The delete listed the document's chunks before its transaction and erased only
+    those, so the chunks a new version stored in between stayed on disk, text and all,
+    belonging to no document."""
+    import threading
+
+    deleting, other = two_handles(tmp_path)
+    try:
+        doc = deleting.add_document("First draft about the Wray account.", extract=False)
+        real = deleting.store.document_chunks
+        updater: list[threading.Thread] = []
+        outcome: list[object] = []
+
+        def update() -> None:
+            try:
+                outcome.append(other.update_document(
+                    doc.id, content="Second version: the Wray account moves to Lisbon.",
+                    extract=False))
+            except KeyError as exc:
+                outcome.append(exc)
+
+        def document_chunks(tenant, doc_id):
+            found = real(tenant, doc_id)
+            if not updater:
+                # On a thread, and waited for for a second: where the chunks are listed
+                # under the write lock, the update cannot run until the delete commits.
+                updater.append(threading.Thread(target=update))
+                updater[0].start()
+                updater[0].join(timeout=1.0)
+            return found
+
+        deleting.store.document_chunks = document_chunks  # type: ignore[method-assign]
+        assert deleting.delete_document(doc.id).deleted
+        updater[0].join()
+        left = [ep.content for ep in other.store.iter_episodes(other.default_scope.tenant)]
+        assert left == [], "episodes left after the delete"
+        assert other.get_document(doc.id) is None
+        assert isinstance(outcome[0], KeyError), "the update ran after the delete"
+    finally:
+        deleting.close()
+        other.close()

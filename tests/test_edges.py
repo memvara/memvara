@@ -1025,6 +1025,7 @@ def test_recall_flattens_every_line_break_form(payload):
             assert len(block.splitlines()) == 2, block
 
 
+@pytest.mark.covers("inv:RT1")
 def test_recall_cannot_resurrect_retired_claims():
     """`include_invalidated` is an audit affordance. Reachable from recall() it is an
     un-delete straight into a live system prompt."""
@@ -1091,6 +1092,235 @@ def test_stats_does_not_disclose_other_tenants():
             mem.remember("user", f"p{i}", "x", tenant="t_b", user="bob")
         assert mem.stats(tenant="t_a")["claims"] == 1
         assert mem.stats(tenant="t_b")["claims"] == 5
+
+
+# -- a repeated value reinforces only a claim its writer can see ---------------------
+#
+# `value_key` names the owner (tenant and user) and not the project, agent or session, so
+# the lookup that finds "the same fact, already on record" reaches every scope the user
+# has. Before this rule a repeat was absorbed by whichever claim that lookup found: the
+# claim in another project or session was reinforced, and the writer read nothing back.
+
+PROJ_A, PROJ_B = "github.com/acme/a", "github.com/acme/b"
+
+
+def _alice() -> Memvara:
+    return Memvara(embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice")
+
+
+def _tombstones(mem: Memvara) -> list[Claim]:
+    return [c for c in mem.store.iter_claims("default", include_invalidated=True)
+            if c.polarity < 0]
+
+
+def test_a_repeat_of_another_projects_value_is_stored_in_the_writers_own_project():
+    with _alice() as mem:
+        theirs = mem.scope(project=PROJ_B).remember("user", "prefers_editor", "vim").added[0]
+        receipt = mem.scope(project=PROJ_A).remember("user", "prefers_editor", "vim")
+        assert receipt.reinforced == [] and receipt.accumulated == []
+        assert [c.scope.project for c in receipt.added] == [PROJ_A]
+        assert [c.object for c in mem.scope(project=PROJ_A).get_all()] == ["vim"]
+        assert mem.store.get_claim(theirs.id).observation_count == 1
+
+
+def test_a_repeat_of_a_sibling_sessions_value_is_stored_in_the_writers_own_session():
+    """The same value in the same slot, so the new claim beside it is not reported as a
+    second answer to the question."""
+    with _alice() as mem:
+        theirs = mem.remember("user", "prefers_editor", "vim", session="s2").added[0]
+        receipt = mem.remember("user", "prefers_editor", "vim", session="s1")
+        assert receipt.reinforced == [] and receipt.accumulated == []
+        assert [c.scope.session for c in receipt.added] == ["s1"]
+        assert [c.object for c in mem.get_all(session="s1")] == ["vim"]
+        assert mem.store.get_claim(theirs.id).observation_count == 1
+
+
+def test_a_repeat_of_a_value_the_writer_inherits_still_reinforces_that_claim():
+    """Visibility widens upward, so a user-level value is the writer's own value from
+    inside any project, and saying it again there is a re-observation of it."""
+    with _alice() as mem:
+        shared = mem.remember("user", "prefers_editor", "vim").added[0]
+        receipt = mem.scope(project=PROJ_A).remember("user", "prefers_editor", "vim")
+        assert [c.id for c in receipt.reinforced] == [shared.id] and receipt.added == []
+        assert mem.store.get_claim(shared.id).observation_count == 2
+
+
+def test_a_user_level_repeat_of_a_value_one_project_holds_is_stored_at_user_level():
+    """A user-level reader cannot see into a project, so a project's claim cannot absorb
+    a user-level write either."""
+    with _alice() as mem:
+        theirs = mem.scope(project=PROJ_A).remember("user", "prefers_editor", "vim").added[0]
+        receipt = mem.remember("user", "prefers_editor", "vim")
+        assert receipt.reinforced == []
+        assert [c.scope.project for c in receipt.added] == [None]
+        assert [c.object for c in mem.get_all()] == ["vim"]
+        assert mem.store.get_claim(theirs.id).observation_count == 1
+
+
+def test_a_retraction_repeated_in_another_project_leaves_that_projects_record_alone():
+    with _alice() as mem:
+        b = mem.scope(project=PROJ_B)
+        b.remember("user", "prefers_editor", "vim")
+        b.remember("user", "prefers_editor", "vim", polarity=-1)
+        [theirs] = _tombstones(mem)
+        mem.scope(project=PROJ_A).remember("user", "prefers_editor", "vim", polarity=-1)
+        assert mem.store.get_claim(theirs.id).observation_count == 1
+
+
+def test_a_repeated_turn_does_not_reinforce_a_claim_its_writer_cannot_see():
+    """A store written before the rule can hold one project's turn among another
+    project's sources. A word-for-word repeat of that turn skips extraction and
+    reinforces the claims citing it, so those claims pass the same test."""
+    with _alice() as mem:
+        a = mem.scope(project=PROJ_A)
+        turn = a.add("Deploys go out on Tuesdays.").episode_ids[0]
+        theirs = mem.scope(project=PROJ_B).remember(
+            "user", "prefers_editor", "vim", sources=[turn]).added[0]
+        a.add("Deploys go out on Tuesdays.")
+        assert mem.store.get_claim(theirs.id).observation_count == 1
+
+
+def test_why_lists_only_the_source_turns_the_reader_can_see():
+    """A user-level preference is visible from every project and can cite a turn from
+    each. `why()` lists the turns the reader could also find by searching, so one
+    project cannot read another's text through a claim they share."""
+    with _alice() as mem:
+        mem.scope(project=PROJ_A).add("I prefer vim. The Falcon deal closes on Friday.")
+        [shared] = [c for c in mem.scope(project=PROJ_B).get_all() if c.object == "vim"]
+        assert shared.scope.project is None
+        assert mem.scope(project=PROJ_B).why(shared.id).episodes == []
+        assert [e.scope.project for e in mem.scope(project=PROJ_A).why(shared.id).episodes] \
+            == [PROJ_A]
+
+
+def test_why_does_not_list_a_superseded_claim_from_a_sibling_session():
+    with _alice() as mem:
+        mem.remember("user", "lives_in", "Berlin", session="s1")
+        paris = mem.remember("user", "lives_in", "Paris", session="s2").added[0]
+        assert mem.why(paris.id, session="s2").superseded == []
+
+
+def _ancestor_calls(monkeypatch, mem: Memvara, turns: int) -> int:
+    s = mem.scope(project=PROJ_A, session="s1")
+    cited = [Episode(content=f"I still prefer vim, day {i}.") for i in range(turns)]
+    cid = s.remember("user", "prefers_editor", "vim", sources=cited).added[0].id
+    calls: list[Scope] = []
+    real = Scope.ancestors
+    monkeypatch.setattr(Scope, "ancestors", lambda self: calls.append(self) or real(self))
+    assert len(s.why(cid).episodes) == turns
+    monkeypatch.setattr(Scope, "ancestors", real)
+    return len(calls)
+
+
+def test_why_checks_visibility_once_per_scope_rather_than_once_per_turn(monkeypatch):
+    """Provenance is cumulative and uncapped: a fact restated daily for a year cites 365
+    turns. Asking `sees()` about each turn rebuilt the reader's ancestors every time, and
+    made `why()` on such a claim 3.5 times slower (1.7 ms against 6.1 ms), so the check
+    is made once per distinct scope."""
+    with _alice() as few, _alice() as many:
+        assert _ancestor_calls(monkeypatch, few, 5) == _ancestor_calls(monkeypatch, many, 60)
+
+
+def test_a_near_duplicate_turn_does_not_reinforce_another_projects_claim():
+    """A turn worded like a stored claim is read as a restatement and reinforces it with no
+    extraction. That search runs over the turn's own scope and the ones above it, and this
+    pins it: the same words in another project leave the claim alone."""
+    with _alice() as mem:
+        theirs = mem.scope(project=PROJ_B).remember("user", "prefers_editor", "vim").added[0]
+        mem.scope(project=PROJ_A).add(theirs.text)
+        assert mem.store.get_claim(theirs.id).observation_count == 1
+        mem.scope(project=PROJ_B).add(theirs.text)
+        assert mem.store.get_claim(theirs.id).observation_count == 2, "a restatement in B"
+
+
+def _cite_from_project_b(mem: Memvara, turn: str) -> Claim:
+    """The state the old lookup left behind: a claim in project B citing a turn from A."""
+    theirs = mem.scope(project=PROJ_B).remember("user", "prefers_editor", "vim").added[0]
+    theirs.sources.append(turn)
+    mem.store.put_claim(theirs)
+    return theirs
+
+
+def test_a_turn_cited_only_by_a_claim_out_of_its_sight_is_still_pending_extraction():
+    """A turn is pending until a claim cites it. A claim in a scope the turn cannot see
+    answers none of that scope's reads, so it does not count, and the turn is read again.
+    That is also how a store written before the visibility rule gets its facts back."""
+    with _alice() as mem:
+        a = mem.scope(project=PROJ_A)
+        turn = a.add("Deploys go out on Tuesdays.").episode_ids[0]
+        assert [e.id for e in a.pending_extraction()] == [turn]
+        _cite_from_project_b(mem, turn)
+        assert [e.id for e in a.pending_extraction()] == [turn]
+        assert a.reextract([turn]).already_extracted == 0
+
+
+def test_a_repeated_turn_still_reinforces_the_global_fact_it_filed_from_a_session():
+    """A global predicate clears only the project, so a turn written in a session inside a
+    repository files its fact at that session with no project, which the turn's own
+    ancestors do not include. It is still the turn's own claim: a repeat reinforces it,
+    and the turn is not offered for extraction again."""
+    with _alice() as mem:
+        s = mem.scope(project=PROJ_A, session="s1")
+        [claim] = s.add("I live in Berlin.").added
+        assert (claim.scope.project, claim.scope.session) == (None, "s1")
+        s.add("I live in Berlin.")
+        assert mem.store.get_claim(claim.id).observation_count == 2
+        assert s.pending_extraction() == []
+
+
+def test_a_new_value_in_one_session_leaves_a_sibling_sessions_value_alone():
+    """A slot spans every session and agent of its project. A write in session s2 used
+    to end the value session s1 held, which s2 cannot read, and hand it back in s2's
+    receipt. A write now closes only claims in its own scope, the broader scopes it
+    reads, and the narrower scopes beneath it."""
+    with _alice() as mem:
+        mem.remember("user", "lives_in", "Berlin", session="s1")
+        receipt = mem.remember("user", "lives_in", "Paris", session="s2")
+        assert receipt.invalidated == [] and receipt.disputed == []
+        assert [c.object for c in mem.get_all(session="s1")] == ["Berlin"]
+        assert [c.object for c in mem.get_all(session="s2")] == ["Paris"]
+
+
+def test_a_new_value_from_one_agent_leaves_a_sibling_agents_value_alone():
+    with _alice() as mem:
+        mem.remember("user", "lives_in", "Berlin", agent="a1")
+        receipt = mem.remember("user", "lives_in", "Paris", agent="a2")
+        assert receipt.invalidated == []
+        assert [c.object for c in mem.get_all(agent="a1")] == ["Berlin"]
+
+
+def test_a_retraction_in_one_session_leaves_a_sibling_sessions_value_alone():
+    with _alice() as mem:
+        theirs = mem.remember("user", "prefers_editor", "vim", session="s1").added[0]
+        receipt = mem.remember("user", "prefers_editor", "vim", polarity=-1, session="s2")
+        assert receipt.invalidated == []
+        assert [c.id for c in mem.get_all(session="s1")] == [theirs.id]
+
+
+def test_a_broader_write_still_closes_a_session_value_beneath_it():
+    """Reaching down is the documented behaviour of a slot operation, as it is for
+    `forget()` and `history()`: a user-level write ends the value a session holds. Only
+    the sideways reach, into a sibling, was the leak."""
+    with _alice() as mem:
+        mem.remember("user", "lives_in", "Berlin", session="s1")
+        receipt = mem.remember("user", "lives_in", "Paris")
+        assert [c.object for c in receipt.invalidated] == ["Berlin"]
+
+
+def test_remember_cites_only_turns_the_writer_can_see():
+    """Source turns are named by id, and ids are not secret. A claim may cite a turn in
+    its own scope or a broader one. Any other id, including one no turn has, is left out,
+    so a claim cannot be made to cite another scope's text, and the claim it returns
+    cannot tell the caller which of the ids exist."""
+    with _alice() as mem:
+        a, b = mem.scope(project=PROJ_A), mem.scope(project=PROJ_B)
+        mine = a.add("Deploys go out on Tuesdays.").episode_ids[0]
+        shared = mem.add("Deploys are frozen in December.").episode_ids[0]
+        theirs = b.add("Deploys go out on Fridays.").episode_ids[0]
+        claim = a.remember("user", "deploy_day", "Tuesday",
+                           sources=[mine, shared, theirs, "ep_missing"]).added[0]
+        assert claim.sources == [mine, shared]
+        assert mem.store.get_claim(claim.id).sources == [mine, shared]
 
 
 # =============================================================================
@@ -1305,3 +1535,20 @@ def test_a_store_predating_bulk_fetch_can_also_list_its_memories():
             assert [c.id for c in mem.produced(stored.sources[0])]
     finally:
         mem.close()
+
+
+def test_remember_takes_a_memory_type_spelled_as_the_mcp_tool_spells_it():
+    """`memory_remember` passes the type as a string, and so does anyone who copies its
+    arguments; `remember()` used to fail on it with an AttributeError (#270)."""
+    with Memvara(embedder=HashingEmbedder(dim=64), user="u") as mem:
+        claim = mem.remember("user", "prefers", "tabs", memory_type="procedural").added[0]
+        assert claim.memory_type is MemoryType.PROCEDURAL
+        assert mem.get(claim.id).memory_type is MemoryType.PROCEDURAL
+
+
+def test_remember_refuses_an_unknown_memory_type_by_name_and_writes_nothing():
+    with Memvara(embedder=HashingEmbedder(dim=64), user="u") as mem:
+        with pytest.raises(ValueError, match="memory_type must be one of episodic, "
+                                             "semantic, procedural, not 'durable'"):
+            mem.remember("user", "prefers", "tabs", memory_type="durable")
+        assert mem.get_all() == []

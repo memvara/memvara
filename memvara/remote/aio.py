@@ -277,11 +277,6 @@ class AsyncRemoteMemvara:
                 "recall(budget=...) is not available against a hosted deployment: "
                 "POST /v1/recall renders the block server-side and takes no budget. Use "
                 "a smaller k, or render your own block from search().")
-        if valid_at is not None:
-            raise ValueError(
-                "recall(valid_at=...) is not available against a hosted deployment: "
-                "POST /v1/recall has no time axis. Use search(valid_at=...) and render "
-                "your own block.")
         body = await self._read(
             "/v1/recall",
             body=_sent({"query": query, "k": k, "min_score": min_score,
@@ -289,6 +284,7 @@ class AsyncRemoteMemvara:
                         "query_rewrite": None if query_rewrite else False,
                         "synthesize": synthesize or None,
                         "memory_types": _types(memory_types),
+                        "valid_at": _iso(valid_at),
                         **_filter_fields(filters, filepath_prefix, self.metadata_filters),
                         "include_episodes": include_episodes}))
         return str(body["text"])
@@ -398,6 +394,8 @@ class AsyncRemoteMemvara:
         return [hydrate.path(p) for p in body["paths"]]
 
     async def standing(self, *, k: int | None = None) -> list[Claim]:
+        if k is not None:
+            _check_k(k)
         body = await self._request("GET", "/v1/standing",
                                    params=self._params(limit=k))
         return [hydrate.claim(c) for c in body["memories"]]

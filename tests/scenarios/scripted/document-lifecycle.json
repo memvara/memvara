@@ -1,0 +1,57 @@
+{
+  "id": "document-lifecycle",
+  "description": "One document through its whole life: added with metadata, looked up by its custom_id, sent again with the same custom_id after it changed, listed by folder, looked up by its id, and deleted by its id. Sending it again updates the document in place, so it keeps its id, the folder lists one document, and a read finds the new text and not the old. Deleting erases its text from every read, and deleting it a second time deletes nothing.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "workspace": {"files": {"handbook/onboarding.md": "# Onboarding\n\nNew hires get a laptop on day one. Badges are issued by the facilities desk on the ground floor.\n"}},
+  "sessions": [
+    {"turns": [
+      {"user": "Keep our onboarding guide in memory. It's handbook/onboarding.md, and it belongs to the people team.",
+       "script": [
+         {"tool": "memory_add_document", "args": {"content": "{file:handbook/onboarding.md}", "custom_id": "handbook/onboarding.md", "title": "Onboarding guide", "filepath": "handbook/onboarding.md", "mime": "text/markdown", "metadata": {"team": "people"}}, "capture": {"doc_id": "document (doc_[0-9a-f]+):"}}
+       ]},
+      {"id": "check", "user": "Did that save properly?",
+       "script": [{"tool": "memory_get_document", "args": {"id": "handbook/onboarding.md"}}]}
+    ]},
+    {"turns": [
+      {"user": "The guide changed. Here is the new text: laptops now arrive during the first week.",
+       "script": [
+         {"tool": "memory_add_document", "args": {"content": "# Onboarding\n\nNew hires get a laptop during their first week. Badges are issued by the facilities desk on the ground floor.\n", "custom_id": "handbook/onboarding.md", "title": "Onboarding guide", "filepath": "handbook/onboarding.md", "mime": "text/markdown"}}
+       ]},
+      {"id": "listed", "user": "Which documents do you have in the handbook folder?",
+       "script": [{"tool": "memory_list_documents", "args": {"filepath_prefix": "handbook/"}}]},
+      {"id": "other-folder", "user": "Anything in the policies folder?",
+       "script": [{"tool": "memory_list_documents", "args": {"filepath_prefix": "policies/"}}]},
+      {"id": "after-update", "user": "When do new hires get their laptop?",
+       "script": [{"tool": "memory_recall", "args": {"query": "when do new hires get a laptop", "include_episodes": true}}]},
+      {"id": "by-id", "user": "Is it still the same document?",
+       "script": [{"tool": "memory_get_document", "args": {"id": "{doc_id}"}}]},
+      {"id": "delete", "user": "We're retiring that guide. Delete it.",
+       "script": [{"tool": "memory_delete_document", "args": {"id": "{doc_id}"}}]},
+      {"id": "delete-again", "user": "Delete it again, just to be sure.",
+       "script": [{"tool": "memory_delete_document", "args": {"id": "{doc_id}"}}]},
+      {"id": "after-delete", "user": "When do new hires get their laptop, according to the guide?",
+       "script": [
+         {"tool": "memory_get_document", "args": {"id": "handbook/onboarding.md"}},
+         {"tool": "memory_recall", "args": {"query": "when do new hires get a laptop", "include_episodes": true}},
+         {"tool": "memory_list_documents"}
+       ]}
+    ]}
+  ],
+  "store_gold": [],
+  "answer_gold": [
+    {"id": "stored-with-its-title", "turn": "check", "must_contain": "title: Onboarding guide"},
+    {"id": "stored-with-its-metadata", "turn": "check", "must_contain": "metadata: team=people"},
+    {"id": "update-keeps-one-document", "turn": "listed", "must_contain": "1 document(s), newest first"},
+    {"id": "other-folder-is-empty", "turn": "other-folder", "abstain": true},
+    {"id": "update-serves-the-new-text", "turn": "after-update", "must_contain": "New hires get a laptop during their first week"},
+    {"id": "update-drops-the-old-text", "turn": "after-update", "must_not_contain": "on day one"},
+    {"id": "update-keeps-the-id", "turn": "by-id", "must_contain": "custom_id: handbook/onboarding.md"},
+    {"id": "delete-erases-the-text", "turn": "delete", "must_contain": "its text is erased"},
+    {"id": "second-delete-deletes-nothing", "turn": "delete-again", "must_contain": "Nothing deleted"},
+    {"id": "nothing-after-delete", "turn": "after-delete", "abstain": true}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}

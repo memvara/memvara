@@ -45,6 +45,7 @@ from memvara import (
 from memvara import core as core_module
 from memvara.telemetry import WRITE_EMBEDDING_UNUSABLE, MemoryRecorder
 from memvara.core import _drop_vectors
+from memvara.store import StoreInUseError
 from memvara.embed import fingerprint as fingerprint_module
 from memvara.embed.fingerprint import (
     embedder_name,
@@ -186,6 +187,7 @@ def test_repr_still_reports_live_and_total_claims(mem):
 # The embedder a store was built with
 # =============================================================================
 
+@pytest.mark.covers("inv:RT7")
 def test_a_new_store_records_the_embedder_that_owns_it(tmp_path):
     path = str(tmp_path / "m.db")
     with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
@@ -194,6 +196,7 @@ def test_a_new_store_records_the_embedder_that_owns_it(tmp_path):
     assert recorded == {"embedder": "hashing:128:3-5", "dim": 128}
 
 
+@pytest.mark.covers("inv:RT7")
 def test_an_embedder_swap_is_refused_at_construction_not_discovered_at_read(tmp_path):
     """The `memvara[local-embed]` upgrade path: `default_embedder()` starts returning a
     384-dim model, every read raises, and writes keep succeeding into a store nothing
@@ -375,6 +378,128 @@ def test_a_same_width_model_swap_warns_because_nothing_else_would(tmp_path):
         Memvara(path, embedder=Rival(dim=128), llm=NullLLM()).close()
 
 
+def _damage_record(tmp_path, damage: str) -> pathlib.Path:
+    """Tear the record the way a crash during its write does, or delete it the way a
+    copy of the store taken without it does."""
+    record = tmp_path / "m.db.embedder.json"
+    if damage == "torn":
+        record.write_text('{"embedder": "hashing:1')
+    else:
+        record.unlink()
+    return record
+
+
+@pytest.mark.parametrize("damage", ["torn", "deleted"])
+def test_a_store_whose_record_is_damaged_warns_that_it_cannot_tell(tmp_path, damage):
+    """The record is the only thing that tells two embedders of the same width apart. When
+    it is torn or gone on a store that holds vectors, the open cannot tell whether this
+    embedder wrote them, so it says so and names the fix. Before the fix for #280 it said
+    nothing, so here a different embedder opened the store in silence."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    record = _damage_record(tmp_path, damage)
+
+    other = HashingEmbedder(dim=128, ngram=(2, 4))      # the same width, another space
+    with pytest.warns(EmbedderChangedWarning,
+                      match="cannot tell whether hashing:128:2-4 wrote") as caught:
+        Memvara(path, embedder=other, llm=NullLLM()).close()
+    [warning] = _memvara_warnings(caught)
+    message = str(warning.message)
+    assert str(record) in message, "must name the file that is damaged"
+    assert "mem.reembed()" in message, "must name the fix for vectors it did not write"
+    assert "the record will name hashing:128:2-4" in message
+    assert json.loads(record.read_text()) == {"embedder": "hashing:128:2-4", "dim": 128}
+
+
+def test_a_record_that_names_another_width_is_treated_as_damaged(tmp_path):
+    """A record names an embedder and a width. One whose width is not the width of the
+    vectors the store holds is wrong about them, whatever name it gives, and was never
+    checked, because only the name was compared. It is treated as damaged now: the open
+    warns that it cannot tell, and writes the record again with the true width."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    record = tmp_path / "m.db.embedder.json"
+    record.write_text(json.dumps({"embedder": "hashing:128:3-5", "dim": 64}))
+    with pytest.warns(EmbedderChangedWarning, match="cannot tell whether hashing:128:3-5"):
+        Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()).close()
+    assert json.loads(record.read_text()) == {"embedder": "hashing:128:3-5", "dim": 128}
+
+
+@pytest.mark.parametrize("damage", ["torn", "deleted"])
+def test_a_warning_turned_into_an_error_leaves_the_record_as_it_was(tmp_path, damage):
+    """The owner, X, lost its record, and an open with the wrong embedder, Y, raised the
+    warning as an error. That open had already written the record, so it named Y, and the
+    owner reopening with X was then told that Y wrote the vectors, which is backwards. The
+    warning now comes first, and the record is written only if the open goes on."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    record = _damage_record(tmp_path, damage)
+    before = record.read_bytes() if record.exists() else None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(EmbedderChangedWarning, match="cannot tell"):
+            Memvara(path, embedder=HashingEmbedder(dim=128, ngram=(2, 4)), llm=NullLLM())
+    assert (record.read_bytes() if record.exists() else None) == before
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()).close()
+    said = [str(w.message) for w in _memvara_warnings(caught)]
+    assert not any("hashing:128:2-4" in message for message in said), said
+
+
+def test_a_store_whose_record_was_lost_notices_the_next_embedder_change(tmp_path):
+    """The open that finds the record missing writes it again, so the check is lost for
+    one open and not for good."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    _damage_record(tmp_path, "deleted")
+    with pytest.warns(EmbedderChangedWarning, match="cannot tell"):
+        Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()).close()
+
+    with pytest.warns(EmbedderChangedWarning, match="written by hashing:128:3-5"):
+        Memvara(path, embedder=HashingEmbedder(dim=128, ngram=(2, 4)),
+                llm=NullLLM()).close()
+
+
+def test_a_record_that_cannot_be_written_again_says_the_warning_will_repeat(
+        tmp_path, monkeypatch):
+    """Where the record cannot be written, the next open cannot tell either. The warning
+    comes before the write, so it can say only what the open will do if it goes on, and a
+    second warning says the write failed and that the first will come back."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    record = _damage_record(tmp_path, "deleted")
+    monkeypatch.setattr(core_module, "write_fingerprint", lambda store, fp: False)
+
+    for _ in range(2):
+        with pytest.warns(EmbedderChangedWarning) as caught:
+            Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM()).close()
+        said = [str(w.message) for w in _memvara_warnings(caught)]
+        assert len(said) == 2 and "cannot tell" in said[0], said
+        assert "could not be written" in said[1] and "every open" in said[1], said
+    assert not record.exists()
+
+
+def test_a_store_that_cannot_have_a_record_does_not_warn_about_one():
+    """An in-memory store has no file to keep a record beside, so a missing record there
+    is not damage, and a second `Memvara` over its vectors has nothing to warn about."""
+    store = SQLiteStore(":memory:")
+    first = Memvara(store=store, embedder=HashingEmbedder(dim=32), llm=NullLLM())
+    first.remember("user", "lives_in", "Lisbon")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        Memvara(store=store, embedder=HashingEmbedder(dim=32), llm=NullLLM())
+    assert not _memvara_warnings(caught)
+    first.close()
+
+
 # `LocalEmbedder()` moved from all-MiniLM-L6-v2 to bge-small-en-v1.5, two models of the
 # same width, 384. No dimension check can tell their vectors apart, so what keeps an
 # existing store on the model that wrote it is the name its fingerprint records.
@@ -404,6 +529,7 @@ def _default_asked_for(monkeypatch) -> list:
     return asked
 
 
+@pytest.mark.covers("inv:RT7")
 def test_a_store_keeps_the_local_model_its_fingerprint_names(tmp_path, monkeypatch):
     """`Memvara()` with no embedder asks for the model the store records, so a store
     MiniLM wrote goes on opening with MiniLM after the default moved."""
@@ -417,12 +543,16 @@ def test_a_store_keeps_the_local_model_its_fingerprint_names(tmp_path, monkeypat
 def test_a_store_with_the_old_width_and_no_record_keeps_the_old_default(tmp_path,
                                                                         monkeypatch):
     """A store copied without its sidecar says only its width. At 384, the one local model
-    a default configuration could have written it with is the one the default was then."""
+    a default configuration could have written it with is the one the default was then.
+    That model is the likeliest writer and not a certain one, so the open still warns that
+    it cannot tell, and records the model it chose."""
     path = _written_by(tmp_path, _MINILM)
     (tmp_path / "m.db.embedder.json").unlink()
     asked = _default_asked_for(monkeypatch)
-    Memvara(path, llm=NullLLM()).close()
+    with pytest.warns(EmbedderChangedWarning, match="cannot tell"):
+        Memvara(path, llm=NullLLM()).close()
     assert asked == ["sentence-transformers/all-MiniLM-L6-v2"]
+    assert json.loads((tmp_path / "m.db.embedder.json").read_text())["embedder"] == _MINILM
 
 
 def test_a_store_with_no_vectors_takes_the_default_whatever_a_record_names(tmp_path,
@@ -563,12 +693,124 @@ def test_a_fingerprint_that_cannot_be_written_is_not_fatal(tmp_path, monkeypatch
     assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8))) is False
 
 
-@pytest.mark.parametrize("payload", ["not json at all", '{"embedder": "x"}', '{"dim": "wide"}'])
+@pytest.mark.parametrize("payload", [
+    "not json at all", '{"embedder": "x"}', '{"dim": "wide"}',
+    # A width that is not an int was read with `int()`, so "128" and 128.9 were believed,
+    # and so was true, which Python counts as the int 1.
+    '{"embedder": "x", "dim": "128"}', '{"embedder": "x", "dim": 128.9}',
+    '{"embedder": "x", "dim": true}'])
 def test_a_corrupt_fingerprint_file_is_ignored_rather_than_believed(tmp_path, payload):
     path = str(tmp_path / "m.db")
     (tmp_path / "m.db.embedder.json").write_text(payload)
     store = types.SimpleNamespace(path=path)
     assert read_fingerprint(store) is None
+
+
+class _DiskFull:
+    """The `json` module, except that `dump` writes part of the record and fails."""
+
+    def __getattr__(self, name):
+        return getattr(json, name)
+
+    @staticmethod
+    def dump(obj, fh, **kwargs):
+        fh.write('{"embedder": "hash')
+        raise OSError(28, "No space left on device")
+
+
+def test_a_record_write_that_fails_halfway_leaves_the_old_record_whole(
+        tmp_path, monkeypatch):
+    """A full disk or a crash in the middle of writing the record must leave the old
+    record or the new one, never half of one, because a torn record reads as no record at
+    all. `reembed()` rewrites the record on a store that already holds vectors, and there
+    a torn record would lose the one check that tells two embedders of the same width
+    apart."""
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+    old = make_fingerprint(HashingEmbedder(dim=8))
+    assert write_fingerprint(store, old) is True
+    monkeypatch.setattr(fingerprint_module, "json", _DiskFull())
+    assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=16))) is False
+    assert read_fingerprint(store) == old
+    assert [p.name for p in tmp_path.iterdir()] == ["m.db.embedder.json"], (
+        "a failed write must not leave its temporary file behind")
+
+
+def test_a_temporary_record_that_cannot_be_removed_is_not_fatal(tmp_path, monkeypatch):
+    """After a failed write the temporary file is removed, and when even that fails, the
+    write reports that it did not write rather than raising: the record is advisory, and
+    it must never be the reason a store does not open."""
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+
+    class NoRemove:
+        """The `os` module, except that `remove` is refused."""
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def remove(path):
+            raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(fingerprint_module, "json", _DiskFull())
+    monkeypatch.setattr(fingerprint_module, "os", NoRemove())
+    assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8))) is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_record_is_updated_in_place_in_a_directory_that_forbids_new_files(tmp_path):
+    """The record is written to a temporary file beside it and renamed, and a directory
+    where the account may write the existing files but may not add new ones refuses that
+    temporary file. The record used to be overwritten in place, which such a directory
+    allows, so when the temporary file is refused, the record is still written in place."""
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+    assert write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8))) is True
+    tmp_path.chmod(0o555)
+    try:
+        written = write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=16)))
+    finally:
+        tmp_path.chmod(0o755)
+    assert written is True
+    assert read_fingerprint(store) == make_fingerprint(HashingEmbedder(dim=16))
+    assert [p.name for p in tmp_path.iterdir()] == ["m.db.embedder.json"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows file modes do not express this")
+def test_a_record_that_does_not_exist_cannot_be_written_where_new_files_are_refused(
+        tmp_path):
+    """Writing in place needs the record to exist already. Where there is none yet and the
+    directory refuses new files, nothing can be written, and the write says so."""
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+    tmp_path.chmod(0o555)
+    try:
+        if os.access(tmp_path, os.W_OK):
+            pytest.skip("this user may write a read-only file")
+        written = write_fingerprint(store, make_fingerprint(HashingEmbedder(dim=8)))
+    finally:
+        tmp_path.chmod(0o755)
+    assert written is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_record_that_is_a_link_stays_a_link_to_the_updated_file(tmp_path):
+    """`os.replace` replaces a link itself, so a record kept as a link to a file elsewhere
+    became a plain file beside the store, and the file the link named kept the old record.
+    The link is followed now: the temporary file is made beside the file it names, and
+    that file is the one replaced."""
+    elsewhere = tmp_path / "records"
+    elsewhere.mkdir()
+    target = elsewhere / "m.json"
+    target.write_text(json.dumps({"embedder": "hashing:8:3-5", "dim": 8}))
+    link = tmp_path / "m.db.embedder.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("this platform may not make a symbolic link")
+    store = types.SimpleNamespace(path=str(tmp_path / "m.db"))
+    new = make_fingerprint(HashingEmbedder(dim=16))
+    assert write_fingerprint(store, new) is True
+    assert link.is_symlink() and link.resolve() == target.resolve()
+    assert json.loads(target.read_text()) == {"embedder": new.name, "dim": new.dim}
+    assert [p.name for p in elsewhere.iterdir()] == ["m.json"]
 
 
 def test_stored_dim_reads_the_vectors_through_the_protocol_alone():
@@ -625,6 +867,7 @@ def _bare_claim(predicate):
 # reembed(): the migration the error message always promised
 # =============================================================================
 
+@pytest.mark.covers("inv:RT7")
 def test_reembed_at_construction_migrates_a_store_to_a_new_embedder(tmp_path):
     path = str(tmp_path / "m.db")
     with Memvara(path, embedder=HashingEmbedder(dim=512), llm=NullLLM()) as mem:
@@ -694,6 +937,45 @@ def test_reembed_switches_every_subsystem_to_the_new_embedder(mem):
     assert mem.reader.embedder is replacement, "queries would keep the old dimension"
     assert mem.consolidator.embedder is replacement
     assert [r.claim.object for r in mem.search("lives")] == ["Lisbon"]
+
+
+@pytest.mark.parametrize("refusal", ["another store has it open", "read-only lock file"])
+def test_a_refused_reembed_leaves_every_subsystem_on_the_old_embedder(tmp_path, refusal):
+    """`reembed()` gave all four subsystems the new embedder before the clear could
+    refuse, so a refused re-embed left the object holding the new embedder beside the old
+    vectors, although it said it had changed nothing. With an embedder of the same width
+    nothing would raise, and every search would compare two unrelated vector spaces. The
+    clear now refuses before anything is rebound."""
+    path = str(tmp_path / "m.db")
+    with Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM()) as setup:
+        setup.remember("user", "lives_in", "Lisbon")
+    lock = tmp_path / "m.db.lock"
+    other = None
+    if refusal == "read-only lock file":
+        if os.name != "posix":
+            pytest.skip("Windows file modes do not express this")
+        os.chmod(lock, 0o444)
+        if os.access(lock, os.W_OK):
+            os.chmod(lock, 0o644)
+            pytest.skip("this user may write a read-only file")
+        expected: type[Exception] = PermissionError
+    else:
+        other = SQLiteStore(path)
+        expected = StoreInUseError
+    old = HashingEmbedder(dim=64)
+    mem = Memvara(path, embedder=old, llm=NullLLM())
+    try:
+        with pytest.raises(expected):
+            mem.reembed(HashingEmbedder(dim=64, ngram=(2, 4)))
+        assert mem.embedder is old
+        assert mem.writer.embedder is old
+        assert mem.reader.embedder is old
+        assert mem.consolidator.embedder is old
+    finally:
+        mem.close()
+        if other is not None:
+            other.close()
+        os.chmod(lock, 0o644)
 
 
 def test_reembed_also_repairs_claims_that_were_never_embedded():
@@ -922,6 +1204,77 @@ def test_delete_is_visible_to_as_of_queries_from_before_it(mem):
     claim = mem.get_all()[0]
     mem.delete(claim.id)
     assert [c.object for c in mem.get_all(as_of=before)] == ["Lisbon"]
+
+
+def test_a_second_delete_leaves_the_first_retirement_as_it_was(mem):
+    """A retirement records when we stopped believing a claim, and a second `delete()`
+    moved that instant later and added a second closure record. Every read of the past
+    between the two deletions then believed the claim again: history was rewritten, not
+    appended to. The second call now changes nothing, and still returns True, because
+    the claim it names is retired when it returns."""
+    claim = mem.remember("user", "likes", "tea").added[0]
+    assert mem.delete(claim.id, reason="asked to") is True
+    first = mem.store.get_claim(claim.id)
+    between = first.invalidated_at + timedelta(microseconds=1)
+    assert mem.get_all(known_at=between) == []
+    assert mem.delete(claim.id, at=utcnow() + timedelta(seconds=1), reason="again") is True
+    second = mem.store.get_claim(claim.id)
+    assert second.invalidated_at == first.invalidated_at, "the retirement moved"
+    assert second.meta == first.meta, "a second closure was recorded"
+    assert mem.get_all(known_at=between) == []
+
+
+def test_a_retirement_is_never_moved_by_close_out():
+    """The same rule in the one function every closure goes through, so that no other
+    caller can move a retirement either, earlier or later."""
+    import copy
+
+    from memvara.types import close_out
+    retired_at = utcnow()
+    claim = Claim(subject="user", predicate="likes", object="tea",
+                  valid_from=retired_at - timedelta(days=1),
+                  recorded_at=retired_at - timedelta(days=1))
+    close_out(claim, retired_at, None, "retired")
+    before = copy.deepcopy((claim.invalidated_at, claim.invalidated_by, claim.meta))
+    for at in (retired_at - timedelta(hours=1), retired_at + timedelta(hours=1)):
+        close_out(claim, at, "cl_other", "retired", "again")
+        assert (claim.invalidated_at, claim.invalidated_by, claim.meta) == before
+
+
+def test_ending_a_retired_claim_leaves_both_clocks_and_its_record_as_they_were(mem):
+    """The same flaw from the other clock. `delete(close="ended")` on a claim that was
+    already retired set its `valid_to` and added a second closure record, `ended`, so
+    history showed a claim we had stopped believing as one that later stopped being
+    true, and a read of the past after the new end no longer found it true during the
+    period we believed it. A retired claim is now left exactly as it is."""
+    import copy
+
+    claim = mem.remember("user", "allergic_to", "pollen").added[0]
+    assert mem.delete(claim.id, reason="the allergy is walnuts") is True
+    retired = copy.deepcopy(mem.store.get_claim(claim.id))
+    assert mem.delete(claim.id, close="ended", reason="no longer applies") is True
+    after = mem.store.get_claim(claim.id)
+    assert after.valid_to is None, "the retired claim was ended"
+    assert after.meta == retired.meta, "a second closure record was added"
+    assert (after.invalidated_at, after.invalidated_by) == (retired.invalidated_at,
+                                                           retired.invalidated_by)
+
+
+def test_close_out_leaves_a_retired_claim_alone_whatever_the_closure():
+    import copy
+
+    from memvara.types import close_out
+    retired_at = utcnow()
+    claim = Claim(subject="user", predicate="likes", object="tea",
+                  valid_from=retired_at - timedelta(days=1),
+                  recorded_at=retired_at - timedelta(days=1))
+    close_out(claim, retired_at, None, "retired")
+    before = copy.deepcopy((claim.valid_to, claim.invalidated_at, claim.invalidated_by,
+                            claim.meta))
+    for at in (retired_at - timedelta(hours=1), retired_at + timedelta(hours=1)):
+        close_out(claim, at, "cl_other", "ended", "it ended")
+        assert (claim.valid_to, claim.invalidated_at, claim.invalidated_by,
+                claim.meta) == before
 
 
 def test_delete_of_an_unknown_id_is_false_not_an_error(mem):
@@ -1519,6 +1872,7 @@ def test_recall_at_a_past_day_renders_that_day_and_says_so(mem):
     assert with_ids.claim_ids == (berlin.id,)
 
 
+@pytest.mark.covers("inv:RT1")
 def test_recall_at_a_past_day_reaches_no_retired_claim(mem):
     """The reason `valid_at` is on `recall()` and `as_of` is not.
 
@@ -2692,6 +3046,113 @@ def test_forget_can_close_out_a_slot_that_genuinely_finished(mem):
     assert [c.object for c in mem.get_all(user="alice",
                                           valid_at=began + timedelta(days=1))] == ["Acme"]
     assert mem.get_all(user="alice") == []
+
+
+def test_forget_retires_a_value_scheduled_to_begin_later_as_well_as_the_live_one(mem):
+    """`forget` retires everything the store believes in the slot, and a value stored to
+    begin later is believed from the moment it is recorded. Retiring only the live values
+    left it believed, so the forgotten slot answered again when it began (#282). A value
+    that has already ended is history and is left as it is."""
+    now = utcnow()
+    mem.remember("user", "lives_in", "Rome", valid_from=now - timedelta(days=60),
+                 valid_to=now - timedelta(days=30))
+    mem.remember("user", "lives_in", "Berlin", valid_from=now - timedelta(days=10))
+    mem.remember("user", "lives_in", "Paris", valid_from=now + timedelta(days=30))
+
+    forgotten = mem.forget("user", "lives_in")
+
+    assert sorted(c.object for c in forgotten) == ["Berlin", "Paris"]
+    assert {c.state for c in forgotten} == {"retired"}
+    assert mem.get_all(valid_at=now + timedelta(days=60)) == []
+    assert [c.object for c in mem.get_all(valid_at=now - timedelta(days=45))] == ["Rome"]
+
+
+def test_ending_a_slot_ends_a_scheduled_value_at_its_own_start(mem):
+    """The world-change reading closes the same values. One that has not begun is ended
+    where it would have begun, the clamp every ending gets, so it is true at no instant
+    instead of becoming true later."""
+    now = utcnow()
+    later = now + timedelta(days=30)
+    mem.remember("user", "works_at", "Acme", valid_from=now - timedelta(days=30))
+    mem.remember("user", "works_at", "Globex", valid_from=later)
+
+    ended = {c.object: c for c in mem.forget("user", "works_at", close="ended")}
+
+    assert sorted(ended) == ["Acme", "Globex"]
+    assert ended["Globex"].valid_from == ended["Globex"].valid_to == later
+    assert ended["Globex"].invalidated_at is None
+    assert mem.get_all(valid_at=later + timedelta(days=1)) == []
+
+
+@pytest.mark.parametrize("close", ["ended", "retired"])
+def test_forget_matching_closes_only_what_is_in_force_now(mem, close):
+    """Unlike `forget()`, which closes a value stored to begin later with its slot
+    (#282), `forget_matching` closes only claims in force now. Its preview is a
+    present-tense search, and its confirming call refuses a claim that is not live, so
+    a value stored to begin later is neither listed nor closed. The docstring states the
+    difference; this pins it, and shows the two ways that do close such a value."""
+    now = utcnow()
+    acme = mem.remember("user", "works_at", "Acme",
+                        valid_from=now - timedelta(days=30)).added[0]
+    globex = mem.remember("user", "works_at", "Globex",
+                          valid_from=now + timedelta(days=30)).added[0]
+    next_month = now + timedelta(days=60)
+
+    preview = mem.forget_matching("Globex Acme", close=close, k=10)
+    assert set(preview.matches) == {acme.id}
+    done = mem.forget_matching("Globex Acme", close=close, k=10,
+                               confirm=preview.confirm)
+    assert [c.object for c in done.closed] == ["Acme"]
+    assert [c.object for c in mem.get_all(valid_at=next_month)] == ["Globex"]
+
+    assert mem.delete(globex.id, close=close)
+    assert mem.get_all(valid_at=next_month) == []
+    assert "stored to begin later" in (Memvara.forget_matching.__doc__ or "")
+
+
+def test_forget_asks_the_store_for_the_open_values_instead_of_reading_the_whole_slot(
+        mem, monkeypatch):
+    """A slot restated hundreds of times holds a few values that have not ended and
+    many that have. `forget()` read every row the slot had ever held with `slot_history`
+    and picked the open ones in Python, so each call paid for the whole history. The
+    store selects them now, with `unended_predicate` in its own query."""
+    now = utcnow()
+    for days, city in ((90, "Rome"), (60, "Oslo"), (30, "Berlin")):
+        mem.remember("user", "lives_in", city, valid_from=now - timedelta(days=days))
+    mem.remember("user", "lives_in", "Paris", valid_from=now + timedelta(days=30))
+    monkeypatch.setattr(mem.store, "slot_history",
+                        lambda *a, **kw: pytest.fail("forget() read the whole slot"))
+
+    forgotten = mem.forget("user", "lives_in")
+
+    assert [c.object for c in forgotten] == ["Berlin", "Paris"], "in recorded order"
+
+
+def test_forget_on_a_store_without_unended_claims_reads_the_clock_once(monkeypatch):
+    """A store written before `unended_claims` still has every value `forget()` closes
+    picked for it: the slot's history, filtered with `Claim.is_unended`. That filter also
+    leaves out an expired claim, and it read the wall clock again for every claim it
+    tested. One `forget()` is one instant, so it now reads the clock once and tests every
+    claim at that instant."""
+    class OldStore(SQLiteStore):
+        unended_claims = None
+
+    mem = Memvara(store=OldStore(":memory:"), embedder=HashingEmbedder(dim=64),
+                  llm=NullLLM(), user="alice")
+    now = utcnow()
+    mem.remember("user", "lives_in", "Rome", valid_from=now - timedelta(days=60),
+                 valid_to=now - timedelta(days=30))
+    mem.remember("user", "lives_in", "Berlin", valid_from=now - timedelta(days=10))
+    mem.remember("user", "lives_in", "Paris", valid_from=now + timedelta(days=30))
+    reads = []
+    monkeypatch.setattr(core_module, "utcnow",
+                        lambda: reads.append(1) or utcnow())
+
+    forgotten = mem.forget("user", "lives_in")
+
+    assert [c.object for c in forgotten] == ["Berlin", "Paris"]
+    assert len(reads) == 1, f"forget() read the clock {len(reads)} times"
+    mem.close()
 
 
 @pytest.mark.parametrize("key, value", [

@@ -38,6 +38,10 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 RECALL = REPO / "plugin" / "hooks" / "recall.py"
+if str(RECALL.parent) not in sys.path:
+    sys.path.insert(0, str(RECALL.parent))
+
+import recall as recall_hook  # noqa: E402
 
 #: The arguments `memory_recall` declares on app.memvara.dev today, read from its
 #: `tools/list` on 2026-09-24. `query_rewrite` is not among them.
@@ -198,8 +202,10 @@ def test_a_server_like_todays_gets_one_request_per_recall(tmp_path):
     fake = Fake()
     reply = _run_hook(fake, tmp_path)
     [first], [wider] = _first_and_wider(fake)
-    assert "include_episodes" not in first and first["min_score"] == pytest.approx(0.29)
-    assert wider["include_episodes"] is True and wider["min_score"] == pytest.approx(0.29)
+    assert "include_episodes" not in first
+    assert first["min_score"] == pytest.approx(recall_hook.HOSTED_MIN_SCORE)
+    assert wider["include_episodes"] is True
+    assert wider["min_score"] == pytest.approx(recall_hook.HOSTED_MIN_SCORE)
     # `query_rewrite` is not in this server's schema, so it is never sent.
     assert all("query_rewrite" not in call for call in fake.recalls)
     assert "1 memory recalled" in reply["systemMessage"]
@@ -218,7 +224,7 @@ def test_a_server_without_include_episodes_gets_one_request_for_the_wider_recall
     assert (len(first), len(wider)) == (1, 1), fake.recalls
     assert all("include_episodes" not in call for call in fake.recalls)
     # The floor is kept: the server takes it, and nothing it refused was about it.
-    assert all(call.get("min_score") == pytest.approx(0.29) for call in fake.recalls)
+    assert all(call.get("min_score") == pytest.approx(recall_hook.HOSTED_MIN_SCORE) for call in fake.recalls)
 
 
 def test_a_server_without_min_score_gets_one_request_per_recall(tmp_path):
@@ -240,7 +246,7 @@ def test_a_failed_probe_falls_back_to_dropping_what_the_server_refused(tmp_path)
     first, wider = _first_and_wider(fake)
     assert len(first) == 2 and len(wider) == 2, fake.recalls
     assert "query_rewrite" in first[0] and "query_rewrite" not in first[1]
-    assert first[1]["min_score"] == pytest.approx(0.29), (
+    assert first[1]["min_score"] == pytest.approx(recall_hook.HOSTED_MIN_SCORE), (
         "the refusal named query_rewrite, so the floor must not be dropped with it")
     assert "1 memory recalled" in reply["systemMessage"]
 

@@ -9,7 +9,8 @@ import sys
 import pytest
 
 import memvara
-from harness.env import REAL_HOME, REPO, child_env
+from harness.env import REAL_HOME, REPO, child_env, feature_env
+from memvara.server.config import ServerConfig
 
 
 def test_the_suite_imports_the_checkout_it_lives_in() -> None:
@@ -51,6 +52,16 @@ def test_a_child_runs_this_checkout_offline_in_the_home_it_was_given(
     assert env["MEMVARA_FEATURE_PROJECT_SCOPE"] == "0"
     assert env["MEMVARA_DAEMON"] == "1"
     assert env["MEMVARA_USER"] == "tester"
+
+
+def test_feature_switches_are_named_the_way_the_server_reads_them() -> None:
+    """One helper builds the MEMVARA_FEATURE_<NAME> variables, for a server's environment
+    and for the client config the hooks read, and the server's own parser reads them back."""
+    env = feature_env({"documents": False, "extraction_chunks": True})
+    assert env == {"MEMVARA_FEATURE_DOCUMENTS": "0", "MEMVARA_FEATURE_EXTRACTION_CHUNKS": "1"}
+    config = ServerConfig.from_env({"MEMVARA_DB": ":memory:", **env})
+    assert "documents" in config.features_off
+    assert "extraction_chunks" not in config.features_off
 
 
 @pytest.mark.skipif(sys.platform == "win32",

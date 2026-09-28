@@ -90,7 +90,9 @@ evaluated against it exactly, and only then is `query` used to *order* what surv
   reason: the item stops answering `get()`, `search()` and `list_namespaces()`, and
   `history()` and `as_of` still reach it. That is right for a graph node replacing state
   and wrong for "delete my data", so the first one warns and names
-  `on_delete="erase"`.
+  `on_delete="erase"`. Erasing an item erases every value its fields have held, not only
+  the current ones, because a value that a later `put` changed and a field that a later
+  `put` dropped are both still stored.
 
     from langgraph.graph import StateGraph
     # pip install 'memvara[langgraph]'
@@ -114,6 +116,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence, cast
 
 from ..compat import NOTE_PREDICATE, ensure_note_predicate
 from ..select import PLAIN_READ
+from ..store import STATES
 from ..types import Claim, Result, content_hash, utcnow
 from ._common import IntegrationError, bind, require, scope_kw
 
@@ -193,8 +196,8 @@ _RETIRED_NOT_ERASED = (
     "That is the right default for a graph replacing its own state, which deletes a key "
     "because something superseded it and is better off keeping the trail. It is the "
     "wrong answer to a data-deletion request: pass MemvaraStore(on_delete='erase') to "
-    "erase the fields outright, or 'retire' to keep this behaviour and silence this "
-    "warning once you have decided."
+    "erase every value the item's fields have held outright, or 'retire' to keep this "
+    "behaviour and silence this warning once you have decided."
 )
 
 _RANKING_TRUNCATED = (
@@ -667,7 +670,8 @@ class _Store:
         are recognised as re-observations and cost nothing — and fields the item used to
         have and no longer does are **retired**, not erased, whatever `on_delete` says.
         A `put` is an update rather than a deletion request, and the bitemporal reading
-        of "this field is gone" is that belief in it ended here.
+        of "this field is gone" is that belief in it ended here. A later `delete()` under
+        `on_delete="erase"` erases such a field along with the rest of the item.
         """
         if op.ttl is not None:
             raise LangGraphCompatError(_NO_TTL.format(ttl=op.ttl))
@@ -688,22 +692,55 @@ class _Store:
                     self.memory.delete(claim.id, at=at, **self._kw)
 
     def _remove(self, existing: _Item | None, at: datetime) -> None:
-        """`delete(namespace, key)`, or a `None`-valued `PutOp`. Retires by default."""
+        """`delete(namespace, key)`, or a `None`-valued `PutOp`. Retires by default.
+
+        Retirement closes the item's live fields. Erasure erases every version of the
+        item, which `_versions` defines.
+        """
         if existing is None:
             return
-        for claim in existing.claims.values():
-            if self.on_delete == "erase":
-                # `sources=False`, and this is where the LangGraph adapter differs from
-                # the CrewAI one: a CrewAI record *is* its source turn, so erasing the
-                # record has to take the turn with it. An item written by `put()` has no
-                # source turn — nothing was said, a graph asserted it — so there is
+        if self.on_delete == "erase":
+            for claim in self._versions(existing):
+                # `sources=False`, the default: an item written by `put()` has no source
+                # turn, because nothing was said and a graph asserted it, so there is
                 # nothing else to reach for.
                 self.memory.erase(claim.id, **self._kw)
-            else:
+        else:
+            for claim in existing.claims.values():
                 self.memory.delete(claim.id, at=at, **self._kw)
         if self.on_delete == "warn" and not self._warned_delete:
             self._warned_delete = True
             warnings.warn(_RETIRED_NOT_ERASED, LangGraphDeletionWarning, stacklevel=2)
+
+    def _versions(self, item: _Item) -> list[Claim]:
+        """Every claim that has held one of `item`'s fields, in any state, oldest first.
+
+        An item is one namespace and key, stored as one claim per field. Every value a
+        field has held is a version of the item:
+
+        * the current value of each field;
+        * an earlier value that a later `put` changed, which is ended;
+        * a field that a later `put` dropped, which is retired;
+        * a value from before the item was deleted by retirement and put again, which is
+          retired too.
+
+        A field that is no longer in the item can be found only by the address in its meta
+        blob, so this reads every claim this store can read, in all three states, and
+        keeps the ones filed under this namespace and key. That is a scan of the scope,
+        as `_snapshot` is.
+
+        It reads the scopes `get()` reads, this store's own scope and the broader scopes
+        it inherits from, so it never reaches the same item in a sibling session, a
+        narrower scope or another user's store. The live claims are taken from `item` as
+        well, so the fields `get()` returned are erased even if the scan, made a moment
+        later, misses one.
+        """
+        found = {claim.id: claim for claim in item.claims.values()}
+        for claim in self.memory.get_all(states=STATES, **self._kw):
+            blob = self._blob_of(claim)
+            if blob is not None and (tuple(blob["namespace"]), blob["key"]) == item.address:
+                found.setdefault(claim.id, claim)
+        return sorted(found.values(), key=lambda c: (c.recorded_at, c.id))
 
     # -- reading -------------------------------------------------------------
 

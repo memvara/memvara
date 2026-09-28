@@ -247,6 +247,16 @@ def test_k_below_one_is_refused():
         make().profile(k=0)
 
 
+def test_standing_refuses_k_below_one_too():
+    """`standing(k=0)` answered an empty list in a scope that held preferences, which a
+    caller cannot tell from an empty store (#269). It is refused, as `profile` does."""
+    mem = make()
+    with pytest.raises(ValueError, match="at least 1"):
+        mem.standing(k=0)
+    with pytest.raises(ValueError, match="at least 1"):
+        mem.scope(project="github.com/acme/app").standing(k=-1)
+
+
 def test_a_profile_and_standing_for_another_project_read_that_project():
     mem = make()
     app = mem.scope(project="github.com/acme/app")

@@ -229,7 +229,9 @@ def test_the_getting_started_pages_actually_run(relative: str, tmp_path: Path) -
         f"{relative} does not run as written:\n{proc.stderr}\n"
         "Every block on a page in RUNNABLE_PAGES executes in reading order. If a block is "
         "an illustration rather than a step, mark it with "
-        "'<!-- runnable: no — <reason> -->' on the line before its fence.")
+        "'<!-- runnable: no — <reason> -->' on the line before its fence. If the error "
+        "is \"No module named 'memvara'\", the memvara this Python has installed is not "
+        "this checkout; see \"Tests that fail only on your machine\" in CONTRIBUTING.md.")
 
 
 #: The `Memvara` facade methods each architecture diagram lists, read out of the diagrams
@@ -291,7 +293,10 @@ def test_the_readme_quotes_the_coding_agent_example_verbatim() -> None:
     proc = subprocess.run([sys.executable, str(ROOT / "examples" / "coding_agent.py")],
                           cwd=ROOT, env=env, capture_output=True, text=True,
                           encoding="utf-8", timeout=300)
-    assert proc.returncode == 0, proc.stderr
+    assert proc.returncode == 0, (
+        f"{proc.stderr}\nIf this is \"No module named 'memvara'\", the memvara this Python "
+        "has installed is not this checkout; see \"Tests that fail only on your machine\" "
+        "in CONTRIBUTING.md.")
     assert quoted.group(1) in proc.stdout, (
         "the README quotes output that examples/coding_agent.py does not print:\n"
         f"--- README ---\n{quoted.group(1)}\n--- actual ---\n{proc.stdout}")

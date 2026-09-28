@@ -87,8 +87,9 @@ def final_score(
 
     Every factor is monotone increasing and each weight is independent, so setting a
     weight to 0 removes that signal exactly rather than re-baselining the others.
-    Salience above 1.0 (heavily reinforced facts) is intentionally not clamped - it is
-    headroom the write path earns by observing something repeatedly.
+    Salience above 1.0 (heavily reinforced facts) is not clamped here, so the multiplier
+    can exceed 1.5, its value when every signal is 1.0, and reaches 1.9 at the salience
+    cap. The ranking's factor stops at 1.0: see `ranking_quality`.
     """
     return fusion * quality_boost(
         recency=recency,
@@ -114,15 +115,64 @@ def quality_boost(
     At the retriever's default weights (0.25 / 0.15 / 0.10) and nominal signals this
     spans 1.0 (every signal at zero) to 1.5 (every signal at 1.0). Holding confidence
     and salience at 1.0 and varying only decay gives 1.25 → 1.5, a 1.2x span. Salience
-    is not capped, so a claim reinforced to 2.6 - the top of the range reported from a
-    production store - takes it to 1.66x. That is the number worth holding against the
-    fusion term's rank-to-rank gap of 1.016x at `rrf_k=60`.
+    is not capped here, so a claim reinforced to 2.6 - the top of the range reported
+    from a production store - takes it to 1.66x. That is the number worth holding
+    against the fusion term's rank-to-rank gap of 1.016x at `rrf_k=60`.
 
     That comparison is why the ranking no longer multiplies this into a fused rank:
     41 rank positions of relevance for one step of freshness is not a trade anyone
-    chose. `normalized_score` divides it back out into a bounded factor instead.
+    chose. `ranking_quality` divides it back out into a bounded factor instead.
     """
     return 1.0 + w_recency * recency + w_confidence * confidence + w_salience * salience
+
+
+def ranking_quality(
+    *,
+    recency: float,
+    confidence: float,
+    salience: float,
+    w_recency: float,
+    w_confidence: float,
+    w_salience: float,
+) -> float:
+    """The factor the ranking scales a result's evidence by, in `(0, 1]`.
+
+    It is `quality_boost` divided by its own maximum, `1 + w_recency + w_confidence +
+    w_salience`, and it stops at 1.0. Recency, confidence and salience can therefore
+    lower a result from its evidence, but never lift it above.
+
+    Without the stop the factor could exceed 1.0: reinforcement raises salience up to
+    `MAX_SALIENCE` (5.0), and at the cap the factor was 1.9 / 1.5 = 1.27 at the default
+    weights. A fact restated that often outranked any claim whose evidence was less
+    than about 21% stronger, and the soak measured the right claim first in only 80% of
+    its probes over 100,000 turns (#333).
+
+    The stop is on the factor, not on salience. Salience above 1.0 still counts: it
+    makes up for freshness or confidence a claim has lost, until the factor reaches
+    1.0, so among claims that match a query equally well the one restated more often
+    still ranks higher. Clamping salience itself at 1.0 was measured and rejected: on a
+    30,000-turn soak it kept the right claim first but turned the correlation between
+    how often a fact was restated and its rank from +0.86 to -0.23.
+
+    >>> ranking_quality(recency=1.0, confidence=1.0, salience=5.0,
+    ...                 w_recency=0.25, w_confidence=0.15, w_salience=0.10)
+    1.0
+    >>> round(ranking_quality(recency=0.2, confidence=1.0, salience=3.0,
+    ...                       w_recency=0.25, w_confidence=0.15, w_salience=0.10), 3)
+    1.0
+    >>> round(ranking_quality(recency=0.2, confidence=1.0, salience=1.0,
+    ...                       w_recency=0.25, w_confidence=0.15, w_salience=0.10), 3)
+    0.867
+    """
+    span = 1.0 + w_recency + w_confidence + w_salience
+    return min(1.0, quality_boost(
+        recency=recency,
+        confidence=confidence,
+        salience=salience,
+        w_recency=w_recency,
+        w_confidence=w_confidence,
+        w_salience=w_salience,
+    ) / span)
 
 
 # --- absolute relevance -----------------------------------------------------
@@ -269,12 +319,13 @@ def normalized_score(
 ) -> float:
     """The number callers threshold on: absolute relevance, in [0, 1].
 
-    `relevance` (the retriever-evidence blend above) is scaled by the quality
-    multiplier divided by its own maximum, so quality can only ever pull a result
-    *down* from its evidence, by at most `1 / (1 + w_recency + w_confidence +
-    w_salience)` - a third at the default weights. Ordering within a query is
-    therefore evidence first, freshness as the tiebreak, which is the intended
-    priority and the one the shipped arithmetic had backwards.
+    `relevance` (the retriever-evidence blend above) is scaled by `ranking_quality`,
+    the quality multiplier divided by its own maximum and stopped at 1.0. So quality
+    can only ever pull a result *down* from its evidence, by at most
+    `1 / (1 + w_recency + w_confidence + w_salience)` - a third at the default weights.
+    Ordering within a query is therefore evidence first, with freshness, confidence and
+    salience as the tiebreak, which is the intended priority and the one the shipped
+    arithmetic had backwards.
 
     **Why this is not the fused score rescaled.** RRF is rank-relative by
     construction: whatever is best gets `1 / (k + 1)`, whether it answers the question
@@ -289,9 +340,8 @@ def normalized_score(
     The raw fusion product remains available as `Explanation.raw_score`; it is the
     right number for debugging a ranking change and the wrong one for a threshold.
 
-    The result is clamped at 1.0. Only a claim with perfect evidence on both legs and
-    salience above 1.0 can reach the clamp, and there ties fall through to the id
-    tiebreak like any other.
+    The result is clamped at 1.0 as a guard; with `relevance` in [0, 1] and
+    `ranking_quality` at most 1.0, only rounding could take it past.
 
     >>> round(normalized_score(0.8, recency=1.0, confidence=1.0, salience=1.0,
     ...                        w_recency=0.25, w_confidence=0.15, w_salience=0.10), 3)
@@ -300,13 +350,11 @@ def normalized_score(
     ...                        w_recency=0.25, w_confidence=0.15, w_salience=0.10), 3)
     0.667
     """
-    span = 1.0 + w_recency + w_confidence + w_salience
-    boost = quality_boost(
+    return min(1.0, relevance * ranking_quality(
         recency=recency,
         confidence=confidence,
         salience=salience,
         w_recency=w_recency,
         w_confidence=w_confidence,
         w_salience=w_salience,
-    )
-    return min(1.0, relevance * boost / span)
+    ))

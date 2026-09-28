@@ -108,8 +108,115 @@ def test_repeating_a_fact_with_an_expiry_puts_the_expiry_on_the_claim_on_record(
     assert m.get(first.id).expire_reason == "temporary"
 
 
+def test_a_repeat_with_an_expiry_and_an_earlier_start_still_puts_the_expiry_on_record(m):
+    """A repeat that says the fact began earlier than the claim on record is normally
+    stored as a claim of its own for that earlier period. One that names an expiry stays
+    a repeat, so the expiry reaches the claim on record. Otherwise the claim for the
+    earlier period would be erased and the fact the caller asked to have erased would
+    stay."""
+    now = utcnow()
+    first = m.remember("user", "door_code", "4411", valid_from=now - DAY).added[0]
+    when = now + DAY
+    receipt = m.remember("user", "door_code", "4411", valid_from=now - 10 * DAY,
+                         expires_at=when)
+    assert [c.id for c in receipt.reinforced] == [first.id] and receipt.added == []
+    assert m.get(first.id).expires_at == when
+
+
+# --- a model's expiry never reaches a claim it did not create -----------------------------
+
+MOVE = "The team relocated the whole office to Porto over the summer."
+
+
+def porto(expires_at: datetime) -> Any:
+    """A model that reads the office's city out of the turn, with an expiry."""
+    from test_pipeline import CountingLLM
+    return CountingLLM(responder=lambda episodes: [
+        {"subject": "team", "predicate": "office_city", "object": "Porto",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+         "source_index": i, "expires_at": expires_at}
+        for i, _ in enumerate(episodes)])
+
+
+def with_model(llm: Any, **kw: Any) -> Memvara:
+    return Memvara(llm=llm, embedder=HashingEmbedder(dim=64), user="alice", **kw)
+
+
+def test_single_call_extraction_cannot_put_an_expiry_on_a_claim_the_caller_asserted():
+    """Single-call extraction is offered no expiry, yet a datetime in the model's output
+    was accepted, and a repeat put it on the claim on record. One in the past hid the
+    caller's claim at once, and the next sweep erased it with a record of the erasure."""
+    m = with_model(porto(utcnow() - DAY))
+    try:
+        asserted = m.remember("team", "office_city", "Porto").added[0]
+        m.add(MOVE)
+        assert m.get(asserted.id) is not None, "the model's expiry hid the caller's claim"
+        assert m.get(asserted.id).expires_at is None
+        assert m.erase_expired() == []
+    finally:
+        m.close()
+
+
+def test_single_call_extraction_writes_no_expiry_on_a_new_claim_either():
+    """Its output has no expiry field to fill, so an expiry in it is dropped wherever it
+    would land."""
+    m = with_model(porto(utcnow() + DAY))
+    try:
+        (added,) = m.add(MOVE).added
+        assert added.expires_at is None
+    finally:
+        m.close()
+
+
+def test_an_agentic_repeat_reinforces_the_callers_claim_without_touching_its_expiry():
+    """An agentic proposal may carry an expiry the turn names, and it is kept on a claim
+    the proposal creates. A proposal that repeats a claim on record reinforced it and put
+    the model's expiry on it, so a sweep after that instant erased what the caller had
+    asserted."""
+    from test_agentic_extraction import ScriptedChat, fact
+    soon = (utcnow() + timedelta(minutes=5)).isoformat()
+    llm = ScriptedChat([("propose_claim", fact("team", "office_city", "Porto",
+                                               expires_at=soon))])
+    m = with_model(llm, write_agentic_extraction=True)
+    try:
+        asserted = m.remember("team", "office_city", "Porto").added[0]
+        receipt = m.add(MOVE)
+        assert [c.id for c in receipt.reinforced] == [asserted.id]
+        assert m.get(asserted.id).expires_at is None, "the model's expiry reached it"
+        assert m.erase_expired(now=utcnow() + timedelta(minutes=10)) == []
+    finally:
+        m.close()
+
+
+def test_an_agentic_restatement_with_an_expiry_keeps_its_earlier_period_as_its_own_claim():
+    """A value restated with an earlier start is stored as a claim for that earlier
+    period, except when the restatement names an expiry, which keeps it a repeat so that
+    the caller's expiry reaches the claim on record. A model's expiry never reaches a
+    claim it did not create, so that exception is the caller's alone. A model's
+    restatement keeps its earlier period as a claim of its own, which carries the model's
+    expiry, and the caller's claim is left as it was."""
+    from test_agentic_extraction import ScriptedChat, fact
+    april = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    turn_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    soon = (utcnow() + timedelta(minutes=5)).isoformat()
+    llm = ScriptedChat([("propose_claim", fact("team", "office_city", "Porto",
+                                               expires_at=soon))])
+    m = with_model(llm, write_agentic_extraction=True)
+    try:
+        asserted = m.remember("team", "office_city", "Porto", valid_from=april).added[0]
+        receipt = m.add(MOVE, ts=turn_at)
+        (earlier,) = receipt.added
+        assert (earlier.valid_from, earlier.valid_to) == (turn_at, april)
+        assert earlier.expires_at is not None, "the model's expiry was dropped"
+        assert receipt.reinforced == []
+        assert m.get(asserted.id).expires_at is None, "the model's expiry reached it"
+    finally:
+        m.close()
+
+
 # --- the sweep ----------------------------------------------------------------
 
+@pytest.mark.covers("inv:I3")
 def test_nothing_is_erased_before_the_instant_and_everything_due_is_erased_after(m):
     code = m.remember("user", "door_code", "4411", expires_at=utcnow() + DAY,
                       expire_reason="rental").added[0]
@@ -138,6 +245,7 @@ def test_the_report_carries_no_copy_of_the_erased_fact(m):
     assert not {"subject", "predicate", "object", "text"} & set(ErasedClaim.__slots__)
 
 
+@pytest.mark.covers("inv:I3")
 def test_ended_superseded_and_retired_claims_are_kept_however_old_they_are(m):
     """Invariant 3: `valid_to` closes history and is never a reason to erase."""
     long_ago = utcnow() - timedelta(days=400)
@@ -309,7 +417,7 @@ def test_a_version_14_file_gains_the_expiry_columns_and_keeps_its_claims(tmp_pat
 
     with mem(path) as upgraded:
         db = upgraded.store._db
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION == 16
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION == 17
         columns = {r["name"] for r in db.execute("PRAGMA table_info(claims)")}
         assert {"expires_at", "expire_reason"} <= columns
         indexes = {r[0] for r in db.execute(
@@ -574,6 +682,26 @@ def test_an_expired_claim_is_not_reinforced_so_a_new_statement_survives_the_swee
     assert receipt.reinforced == [] and receipt.added[0].id != old.id
     assert [e.claim_id for e in m.erase_expired()] == [old.id]
     assert m.get(receipt.added[0].id) is not None
+
+
+def test_a_retraction_repeated_after_the_first_expired_keeps_a_tombstone_of_its_own(m):
+    """The retraction side of the test above. A repeated retraction is normally folded
+    into the tombstone the first one left. Folded into a tombstone whose expiry has
+    passed, it was erased with that tombstone by the next sweep, and a retraction written
+    with no expiry left no record at all (#284)."""
+    m.remember("user", "likes", "tea")
+    m.remember("user", "likes", "tea", polarity=-1, expires_at=utcnow() + DAY)
+    [first] = [c for c in m.store.iter_claims(None, True) if c.polarity < 0]
+    first.expires_at = utcnow() - timedelta(seconds=1)
+    m.store.put_claim(first)
+
+    m.remember("user", "likes", "tea", polarity=-1)
+    tombstones = [c for c in m.store.iter_claims(None, True) if c.polarity < 0]
+    assert len(tombstones) == 2, "the repeat was folded into the expired tombstone"
+    [second] = [c for c in tombstones if c.id != first.id]
+    assert second.expires_at is None and second.state == "retired"
+    assert [e.claim_id for e in m.erase_expired()] == [first.id]
+    assert [c.id for c in m.store.iter_claims(None, True) if c.polarity < 0] == [second.id]
 
 
 def test_erase_by_name_still_erases_a_claim_whose_expiry_has_passed(m):

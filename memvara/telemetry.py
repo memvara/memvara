@@ -401,12 +401,11 @@ RETRIEVAL_RESULTS = "retrieval.results"
 #: `fusion_score`, because fusion no longer drives the ranking — see
 #: `scoring.normalized_score`.
 #:
-#: **Above 1.0 is the alarm.** The design intent is that quality can only pull a result
-#: *down* from its evidence, by at most `1 / span`; the one way past 1.0 is a salience
-#: reinforced beyond 1.0, which `scoring.quality_boost` deliberately does not clamp
-#: because it is headroom the write path earns. Emitted unclamped for exactly that
-#: reason: a distribution creeping above 1.0 while precision falls is salience
-#: outranking relevance, and clamping here would hide the only direct evidence of it.
+#: **Above 1.0 is the alarm.** Quality can only pull a result *down* from its evidence,
+#: by at most `1 / span`. The value is `scoring.ranking_quality`, the factor the ranking
+#: itself used, which stops at 1.0. Salience reinforced past 1.0 once took this factor to
+#: 1.27 and let a much-restated fact outrank the claim a query asked about (#333). A
+#: value above 1.0 would mean the ranking lets quality promote a result again.
 RETRIEVAL_QUALITY_FACTOR = "retrieval.quality_factor"
 
 #: Spearman correlation between a result's `observation_count` and how well it ranked,
@@ -488,7 +487,8 @@ CONSOLIDATE_DECAYED = "consolidate.decayed"
 CONSOLIDATE_MERGED = "consolidate.merged"
 CONSOLIDATE_PROMOTED = "consolidate.promoted"
 
-#: Rows a pass wrote back, and how long the whole pass took.
+#: Rows a pass wrote back, and how long the whole pass took. A row that another writer
+#: changed or erased during the pass is left unwritten and is not counted here.
 CONSOLIDATE_ROWS_WRITTEN = "consolidate.rows_written"
 CONSOLIDATE_LATENCY_MS = "consolidate.latency_ms"
 

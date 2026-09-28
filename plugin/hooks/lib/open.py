@@ -27,6 +27,13 @@ from .ipc import client_env, emit, server_env  # noqa: F401  (re-exported; they
 #: Written by `memvara-mcp login`, read when there is no local store to open.
 _CREDENTIALS = Path.home() / ".memvara" / "credentials.json"
 
+#: Why the last `open_store` call could not open the local store it was configured to
+#: open, or None. `open_store` still answers None then, as it does when nothing is
+#: configured, so the hooks read this to tell the two apart: a store that is configured
+#: and cannot open is a failure, and reporting it as "not configured" sent a person
+#: looking for configuration that was there (#337).
+failure: "BaseException | None" = None
+
 
 def _import_memvara(env: Mapping[str, str]) -> Any:
     """Import the library, honouring a PYTHONPATH that only the server block knows.
@@ -57,6 +64,8 @@ def open_store() -> Any | None:
     for a second client to be better at. It briefly took a `recalls` flag, when the MCP
     surface could not carry `sources=` and the library's client could.
     """
+    global failure
+    failure = None
     # The client's block loses to a real environment variable; `client_env` is where that
     # rule is written, for this function, the daemon's address and the rewrite decision.
     env = client_env()
@@ -112,8 +121,10 @@ def open_store() -> Any | None:
             # degrades to the route that works instead of to a silent outage.
             return None
         return build_memvara(config)
-    except Exception:
+    except Exception as exc:
         # Deliberately bare. ConfigError, ImportError, EmbedderMismatchError, a corrupt
         # SQLite file and a revoked API key are all the same event from here: no memory
-        # this turn.
+        # this turn. Kept in `failure`, because it is not the same event as having no
+        # store configured, and the hooks say which it was.
+        failure = exc
         return None

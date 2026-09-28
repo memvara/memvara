@@ -1,0 +1,48 @@
+{
+  "id": "project-isolation",
+  "description": "The user works in two repositories. A test command learned in billing stays in billing: from storefront no read shows it, and storefront's own command does not replace it. A preference is global, so it follows the user into both repositories.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester"},
+  "sessions": [
+    {"env": {"project": "github.com/acme/billing"}, "turns": [
+      {"user": "In this repo the tests run with make test-billing. And in general I always want small, focused commits.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "test_command", "object": "make test-billing"}},
+         {"tool": "memory_remember", "args": {"predicate": "prefers", "object": "small focused commits", "memory_type": "procedural"}}
+       ]}
+    ]},
+    {"env": {"project": "github.com/acme/storefront"}, "turns": [
+      {"id": "ask-command", "user": "How do I run the tests in this repo?",
+       "script": [
+         {"tool": "memory_recall", "args": {"query": "what command runs the tests", "anchored": true}},
+         {"tool": "memory_history", "args": {"predicate": "test_command"}}
+       ]},
+      {"user": "Here it's npm test.",
+       "script": [
+         {"tool": "memory_remember", "args": {"predicate": "test_command", "object": "npm test"}}
+       ]},
+      {"id": "ask-style", "user": "How do I like my commits?",
+       "script": [{"tool": "memory_standing"}]}
+    ]},
+    {"env": {"project": "github.com/acme/billing"}, "turns": [
+      {"id": "back-in-billing", "user": "What's the test command here again?",
+       "script": [{"tool": "memory_history", "args": {"predicate": "test_command"}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "billing-command-stays-live", "text": "user test command make test-billing", "state": "live", "count": 1, "project": "github.com/acme/billing"},
+    {"id": "storefront-command-live", "text": "user test command npm test", "state": "live", "count": 1, "project": "github.com/acme/storefront"},
+    {"id": "billing-command-invisible-from-storefront", "text": "user test command make test-billing", "state": "absent", "project": "github.com/acme/storefront"},
+    {"id": "preference-is-global", "text": "user prefers small focused commits", "state": "live", "count": 1, "project": null}
+  ],
+  "answer_gold": [
+    {"id": "storefront-does-not-know-the-command", "turn": "ask-command", "abstain": true},
+    {"id": "billing-command-does-not-leak", "turn": "ask-command", "must_not_contain": "make test-billing"},
+    {"id": "preference-follows-the-user", "turn": "ask-style", "must_contain": "small focused commits"},
+    {"id": "billing-keeps-its-command", "turn": "back-in-billing", "must_contain": "make test-billing"},
+    {"id": "storefront-command-stays-home", "turn": "back-in-billing", "must_not_contain": "npm test"}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}

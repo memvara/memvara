@@ -1,0 +1,65 @@
+{
+  "id": "graph-walk",
+  "description": "The graph tools over a small map of services. The walk follows only relations a vocabulary declares as graph edges, and no built-in predicate is one, so this scenario loads the engineering vocabulary, where depends_on, owner and current_host (spelled runs_on here) are. memory_neighborhood returns one-hop and two-hop chains, and min_hops leaves the one-hop chain out. memory_paths finds the route to today's host, finds the route to last year's host only at a date when it held, and otherwise says that nothing stored connects the two rather than that they are unrelated. memory_link records that one fact was inferred from another and memory_why shows the link, while a link from a fact to itself is refused and a link to an id that is not visible links nothing. The next session finds the route under other spellings of both names. Loading a vocabulary needs Python 3.11, so this scenario skips on 3.10.",
+  "tier": "fast",
+  "surfaces": ["stdio"],
+  "env": {"user": "tester", "predicates": "engineering"},
+  "sessions": [
+    {"turns": [
+      {"user": "Some architecture notes. checkout-web has depended on payments-api since January 2024, and the Payments team has owned payments-api since then too. payments-api ran on host-2 until June 2025 and has run on host-7 since.",
+       "script": [
+         {"tool": "memory_remember", "args": {"subject": "checkout-web", "predicate": "depends_on", "object": "payments-api", "true_since": "2024-01-01"}},
+         {"tool": "memory_remember", "args": {"subject": "payments-api", "predicate": "owner", "object": "Payments team", "true_since": "2024-01-01"}, "capture": {"owner_id": "\\[(cl_[0-9a-f]+)\\] payments-api owner Payments team"}},
+         {"tool": "memory_remember", "args": {"subject": "payments-api", "predicate": "runs_on", "object": "host-2", "true_since": "2024-01-01", "true_until": "2025-06-01"}},
+         {"tool": "memory_remember", "args": {"subject": "payments-api", "predicate": "runs_on", "object": "host-7", "true_since": "2025-06-01"}}
+       ]},
+      {"id": "around", "user": "What does checkout-web touch?",
+       "script": [{"tool": "memory_neighborhood", "args": {"entity": "checkout-web"}}]},
+      {"id": "two-hops", "user": "Only the indirect ones, please.",
+       "script": [{"tool": "memory_neighborhood", "args": {"entity": "checkout-web", "min_hops": 2}}]},
+      {"id": "route-now", "user": "How does checkout-web reach host-7?",
+       "script": [{"tool": "memory_paths", "args": {"source": "checkout-web", "target": "host-7"}}]},
+      {"id": "route-then", "user": "How did checkout-web reach host-2 in January 2025?",
+       "script": [{"tool": "memory_paths", "args": {"source": "checkout-web", "target": "host-2", "valid_at": "2025-01-15"}}]},
+      {"id": "route-gone", "user": "And does it reach host-2 today?",
+       "script": [{"tool": "memory_paths", "args": {"source": "checkout-web", "target": "host-2"}}]},
+      {"id": "link", "user": "checkout-web's on-call goes to the Payments team because they own payments-api. Record that, and where it came from.",
+       "script": [
+         {"tool": "memory_remember", "args": {"subject": "checkout-web", "predicate": "oncall_team", "object": "Payments team"}, "capture": {"oncall_id": "\\[(cl_[0-9a-f]+)\\] checkout-web oncall team Payments team"}},
+         {"tool": "memory_link", "args": {"from_id": "{oncall_id}", "to_id": "{owner_id}", "relation": "derives"}},
+         {"tool": "memory_link", "args": {"from_id": "{oncall_id}", "to_id": "{oncall_id}", "relation": "extends"}, "expect_error": true},
+         {"tool": "memory_link", "args": {"from_id": "{oncall_id}", "to_id": "cl_00000000000000000000", "relation": "extends"}}
+       ]},
+      {"id": "why", "user": "Why does the Payments team get checkout-web's pages?",
+       "script": [{"tool": "memory_why", "args": {"claim_id": "{oncall_id}"}}]}
+    ]},
+    {"turns": [
+      {"id": "next-session", "user": "Remind me: what connects Checkout-Web to the payments team?",
+       "script": [{"tool": "memory_paths", "args": {"source": "Checkout-Web", "target": "payments team"}}]}
+    ]}
+  ],
+  "store_gold": [
+    {"id": "dependency-live", "text": "checkout-web depends on payments-api", "state": "live", "count": 1},
+    {"id": "new-host-live", "text": "payments-api current host host-7", "state": "live", "count": 1},
+    {"id": "old-host-ended", "text": "payments-api current host host-2", "state": "ended", "count": 1}
+  ],
+  "answer_gold": [
+    {"id": "one-hop-chain", "turn": "around", "must_contain": "checkout-web -depends_on-> payments-api"},
+    {"id": "two-hop-chain-to-the-owner", "turn": "around", "must_contain": "checkout-web -depends_on-> payments-api -owner-> Payments team"},
+    {"id": "no-chain-to-the-old-host-today", "turn": "around", "must_not_contain": "host-2"},
+    {"id": "min-hops-keeps-the-two-hop-chains", "turn": "two-hops", "must_contain": "checkout-web -depends_on-> payments-api -owner-> Payments team"},
+    {"id": "min-hops-drops-the-one-hop-chain", "turn": "two-hops", "must_not_match": "\\[1 hop\\(s\\)"},
+    {"id": "route-to-todays-host", "turn": "route-now", "must_contain": "checkout-web -depends_on-> payments-api -current_host-> host-7"},
+    {"id": "route-to-last-years-host-then", "turn": "route-then", "must_contain": "checkout-web -depends_on-> payments-api -current_host-> host-2"},
+    {"id": "dated-route-says-when", "turn": "route-then", "must_contain": "as true on 2025-01-15"},
+    {"id": "no-route-says-nothing-connects-them", "turn": "route-gone", "must_contain": "say nothing stored connects them"},
+    {"id": "link-means-inferred-from", "turn": "link", "must_contain": "meaning the first was inferred from the second"},
+    {"id": "self-link-refused", "turn": "link", "must_contain": "to itself"},
+    {"id": "invisible-id-links-nothing", "turn": "link", "must_contain": "one of the two ids is not visible here"},
+    {"id": "why-shows-the-link", "turn": "why", "must_contain": "this derives"},
+    {"id": "why-names-the-source-fact", "turn": "why", "must_contain": "payments-api owner Payments team"},
+    {"id": "next-session-folds-the-names", "turn": "next-session", "must_contain": "checkout-web -depends_on-> payments-api -owner-> Payments team"}
+  ],
+  "requires": ["tools"],
+  "negative_control": true
+}

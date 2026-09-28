@@ -19,6 +19,9 @@ below the facade sees it. See `memvara.types.time_axes`.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import fields
 from datetime import datetime
 from contextlib import AbstractContextManager, nullcontext
 from typing import (TYPE_CHECKING, Any, Collection, Iterable, Literal, Protocol, Sequence,
@@ -139,6 +142,25 @@ def _either(*parts: str) -> str:
             else "(" + " OR ".join(f"({p})" for p in parts) + ")")
 
 
+# The three clauses `state_predicate` and `unended_predicate` share, each written once so
+# the two predicates cannot come to disagree about what one of them means. `a` is the
+# column prefix and `at` the SQL expression for the instant, as in both callers.
+
+def _recorded_by(a: str, at: str) -> str:
+    """The belief floor: recorded by `at`. No population ever lifts it."""
+    return f"{a}recorded_at <= {at}"
+
+
+def _not_retired_by(a: str, at: str) -> str:
+    """Still believed at `at`: not retired, or retired only later."""
+    return f"({a}invalidated_at IS NULL OR {a}invalidated_at > {at})"
+
+
+def _not_ended_by(a: str, at: str) -> str:
+    """Not ended by `at`: open, or ending only later. Says nothing about the start."""
+    return f"({a}valid_to IS NULL OR {a}valid_to > {at})"
+
+
 def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
                     alias: str = "") -> tuple[str, tuple[str, ...]]:
     """SQL for "in one of `states` at `at`", plus the axis each bind marker reads.
@@ -179,7 +201,7 @@ def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
     """
     a = f"{alias}." if alias else ""
     wanted = resolve_states(states)
-    floor = f"{a}recorded_at <= {at}"
+    floor = _recorded_by(a, at)
     if len(wanted) == len(STATES):
         return f"({floor})", ("known",)
 
@@ -188,8 +210,7 @@ def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
     # closes (see `types.close_out`), so `valid_to <= V` already implies `valid_from <= V`
     # and the two intervals between them cover everything that had started by `V`.
     world, world_axes = {
-        ("live",): (f"{a}valid_from <= {at} "
-                    f"AND ({a}valid_to IS NULL OR {a}valid_to > {at})",
+        ("live",): (f"{a}valid_from <= {at} AND {_not_ended_by(a, at)}",
                     ("valid", "valid")),
         ("ended",): (f"{a}valid_to IS NOT NULL AND {a}valid_to <= {at}", ("valid",)),
         ("live", "ended"): (f"{a}valid_from <= {at}", ("valid",)),
@@ -198,8 +219,7 @@ def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
     axes = ("known", "known") + world_axes
 
     if "retired" not in wanted:
-        not_retired = f"({a}invalidated_at IS NULL OR {a}invalidated_at > {at})"
-        return f"({floor} AND {not_retired} AND {world})", axes
+        return f"({floor} AND {_not_retired_by(a, at)} AND {world})", axes
     # With `retired` wanted, the "still believed" guard on the other half is redundant:
     # the two are exact complements, so `retired OR (believed AND in_force)` is just
     # `retired OR in_force`. The retired disjunct is written first so its belief marker
@@ -294,6 +314,33 @@ def live_predicate(at: str = "?", *, include_invalidated: bool = False,
     )[0]
 
 
+def unended_predicate(at: str = "?", *, alias: str = "") -> tuple[str, tuple[str, ...]]:
+    """SQL for "believed at `at` and not ended by it", plus the axis each marker reads.
+
+    The claims `Memvara.forget` closes: those in force at `at`, and those stored to begin
+    later, which are recorded and believed but not in force yet. No subset of
+    `state_predicate`'s states names the second group (see "The three states do not tile
+    the store" there), so this is its own predicate: the live clause without its
+    valid-time floor. Its clauses are the live clause's, from the same three helpers, so
+    the two cannot drift apart. `Claim.is_unended` is the same test in Python and
+    `Store.unended_claims` is the lookup that runs it.
+
+    `at` is substituted at every marker, as in `state_predicate`, and the markers read
+    belief before world: `("known", "known", "valid")`.
+
+    >>> sql, axes = unended_predicate("now()")
+    >>> print(sql.replace(" AND ", "\\n AND "))
+    (recorded_at <= now()
+     AND (invalidated_at IS NULL OR invalidated_at > now())
+     AND (valid_to IS NULL OR valid_to > now()))
+    >>> axes
+    ('known', 'known', 'valid')
+    """
+    a = f"{alias}." if alias else ""
+    return (f"({_recorded_by(a, at)} AND {_not_retired_by(a, at)} "
+            f"AND {_not_ended_by(a, at)})", ("known", "known", "valid"))
+
+
 def unexpired_predicate(at: str = "?", *, alias: str = "") -> str:
     """SQL for "carries no `expires_at`, or one after `at`".
 
@@ -338,6 +385,35 @@ def bulk_claims(store: "Store", claim_ids: Sequence[str]) -> dict[str, Claim]:
             if (claim := store.get_claim(cid)) is not None}
 
 
+#: Every field of a claim. Each one is a column `put_claim` writes.
+_CLAIM_COLUMNS = tuple(f.name for f in fields(Claim))
+
+
+def claim_digest(claim: Claim) -> bytes:
+    """A 16-byte digest of every column of `claim`, to tell later whether its row changed.
+
+    A pass that reads claims, decides, and writes them back later takes one of these for
+    each row it reads, and writes a row back only if the row it reads again, under the
+    write lock, has the same digest; otherwise another writer changed the row in between,
+    and writing the old copy back would undo that change. `meta` is serialised with its
+    keys sorted, and every other value by `repr`, which is exact for the strings,
+    numbers, instants and enums a claim holds. Two rows with the same digest hold the same
+    values, short of a 128-bit hash collision.
+
+    >>> from datetime import datetime, timezone
+    >>> jan = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    >>> claim = Claim(subject="user", predicate="lives_in", object="Berlin", id="cl_1",
+    ...               valid_from=jan, recorded_at=jan)
+    >>> read = claim_digest(claim)
+    >>> claim.valid_to = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    >>> claim_digest(claim) == read
+    False
+    """
+    values = [json.dumps(value, sort_keys=True, default=str) if isinstance(value, dict)
+              else value for value in (getattr(claim, name) for name in _CLAIM_COLUMNS)]
+    return hashlib.blake2b(repr(values).encode(), digest_size=16).digest()
+
+
 def transaction(store: object) -> AbstractContextManager[Any]:
     """`store.batch()` where the store has one, and a context that does nothing where it
     does not.
@@ -353,9 +429,10 @@ def transaction(store: object) -> AbstractContextManager[Any]:
 #: Members a backend may leave out, and what it costs to leave each one out.
 #:
 #: `Store` is `@runtime_checkable`, and `isinstance` on a Protocol is **all or nothing**:
-#: it asks whether every one of the 46 members is present, so it cannot answer "can this
+#: it asks whether every member of the protocol is present, so it cannot answer "can this
 #: store walk a graph". A backend that implements everything a memory needs and skips the
-#: eight below is a perfectly good store and `isinstance(x, Store)` is `False` for it.
+#: optional members listed below is a working store, yet `isinstance(x, Store)` is
+#: `False` for it.
 #:
 #: So the capability check in this codebase is `getattr(store, name, None)`, per member,
 #: at the call site that needs it — and each of those call sites degrades in a way it
@@ -411,6 +488,10 @@ OMITTABLE: dict[str, str] = {
     "occupied_slots": "read-side shadowing falls back to one count_competing per slot, "
                       "and without that too, a read bound to a project returns a "
                       "user-wide value beside the project's own.",
+    "unended_claims": "forget() reads the slot's whole history with slot_history and "
+                      "picks the values to close with Claim.is_unended, so its cost grows "
+                      "with every value the slot has held rather than with the few it "
+                      "closes. It closes the same values.",
 }
 
 
@@ -466,7 +547,25 @@ class Store(Protocol):
         ...
 
     def batch(self) -> AbstractContextManager["Store"]:
-        """Context manager deferring commits to one transaction for bulk work."""
+        """Context manager that runs a block as one transaction, committed once at the end.
+
+        Every guarantee `Memvara` gives about a read followed by a write depends on the
+        batch taking the store's write lock when it begins, before the block's first read,
+        and holding it until the block commits or rolls back. `remember()` and the claim
+        transaction of `add()`, `delete()`, `forget()`, `forget_matching()`, `supersede()`,
+        `link()`, `erase()`, the expiry sweep, consolidation, the backfills and the document
+        writes all read what they are about to change inside a batch. They are safe
+        against another writer only because no other writer can commit between that read
+        and the write. `SQLiteStore.batch()` takes the lock: it begins with
+        `BEGIN IMMEDIATE`.
+
+        A store whose `batch()` only defers commits, or that has no `batch()` at all, runs
+        the same code without that guarantee: another writer can commit between a read and
+        the write that follows it, and the write then puts back the copy it read over the
+        other writer's change. `RemoteStore.batch()` is one of these. It yields the store
+        and does nothing else, because the hosted API has no transaction a client can hold
+        open.
+        """
         ...
 
     def competing_claims(self, tenant: str, fact_key: str, *,
@@ -514,7 +613,15 @@ class Store(Protocol):
         """
         ...
 
-    def find_by_value(self, tenant: str, value_key: str) -> list[Claim]: ...
+    def find_by_value(self, tenant: str, value_key: str) -> list[Claim]:
+        """Every claim with this `value_key` in the tenant, from every scope.
+
+        `value_key` names the owner and not the project, agent or session, so the answer
+        spans every scope the owner has. A caller acting for one scope filters it with
+        `Scope.visible` before it reinforces or reports anything, as `Reconciler.apply`
+        does.
+        """
+        ...
 
     def claims_citing(self, tenant: str, episode_id: str) -> list[Claim]:
         """Every claim whose `sources` names this turn — provenance, backwards.
@@ -528,6 +635,10 @@ class Store(Protocol):
 
         No liveness filter: a retired claim was still extracted from that turn. Callers
         that want only live claims say so.
+
+        No scope filter either: the answer spans the tenant. A caller acting for one scope
+        filters it with `Scope.visible`, because a claim in a scope the caller cannot see
+        must not be reinforced, reported, or counted as the turn's extraction.
         """
         ...
 
@@ -541,6 +652,22 @@ class Store(Protocol):
 
     def slot_history(self, tenant: str, fact_key: str) -> list[Claim]:
         """Every claim ever recorded in one slot, oldest first — the audit trail."""
+        ...
+
+    def unended_claims(self, tenant: str, fact_key: str, *,
+                       valid_at: datetime | None = None,
+                       known_at: datetime | None = None) -> list[Claim]:
+        """Claims in one slot believed at `known_at` and not ended by `valid_at`.
+
+        The values in force, and the values stored to begin later: what `Memvara.forget`
+        closes. Selected by `unended_predicate` inside the store's own query, because a
+        slot restated many times holds few such values and many that have ended, and
+        reading all of them to keep a few makes every `forget()` pay for the slot's whole
+        history. A claim whose expiry has passed is left out, as every read leaves it out.
+        Oldest first, on `slot_history`'s `(recorded_at, id)` order.
+
+        Optional; see `OMITTABLE`.
+        """
         ...
 
     def adjacent(self, tenant: str, keys: Sequence[str], *,
@@ -734,7 +861,10 @@ class Store(Protocol):
 
         A store that other processes share may refuse while they have it open, as
         `SQLiteStore` does with `StoreInUseError`: emptying a matrix another process
-        still reads is how that process crashes.
+        still reads is how that process crashes. `SQLiteStore` also raises
+        `PermissionError`, naming `<db>.lock` and having changed nothing, when this
+        process may not write that file, because it then cannot tell whether another
+        process has the store open.
         """
         ...
 
@@ -906,8 +1036,9 @@ class Store(Protocol):
         returned, or a cached count, would not be.
 
         Keys are the implementation's own tables — `SQLiteStore` returns `claims`,
-        `claims_fts`, `embeddings` and `claim_sources` — because "which tables can this
-        claim's content survive in" is a property of the backend and not of the protocol.
+        `claims_fts`, `embeddings`, `claim_sources` and `claim_links`, and `vector_file`
+        for the claim's row of its vector file — because "which tables can this claim's
+        content survive in" is a property of the backend and not of the protocol.
         Every value zero is the answer that proves an erasure; any non-zero means it did
         not complete, whatever `erase_claim` said.
 

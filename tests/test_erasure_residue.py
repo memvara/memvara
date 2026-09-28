@@ -141,8 +141,8 @@ def test_ordinary_rows_are_overwritten_rather_than_left_in_a_free_page(tmp_path)
     """The other half, and the reason the FTS fix alone is not enough.
 
     Turned off explicitly here, so this fails if `PRAGMA secure_delete` is ever dropped
-    from `SCHEMA` — the FTS option would still hide the index half and the file would
-    still be leaking.
+    from `_CONNECTION_PRAGMAS` — the FTS option would still hide the index half and the
+    file would still be leaking.
     """
     path = tmp_path / "m.db"
     mem = store_at(path)

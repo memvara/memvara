@@ -84,9 +84,13 @@ def _listening(path: str) -> bool:
 
 
 class Daemon:
-    def __init__(self, path: str, store: object) -> None:
+    def __init__(self, path: str, store: object, *, hosted: bool = False) -> None:
         self.path = path
         self.store = store
+        #: Whether `store` is the hook's hosted client rather than a library store. A
+        #: request carries a floor for each route (`lib.fast.recall`), and the daemon
+        #: applies the one for the backend it serves.
+        self.hosted = hosted
         self.last_seen = time.monotonic()
         self._lock = threading.Lock()
         self.failures = 0
@@ -108,6 +112,8 @@ class Daemon:
                 "budget": int(request.get("budget") or 700),
             }
             floor = float(request.get("min_score") or 0.0)
+            if self.hosted and "hosted_min_score" in request:
+                floor = float(request["hosted_min_score"] or 0.0)
             if floor:
                 # Sent only when there is a floor to apply, which is exactly what
                 # `lib.fast.recall` does on the direct path. Passing it unconditionally
@@ -253,15 +259,31 @@ class Daemon:
                 server.bind(self.path)
             except OSError:
                 return 0
+        # The file's identity, read straight after `bind()`, so that `_release` removes
+        # only this daemon's socket. It is read from the path because `fstat` on a socket
+        # does not describe the socket's file. A second daemon needs a failed `bind()`, an
+        # import and a refused probe before it can replace the file, which is far longer
+        # than the one call between `bind()` and this one. A file that is already gone
+        # belongs to that other daemon now, so this one leaves.
         try:
-            os.chmod(self.path, 0o600)
+            ours = os.stat(self.path)
         except OSError:
-            pass
-        self._sweep_stale()
-
+            server.close()
+            return 0
+        # Listen at once. A second daemon whose `bind()` fails probes this path, and takes
+        # a refused probe to mean the owner is dead: a socket that is bound and not yet
+        # listening refuses too, so listening only after the sweep below let a loser
+        # unlink this path and bind its own, leaving this daemon on a socket nothing
+        # could reach (#344). The socket is private before `chmod` as well, because its
+        # directory is 0700 (`lib.ipc.runtime_dir`).
         server.listen(16)
-        server.settimeout(30.0)
         try:
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
+            self._sweep_stale()
+            server.settimeout(30.0)
             while True:
                 try:
                     conn, _ = server.accept()
@@ -280,10 +302,17 @@ class Daemon:
                 threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
         finally:
             server.close()
-            try:
+            self._release(ours)
+
+    def _release(self, ours: os.stat_result) -> None:
+        """Remove the socket file, if the path still names this daemon's socket. Another
+        daemon may have replaced it, and removing that daemon's socket would leave it
+        serving an address no client can reach."""
+        try:
+            if os.path.samestat(os.stat(self.path), ours):
                 os.unlink(self.path)
-            except OSError:
-                pass
+        except OSError:
+            pass
 
 
 def main() -> int:
@@ -301,7 +330,7 @@ def main() -> int:
         # accept connections and answer every one with silence, which is indistinguishable
         # from a working daemon over a store that happens to be empty.
         return 0
-    served = Daemon(socket_path(store_key()), store)
+    served = Daemon(socket_path(store_key()), store, hosted=hosted)
     # The warm-up is a plain read: it exists to pay connection costs, not a model call.
     # The library's store is told so with the plain read the daemon decided on at
     # startup; the stdlib hosted client takes no such argument and always asks its server

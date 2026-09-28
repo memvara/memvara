@@ -18,10 +18,12 @@ about one of them:
   formatting.
 """
 
+import copy
 import io
 import json
 import pathlib
 import re
+import sqlite3
 import sys
 import types
 from dataclasses import replace
@@ -44,6 +46,7 @@ from memvara import (
     utcnow,
 )
 from memvara.embed import default_embedder as real_default_embedder, fingerprint_of
+from memvara.remote.errors import RemoteError
 from memvara.server import (
     MemvaraMCPServer,
     ProtocolError,
@@ -58,6 +61,7 @@ from memvara.server import cli as cli_module
 from memvara.server.config import ConfigError, _llm
 from memvara.server.mcp import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS
 from memvara.server.protocol import (
+    INTERNAL_ERROR,
     INVALID_PARAMS,
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
@@ -67,6 +71,7 @@ from memvara.server.protocol import (
 )
 from memvara.server.tools import BY_NAME, ToolContext, safe_line
 from memvara.server.validate import _ARTICLES, validate
+from memvara.types import Claim
 
 
 # -- fixtures ----------------------------------------------------------------
@@ -243,6 +248,7 @@ def test_the_document_delete_tool_retires_memories_and_touches_only_its_own_docu
     srv.close()
 
 
+@pytest.mark.covers("inv:MS1")
 def test_no_tool_accepts_a_scope_argument():
     """The security property, asserted structurally.
 
@@ -634,6 +640,116 @@ def test_unknown_notification_is_silently_ignored(server):
 ])
 def test_malformed_requests_get_the_right_error(server, line, code):
     assert json.loads(server.handle_line(line))["error"]["code"] == code
+
+
+def test_a_request_nested_too_deeply_gets_a_parse_error_and_the_server_carries_on(server):
+    """The standard library's JSON decoder raises `RecursionError`, not `ValueError`, on
+    nesting deeper than the interpreter's stack allows. One such line used to end the
+    stdio loop, and with it the agent's memory for the rest of the session (#268)."""
+    depth = 100_000
+    line = ('{"jsonrpc":"2.0","id":7,"method":"ping","params":'
+            + "[" * depth + "]" * depth + "}")
+    reply = json.loads(server.handle_line(line))
+    assert reply["id"] is None and reply["error"]["code"] == PARSE_ERROR
+    assert "nested too deeply" in reply["error"]["message"]
+    after = json.loads(server.handle_line('{"jsonrpc":"2.0","id":8,"method":"ping"}'))
+    assert after == {"jsonrpc": "2.0", "id": 8, "result": {}}
+
+
+def strict(line: str) -> dict:
+    """`json.loads` as a strict parser reads a line, such as JavaScript's `JSON.parse`:
+    the tokens `NaN`, `Infinity` and `-Infinity` are not JSON."""
+    def refuse(token: str) -> float:
+        raise ValueError(f"{token} is not JSON")
+    return json.loads(line, parse_constant=refuse)
+
+
+NON_FINITE_IDS = ["NaN", "Infinity", "-Infinity", "1e400"]
+
+
+@pytest.mark.parametrize("raw_id", NON_FINITE_IDS)
+def test_an_id_no_json_number_can_carry_gets_a_parse_error_on_a_line_that_is_json(
+        server, raw_id):
+    """Python's decoder accepts `NaN`, `Infinity` and `-Infinity`, which are not JSON, and
+    reads `1e400`, which is, as infinity. The reply then echoed the id as a bare `NaN` or
+    `Infinity`, a line a strict parser cannot read, which loses the reply or ends the
+    client's session. All four are now a parse error, answered with a null id."""
+    reply = strict(server.handle_line('{"jsonrpc":"2.0","id":' + raw_id + ',"method":"ping"}'))
+    assert reply["id"] is None and reply["error"]["code"] == PARSE_ERROR
+    assert reply["error"]["message"].startswith("invalid JSON")
+
+
+@pytest.mark.covers("inv:MS6")
+def test_every_reply_line_the_stdio_loop_writes_parses_under_a_strict_parser(server):
+    lines = ['{"jsonrpc":"2.0","id":' + raw + ',"method":"ping"}' for raw in NON_FINITE_IDS]
+    lines.append('{"jsonrpc":"2.0","id":1,"method":"ping"}')
+    stdout = io.StringIO()
+    assert serve_stdio(server.handle_line, io.StringIO("\n".join(lines) + "\n"),
+                       stdout) == 5
+    replies = [strict(line) for line in stdout.getvalue().splitlines()]
+    assert [r.get("error", {}).get("code") for r in replies] == [PARSE_ERROR] * 4 + [None]
+    assert replies[-1] == {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+
+def test_encode_refuses_a_number_json_cannot_carry():
+    """So that no reply can carry one, whatever reaches the encoder."""
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            encode({"jsonrpc": "2.0", "id": value, "result": {}})
+
+
+@pytest.mark.parametrize("raw_id", ['[NaN]', '{"a":[1,Infinity]}', '[[[-Infinity]]]',
+                                    '{"n":1e400}'])
+def test_an_id_that_holds_a_number_json_cannot_carry_gets_a_parse_error(server, raw_id):
+    """The server echoes an id of any JSON type, an object or an array included, so a
+    number no JSON can carry is refused wherever it sits inside the id. Echoed, it would
+    make the encoder refuse the reply, and the stdio loop would end with it."""
+    stdout = io.StringIO()
+    lines = ['{"jsonrpc":"2.0","id":' + raw_id + ',"method":"ping"}',
+             '{"jsonrpc":"2.0","id":2,"method":"ping"}']
+    assert serve_stdio(server.handle_line, io.StringIO("\n".join(lines) + "\n"),
+                       stdout) == 2
+    refused, answered = [strict(line) for line in stdout.getvalue().splitlines()]
+    assert refused["id"] is None and refused["error"]["code"] == PARSE_ERROR
+    assert answered == {"jsonrpc": "2.0", "id": 2, "result": {}}
+
+
+@pytest.mark.covers("inv:MS6")
+def test_a_reply_that_cannot_be_written_as_json_is_an_internal_error_and_serving_goes_on(
+        server, capsys):
+    """`encode` refuses a number JSON cannot carry anywhere in a reply, not only in its
+    id, and nothing caught the refusal: a tool whose result held a NaN ended the stdio
+    loop, and the client's session with it. That request is now answered with a
+    JSON-RPC internal error (-32603) that carries its id, the reason is written to
+    standard error, and the next request on the stream is answered."""
+    from memvara.server.tools import Tool
+
+    server._tools["broken"] = Tool(name="broken", description="Returns a NaN.",
+                                   properties={}, required=(),
+                                   handler=lambda ctx, args: float("nan"))
+    lines = ['{"jsonrpc":"2.0","id":7,"method":"tools/call",'
+             '"params":{"name":"broken","arguments":{}}}',
+             '{"jsonrpc":"2.0","id":8,"method":"ping"}']
+    stdout = io.StringIO()
+    assert serve_stdio(server.handle_line, io.StringIO("\n".join(lines) + "\n"),
+                       stdout) == 2
+    refused, answered = [strict(line) for line in stdout.getvalue().splitlines()]
+    assert refused["id"] == 7 and refused["error"]["code"] == INTERNAL_ERROR, refused
+    assert answered == {"jsonrpc": "2.0", "id": 8, "result": {}}
+    err = capsys.readouterr().err
+    assert "request 7" in err and "not JSON compliant" in err, err
+
+
+@pytest.mark.parametrize("raw", NON_FINITE_IDS)
+def test_a_number_json_cannot_carry_in_the_arguments_reaches_the_tool(server, raw):
+    """Only the id is echoed into a reply, so only the id is refused at the wire. A value
+    anywhere else is read, and the tool's own argument check answers it, as a tool error
+    that carries the request's id so the client can match it."""
+    line = ('{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":'
+            '"memory_recall","arguments":{"query":"tea","k":' + raw + '}}}')
+    reply = strict(server.handle_line(line))
+    assert reply["id"] == 9 and reply["result"]["isError"] is True, reply
+    assert "k" in reply["result"]["content"][0]["text"]
 
 
 @pytest.mark.parametrize("line", [
@@ -2071,6 +2187,66 @@ def test_ending_an_already_retired_claim_does_not_report_it_as_ended(server):
     assert server._ctx.memory.get(claim_id).state == "retired"
 
 
+def test_ending_a_retired_claim_through_the_tool_changes_nothing_as_its_reply_says(server):
+    """The reply above said nothing changed, and the store changed the claim anyway:
+    `memory_end` set `valid_to` on the claim `memory_forget` had retired and added a
+    second closure record. `memory_history` then showed a claim we had stopped believing
+    as one that ended "because: no longer applies". Now neither clock moves and no record
+    is added, so the reply is true."""
+    text(server, "memory_remember", {"subject": "Mei", "predicate": "allergic_to",
+                                     "object": "pollen"})
+    claim_id = text(server, "memory_search", {"query": "pollen"}).split("[id=")[1].split()[0]
+    text(server, "memory_forget", {"claim_id": claim_id,
+                                   "reason": "Mei's allergy is walnuts"})
+    retired = copy.deepcopy(server._ctx.memory.get(claim_id))
+
+    body = text(server, "memory_end", {"claim_id": claim_id, "reason": "no longer applies"})
+    after = server._ctx.memory.get(claim_id)
+    assert "Nothing changed here" in body
+    assert after.valid_to is None, "the retired claim was ended after all"
+    assert after.meta["closure"] == retired.meta["closure"], "a closure record was added"
+    assert after.invalidated_at == retired.invalidated_at
+
+
+def test_retiring_a_retired_claim_through_the_tool_says_that_nothing_changed(server):
+    """A second `memory_forget` writes nothing, and its reply used to say "Retired claim
+    ..." as if it had retired it then, with the reason it was given."""
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Berlin"})
+    claim_id = text(server, "memory_search", {"query": "Berlin"}).split("[id=")[1].split()[0]
+    text(server, "memory_forget", {"claim_id": claim_id, "reason": "never lived there"})
+    retired = copy.deepcopy(server._ctx.memory.get(claim_id))
+
+    body = text(server, "memory_forget", {"claim_id": claim_id, "reason": "again"})
+    assert body.startswith(f"Claim {claim_id} is already retired"), body
+    assert "Nothing changed" in body and "not recorded" in body
+    assert server._ctx.memory.get(claim_id).meta == retired.meta
+
+
+@pytest.mark.parametrize("reason", ["misheard", None])
+def test_forget_says_so_when_another_writer_retired_the_claim_while_it_ran(server, reason):
+    """`memory_forget` read the claim, found it live, and then retired it. Another writer
+    that retired it in between, after that read and before this call's write, made the
+    write change nothing, and the reply still said "Retired claim ...", as if this call's
+    retirement, and its reason, were on record. The claim is read after the write, as
+    `memory_end` reads it, and the reply says it was already retired."""
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Berlin"})
+    claim_id = text(server, "memory_search", {"query": "Berlin"}).split("[id=")[1].split()[0]
+    engine = server._ctx.memory._mem
+    real = engine.delete
+
+    def delete(target: str, **kw):
+        assert real(target, **{**kw, "reason": "the other writer's reason"})
+        return real(target, **kw)
+
+    engine.delete = delete
+    arguments = {"claim_id": claim_id} if reason is None else {"claim_id": claim_id,
+                                                               "reason": reason}
+    body = text(server, "memory_forget", arguments)
+    assert body.startswith(f"Claim {claim_id} is already retired"), body
+    assert "Nothing changed" in body
+    assert ("not recorded" in body) is (reason is not None)
+
+
 def test_memory_since_says_so_when_the_instant_has_not_arrived(server):
     """"Nothing has changed" is true of the future and tells the caller nothing.
 
@@ -2293,6 +2469,43 @@ def test_forget_an_unknown_slot_says_so_without_pretending(server):
                                        {"predicate": "favourite_colour"})
 
 
+@pytest.mark.parametrize("name, single", [("memory_end_matching", "memory_end"),
+                                          ("memory_forget_matching", "memory_forget")])
+def test_the_matching_tools_say_they_never_list_a_value_stored_to_begin_later(
+        server, name, single):
+    """The two matching tools preview with a present-tense search, so a fact stored to
+    begin later is never listed and never closed, while the slot form of memory_end and
+    memory_forget closes it. memory_history shows such a fact as live, and these tools
+    say they close every live fact that matches, so the description has to name the
+    exception and the way to close one, which works on every server: its claim_id."""
+    now = utcnow()
+    server._ctx.memory.remember("user", "works_at", "Globex",
+                                valid_from=now + timedelta(days=30))
+    description = BY_NAME[name].description
+
+    assert "Nothing matched 'Globex'" in text(server, name, {"query": "Globex"})
+    assert "a fact stored to begin later is never listed" in description
+    assert f"pass its claim_id from memory_history to {single}" in description
+
+
+@pytest.mark.parametrize("name", ["memory_forget", "memory_end"])
+def test_the_slot_form_names_a_value_stored_to_begin_later_in_one_term(server, name):
+    """Given a predicate, both tools also close a value stored to begin later (#282).
+    The description, the argument error and the reply when nothing was closed all say
+    so, and `.claude/rules/tool-descriptions.md` asks for one term per concept: the
+    replies had said "scheduled" where the other two said "stored to begin later"."""
+    description = BY_NAME[name].description
+    error, is_error = call(server, name, {})
+    reply = text(server, name, {"predicate": "favourite_colour"})
+
+    assert ("every current value of that fact and any value stored to begin later"
+            in description)
+    assert is_error and "any value stored to begin later" in error
+    assert "has no current value and no value stored to begin later" in reply
+    for said in (description, error, reply):
+        assert "scheduled" not in said
+
+
 # -- ending a fact -----------------------------------------------------------
 #
 # The half of the closure split the agent-facing surface used to be missing. `Closure`
@@ -2453,6 +2666,66 @@ def test_ending_a_single_claim_in_the_future_says_so_too(server):
     body = text(server, "memory_end", {
         "claim_id": claim_id, "at": (utcnow() + timedelta(days=16)).isoformat()})
     assert "still in the future" in body
+
+
+def test_ending_a_slot_says_a_value_that_had_not_begun_is_true_at_no_instant(server):
+    """Ending a slot also ends a value stored to begin later, at that value's own start,
+    so the value is true at no instant. Its ending is still in the future, and the reply
+    used to count it as one: it said the value was true until then and that
+    memory_recall kept returning it, which was false on both counts, and it said every
+    value still answered about the period before its ending."""
+    now = utcnow()
+    memory = server._ctx.memory
+    memory.remember("user", "works_at", "Acme", valid_from=now - timedelta(days=30))
+    memory.remember("user", "works_at", "Globex", valid_from=now + timedelta(days=30))
+
+    body = text(server, "memory_end", {"predicate": "works_at"})
+
+    assert "Ended 2 value(s) of user/works_at" in body
+    assert "still in the future" not in body and "keeps returning" not in body
+    assert "They answer nothing after it" not in body
+    assert "Those that had begun answer nothing after it" in body
+    assert "note: 1 of these had not begun when they were ended" in body
+    assert "true at no instant" in body
+    # What the line says, checked against the store rather than taken on trust.
+    globex = [c for c in memory.history("user", "works_at") if c.object == "Globex"][0]
+    assert globex.valid_to == globex.valid_from
+    assert memory.get_all(valid_at=globex.valid_from + timedelta(days=1)) == []
+
+
+def test_ending_one_value_that_has_not_begun_says_it_is_true_at_no_instant(server):
+    """The id-addressed path clamps the same way, and said the same false things: that
+    the value still answered about the period before its ending, and that it was true
+    until then."""
+    starts = utcnow() + timedelta(days=30)
+    globex = server._ctx.memory.remember("user", "works_at", "Globex",
+                                         valid_from=starts).added[0]
+
+    body = text(server, "memory_end", {"claim_id": globex.id})
+
+    assert f"Ended claim {globex.id}" in body and "not retired" in body
+    assert "still answers about the period before it" not in body
+    assert "still in the future" not in body
+    assert "It had not begun when it was ended" in body and "true at no instant" in body
+
+
+@pytest.mark.parametrize("address", ["predicate", "claim_id"])
+def test_ending_a_value_stored_to_begin_later_after_its_start_says_when_it_answers(
+        server, address):
+    """Ended at an instant after its own start, a value stored to begin later is true
+    between the two. It is not true now, so memory_recall is not returning it, and the
+    note must not say it keeps doing so."""
+    starts = utcnow() + timedelta(days=30)
+    globex = server._ctx.memory.remember("user", "works_at", "Globex",
+                                         valid_from=starts).added[0]
+    arguments = {"at": (starts + timedelta(days=30)).isoformat()}
+    arguments[address] = "works_at" if address == "predicate" else globex.id
+
+    body = text(server, "memory_end", arguments)
+
+    assert "keeps returning" not in body and "true at no instant" not in body
+    assert "note: 1 of these are stored to begin later" in body
+    assert "true only from its own start until then" in body
 
 
 @pytest.mark.parametrize("address", ["predicate", "claim_id"])
@@ -2742,6 +3015,7 @@ def test_the_instant_argument_cannot_be_read_as_transaction_time(server):
     assert "always now" in since and "forge an audit trail" in since
 
 
+@pytest.mark.covers("inv:I8")
 def test_true_since_cannot_be_used_to_set_transaction_time(server):
     """The boundary, asserted behaviourally as well: valid time moves, belief time does not.
 
@@ -2826,6 +3100,157 @@ def test_a_past_dated_write_behind_a_later_value_is_history_not_news(server):
     assert berlin.valid_to == lisbon.valid_from
     assert [c.object for c in server._ctx.memory.get_all()] == ["Lisbon"]
     assert "already stopped being true" in body
+
+
+def test_restating_a_stored_fact_with_an_earlier_start_does_not_say_it_stopped(server):
+    """The same value restated with an earlier true_since is stored for the earlier
+    period, ending where the claim on record begins (#283). That claim is over, but the
+    fact is not, so the note must not tell the model it stopped being true there: the
+    model would repeat that to the user, or write the fact a third time."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    april, january = now - timedelta(days=150), now - timedelta(days=240)
+    text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                     "true_since": stamp(april)})
+    body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                            "true_since": stamp(january)})
+
+    assert body.startswith("added 1, ended 0, retired 0, already-known 0")
+    assert "already stopped being true" not in body
+    assert "the same value is already stored and still in force" in body
+    assert [c.object for c in server._ctx.memory.get_all(
+        valid_at=january + timedelta(days=30))] == ["tea"]
+
+
+def test_restating_from_an_even_earlier_start_does_not_say_it_stopped_either(server):
+    """Tea is stored from April, and a restatement from January stored January to April.
+    A restatement from October stores only October to January, ending where the claim
+    for January begins. That claim is over as well, but the value is not, so the note
+    must not say the fact stopped being true in January."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    for days in (150, 240):
+        text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                         "true_since": stamp(now - timedelta(days=days))})
+    body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                            "true_since": stamp(now - timedelta(days=330))})
+
+    assert body.startswith("added 1, ended 0, retired 0, already-known 0")
+    assert "already stopped being true" not in body
+    assert "the same value is already stored and still in force" in body
+
+
+def test_restating_the_same_earlier_start_twice_is_already_known(server):
+    """The second restatement from January says nothing the store does not hold, so it
+    is reported as already known and stores nothing."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    for days in (150, 240):
+        text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                         "true_since": stamp(now - timedelta(days=days))})
+    body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                            "true_since": stamp(now - timedelta(days=240))})
+
+    assert body.startswith("added 0, ended 0, retired 0, already-known 1")
+    assert len(server._ctx.memory.history("user", "likes")) == 2
+
+
+class _CipherError(Exception):
+    """Stands in for SQLCipher's `Error`, which derives from no `sqlite3` class."""
+
+
+@pytest.mark.parametrize("failure", [
+    RemoteError(503, "unavailable", "the deployment did not answer", True),
+    sqlite3.OperationalError("disk I/O error"),
+    _CipherError("file is not a database"),
+], ids=["hosted", "sqlite", "sqlcipher"])
+def test_a_failed_read_of_the_slot_leaves_the_write_and_the_general_note(
+        server, monkeypatch, failure):
+    """Telling a restatement's earlier period from a value that stopped takes a read made
+    after the write. If the store or the deployment fails that read, the reply must still
+    report the write rather than an error: the write happened, and a model told it failed
+    would say so to the user, or write the fact again. SQLCipher's module is loaded only
+    for an encrypted store, so a stand-in for it is put where that store would load it."""
+    monkeypatch.setitem(sys.modules, "sqlcipher3.dbapi2",
+                        types.SimpleNamespace(Error=_CipherError))
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                     "true_since": stamp(now - timedelta(days=150))})
+
+    def unreachable(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(type(server._ctx.memory), "history", unreachable)
+    body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                            "true_since": stamp(now - timedelta(days=240))})
+
+    assert body.startswith("added 1, ended 0, retired 0, already-known 0")
+    assert "already stopped being true" in body
+
+
+def test_a_defect_in_the_read_after_the_write_is_not_hidden(server, monkeypatch):
+    """The fallback covers a store or a deployment that fails the read, and nothing else.
+    An exception of any other kind is a defect in memvara, and a reply that hid it would
+    let it go unnoticed, so the call reports it, even though the write has happened."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                     "true_since": stamp(now - timedelta(days=150))})
+
+    def broken(*args, **kwargs):
+        raise TypeError("history() got an unexpected keyword argument")
+
+    monkeypatch.setattr(type(server._ctx.memory), "history", broken)
+    body, is_error = call(server, "memory_remember", {
+        "predicate": "likes", "object": "tea",
+        "true_since": stamp(now - timedelta(days=240))})
+
+    assert is_error and "TypeError" in body
+    assert len(server._ctx.memory.get_all(valid_at=now - timedelta(days=200))) == 1
+
+
+def test_the_slot_is_not_read_when_the_caller_set_the_end_the_store_kept(
+        server, monkeypatch):
+    """The note for a continued value can apply only to a claim whose end the store set,
+    where the next claim of its value begins. A claim that ends where the caller said,
+    with true_until, gets the general note, so the reply reads nothing more."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                     "true_since": stamp(now - timedelta(days=150))})
+
+    reads = []
+    history = type(server._ctx.memory).history
+
+    def counted(*args, **kwargs):
+        reads.append(args[1:])
+        return history(*args, **kwargs)
+
+    monkeypatch.setattr(type(server._ctx.memory), "history", counted)
+    body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                            "true_since": stamp(now - timedelta(days=240)),
+                                            "true_until": stamp(now - timedelta(days=200))})
+
+    assert body.startswith("added 1, ended 0, retired 0, already-known 0")
+    assert "already stopped being true" in body
+    assert reads == []
+
+
+def test_the_interval_notes_are_written_for_the_instant_they_are_given():
+    """`_continued` and `_interval_note` decide whether a claim is over against one
+    instant, taken once for the reply, so the two cannot disagree about a claim that
+    ends between two readings of the clock."""
+    from memvara.server.tools import _interval_note
+
+    ends = utcnow() - timedelta(days=1)
+    claim = Claim(subject="user", predicate="likes", object="tea",
+                  valid_from=ends - timedelta(days=30), valid_to=ends)
+
+    assert _interval_note([claim], frozenset(), ends - timedelta(seconds=1)) == ""
+    assert "already stopped being true" in _interval_note([claim], frozenset(), ends)
+    assert "the same value is already stored" in _interval_note(
+        [claim], frozenset({claim.id}), ends)
 
 
 def test_a_future_dated_write_is_stored_and_says_it_is_not_in_force_yet(server):
@@ -3395,6 +3820,7 @@ def test_a_flag_that_is_neither_true_nor_false_is_a_startup_error():
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_READ_ONLY": "maybe"})
 
 
+@pytest.mark.covers("env:MEMVARA_LLM")
 def test_an_unknown_backend_is_a_startup_error():
     with pytest.raises(ConfigError, match="is not a backend"):
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "ollama"})
@@ -3499,6 +3925,7 @@ def test_no_cap_is_the_default_because_hosted_openai_rejects_one(monkeypatch):
 
 @pytest.mark.parametrize("value", ["0", "-1", "abc", "3.5", "twelve",
                                    "\u00b9\u00b2", "\u0661\u0662"])
+@pytest.mark.covers("env:MEMVARA_LLM_MAX_CLAIMS")
 def test_an_unusable_claim_cap_is_refused_at_startup(value):
     """Refused rather than clamped or ignored. `0` would forbid every claim and make
     extraction a silent no-op, and a typo falling back to uncapped would leave a grammar
@@ -3577,6 +4004,7 @@ def test_the_claim_cap_and_the_terse_shape_are_separate_switches(monkeypatch):
 
 
 @pytest.mark.parametrize("value", ["maybe", "2", "yes please"])
+@pytest.mark.covers("env:MEMVARA_LLM_TERSE_CLAIMS")
 def test_an_unusable_terse_flag_is_refused_at_startup(value):
     """Refused rather than read as false. A typo falling through to the full shape would
     leave an operator believing they had halved their generation time when they had not,
@@ -3627,6 +4055,7 @@ def test_no_extraction_timeout_leaves_the_sdk_default_alone(monkeypatch):
 
 @pytest.mark.parametrize("value", ["0", "-5", "inf", "nan", "1e400", "soon", "10s",
                                    "\u0661", "\u0665\u0660\u0660"])
+@pytest.mark.covers("env:MEMVARA_LLM_TIMEOUT")
 def test_an_unusable_extraction_timeout_is_refused_at_startup(value):
     """`float()` alone would take `inf`, `nan` and `1e400`, and none of those is a
     duration. `inf` is the sharp one: it would wait on a single turn forever, which is
@@ -3701,6 +4130,7 @@ def test_the_budget_and_the_claim_cap_are_separate_switches(monkeypatch):
 @pytest.mark.parametrize("value", ["0", "-1", "2048 tokens", "2.5", "lots",
                                    "0x10", "2_048", "\u00b2\u2070\u2074\u2078",
                                    "\u0662\u0660\u0664\u0668"])
+@pytest.mark.covers("env:MEMVARA_LLM_MAX_TOKENS")
 def test_an_unusable_response_budget_is_refused_at_startup(value):
     """Refused rather than clamped or ignored. A typo falling back to 8,192 would leave
     an operator believing they had bounded a runaway they had not — and `0` is the sharp
@@ -3761,6 +4191,7 @@ def test_the_shipped_extraction_instructions_are_the_default(monkeypatch):
     memory.close()
 
 
+@pytest.mark.covers("env:MEMVARA_LLM_EXTRACT_SYSTEM")
 def test_an_unreadable_extraction_prompt_is_refused_at_startup(tmp_path):
     """Refused rather than falling back to the shipped prompt. A deployment that named
     this file meant to change what the model is told, and quietly not changing it is the
@@ -3892,6 +4323,7 @@ def test_a_missing_openai_key_is_a_startup_error_not_a_traceback(monkeypatch):
                                              "MEMVARA_LLM": "openai"}))
 
 
+@pytest.mark.covers("env:MEMVARA_LLM_MODEL")
 def test_cloud_mode_refuses_a_named_extraction_model():
     """Same rule as MEMVARA_LLM and MEMVARA_EMBEDDER, and the same reason: extraction
     runs inside the deployment, so a model named here would be read and never used. An
@@ -4005,6 +4437,7 @@ def test_a_deployment_with_no_extras_and_no_variable_is_unchanged(tmp_path, monk
     memory.close()
 
 
+@pytest.mark.covers("env:MEMVARA_EMBEDDER")
 def test_a_width_the_default_cannot_read_is_reachable_from_the_environment(tmp_path):
     """Why the value takes an argument at all.
 
@@ -4114,6 +4547,7 @@ def test_an_unknown_embedder_is_a_startup_error_that_names_the_vocabulary():
     ("hashing:0", "does not name a width"),
     ("hashing:-8", "does not name a width"),
 ])
+@pytest.mark.covers("env:MEMVARA_EMBEDDER")
 def test_every_unusable_embedder_value_fails_before_the_store_is_touched(value, fragment):
     with pytest.raises(ConfigError) as caught:
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_EMBEDDER": value})
@@ -4344,6 +4778,15 @@ def standing_server():
     srv = MemvaraMCPServer(memory, user="alice")
     yield srv
     srv.close()
+
+
+def test_standing_refuses_k_below_one_instead_of_reporting_an_empty_store(standing_server):
+    """`k=0` asked for no rows and got the reply that means "nothing is stored", in a
+    scope holding two standing preferences (#269). A caller cannot tell those apart, so
+    the argument is refused by name, as every other tool's `k` is."""
+    body, is_error = call(standing_server, "memory_standing", {"k": 0})
+    assert is_error and "memory_standing.k must be >= 1" in body, body
+    assert not text(standing_server, "memory_standing", {"k": 1}).startswith("No standing")
 
 
 def test_standing_marks_the_row_a_machine_derived(standing_server):
@@ -4668,6 +5111,7 @@ def test_anchored_recall_says_nothing_about_a_stranger_and_search_agrees(server)
 
 # -- the read configuration a deployment can choose ---------------------------
 
+@pytest.mark.covers("env:MEMVARA_READ_W_GRAPH")
 def test_the_graph_leg_can_be_switched_on_from_the_environment():
     """`read_w_graph` existed as a constructor argument and no deployment could set it.
 
@@ -4694,6 +5138,7 @@ def test_the_graph_leg_is_off_when_nobody_asks_for_it():
 
 @pytest.mark.parametrize("value", ["-1", "-0.5", "lots", "1.0.0", "1,0",
                                    "\u0661", "nan", "inf"])
+@pytest.mark.covers("env:MEMVARA_READ_W_GRAPH")
 def test_an_unusable_graph_weight_is_refused_at_startup(value):
     """Refused rather than ignored, for the reason every other setting here is: a typo
     that fell back to 0.0 would leave an operator believing they had switched the leg on.

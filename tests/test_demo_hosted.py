@@ -17,8 +17,9 @@ The failures these tests exist to prevent:
    this happens before anything is written.
 2. **A hosted arm that silently answers a different question.** A hosted project cannot
    declare the support schema, so `plan` is multi-valued there and a new plan would sit
-   beside the old one. And `POST /v1/recall` has no time axis, so a dated question read
-   through it would get today's block. Each would produce a plausible, wrong row. The
+   beside the old one. And `POST /v1/recall` had no time axis when the arm was written, so
+   a dated question read through it would have got today's block. Each would produce a
+   plausible, wrong row. The
    arm closes single-valued slots itself and reads dated questions through
    `search(valid_at=)`; the tests check the slots against the local structured arm, which
    has the schema, rather than against expectations written here.
@@ -60,7 +61,8 @@ class FakeScoped:
 
     The store runs on the built-in vocabulary alone, which is what a hosted project has:
     the client cannot send a predicate schema, so `plan` and the two addresses are not
-    single-valued there. `recall(valid_at=)` raises, as `RemoteMemvara.recall` does.
+    single-valued there. `recall(valid_at=)` raises, so a test fails if the arm ever reads a
+    dated question through the hosted recall rather than through `search(valid_at=)`.
     """
 
     def __init__(self, owner: "FakeHosted", user: str) -> None:

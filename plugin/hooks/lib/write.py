@@ -24,6 +24,7 @@ from typing import Any, Iterable, Sequence
 from core.host import active
 
 from .open import open_store
+from .private import private_dir, private_open
 
 #: Beside the store, not in the plugin: the plugin directory is replaced wholesale on
 #: update, and a log that disappears on upgrade is not a log.
@@ -64,12 +65,16 @@ EPISODE_ROLE = "system"
 
 
 def log(line: str) -> None:
-    """Append one line, or give up quietly. Never raises into a hook."""
+    """Append one line, or give up quietly. Never raises into a hook.
+
+    The directory is 0700 and the file 0600 (`lib.private`): a line can quote up to 200
+    characters of a model's reply.
+    """
     try:
-        LOG.parent.mkdir(parents=True, exist_ok=True)
+        private_dir(str(LOG.parent))
         if LOG.exists() and LOG.stat().st_size > LOG_MAX_BYTES:
-            LOG.write_text("")
-        with LOG.open("a", encoding="utf-8") as fh:
+            private_open(str(LOG), "w").close()
+        with private_open(str(LOG), "a") as fh:
             fh.write(f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} {line}\n")
     except OSError:
         pass
@@ -198,10 +203,12 @@ def remember_kwargs(memory_type: "str | None", turn: str, hosted: bool,
     """
     kwargs: dict = {"confidence": 0.7}
     if memory_type:
-        # The hosted tool takes the type's name. The local library takes its enum, and a
-        # plain string fails there with `AttributeError: 'str' object has no attribute
-        # 'value'` when the claim is stored. Every fact this hook wrote to a local store
-        # failed that way, and capture.log recorded each one under `failed=`.
+        # The hosted tool takes the type's name. The local library takes its enum, and
+        # before #270 a plain string failed there with `AttributeError: 'str' object has
+        # no attribute 'value'` when the claim was stored, so every fact this hook wrote
+        # to a local store failed and capture.log recorded each one under `failed=`. The
+        # library converts a name itself now; converting here as well keeps the hook
+        # working with an installed library older than that fix.
         kwargs["memory_type"] = memory_type if hosted else _memory_type(memory_type)
     # The label the host writes under. It is stored on every claim and rendered back
     # by `memory_why`, so it is a fact about recorded history rather than a string to

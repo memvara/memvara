@@ -418,6 +418,7 @@ def test_the_date_range_becomes_valid_at_at_the_last_second_of_its_final_day() -
                                                query_rewrite=False)] == ["Porto"]
 
 
+@pytest.mark.covers("inv:RT4")
 def test_the_callers_valid_at_wins_over_the_models_range() -> None:
     mem = two_homes(FakeChat(rewrite_reply(start="2024-03-01", end="2024-03-31")))
     hits = mem.search("where did I live in March 2024",
@@ -427,6 +428,7 @@ def test_the_callers_valid_at_wins_over_the_models_range() -> None:
     assert hits.rewrite.date_to == date(2024, 3, 31), "the range is still reported"
 
 
+@pytest.mark.covers("inv:RT4")
 def test_the_callers_as_of_wins_over_the_models_range() -> None:
     mem = two_homes(FakeChat(rewrite_reply(start="2024-03-01", end="2024-03-31")))
     hits = mem.search("where did I live", as_of=datetime(2030, 1, 1, tzinfo=UTC))
@@ -901,6 +903,7 @@ def synthesis_telemetry(chat: FakeChat, **kw: Any) -> MemoryRecorder:
     ("rewrite", rewrite_telemetry, rewrite_reply("tea")),
     ("synthesis", synthesis_telemetry, '{"synthesis": "Green tea."}'),
 ])
+@pytest.mark.covers("inv:TB6")
 def test_an_answered_call_is_counted_with_its_tokens_and_time(stage: str, run: Any,
                                                               reply: str) -> None:
     from memvara.telemetry import RETRIEVAL_REWRITE_MS, RETRIEVAL_SYNTHESIS_MS
@@ -913,6 +916,7 @@ def test_an_answered_call_is_counted_with_its_tokens_and_time(stage: str, run: A
 
 @pytest.mark.parametrize("stage, run", [("rewrite", rewrite_telemetry),
                                         ("synthesis", synthesis_telemetry)])
+@pytest.mark.covers("inv:TB6")
 def test_a_failed_call_is_counted_as_a_fallback_with_its_reason(stage: str, run: Any) -> None:
     from memvara.telemetry import RETRIEVAL_MODEL_FALLBACK
     rec = run(FakeChat("garbage"))
@@ -947,6 +951,7 @@ def test_a_timeout_is_counted_as_a_timeout(stage: str) -> None:
 
 @pytest.mark.parametrize("stage, run", [("rewrite", rewrite_telemetry),
                                         ("synthesis", synthesis_telemetry)])
+@pytest.mark.covers("inv:TB6")
 def test_a_rejected_key_is_counted_as_refused(stage: str, run: Any) -> None:
     from memvara.telemetry import RETRIEVAL_MODEL_REFUSED
     rec = run(FakeChat(raises=status(401)))
@@ -1138,6 +1143,7 @@ def test_the_mem0_shim_is_deterministic_unless_asked() -> None:
     assert len(chat.calls) == 1
 
 
+@pytest.mark.covers("inv:TB7")
 def test_the_benchmark_reads_are_plain_unless_a_run_asks() -> None:
     import sys
     sys.path.insert(0, ".")
@@ -1365,6 +1371,7 @@ def _model_calls() -> set[str]:
     return found
 
 
+@pytest.mark.covers("inv:I1")
 def test_a_model_is_reached_only_from_the_places_invariant_1_names() -> None:
     assert _model_calls() == MODEL_CALLS
 
@@ -1427,5 +1434,6 @@ def _undeclared_reads() -> set[str]:
     return found
 
 
+@pytest.mark.covers("inv:TB7")
 def test_every_read_in_this_repository_says_whether_it_may_call_a_model() -> None:
     assert _undeclared_reads() == set(DECLARED_ELSEWHERE)

@@ -1,0 +1,6 @@
+# The checklist's gaps: items that no test covers yet, one per line.
+#
+# tests/adversarial/test_adv_checklist.py fails when an item has no test and is not
+# listed here, and when a line here is no longer a gap. When a test starts covering an
+# item, delete its line. A new item needs a test, not a line here.
+# docs/claude/testing.md explains the checklist.

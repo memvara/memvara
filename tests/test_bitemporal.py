@@ -27,11 +27,15 @@ Rows 2 and 3 were unreachable before; row 4 must keep answering exactly as it di
 """
 
 import asyncio
+import threading
+import time
 from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
 
 import pytest
 
-from memvara import Claim, Episode, HashingEmbedder, Memvara, NullLLM, Scope, utcnow
+from memvara import (Claim, ConfirmationRefused, Episode, HashingEmbedder, Memvara, NullLLM,
+                     Scope, WriteReceipt, utcnow)
 from memvara.aio import AsyncMemvara
 from memvara.schema import Cardinality, PredicateSpec, Volatility
 from memvara.store import STATES
@@ -215,6 +219,7 @@ def test_as_of_with_either_axis_raises_rather_than_picking_one(mem, kw):
     ("neighborhood", ("user",)),
     ("paths_between", ("user", "Berlin")),
 ])
+@pytest.mark.covers("inv:RT2")
 def test_every_read_that_takes_as_of_refuses_to_mix_it(mem, method, args):
     """One rule, not eight. A method that accepted the mix would be the one an
     integration reaches for, and the answer it returned would look ordinary."""
@@ -503,6 +508,7 @@ def test_the_state_filter_is_in_the_sql_not_applied_after_the_page(mem):
     lambda m, **kw: m.store.candidate_ids([SCOPE], **kw),
     lambda m, **kw: list(m.store.iter_claims("acme", **kw)),
 ])
+@pytest.mark.covers("inv:MM1")
 def test_states_and_include_invalidated_together_raise_rather_than_pick_one(mem, call):
     """There is no reading of `states=["retired"], include_invalidated=False` in which one
     of the two is not being ignored. Silently honouring either answers a question the
@@ -1231,6 +1237,7 @@ def test_ask_does_not_quote_a_value_we_had_already_stopped_believing(mem):
         "by June we had stopped believing it, so June would not have quoted it"
 
 
+@pytest.mark.covers("inv:RT2")
 def test_ask_carries_the_instant_it_answered_about(mem):
     """The same reason `Delta` carries `since`: a caller logging the result must not be
     able to separate the answer from the question it answers."""
@@ -1257,6 +1264,89 @@ def test_the_scoped_and_async_facades_forward_ask(mem, corrected):
     answer, scoped_answer = asyncio.run(go())
     assert cities(answer.readings[0].stated) == ["Rome"]
     assert cities(scoped_answer.readings[0].stated) == ["Rome"]
+
+
+# --- a retired claim is left as it is by a later write -----------------------------------
+#
+# `delete(at=...)` can record a retirement that takes effect later, and until then the store
+# still believes the claim, so a new value meets it as one in force. It is retired all the
+# same: its state is `retired`, and once a claim is retired no later end or retirement may
+# change either of its clocks or add a closure record. So the new value leaves it as it is,
+# and the write's receipt does not name it as closed.
+
+
+def _retired_paris(mem) -> Claim:
+    paris = mem.remember("user", "lives_in", "Paris").added[0]
+    assert mem.delete(paris.id, at=utcnow() + timedelta(days=1),
+                      reason="moving out tomorrow") is True
+    return mem.store.get_claim(paris.id)
+
+
+@pytest.mark.parametrize("close", ["ended", "retired"])
+def test_a_new_value_leaves_a_claim_whose_retirement_takes_effect_later_as_it_was(mem,
+                                                                                  close):
+    retired = _retired_paris(mem)
+    rome = mem.remember("user", "lives_in", "Rome", close=close)
+    assert [c.object for c in rome.closed] == []
+    assert mem.store.get_claim(retired.id) == retired, "the retired claim was changed"
+
+
+def test_a_retraction_leaves_a_claim_whose_retirement_takes_effect_later_as_it_was(mem):
+    retired = _retired_paris(mem)
+    taken_back = mem.remember("user", "lives_in", "Paris", polarity=-1)
+    assert [c.object for c in taken_back.closed] == []
+    assert mem.store.get_claim(retired.id) == retired, "the retired claim was changed"
+
+
+def test_forget_leaves_a_claim_whose_retirement_takes_effect_later_as_it_was(mem):
+    retired = _retired_paris(mem)
+    assert [c.object for c in mem.forget("user", "lives_in", close="ended")] == []
+    assert mem.store.get_claim(retired.id) == retired, "the retired claim was changed"
+
+
+# --- a value scheduled to begin later still competes for its slot --------------------
+#
+# A single-valued slot holds one value at a time, and that includes values written to begin
+# in the future. Those are believed from the moment they are recorded without being in force
+# yet, and the reconciler looked only at values in force at the time of the write, so a second
+# scheduled value never met the first.
+
+YEAR_2100 = datetime(2100, 1, 1, tzinfo=TZ)
+
+
+def test_a_second_scheduled_value_replaces_the_first_and_a_later_one_ends_it(mem):
+    """Rome, scheduled from the same instant as Paris, collapses Paris; Lisbon, scheduled
+    half a year later, ends Rome where it begins. Before, all three were live together."""
+    mem.remember("user", "lives_in", "Paris", valid_from=YEAR_2100)
+    mem.remember("user", "lives_in", "Rome", valid_from=YEAR_2100)
+    assert cities(mem.get_all(valid_at=YEAR_2100 + timedelta(days=1))) == ["Rome"]
+    mem.remember("user", "lives_in", "Lisbon", valid_from=YEAR_2100 + timedelta(days=180))
+    assert cities(mem.get_all(valid_at=YEAR_2100 + timedelta(days=1))) == ["Rome"]
+    assert cities(mem.get_all(valid_at=YEAR_2100 + timedelta(days=200))) == ["Lisbon"]
+
+
+def test_a_value_scheduled_to_begin_later_ends_a_new_one_that_begins_first(mem):
+    """The third rule for a value in force today, applied to one that is not in force
+    yet: a competing value that begins later ends the new one, which is stored as
+    history."""
+    mem.remember("user", "lives_in", "Rome", valid_from=YEAR_2100 + timedelta(days=180))
+    paris = mem.remember("user", "lives_in", "Paris", valid_from=YEAR_2100).added[0]
+    assert paris.valid_to == YEAR_2100 + timedelta(days=180)
+    assert cities(mem.get_all(valid_at=YEAR_2100 + timedelta(days=1))) == ["Paris"]
+    assert cities(mem.get_all(valid_at=YEAR_2100 + timedelta(days=200))) == ["Rome"]
+
+
+def test_a_write_lists_as_closed_only_the_values_it_changed(mem):
+    """Berlin, in force today, was ended at 2100 by the first scheduled value. The second
+    one starts at 2100 too, so it changes nothing about Berlin, and used to list Berlin as
+    closed anyway, with a second closure record on it and itself as the successor."""
+    berlin = mem.remember("user", "lives_in", "Berlin").added[0]
+    paris = mem.remember("user", "lives_in", "Paris", valid_from=YEAR_2100)
+    assert [c.id for c in paris.closed] == [berlin.id]
+    ended = mem.store.get_claim(berlin.id)
+    rome = mem.remember("user", "lives_in", "Rome", valid_from=YEAR_2100)
+    assert [c.id for c in rome.closed] == [paris.added[0].id]
+    assert mem.store.get_claim(berlin.id) == ended, "Berlin was written again"
 
 
 # --- an interval of no length is not a shorter fact --------------------------
@@ -1340,6 +1430,32 @@ def test_is_live_mirrors_the_store_clause_on_both_axes(mem, four):
         assert by_hand == by_store, kw
 
 
+def test_is_unended_mirrors_the_store_clause_on_both_axes(mem, four):
+    """`Claim.is_unended` and `Store.unended_claims` must agree row for row, as `is_live`
+    and the live clause do. `forget()` closes what the store selects, and falls back to
+    the Python test on a store that cannot run the SQL one, so two definitions of
+    "believed and not ended" would close different values on two kinds of store. A value
+    stored to begin later is added to the four rows, because it is the one row the two
+    tests exist to include and `is_live` excludes."""
+    put(mem, "Madrid", valid_from=datetime(2100, 1, 1, tzinfo=TZ), recorded_at=AUG)
+    everything = mem.history("user", "lives_in")
+    key = everything[0].fact_key
+    for kw in ({}, {"valid_at": JUNE}, {"known_at": JULY_MID},
+               {"valid_at": JUNE, "known_at": AUG}, {"as_of": JUNE}):
+        valid_at, known_at = time_axes(kw.get("as_of"), kw.get("valid_at"),
+                                       kw.get("known_at"))
+        by_hand = {c.object for c in everything if c.is_unended(**kw)}
+        by_store = {c.object for c in mem.store.unended_claims(
+            "acme", key, valid_at=valid_at, known_at=known_at)}
+        assert by_hand == by_store, kw
+    # …and the answers differ by instant, or the agreement above proves nothing. The
+    # last instant was `as_of=JUNE`, when only Berlin was believed and not over.
+    assert by_hand == {"Berlin"}
+    assert {c.object for c in everything if c.is_unended()} == {"Lisbon", "Madrid"}
+    assert {c.object for c in everything if c.is_unended(valid_at=JUNE)} == {
+        "Rome", "Lisbon", "Madrid"}, "a value that has not begun by then is included"
+
+
 def test_a_bare_is_live_reads_one_clock_for_both_axes():
     """Two clock reads would put the axes microseconds apart on the commonest call
     there is. Nothing could observe the difference reliably, which is exactly what makes
@@ -1348,3 +1464,213 @@ def test_a_bare_is_live_reads_one_clock_for_both_axes():
     edge = Claim(subject="user", predicate="lives_in", object="Rome",
                  valid_from=now, recorded_at=now, valid_to=now + timedelta(days=1))
     assert edge.is_live()
+
+
+# --- a write that waits for the write lock -----------------------------------------------
+#
+# Two handles on one file stand for two processes, such as the MCP server and the hooks'
+# daemon. One handle holds the write lock for a second; the write under test runs through
+# the other handle on a thread and has to wait for it.
+
+
+@pytest.fixture()
+def two(tmp_path):
+    """Two handles on one store file."""
+    path = str(tmp_path / "s.db")
+    first = Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme",
+                    user="alice")
+    second = Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme",
+                     user="alice")
+    yield first, second
+    first.close()
+    second.close()
+
+
+def after_a_second_behind(holder: Memvara,
+                          write: Callable[[], WriteReceipt]) -> tuple[WriteReceipt, datetime,
+                                                                       datetime]:
+    """Run `write` on a thread while `holder` holds the write lock for a second. Returns
+    the write's receipt and the instants the wait began and ended."""
+    receipts: list[WriteReceipt] = []
+    with holder.store.batch():
+        began = utcnow()
+        worker = threading.Thread(target=lambda: receipts.append(write()))
+        worker.start()
+        time.sleep(1.0)
+        ended = utcnow()
+    worker.join(10)
+    assert receipts, "the write never finished"
+    return receipts[0], began, ended
+
+
+def test_a_write_that_waited_for_the_lock_is_believed_from_when_it_got_it(two):
+    """A `remember()` with no `recorded_at` takes it once it holds the write lock, at the
+    instant it retires what it replaces, so the old value's belief ends exactly where the
+    new one's begins. Stamped when the call began, the new value was believed from before
+    the wait and the old one until after it, and a read of the past inside the wait
+    returned both."""
+    holder, writer = two
+    berlin = holder.remember("user", "lives_in", "Berlin", valid_from=JAN).added[0]
+    receipt, began, ended = after_a_second_behind(holder, lambda: writer.remember(
+        "user", "lives_in", "Paris", valid_from=JULY, close="retired"))
+    paris = receipt.added[0]
+    kept = writer.store.get_claim(berlin.id)
+    middle = began + (ended - began) / 2
+    believed = cities(writer.get_all(known_at=middle, valid_at=AUG))
+    assert believed == ["Berlin"], f"believed at {middle}, inside the wait: {believed}"
+    assert paris.recorded_at == kept.invalidated_at
+    assert paris.recorded_at > ended
+
+
+def test_a_replacement_that_waited_for_the_lock_retires_its_predecessor_when_it_got_it(
+        two):
+    """`remember(replaces=...)` stamps the same way, and retires the claim it names at
+    that instant."""
+    holder, writer = two
+    berlin = holder.remember("user", "lives_in", "Berlin", valid_from=JAN).added[0]
+    receipt, _, ended = after_a_second_behind(holder, lambda: writer.remember(
+        "user", "lives_in", "Paris", valid_from=JULY, replaces=berlin.id, close="retired"))
+    paris = receipt.added[0]
+    assert writer.store.get_claim(berlin.id).invalidated_at == paris.recorded_at
+    assert paris.recorded_at > ended
+
+
+@pytest.mark.parametrize("replacing", [False, True])
+def test_a_write_given_no_instants_begins_when_it_gets_the_lock(two, replacing):
+    """Given neither `valid_from` nor `recorded_at`, a write takes both from one reading
+    under the lock, so the value it ends stops exactly where the new one starts. With
+    only `recorded_at` moved, a write that waited began before its wait while the value
+    it ended stopped there too, and both clocks of the new claim disagreed by the wait."""
+    holder, writer = two
+    berlin = holder.remember("user", "lives_in", "Berlin", valid_from=JAN).added[0]
+    receipt, _, ended = after_a_second_behind(holder, lambda: writer.remember(
+        "user", "lives_in", "Paris", replaces=berlin.id if replacing else None))
+    paris = receipt.added[0]
+    assert paris.valid_from == paris.recorded_at > ended
+    assert writer.store.get_claim(berlin.id).valid_to == paris.valid_from
+
+
+def test_a_recorded_at_the_caller_passes_is_kept(mem):
+    """Only the default moves under the lock. A backdated import states its own
+    transaction time, and the write keeps it."""
+    mem.remember("user", "lives_in", "Berlin", valid_from=JAN)
+    paris = mem.remember("user", "lives_in", "Paris", valid_from=JULY,
+                         recorded_at=JULY_MID, close="retired").added[0]
+    assert paris.recorded_at == JULY_MID
+    assert mem.store.get_claim(paris.id).recorded_at == JULY_MID
+
+
+# --- a write that closes a claim reads it under the write lock ------------------------
+#
+# Two handles on one file stand for two processes, such as the MCP server and the hooks'
+# daemon. One handle opens a batch, which holds the database's write lock. The write under
+# test starts through the other handle, on a thread, and has to wait for that lock. While
+# it waits, the first handle changes the claim it is about to close, and then commits. The
+# write must act on the claim as the first handle left it. Before, it read the claim before
+# it had the lock and wrote that stale copy back whole, undoing the other change.
+
+
+def behind(holder: Memvara, change: Callable[[], Any],
+           call: Callable[[], Any]) -> tuple[Any, Any]:
+    """Start `call` on a thread while `holder` holds the write lock, then make `change`
+    through `holder` and commit it. Returns what `change` and `call` returned, and raises
+    what `call` raised.
+
+    `call` cannot finish while the batch is open, because it has to wait for the lock, and
+    that is checked before `change` runs, so every test really makes its change while the
+    write under test is waiting."""
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as exc:  # noqa: BLE001 - raised again below
+            outcome["error"] = exc
+
+    with holder.store.batch():
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(0.2)
+        assert worker.is_alive(), f"the write did not wait for the lock: {outcome}"
+        changed = change()
+    worker.join(10)
+    assert not worker.is_alive(), "the write never finished"
+    if "error" in outcome:
+        raise outcome["error"]
+    return changed, outcome["value"]
+
+
+def test_a_delete_keeps_an_ending_another_writer_made_while_it_waited(two):
+    holder, deleter = two
+    berlin = holder.remember("user", "lives_in", "Berlin", valid_from=JAN).added[0]
+    paris, deleted = behind(
+        holder, lambda: holder.remember("user", "lives_in", "Paris", valid_from=JULY),
+        lambda: deleter.delete(berlin.id))
+    kept = deleter.store.get_claim(berlin.id)
+    assert deleted is True
+    assert (kept.valid_to, kept.invalidated_by) == (JULY, paris.added[0].id)
+    assert kept.invalidated_at is not None
+
+
+def test_forget_retires_the_slot_as_another_writer_left_it(two):
+    """The slot is read once the lock is held, and the retirement is stamped then too, so
+    forget retires the value written while it waited, at an instant after that value was
+    recorded, and leaves the value it replaced ended as that write left it."""
+    holder, forgetter = two
+    berlin = holder.remember("user", "lives_in", "Berlin", valid_from=JAN).added[0]
+    paris, retired = behind(
+        holder, lambda: holder.remember("user", "lives_in", "Paris", valid_from=JULY),
+        lambda: forgetter.forget("user", "lives_in"))
+    paris_id = paris.added[0].id
+    assert [c.id for c in retired] == [paris_id]
+    stored = forgetter.store.get_claim(paris_id)
+    assert stored.invalidated_at >= stored.recorded_at
+    kept = forgetter.store.get_claim(berlin.id)
+    assert (kept.state, kept.valid_to) == ("ended", JULY)
+
+
+def test_a_confirmed_forget_matching_refuses_a_claim_ended_while_it_waited(two):
+    holder, matcher = two
+    berlin = holder.remember("user", "lives_in", "Berlin", valid_from=JAN).added[0]
+    preview = matcher.forget_matching("Berlin", close="retired", k=1)
+    assert list(preview.matches) == [berlin.id]
+    with pytest.raises(ConfirmationRefused, match="now ended"):
+        behind(holder, lambda: holder.remember("user", "lives_in", "Paris", valid_from=JULY),
+               lambda: matcher.forget_matching("Berlin", close="retired", k=1,
+                                               confirm=preview.confirm))
+    kept = matcher.store.get_claim(berlin.id)
+    assert (kept.state, kept.valid_to) == ("ended", JULY)
+
+
+def test_supersede_refuses_a_claim_retired_while_it_waited(two):
+    holder, superseder = two
+    berlin = holder.remember("user", "lives_in", "Berlin", valid_from=JAN).added[0]
+    lisbon = Claim(subject="user", predicate="lives_in", object="Lisbon", valid_from=AUG)
+    with pytest.raises(ValueError, match="already retired"):
+        behind(holder, lambda: holder.delete(berlin.id),
+               lambda: superseder.supersede(berlin.id, lisbon))
+    kept = superseder.store.get_claim(berlin.id)
+    assert (kept.state, kept.valid_to, kept.invalidated_by) == ("retired", None, None)
+    assert [c.object for c in superseder.get_all()] == []
+
+
+@pytest.mark.parametrize("replacing", [False, True])
+def test_a_write_whose_expiry_passes_while_it_waits_for_the_lock_is_refused(two,
+                                                                            replacing):
+    """`remember()` refuses an `expires_at` that is not in the future, because the next
+    sweep would erase the claim at once. It checked the expiry against the instant the
+    call began, and the write is stamped when it takes the lock, so a write that waited
+    past its expiry was stored already expired. It is checked again under the lock,
+    against the instant the write is stamped with, and refused the same way, before
+    anything is written: no claim is stored and the claim it names is not closed."""
+    holder, writer = two
+    berlin = holder.remember("user", "lives_in", "Berlin", valid_from=JAN).added[0]
+    before = writer.store.get_claim(berlin.id)
+    soon = utcnow() + timedelta(milliseconds=500)
+    with pytest.raises(ValueError, match="is not in the future"):
+        behind(holder, lambda: time.sleep(1.5), lambda: writer.remember(
+            "user", "lives_in", "Paris", expires_at=soon,
+            replaces=berlin.id if replacing else None))
+    stored = list(writer.store.iter_claims("acme", include_invalidated=True))
+    assert [c.object for c in stored] == ["Berlin"], "the expired write was stored"
+    assert writer.store.get_claim(berlin.id) == before

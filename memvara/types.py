@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Iterable, Literal, TypeVar, cast
+from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Iterable, Literal, Protocol,
+                    TypeVar, cast)
 
 from .entities import (OWNER_SEP, entity_key, entity_type_of,
                        split_entity_type, typed_entity_key)
@@ -370,7 +371,21 @@ def close_out(claim: "Claim", at: datetime, by: str | None, close: Closure,
     clock that stopped. The caller validates it first with `closure_reason`. It is
     written only when given, so a closure without one leaves exactly the record it
     always did.
+
+    **A retired claim is never closed again.** Once a claim is retired, a later closure
+    of either kind changes nothing: not `invalidated_at`, not `valid_to`, not
+    `invalidated_by`, and no second witness. The retirement instant is when we stopped
+    believing the claim, so moving it later made every read of the past between the two
+    instants believe the claim again, and moving it earlier would unbelieve what we did
+    believe. An ending is no better: it would give a claim we stopped believing an end in
+    the world, and history would show it as a fact that finished rather than one we took
+    back. A second `delete()` did the first, and `delete(close="ended")` on a retired
+    claim did the second. This is where the rule has to live so that no other caller can
+    break it. A claim counts as retired once its retirement is recorded, even one dated to
+    take effect later, which is what `Claim.state` says too.
     """
+    if claim.invalidated_at is not None:
+        return
     if by is not None:
         claim.invalidated_by = by
     if close == "retired":
@@ -381,11 +396,21 @@ def close_out(claim: "Claim", at: datetime, by: str | None, close: Closure,
     # collapses the interval to zero length rather than inverting it. An interval that
     # ends before it begins is not a shorter fact, it is a row no `as_of` window can
     # return consistently.
-    edge = max(as_utc(at), as_utc(claim.valid_from))
+    edge = not_before_start(at, claim)
     landed = claim.valid_to
     if landed is None or as_utc(landed) > edge:
         claim.valid_to = landed = edge
     _witness(claim, as_utc(landed), by, close, reason)
+
+
+def not_before_start(at: datetime, claim: "Claim") -> datetime:
+    """`at`, or the claim's own start when `at` falls before it.
+
+    Every closure of a claim's world clock ends it here, so a closure dated before the
+    fact it closes leaves an empty interval rather than one that ends before it begins.
+    `close_out`, the backfill's supersession and a retraction's tombstone all use it.
+    """
+    return max(as_utc(at), as_utc(claim.valid_from))
 
 
 def planned_end(claim: "Claim", reason: str) -> None:
@@ -460,7 +485,10 @@ def owner_key(scope: "Scope") -> str:
 
     Agent and session are excluded on purpose: a durable fact about a person is the same
     fact no matter which agent or session observed it, so learning "I moved to Lisbon" in
-    a fresh session must still retire the old city.
+    a fresh session must still retire the old city on record at a level that session
+    reads, such as the user's own. The slot therefore spans every session and agent, and
+    a write does not close what a sibling session or agent holds: see
+    `Reconciler._in_reach`.
     """
     return f"{scope.tenant}{OWNER_SEP}{scope.user or ''}"
 
@@ -569,6 +597,47 @@ class Derivation(str, Enum):
     CONSOLIDATION = "consolidation"  # derived by merging or promoting other claims
 
 
+class _HasScope(Protocol):
+    """Anything filed under a scope: a `Claim`, an `Episode`."""
+
+    @property
+    def scope(self) -> Scope: ...
+
+
+_Scoped = TypeVar("_Scoped", bound=_HasScope)
+
+
+#: The two values no level of a `Scope` may hold. `Scope.key()` writes a level that is not
+#: bound as '*', and up to 0.16.0 it wrote a level set to '*' or to '' the same way. So a
+#: claim written by a handle bound to `user="*"` had the key of a claim written for the
+#: whole tenant, and every other user's `get()` and `why()` returned it. Both values are
+#: refused rather than read as "not bound": read that way, a user who can choose their own
+#: id would write claims that every user's search returns.
+REFUSED_SCOPE_VALUES = ("*", "")
+
+
+def check_scope_value(level: str, value: object) -> None:
+    """Raise `ValueError` if `value` is one a scope `level` may not hold.
+
+    The one statement of the refusal, which `Scope` makes for every level when it is
+    built, and which the server's configuration makes for each variable so that it can
+    name the variable.
+
+    >>> check_scope_value("user", "alice")
+    >>> check_scope_value("user", "*")
+    Traceback (most recent call last):
+    ...
+    ValueError: user='*' is not a scope value. '*' and '' are refused at every level of a scope, because a scope's key writes a level that is not bound as '*'. Leave user unset (None) for no user.
+    """
+    if isinstance(value, str) and value in REFUSED_SCOPE_VALUES:
+        leave = ("Leave it unset for the default tenant." if level == "tenant"
+                 else f"Leave {level} unset (None) for no {level}.")
+        raise ValueError(
+            f"{level}={value!r} is not a scope value. '*' and '' are refused at every "
+            "level of a scope, because a scope's key writes a level that is not bound as "
+            f"'*'. {leave}")
+
+
 @dataclass(frozen=True, slots=True)
 class Scope:
     """Hierarchical addressing: tenant > user > project > agent > session.
@@ -581,6 +650,10 @@ class Scope:
     That direction is the useful one: a session should answer from what the user said
     months ago, while its own scratch state stays out of everyone else's results.
     mem0's flat user_id/agent_id/run_id triple cannot express the distinction.
+
+    No level may be '*' or the empty string: building such a scope raises `ValueError`,
+    naming the level and the value. `None` is how a level is left unbound. See
+    `REFUSED_SCOPE_VALUES`, and `stored_scope` for rows a store already holds.
     """
 
     tenant: str = "default"
@@ -604,6 +677,10 @@ class Scope:
     #: what version of Postgres a service runs does not.
     project: str | None = None
 
+    def __post_init__(self) -> None:
+        for level in ("tenant", "user", "project", "agent", "session"):
+            check_scope_value(level, getattr(self, level))
+
     def key(self) -> str:
         """A flat, comparable identity for this scope. Never parsed back apart.
 
@@ -613,25 +690,43 @@ class Scope:
         `Scope(user="alice/gh", project="o/a")` produce the same key, and `sees()`
         compares keys — so one user's scope would see another's. `%` is escaped first so
         that the escape itself cannot be forged by a component that contains `%2F`.
+
+        A level that is not bound is written '*', and nothing else is. A scope cannot hold
+        '*' or '' any more, but a row stored before that was refused can, and `stored_scope`
+        reads it back as stored. Such a value is written `%2A` for '*' and as an empty
+        component for '', so it never shares a key with a level that is not bound. Up to
+        0.16.0 both were written '*', and `sees()` let every user read such a row by id.
         """
-        def esc(part: str) -> str:
+        def esc(part: str | None) -> str:
+            if part is None:
+                return "*"
+            if part == "*":
+                return "%2A"
             return part.replace("%", "%25").replace("/", "%2F")
 
-        return "/".join(esc(p) for p in (self.tenant, self.user or "*",
-                                         self.project or "*", self.agent or "*",
-                                         self.session or "*"))
+        return "/".join(esc(p) for p in (self.tenant, self.user, self.project, self.agent,
+                                         self.session))
 
     def ancestors(self) -> list["Scope"]:
-        """This scope plus every broader scope it inherits from, narrowest first."""
+        """This scope plus every broader scope it inherits from, narrowest first.
+
+        The broader scopes are built with `stored_scope`. Each one only clears levels
+        this scope holds, so it holds no value this scope does not. A scope read back
+        from a store with '*' or '' at some level therefore has ancestors like any other,
+        instead of raising when one of them is built; they keep that value where they
+        keep the level, so their keys, like its own, match no scope a caller can build.
+        """
         out = [self]
         if self.session is not None:
-            out.append(replace(self, session=None))
+            out.append(stored_scope(self.tenant, self.user, self.agent, None,
+                                    project=self.project))
         if self.agent is not None:
-            out.append(replace(self, agent=None, session=None))
+            out.append(stored_scope(self.tenant, self.user, None, None,
+                                    project=self.project))
         if self.project is not None:
-            out.append(replace(self, project=None, agent=None, session=None))
+            out.append(stored_scope(self.tenant, self.user, None, None))
         if self.user is not None:
-            out.append(Scope(tenant=self.tenant))
+            out.append(stored_scope(self.tenant, None, None, None))
         # De-duplicate while preserving order.
         seen: set[str] = set()
         uniq = []
@@ -663,6 +758,37 @@ class Scope:
         mine = {s.key() for s in self.ancestors()}
         return other.key() in mine
 
+    def visible(self, items: Iterable[_Scoped]) -> list[_Scoped]:
+        """The items a reader at this scope may read: those whose `scope` it `sees`.
+
+        `sees` applied to many items at once, and decided once per distinct scope rather
+        than once per item, in the order the items came. Provenance is cumulative and
+        uncapped, so a fact restated daily for a year cites 365 turns, nearly all from one
+        or two scopes. Asking `sees` about each turn rebuilt this scope's ancestors every
+        time and made `why()` on such a claim 3.5 times slower (1.7 ms against 6.1 ms).
+
+        Every write that acts on claims found by owner alone, and every read that follows
+        a claim's sources, filters through here: `Store.find_by_value` and
+        `Store.claims_citing` answer for the whole tenant, not for one scope.
+
+        >>> from types import SimpleNamespace as Item
+        >>> reader = Scope("acme", "alice", project="gh/o/a")
+        >>> items = [Item(name="own", scope=reader),
+        ...          Item(name="user level", scope=Scope("acme", "alice")),
+        ...          Item(name="other project", scope=Scope("acme", "alice", project="gh/o/b"))]
+        >>> [item.name for item in reader.visible(items)]
+        ['own', 'user level']
+        """
+        verdicts: dict[Scope, bool] = {}
+        out: list[_Scoped] = []
+        for item in items:
+            seen = verdicts.get(item.scope)
+            if seen is None:
+                seen = verdicts[item.scope] = self.sees(item.scope)
+            if seen:
+                out.append(item)
+        return out
+
     def contains(self, other: "Scope") -> bool:
         """True if `other` is at or beneath this scope.
 
@@ -672,6 +798,12 @@ class Scope:
         The project is compared like every other field. Fact keys also include it, so a
         slot operation could not reach another project's claims today, but this boundary
         should not depend on how a key happens to be built.
+
+        A wildcard does not reach a level holding '*' or '', which only a row stored
+        before those values were refused can hold. Up to 0.16.0 `owner_key` and fact keys
+        wrote a user or project of '' like one that is not bound, so such a row sits in
+        the slots of the scope above it, and `history()` and `forget()` there would reach
+        it while `get_all()` does not.
         """
         if self.tenant != other.tenant:
             return False
@@ -681,9 +813,45 @@ class Scope:
             (self.agent, other.agent),
             (self.session, other.session),
         ):
-            if mine is not None and mine != theirs:
+            if mine is None:
+                if theirs in REFUSED_SCOPE_VALUES:
+                    return False
+            elif mine != theirs:
                 return False
         return True
+
+
+def stored_scope(tenant: str, user: str | None, agent: str | None, session: str | None,
+                 project: str | None = None) -> Scope:
+    """The scope a stored row names, exactly as it was stored.
+
+    For a store reading its own rows back, for a client reading a row a server sent, and
+    for a scope derived from one of those that keeps the stored value of every level it
+    does not change: a broader scope, which only clears levels (`Scope.ancestors`,
+    `PredicateRegistry.slot_scope`, `WritePipeline.own_claims`), and the project slot a
+    read bound to a project checks for a value that hides a user-wide one, which takes the
+    reader's project (`retrieve.shadow.shadowed`). Every scope a caller names goes through
+    `Scope`, which refuses '*' and '' at every level. A store written before that refusal
+    can hold either value, and maintenance reads every row, so such a row is read back
+    here without the refusal rather than making the read fail. Its `key()` writes the
+    value differently from a level that is not bound, and `contains()` does not reach it,
+    so no scope a caller can build reads the row.
+
+    >>> stored_scope("default", "*", None, None).key()
+    'default/%2A/*/*/*'
+    >>> stored_scope("default", "alice", None, None) == Scope("default", "alice")
+    True
+    """
+    values = (tenant, user, agent, session, project)
+    if not any(isinstance(v, str) and v in REFUSED_SCOPE_VALUES for v in values):
+        return Scope(tenant, user, agent, session, project=project)
+    scope = object.__new__(Scope)
+    # The names come from `Scope` itself, in the order it declares them, which is the
+    # order of `values`. Listed here by hand, a field added to `Scope` would be left unset
+    # on every such row without a word; `strict=True` raises instead.
+    for spec, value in zip(fields(Scope), values, strict=True):
+        object.__setattr__(scope, spec.name, value)
+    return scope
 
 
 @dataclass(slots=True)
@@ -1080,12 +1248,38 @@ class Claim:
         now = utcnow()
         v = valid_at if valid_at is not None else now
         k = known_at if known_at is not None else now
+        if self.valid_from > v:
+            return False                                  # not true yet
+        # The other three clauses are `is_unended`'s, as `base.unended_predicate` is the
+        # live clause without its valid-time floor.
+        return self.is_unended(valid_at=v, known_at=k)
+
+    def is_unended(self, as_of: datetime | None = None, *,
+                   valid_at: datetime | None = None,
+                   known_at: datetime | None = None) -> bool:
+        """Was this claim believed at `known_at`, and not ended by `valid_at`?
+
+        `is_live` without the valid-time floor, and the Python mirror of
+        `store.base.unended_predicate`: the two must agree clause for clause. It is true
+        of a claim in force, and of one stored to begin later, which is recorded and
+        believed but not true yet. It is false of a claim that has ended or been retired.
+        Those are the claims `Memvara.forget` closes. The axes read as `is_live`'s do.
+
+        >>> june = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        >>> moving = Claim(subject="user", predicate="lives_in", object="Paris",
+        ...                valid_from=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        ...                recorded_at=june)
+        >>> moving.is_live(as_of=june), moving.is_unended(as_of=june)
+        (False, True)
+        """
+        valid_at, known_at = time_axes(as_of, valid_at, known_at)
+        now = utcnow()
+        v = valid_at if valid_at is not None else now
+        k = known_at if known_at is not None else now
         if self.recorded_at > k:
             return False                                  # we didn't know it yet
         if self.invalidated_at is not None and self.invalidated_at <= k:
             return False                                  # we'd already retracted it
-        if self.valid_from > v:
-            return False                                  # not true yet
         if self.valid_to is not None and self.valid_to <= v:
             return False                                  # no longer true
         return True
@@ -1331,8 +1525,9 @@ class ErasureProof:
     deleted a row, and that was the whole of the evidence. That proves the code took the
     branch it thought it took, which is the same statement the return value already made.
     A proof has to be able to *disagree* with the delete, so this is built from a physical
-    re-query — `Store.residue`, four `SELECT COUNT(*)`s over the tables a claim's content
-    can survive in.
+    re-query — `Store.residue`, which for `SQLiteStore` is five `SELECT COUNT(*)`s over the
+    tables a claim's content can survive in and a read of the claim's row in the vector
+    file.
 
     **`proven` is false whenever it could not be established**, never merely when
     something survived. A store with no `residue` method yields `proven=False` with a

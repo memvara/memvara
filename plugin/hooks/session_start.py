@@ -30,6 +30,7 @@ opening brief is the other case: narrative background is exactly what it is for.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -37,16 +38,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.envelope import read_event, write  # noqa: E402
 from core.host import Reply, active  # noqa: E402
 from lib.ipc import (  # noqa: E402
-    due_capture_alert, payload, plural, status, under_extraction, with_alert,
+    due_capture_alert, log_line, payload, plural, status, under_extraction, with_alert,
 )
-from lib import counts, project  # noqa: E402
+from lib import counts, deadline, project  # noqa: E402
 from lib.agentic import sweep_configs as sweep_capture_configs  # noqa: E402
-from lib.fast import read_kinds  # noqa: E402
+from lib.fast import OPEN, read_kinds  # noqa: E402
 from lib.mark import count as count_memories  # noqa: E402
 from lib.mark import mark_block  # noqa: E402
 from lib.mark import on as mark_on  # noqa: E402
 from lib.project import bind as bind_project  # noqa: E402
-from lib.standing import standing_block  # noqa: E402
+from lib.standing import record_injected, standing_block  # noqa: E402
 from lib.write import open_writer  # noqa: E402
 
 #: Wider than the per-prompt hook: this runs once per session, not once per turn.
@@ -104,8 +105,13 @@ def _why(exc: "BaseException") -> str:
     return "notes unavailable (quota)" if getattr(exc, "code", "") == "quota_exhausted" else ""
 
 
+#: What the status line calls each section when it did not arrive.
+_SECTIONS = {"binding": "scope", "standing": "standing preferences", "notes": "notes"}
+
+
 def _local_binding(store: object) -> str:
-    """The binding line from a library handle, or '' if it cannot be read.
+    """The binding line from a library handle. A store that cannot be read raises, so that
+    `main` can say the store did not answer rather than that it is empty.
 
     `scope` means two different things on the two classes this can be handed. On a
     `ScopedMemvara` it is the bound `Scope`; on a bare `Memvara` it is the *method* that
@@ -113,13 +119,10 @@ def _local_binding(store: object) -> str:
     this wrong is silent — the attribute exists either way — which is why it is resolved
     explicitly rather than by a `try` that would swallow the difference.
     """
-    try:
-        scope_attr = getattr(store, "scope")
-        scoped = store if not callable(scope_attr) else store.scope()  # type: ignore[operator]
-        scope = scoped.scope.key()
-        visible = scoped.count()
-    except Exception:
-        return ""
+    scope_attr = getattr(store, "scope")
+    scoped = store if not callable(scope_attr) else store.scope()  # type: ignore[operator]
+    scope = scoped.scope.key()
+    visible = scoped.count()
     return _binding_line(scope, f"{visible} claim(s)")
 
 
@@ -127,12 +130,10 @@ def _hosted_binding(store: object) -> str:
     """The binding line from the hosted endpoint's own `memory_stats` report.
 
     The server already formats the scope and the count, so this reads them back rather than
-    deriving a second version that could disagree with the first.
+    deriving a second version that could disagree with the first. A failed call raises, so
+    that `main` can say the store did not answer rather than that it is empty.
     """
-    try:
-        report = str(store.stats() or "")  # type: ignore[attr-defined]
-    except Exception:
-        return ""
+    report = str(store.stats() or "")  # type: ignore[attr-defined]
     scope, visible = "", ""
     for line in report.splitlines():
         line = line.strip()
@@ -160,7 +161,7 @@ def _binding_line(scope: str, visible: str) -> str:
     return line
 
 
-def main() -> int:
+def _main() -> int:
     if under_extraction():
         # `claude -p` opens a session like any other, so this hook fired inside every
         # extraction and built the whole standing block for a child that was about to be
@@ -184,6 +185,9 @@ def main() -> int:
     # valid banner and fail nothing.
     alert = due_capture_alert()
     host = active()
+    # Before any hosted call: every one of them stops at this, so the hook answers inside
+    # its host's limit however the endpoint behaves (#345).
+    deadline.set_from_limit(host.timeouts.get("session_start", 20))
 
     def _emit(reply: Reply) -> None:
         if reply.status:
@@ -194,7 +198,8 @@ def main() -> int:
     # checkout, and `cwd` is how the second half is known. An unreadable payload gives "",
     # which `_mine` treats as "user notes only" -- the safe direction, since the failure it
     # avoids is carrying another project's instructions into this one.
-    cwd = read_event(host, "session_start", payload()).cwd
+    event = read_event(host, "session_start", payload())
+    cwd = event.cwd
     # Before the store is opened: the hosted client sends this project with every call.
     bind_project(cwd)
     # Once per session rather than on every write: the per-session counters and the
@@ -207,6 +212,16 @@ def main() -> int:
     sweep_capture_configs()
     store, close = open_writer()
     if store is None:
+        # `open_writer` answers None both when nothing is configured and when a local
+        # store is configured and cannot open. The second is a failure, and saying "not
+        # configured" of it sent a person looking for configuration that was there (#337).
+        from lib import open as opener  # noqa: PLC0415
+
+        if opener.failure is not None:
+            log_line("session_start",
+                     f"failed reason={OPEN}:{type(opener.failure).__name__}")
+            _emit(Reply("session_start", status=status("recall failed")))
+            return 0
         _emit(Reply("session_start", status=status("not configured")))
         return 0
 
@@ -223,25 +238,47 @@ def main() -> int:
     #: What a section could not be fetched for, in words. Set before the `try` so that
     #: every path to the banner below has it, including the ones that leave early.
     missing = ""
+    #: `(section, exception)` for each section the store did not answer for. A store that
+    #: did not answer is not an empty one, and before this list the hook said "nothing
+    #: stored yet" of an endpoint it could not reach, and logged nothing (#339).
+    failed: "list[tuple[str, BaseException]]" = []
     mark = mark_on()
     try:
         parts = []
-        binding = _hosted_binding(store) if hosted else _local_binding(store)
+        try:
+            binding = _hosted_binding(store) if hosted else _local_binding(store)
+        except Exception as exc:
+            binding = ""
+            failed.append(("binding", exc))
         if binding:
             parts.append(binding)
 
+        #: Whether the standing block came from the ranked read below. Recall's refresh
+        #: never uses that read, so its digest would differ from the full block the next
+        #: refresh builds, and that refresh would inject the block again as "updated".
+        legacy = False
+
         def _legacy_standing() -> str:
-            return str(store.recall(QUERY, k=STANDING_K,
-                                    budget=STANDING_FALLBACK_TOKENS,
-                                    header=STANDING_HEADER,
-                                    memory_types=STANDING, **plain_read) or "")
+            nonlocal legacy
+            legacy = True
+            # `standing_block` catches every failure of its own routes and of this one, and
+            # answers "" for all of them, so a failure here is recorded before it is caught.
+            try:
+                return str(store.recall(QUERY, k=STANDING_K,
+                                        budget=STANDING_FALLBACK_TOKENS,
+                                        header=STANDING_HEADER,
+                                        memory_types=STANDING, **plain_read) or "")
+            except Exception as exc:
+                failed.append(("standing", exc))
+                raise
 
         try:
             standing = standing_block(store, hosted=hosted, budget=STANDING_BUDGET,
                                       header=STANDING_HEADER, fallback=_legacy_standing,
                                       cwd=cwd)
-        except Exception:
+        except Exception as exc:
             standing = ""
+            failed.append(("standing", exc))
         if standing.strip():
             # Marked here as well as in `render`, because the legacy fallback returns the
             # server's own block, whose bullets carry no mark. Marking twice is harmless.
@@ -258,18 +295,31 @@ def main() -> int:
             # memory. Measured on a spent quota: three sections and 15,324 characters
             # became two and 13,541, with the banner unchanged.
             notes, missing = "", _why(exc)
+            failed.append(("notes", exc))
         if notes.strip():
             parts.append(mark_block(notes.rstrip(), mark))
     finally:
         if close is not None:
             close()
 
+    for section, exc in failed:
+        # On every host, as recall logs its failures, because most hosts show no status
+        # line and the log is the only account there is. The exception's class, which
+        # names the kind of failure, and nothing the store's reply said.
+        log_line("session_start", f"failed section={section} reason={type(exc).__name__}")
+    if failed and not missing:
+        # A session that opened without a section says which one, so a partial session is
+        # not mistaken for a whole one. A spent quota has already said it in its own words.
+        missing = " and ".join(dict.fromkeys(_SECTIONS[name] for name, _ in failed))
+        missing += " unavailable"
+
     if not parts:
         # "Nothing stored yet" is a claim about the store's contents. Only make it when
         # every section came back empty rather than unavailable -- otherwise a store that
         # is merely unreachable is reported as one that is empty, and nobody investigates
         # an empty store.
-        _emit(Reply("session_start", status=status(missing or "nothing stored yet")))
+        empty = "recall failed" if failed else "nothing stored yet"
+        _emit(Reply("session_start", status=status(missing or empty)))
         return 0
 
     count = count_memories("\n\n".join(parts))
@@ -279,7 +329,22 @@ def main() -> int:
     _emit(Reply("session_start",
                 status=status(f"{opened} · {missing}" if missing else opened),
                 context="\n\n".join(parts)))
+    if standing.strip() and not legacy and "recall" in host.events:
+        # After the reply is written, so only a block that was delivered is recorded. The
+        # recall hook reads this, and without it the first prompt injected the same block
+        # again (#343). Not on a host that runs no recall, such as Cursor: nothing there
+        # would read the record, and recall is what prunes these files.
+        record_injected(event.session, standing, time.time())
     return 0
+
+
+def main() -> int:
+    """Run the hook, then clear the deadline it set, for a caller that runs it in this
+    process and goes on to make hosted calls of its own."""
+    try:
+        return _main()
+    finally:
+        deadline.clear()
 
 
 if __name__ == "__main__":

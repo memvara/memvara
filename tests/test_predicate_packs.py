@@ -16,17 +16,16 @@ from pathlib import Path
 
 import pytest
 
-#: Declared vocabularies are read with `tomllib`, which arrives in 3.11. On 3.10 the
-#: reader refuses by design rather than pulling in a backport nobody declared, so the
-#: behaviour these pin does not exist there. `TestUnsupportedInterpreter` covers what 3.10
-#: does instead.
-needs_toml = pytest.mark.skipif(sys.version_info < (3, 11),
-                                reason="tomllib arrives in 3.11; load_specs refuses below it")
-
 from memvara.schema import (BUILTIN_PREDICATES, Cardinality, PredicatePackError,
                             PredicateRegistry, PredicateSpec, Volatility,
                             available_packs, load_all_specs, load_specs)
 from memvara.server.config import ConfigError, ServerConfig, build_memvara
+
+# Declared vocabularies are read with `tomllib`, which arrives in 3.11. On 3.10 the
+# reader refuses by design rather than pulling in a backport nobody declared, so the
+# behaviour these pin does not exist there, and `needs_toml` skips them.
+# `TestUnsupportedInterpreter` covers what 3.10 does instead.
+from harness.skips import needs_toml
 
 #: Resolved from this file rather than the working directory, because pytest
 #: is run from wherever the caller happened to be.
@@ -132,6 +131,7 @@ class TestLoading:
 
 @needs_toml
 class TestServerWiring:
+    @pytest.mark.covers("env:MEMVARA_PREDICATES")
     def test_a_typo_is_a_startup_error_not_a_first_write_surprise(self, tmp_path):
         # By the first write the process has already accepted facts into the very slots
         # the pack was meant to shape.
@@ -144,6 +144,7 @@ class TestServerWiring:
         memory = build_memvara(config)
         assert not memory.registry.known("git_state")
 
+    @pytest.mark.covers("env:MEMVARA_PREDICATES")
     def test_a_declared_predicate_supersedes(self, tmp_path):
         memory = build_memvara(
             ServerConfig.from_env(_env(tmp_path, MEMVARA_PREDICATES="engineering")))
@@ -650,6 +651,7 @@ class TestTheGraphHarnessesDeclareTheirVocabularies:
     a table.
     """
 
+    @pytest.mark.covers("inv:TB8")
     def test_the_multihop_relations_carry_edges_and_the_padding_does_not(self):
         import bench.multihop as mh
 
@@ -665,6 +667,7 @@ class TestTheGraphHarnessesDeclareTheirVocabularies:
         assert registry.spec("works_at").cardinality is Cardinality.ONE
 
     @needs_toml
+    @pytest.mark.covers("inv:TB8")
     def test_the_twowiki_harness_loads_its_pack(self):
         import bench.twowiki as tw
 
