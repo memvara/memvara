@@ -16,7 +16,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   none, so on those hosts a missing store and an empty answer left the same trace: no
   reply and no log line. Recall now writes `skipped=not configured` or `recalled=0
   repeats=N` to `~/.memvara/.hooks/recall.log`, the same shape as the line a recall that
-  injected something writes. #338 (B56).
+  injected something writes. When nothing new matched but the standing preferences
+  changed, the line adds what was injected: `injected=<N>c standing=updated`. #338 (B56).
 
 ## [0.17.0] — 2026-09-28
 

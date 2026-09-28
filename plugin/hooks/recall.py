@@ -980,20 +980,23 @@ def _main() -> int:
 
     if not fresh:
         _write_state(session, seen, topic, standing_state)
-        # The same shape as the line a recall that injected something writes, so the log
-        # tells "nothing matched" from "nothing configured" on a host with no status line
-        # (#338).
-        log_line("recall", f"recalled=0 repeats={repeats}")
         note = status(f"{repeats} already in context" if repeats
                       else "no matching memories")
         if standing:
             # Nothing new to recall, and the standing set has moved: the turn still has to
             # carry it, or a rule written mid-session waits for the next prompt that
-            # happens to match something.
+            # happens to match something. Logged with what it injected, so the line does
+            # not read like a turn that injected nothing.
+            log_line("recall", f"recalled=0 repeats={repeats} injected={len(standing)}c "
+                     "standing=updated")
             _emit(Reply("recall", status=status("standing preferences updated"),
                         context=standing))
             _count_recalled(session, count_memories(standing))
             return 0
+        # The same shape as the line a recall that injected something writes, so the log
+        # tells "nothing matched" from "nothing configured" on a host with no status line
+        # (#338).
+        log_line("recall", f"recalled=0 repeats={repeats}")
         _emit(Reply("recall", status=note))
         return 0
 
