@@ -913,7 +913,9 @@ def _main() -> int:
         # Nothing configured. Still reported, because a hook that prints nothing is
         # indistinguishable from a hook that has stopped working -- which is the failure
         # this file exists to stop repeating -- but reported as what it is rather than as a
-        # breakage someone would go looking for.
+        # breakage someone would go looking for. Logged as well, because Codex, Copilot
+        # and OpenCode show no status line, and there the log is the only account (#338).
+        log_line("recall", "skipped=not configured")
         _emit(Reply("recall", status=status("not configured")))
         return 0
     if not ok:
@@ -983,11 +985,18 @@ def _main() -> int:
         if standing:
             # Nothing new to recall, and the standing set has moved: the turn still has to
             # carry it, or a rule written mid-session waits for the next prompt that
-            # happens to match something.
+            # happens to match something. Logged with what it injected, so the line does
+            # not read like a turn that injected nothing.
+            log_line("recall", f"recalled=0 repeats={repeats} injected={len(standing)}c "
+                     "standing=updated")
             _emit(Reply("recall", status=status("standing preferences updated"),
                         context=standing))
             _count_recalled(session, count_memories(standing))
             return 0
+        # The same shape as the line a recall that injected something writes, so the log
+        # tells "nothing matched" from "nothing configured" on a host with no status line
+        # (#338).
+        log_line("recall", f"recalled=0 repeats={repeats}")
         _emit(Reply("recall", status=note))
         return 0
 

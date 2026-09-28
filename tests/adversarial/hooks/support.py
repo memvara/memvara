@@ -535,15 +535,13 @@ def pin_cannot_open(runs: Runs, host: str, hook: str) -> None:
     check_told_apart(runs, host, hook, "store cannot open", "not configured")
 
 
-def pin_nothing_matches(runs: Runs, host: str) -> None:
-    """B56: on a host that shows no status line, recall prints nothing and logs nothing,
-    both when nothing matches and when nothing is configured."""
+def check_nothing_matches_is_logged(runs: Runs, host: str) -> None:
+    """On a host that shows no status line, recall's log tells nothing matching from
+    nothing configured. Both used to print nothing and log nothing (#338, B56)."""
     nothing = runs[host, "recall", "nothing matches"]
     missing = runs[host, "recall", "not configured"]
-    if (nothing.reply, nothing.logs, missing.reply, missing.logs) == (None, {}, None, {}):
-        raise known_bugs.Reproduced(
-            f"B56: recall on {host} prints and logs nothing both when nothing matches and "
-            f"when nothing is configured")
+    assert "recalled=0 repeats=0" in nothing.log("recall"), nothing.logs
+    assert "skipped=not configured" in missing.log("recall"), missing.logs
     check_told_apart(runs, host, "recall", "nothing matches", "not configured")
 
 
