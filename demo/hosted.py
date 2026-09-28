@@ -473,8 +473,9 @@ class HostedMemvara:
     signature, so `arms()` drops straight into the harness in place of the local two.
 
     `min_age` is the youngest a scope may be when it is read, measured from its `complete`
-    row in the manifest to `clock()`. `None`, the default here, checks nothing and writes
-    a scope on first read, as the one-step run always did, and so does zero. A value above
+    row in the manifest to `clock()`. `None`, the default here, asks for no wait and writes
+    a scope on first read, as the one-step run always did, and so does zero; a scope whose
+    write recorded a wait is still held to it, as the next paragraph says. A value above
     zero refuses to write a scope during a read: a scope written now could never be old
     enough.
     The command line passes 24 hours unless told otherwise; see the module docstring.

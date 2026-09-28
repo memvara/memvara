@@ -868,7 +868,9 @@ def test_the_write_step_records_its_minimum_age_and_a_shorter_read_is_refused(tm
                             manifest=ho.Manifest(path)).scope_name("memvara", QUESTIONS[0])
     assert ho.Manifest(path).completed(name)["min_age_hours"] == 24.0
 
-    for shorter in (timedelta(hours=1), timedelta(0)):
+    # None, the default, asks for no wait, and a scope written to be read later is still
+    # held to its recorded wait (#432).
+    for shorter in (timedelta(hours=1), timedelta(0), None):
         hurried = ho.HostedMemvara(client, run_id="r1", scale=1, manifest=ho.Manifest(path),
                                    min_age=shorter, clock=lambda: T0 + timedelta(hours=2))
         with pytest.raises(SystemExit, match="--override-min-scope-age"):
