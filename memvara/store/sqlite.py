@@ -48,7 +48,9 @@ Reads taken that way see the snapshot as of their own statement, so a reader obs
 sweep's windows as they commit rather than waiting for the end of one. The exception is
 a thread inside `batch()`, which must see its own uncommitted rows — `competing_claims`
 during a write is what makes contradiction detection exact — so it stays on the writer's
-connection. See `_read`.
+connection. See `_read`. That connection holds the database's write lock from the first
+statement of the batch, so no other writer can commit between a lookup and the write it
+decides; see `batch`.
 """
 
 from __future__ import annotations
@@ -90,6 +92,7 @@ from ..types import (
     Scope,
     as_utc,
     resolved_entity,
+    stored_scope,
     utcnow,
 )
 from .base import (BELIEVED, resolve_states, state_predicate, stored_state_predicate,
@@ -192,7 +195,11 @@ if TYPE_CHECKING:  # pragma: no cover
 #    "the", so "the the band" keys as `band` and folds to itself. No column changes. The
 #    version exists so that an older file re-derives every key once with the new fold,
 #    which `_migrate_to_v12` does on every upgrade; `_migrate` says why that is enough.
-SCHEMA_VERSION = 16
+# 17: `erasures` gained `vector_slot`, the row of `<db>.vecs` an erased claim's vector
+#    held, so that `residue` can read that row from the file and check that the erasure
+#    blanked it. Nullable and nothing is backfilled: no earlier version recorded the row,
+#    and the proof of such an erasure answers from the database, as it did before.
+SCHEMA_VERSION = 17
 
 # The two document tables, created by `_migrate_to_v14`.
 #
@@ -506,6 +513,10 @@ CREATE TABLE IF NOT EXISTS erasures (
     erased_at  REAL NOT NULL,
     sources    INTEGER NOT NULL DEFAULT 0,
     counts     TEXT NOT NULL DEFAULT '{}',
+    -- The row of `<db>.vecs` the claim's vector held, or NULL when it had none or was
+    -- erased before schema 17. A number, not content: it is what lets `residue` read
+    -- that row from the file and check that the erasure blanked it.
+    vector_slot INTEGER,
     -- Keyed on the pair, not on the claim. An id can be erased, restored from a backup,
     -- and erased again, and those are two events: keying on `claim_id` alone made the
     -- second silently overwrite the first, so an append-only trail lost exactly the entry
@@ -1418,18 +1429,32 @@ class _VecIndex:
         erases, because the name-to-row map is loaded lazily: a process that erases
         before it has searched has no entry for the item, and without the slot the row
         would stay in the file with the vector in it.
+
+        The row can also lie beyond the part of the file this index has mapped, because
+        another process wrote it after this one last mapped the file. It is then blanked
+        through the file itself. Only the mapped part used to be blanked, so an erasure
+        in one process of a vector another process had written left it on disk.
         """
         with self._lock:
             mapped = self._row.pop(item_id, None)
             slot = mapped if mapped is not None else slot
-            if slot is not None and self._mat is not None and slot < self._rows:
+            if slot is None:
+                return None
+            if self._mat is not None and slot < self._rows:
                 self._mat[slot] = 0.0
-            if slot is not None and self._sealer is not None and self._fh is not None:
+            if self._fh is None or self.dim is None:
+                return slot
+            if self._sealer is not None:
                 # The ciphertext goes too. It is encrypted, but whoever holds the key
                 # could still decrypt it, and "erased" has to mean gone from the file.
                 offset, size = self._record(slot)
-                if offset < os.fstat(self._fh.fileno()).st_size:
-                    _write_at(self._fh.fileno(), bytes(size), offset)
+            elif self._mat is None or slot >= self._rows:
+                offset, size = _VEC_HEADER + slot * self.dim * 4, self.dim * 4
+            else:
+                return slot
+            end = os.fstat(self._fh.fileno()).st_size
+            if offset < end:
+                _write_at(self._fh.fileno(), bytes(min(size, end - offset)), offset)
             return slot
 
     def reset(self) -> None:
@@ -2313,6 +2338,7 @@ class SQLiteStore:
             self._migrate_to_v13()
             self._migrate_to_v14()
             self._migrate_to_v15()
+            self._migrate_to_v17()
             # No `_migrate_to_v16`: version 16 changed the entity fold and nothing else,
             # and `_migrate_to_v12` above already re-derived every claim's keys and both
             # hashes from its surface text with the fold this build runs. Alias stamps are
@@ -2374,6 +2400,20 @@ class SQLiteStore:
             self._db.execute("ALTER TABLE claims ADD COLUMN expires_at REAL")
         if "expire_reason" not in have:
             self._db.execute("ALTER TABLE claims ADD COLUMN expire_reason TEXT")
+
+    def _migrate_to_v17(self) -> None:
+        """Add `erasures.vector_slot`, and backfill nothing into it.
+
+        Shape-driven like `_migrate_to_v15`: a new file already has the column from
+        `SCHEMA`, and running this twice changes nothing. No earlier version recorded
+        which row of the vector file an erased claim's vector held, and the row cannot be
+        recovered once the vector is gone, so every erasure already on record keeps NULL.
+        `residue` then has no row to read, and the proof of that erasure is the database
+        count it always was.
+        """
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(erasures)")}
+        if "vector_slot" not in have:
+            self._db.execute("ALTER TABLE erasures ADD COLUMN vector_slot INTEGER")
 
     def _migrate_to_v12(self) -> None:
         """Add the project and type columns, re-fold both keys, and rehash both hashes.
@@ -3040,6 +3080,19 @@ class SQLiteStore:
         benefit, since the whole sweep is one logical operation. Reentrant, so nesting
         is harmless.
 
+        A batch is also a write transaction that holds the database's write lock from its
+        first statement. The outermost `batch()` begins with `BEGIN IMMEDIATE`, so every
+        read inside the block runs under the lock and sees what every other writer has
+        committed. Python's `sqlite3` module would otherwise begin the transaction only at
+        the first write statement, and a lookup made before it could be out of date by
+        the time the write landed: two writers on one file each looked up a single-valued
+        slot, each found it empty, and both values stayed live. Now a second writer, on
+        another handle or in another process, waits at its own `BEGIN IMMEDIATE` until
+        this batch commits, and then reads what it wrote. A writer that waits longer than
+        SQLite's busy timeout of five seconds gets `OperationalError: database is locked`
+        from the `with` statement, before anything in its block has run. Readers on their
+        own connections are not held up; they keep reading the last commit.
+
         Durability caveat, stated precisely because it is easy to assume otherwise: this
         store runs `synchronous=NORMAL` in WAL mode, so a commit survives a *process*
         crash but not a machine or power loss until the next checkpoint. Set
@@ -3049,6 +3102,11 @@ class SQLiteStore:
         vectors SQLite holds if it is ever found stale.
         """
         with self._lock:
+            if self._batch_depth == 0 and not self._db.in_transaction:
+                # The write lock before the block's first read; see the docstring. A
+                # transaction already open here is one a write outside any batch began and
+                # has not committed, and it holds the lock already.
+                self._db.execute("BEGIN IMMEDIATE")
             self._batch_depth += 1
             try:
                 yield self
@@ -3272,8 +3330,8 @@ class SQLiteStore:
     def _row_to_episode(self, r: sqlite3.Row) -> Episode:
         return Episode(
             id=r["id"],
-            scope=Scope(r["tenant"], r["usr"], r["agent"], r["session"],
-                        project=r["project"]),
+            scope=stored_scope(r["tenant"], r["usr"], r["agent"], r["session"],
+                               project=r["project"]),
             role=r["role"],
             content=r["content"],
             ts=_dt(r["ts"]),  # type: ignore[arg-type]
@@ -3576,8 +3634,8 @@ class SQLiteStore:
     def _row_to_claim(r: sqlite3.Row) -> Claim:
         return Claim(
             id=r["id"],
-            scope=Scope(r["tenant"], r["usr"], r["agent"], r["session"],
-                        project=r["project"]),
+            scope=stored_scope(r["tenant"], r["usr"], r["agent"], r["session"],
+                               project=r["project"]),
             subject=r["subject"], predicate=r["predicate"], object=r["object"],
             text=r["text"], polarity=r["polarity"],
             memory_type=MemoryType(r["memory_type"]),
@@ -3759,6 +3817,10 @@ class SQLiteStore:
         self._db.execute(f"DELETE FROM {fts} WHERE rowid=?", (row["rowid"],))
         held = self._db.execute(
             f"SELECT slot FROM {t.name} WHERE {t.key}=?", (item_id,)).fetchone()
+        if held is not None:
+            # Before the vector's row goes: a store that held no vector when it opened
+            # has not opened the vector file yet, and learns its width from these rows.
+            self._ensure_dim()
         self._db.execute(
             f"INSERT OR IGNORE INTO vec_free (slot) SELECT slot FROM {t.name} "
             f"WHERE {t.key}=? AND slot IS NOT NULL", (item_id,))
@@ -3841,10 +3903,12 @@ class SQLiteStore:
 
         Which turns may go is decided by two set queries rather than two per turn, and
         the erasure itself runs in one transaction, so erasing a document's hundred
-        chunks is one write rather than a hundred.
+        chunks is one write rather than a hundred. The decision is made inside that
+        transaction, under the write lock, so a claim that another writer made cite one of
+        the turns in the meantime keeps it.
         """
         ids = list(dict.fromkeys(episode_ids))
-        with self._lock:
+        with self.batch():
             keep = self._held(ids) | (set() if cited else self._cited(ids))
             erased = 0
             for episode_id in ids:
@@ -3852,7 +3916,6 @@ class SQLiteStore:
                     gone, _ = self._erase_row("episodes", "episodes_fts",
                                               _EPISODE_VECS, episode_id)
                     erased += gone
-            self._maybe_commit()
         return erased
 
     def erase_claim(self, claim_id: str, *, sources: bool = False) -> dict[str, int]:
@@ -3897,8 +3960,13 @@ class SQLiteStore:
         delete and in the same transaction, holding no text, subject, predicate or object.
         See the table's own comment for why it holds none of those, and for what the
         ordering does and does not guarantee.
+
+        The whole method is one `batch()`, so the claim is read under the write lock. Two
+        erasures of one claim at once, from two handles or two processes, take turns: the
+        second finds nothing, returns zeroes and records nothing. Read outside the lock,
+        both found the row, and the second recorded an erasure it did not make.
         """
-        with self._lock:
+        with self.batch():
             row = self._db.execute(
                 "SELECT tenant, usr, project, agent, session, sources FROM claims "
                 "WHERE id=?",
@@ -3936,14 +4004,19 @@ class SQLiteStore:
                 # succeed and its record fail, which is exactly the state that cannot be
                 # detected afterwards. Counts are patched in below, once they are known.
                 stamp = utcnow().timestamp()
+                # Which row of the vector file the vector held, so that `residue` can
+                # read that row later and check the erasure blanked it.
+                held = self._db.execute(
+                    "SELECT slot FROM embeddings WHERE claim_id=?", (claim_id,)).fetchone()
                 self._db.execute(
                     "INSERT OR REPLACE INTO erasures "
-                    "(claim_id, tenant, scope, erased_at, sources, counts) "
-                    "VALUES (?,?,?,?,?,?)",
+                    "(claim_id, tenant, scope, erased_at, sources, counts, vector_slot) "
+                    "VALUES (?,?,?,?,?,?,?)",
                     (claim_id, tenant,
-                     Scope(tenant, row["usr"], row["agent"], row["session"],
-                           project=row["project"]).key(),
-                     stamp, len(json.loads(row["sources"])), "{}"))
+                     stored_scope(tenant, row["usr"], row["agent"], row["session"],
+                                  project=row["project"]).key(),
+                     stamp, len(json.loads(row["sources"])), "{}",
+                     held["slot"] if held is not None else None))
                 # Before the claim row goes, and not as housekeeping afterwards: these rows
                 # are what `_orphan` reads three lines below to decide whether the turns this
                 # claim cited still have a citer. Left behind, the claim being erased votes
@@ -3990,7 +4063,6 @@ class SQLiteStore:
                     # the compensation would bury it.
                     pass
                 raise
-            self._maybe_commit()
         return counts
 
     def residue(self, claim_id: str) -> dict[str, int]:
@@ -4008,15 +4080,27 @@ class SQLiteStore:
         that name it. A non-zero anywhere means the erasure did not complete, whatever it
         reported.
 
+        And one file, `vector_file`: the claim's row of `<db>.vecs`, read from the file
+        itself rather than through this store's mapping of it. The row is the one the
+        claim holds, or the one its erasure recorded in `erasures.vector_slot`, and the
+        count is 1 when that row still holds anything. A row the store has since given to
+        another vector holds that vector, not this one, and a row that was never recorded
+        (an erasure from before schema 17) cannot be read, so both count 0. A database
+        count alone certified erasures that left the vector on disk.
+
         `erasures` is deliberately not among them. It is the record that the erasure
         happened and it is *supposed* to survive; counting it would make every proof fail.
 
+        Runs in one `batch()`, holding the write lock, so that no other writer is between
+        taking a freed row for a new vector and committing: the file row read here then
+        belongs to exactly the owner the database names.
+
         >>> store = SQLiteStore(":memory:")
         >>> store.residue("nothing-was-ever-stored-here")
-        {'claims': 0, 'claims_fts': 0, 'embeddings': 0, 'claim_sources': 0, 'claim_links': 0}
+        {'claims': 0, 'claims_fts': 0, 'embeddings': 0, 'claim_sources': 0, 'claim_links': 0, 'vector_file': 0}
         >>> store.close()
         """
-        with self._lock:
+        with self.batch():
             def count(sql: str) -> int:
                 return int(self._db.execute(sql, (claim_id,)).fetchone()[0])
             return {
@@ -4031,7 +4115,46 @@ class SQLiteStore:
                 "claim_links": int(self._db.execute(
                     "SELECT COUNT(*) FROM claim_links WHERE from_id=? OR to_id=?",
                     (claim_id, claim_id)).fetchone()[0]),
+                "vector_file": self._vector_residue(claim_id),
             }
+
+    def _vector_residue(self, claim_id: str) -> int:
+        """1 when the claim's row of the vector file still holds anything, else 0. See
+        `residue`; the caller holds the write lock."""
+        path = self._vec.path
+        if path is None:
+            return 0
+        held = self._db.execute(
+            "SELECT slot FROM embeddings WHERE claim_id=?", (claim_id,)).fetchone()
+        if held is not None:
+            slot = held["slot"]
+        else:
+            record = self._db.execute(
+                "SELECT vector_slot FROM erasures WHERE claim_id=? "
+                "ORDER BY erased_at DESC LIMIT 1", (claim_id,)).fetchone()
+            slot = record["vector_slot"] if record is not None else None
+            if slot is not None and any(
+                    self._db.execute(f"SELECT 1 FROM {name} WHERE slot=?",
+                                     (slot,)).fetchone() is not None
+                    for name in _VEC_TABLE_NAMES):
+                return 0
+        if slot is None:
+            return 0
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        except FileNotFoundError:
+            return 0
+        try:
+            head = _read_at(fd, _VEC_HEADER, 0)
+            if len(head) < 16:
+                return 0
+            (dim,) = struct.unpack_from("<I", head, 12)
+            sealer = self._vec._sealer
+            size = sealer.record_size(dim) if sealer is not None else dim * 4
+            row = _read_at(fd, size, _VEC_HEADER + int(slot) * size)
+        finally:
+            os.close(fd)
+        return 1 if row.strip(b"\0") else 0
 
     def erasure_record(self, claim_id: str) -> dict[str, Any] | None:
         """The `erasures` row for `claim_id`, or `None` if nothing here erased it.
@@ -4115,8 +4238,8 @@ class SQLiteStore:
     def _row_to_document(r: sqlite3.Row) -> Document:
         return Document(
             id=r["id"],
-            scope=Scope(r["tenant"], r["usr"], r["agent"], r["session"],
-                        project=r["project"]),
+            scope=stored_scope(r["tenant"], r["usr"], r["agent"], r["session"],
+                               project=r["project"]),
             custom_id=r["custom_id"], title=r["title"], filepath=r["filepath"],
             source_uri=r["source_uri"], mime=r["mime"], content_hash=r["content_hash"],
             status=r["status"], error=r["error"], meta=json.loads(r["meta"]),
@@ -4143,11 +4266,19 @@ class SQLiteStore:
         return self._row_to_document(r) if r else None
 
     def find_document(self, scope: Scope, custom_id: str) -> Document | None:
+        """The document at exactly `scope` whose `custom_id` is this, or None.
+
+        The scope's columns are compared as well as its stored key, as every other read
+        compares them (`_scope_clause`). Up to 0.16.0 a scope holding '*' or '' at some
+        level stored the key of the scope above it, so a name lookup by key alone found
+        that row for a caller in the scope above.
+        """
+        sc, params = self._scope_clause([scope], "d")
         with self._read() as conn:
             r = conn.execute(
                 _DOCUMENT_SELECT.format(
-                    where="d.tenant = ? AND d.scope_key = ? AND d.custom_id = ?"),
-                (scope.tenant, scope.key(), custom_id)).fetchone()
+                    where=f"d.tenant = ? AND d.scope_key = ? AND d.custom_id = ? AND {sc}"),
+                (scope.tenant, scope.key(), custom_id, *params)).fetchone()
         return self._row_to_document(r) if r else None
 
     def list_documents(self, scopes: Sequence[Scope], *,
@@ -4246,6 +4377,11 @@ class SQLiteStore:
         a project is user-wide rather than the repository's, so it stays. An unset
         project is a wildcard like every other unset field, so a purge with none still
         takes every project.
+
+        The whole purge is one `batch()`, so it holds the write lock from its first read.
+        That read lists the vectors to blank in the vector file, while the deletes that
+        follow select their rows by scope; taken before the lock, a claim written in
+        between lost its row and kept its vector, where the text can be recovered.
         """
         conds = ["tenant = ?"]
         params: list = [scope.tenant]
@@ -4256,7 +4392,7 @@ class SQLiteStore:
                 params.append(val)
         where = " AND ".join(conds)
 
-        with self._lock:
+        with self.batch():
             # Set-based, not a statement pair per row: erasing a user with 50k claims
             # is one request, and 100k round trips through the SQL layer made it look
             # like the store had hung.
@@ -4269,6 +4405,10 @@ class SQLiteStore:
                     f"WHERE {t.key} IN ({doomed})",
                     params2,
                 ).fetchall()
+                if rows:
+                    # Before the rows go, for `_erase_row`'s reason: this store may not
+                    # have opened the vector file yet.
+                    self._ensure_dim()
                 self._db.execute(
                     f"INSERT OR IGNORE INTO vec_free (slot) SELECT slot FROM {t.name} "
                     f"WHERE {t.key} IN ({doomed}) AND slot IS NOT NULL", params2)
@@ -4313,9 +4453,6 @@ class SQLiteStore:
                 f"DELETE FROM episodes WHERE {where}", params
             ).rowcount
             entities = self._gc_entities(scope.tenant)
-            # `_maybe_commit`, not `commit`: an unconditional commit here would end an
-            # enclosing `batch()` early and silently void its rollback guarantee.
-            self._maybe_commit()
         return {"claims": claims, "episodes": episodes, "embeddings": gone,
                 "entities": entities, "documents": documents,
                 "document_chunks": chunk_rows}
@@ -4358,7 +4495,7 @@ class SQLiteStore:
             "SELECT usr, agent, session, subject, object FROM claims WHERE tenant=?",
             (tenant,),
         ):
-            owner = owner_key(Scope(tenant, c["usr"], c["agent"], c["session"]))
+            owner = owner_key(stored_scope(tenant, c["usr"], c["agent"], c["session"]))
             for surface in (c["subject"], c["object"]):
                 if surface:
                     live.add(entity_id(owner, typed_entity_key(surface)))

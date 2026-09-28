@@ -12,6 +12,7 @@ load-bearing rather than merely tidy.
 
 from __future__ import annotations
 
+import sys
 import threading
 import warnings
 from typing import TYPE_CHECKING, Any, Collection, Mapping, TextIO
@@ -20,6 +21,7 @@ from .. import __version__
 from ..core import Memvara
 from ..store import SQLiteStore
 from .protocol import (
+    INTERNAL_ERROR,
     INVALID_PARAMS,
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
@@ -349,13 +351,32 @@ class MemvaraMCPServer:
     # -- transport -----------------------------------------------------------
 
     def handle_line(self, line: str) -> str | None:
-        """One line in, at most one line out. `None` means there is nothing to reply to."""
+        """One line in, at most one line out. `None` means there is nothing to reply to.
+
+        A reply `encode` refuses, because it holds a number JSON cannot carry, is not
+        written. The request is answered with an internal error (-32603) that carries its
+        id, and the reason is written to standard error, where diagnostics go, because
+        stdout is the wire. Uncaught, the refusal ended the stdio loop, and the client's
+        session with it. The id can always be written: `decode` refused the request if its
+        id held such a number.
+        """
         try:
             message = decode(line)
         except ProtocolError as exc:
             return encode(failure(None, exc.code, exc.message))
         response = self.handle_message(message)
-        return None if response is None else encode(response)
+        if response is None:
+            return None
+        try:
+            return encode(response)
+        except ValueError as exc:
+            request_id = response.get("id")
+            print(f"memvara-mcp: the reply to request {request_id!r} could not be written "
+                  f"as JSON ({exc}), so the request was answered with an internal error.",
+                  file=sys.stderr, flush=True)
+            return encode(failure(request_id, INTERNAL_ERROR,
+                                  "internal error: the server could not write the reply "
+                                  "to this request as JSON"))
 
     def handle_message(self, message: Any) -> dict[str, Any] | None:
         """Route one decoded JSON-RPC message. Returns the response, or None for a

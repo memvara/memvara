@@ -84,9 +84,9 @@ Two things that are **not** mitigations, so do not discount a finding for them:
 `erase()` and `purge()` are irreversible deletion, not retirement, and the guarantee is
 that everything derived from the text goes with it: the claim row, the FTS5 entries (which
 store the tokens directly), the embedding (which leaks content under inversion, and is
-zeroed in place in the `.vecs` sidecar), the entity rows in `entities.canonical` (which
-keep the first spelling ever seen of every subject and object), and — with `sources=True`,
-or always for `purge` — the source turns.
+zeroed in place in the `.vecs` sidecar, a row `prove_erased` reads back from the file), the
+entity rows in `entities.canonical` (which keep the first spelling ever seen of every
+subject and object), and — with `sources=True`, or always for `purge` — the source turns.
 
 **Recoverable text after a call that reported success is in scope**, and the reported
 per-table counts are part of the guarantee: a count that says the data is gone while it is
@@ -192,6 +192,33 @@ caller-supplied scope string for a model to be talked into changing. In scope:
   `erase` are deliberately not tools, and a test asserts their absence; a route to one
   through the eight that exist is a finding.
 - Anything written to stdout that is not a JSON-RPC message, which desynchronises a client.
+
+### The plugin's approve hook
+
+`plugin/hooks/approve.py` runs in the agent host before a tool call and tells the host to
+run memvara's read-only memory tools without a permission prompt. It is the one hook that
+grants a permission. In scope:
+
+- The hook allowing any tool other than memvara's own read-only tools: a write tool, or a
+  tool from another MCP server, whatever that server or tool is named.
+
+One case is a known limitation rather than a finding. The hook sees a tool's name, and the
+name carries only the server's config key. A different server that you configure under the
+key `memvara` itself is therefore approved like memvara's own. A project's `.mcp.json` can
+declare one, which is why the host asks before it enables a project's MCP servers. A way to
+get a server approved without that key, or without the host's prompt, is in scope.
+
+### The files the plugin keeps
+
+The plugin's hooks keep logs that quote prompts and a model's replies, a token ledger, the
+list of transcripts they have mined, and small state files, all under `~/.memvara`. Every
+directory there is created 0700 and every file 0600, and the hooks take any permission for
+group and others off one that already has it, as `memvara-mcp init` and `memvara-mcp login`
+do for `~/.memvara` itself. **A hook file, or `~/.memvara` itself,
+readable or writable by another account on the machine is in scope**, as is anything the
+plugin writes outside `~/.memvara` that holds a prompt, a reply or a transcript. The one
+transcript the plugin writes itself, OpenCode's, goes to `~/.memvara/.hooks/opencode` and is
+removed when its capture is done.
 
 ### Injection into the store
 

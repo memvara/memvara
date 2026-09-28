@@ -726,6 +726,22 @@ def _as_memory_type(value: MemoryType | str | None) -> MemoryType | None:
             + ", ".join(t.value for t in MemoryType) + f", not {value!r}") from None
 
 
+def _refuse_expired(expires_at: datetime, now: datetime) -> None:
+    """Raise `ValueError` if `expires_at` is at or before `now`.
+
+    `remember()` asks this twice: when it is called, and again under the write lock at the
+    instant the write is stamped with, because a write that waited for another writer can
+    reach the lock after its expiry has passed. Stored then, the claim would be erased by
+    the next sweep, so both refusals say the same thing.
+    """
+    if as_utc(expires_at) <= now:
+        raise ValueError(
+            f"expires_at ({as_utc(expires_at).isoformat()}) is not in the future. A "
+            "claim that is already due would be erased by the next sweep, so this "
+            "would write a fact only to delete it. If the fact should not be kept, "
+            "do not store it; if it should be kept for a while, give a later instant.")
+
+
 class Memvara:
     """Bitemporal memory for agents.
 
@@ -1493,7 +1509,10 @@ class Memvara:
                 continue
             if not self.writer.gate.carries_fact(ep)[0]:
                 continue
-            if not self.store.claims_citing(ep.scope.tenant, ep.id):
+            # Only the turn's own claims count as extracted from it, the rule `reextract`
+            # follows; see `WritePipeline.own_claims`.
+            if not self.writer.own_claims(ep, self.store.claims_citing(ep.scope.tenant,
+                                                                       ep.id)):
                 out.append(ep)
         return out
 
@@ -1607,15 +1626,27 @@ class Memvara:
         `valid_from` and `recorded_at` are separately settable so historical records can
         be backfilled honestly: a fact that was true from 2019 but only imported today has
         a 2019 valid time and a today transaction time, and `as_of` queries stay correct
-        for both axes. Restating a value the store already holds, with a `valid_from`
-        before the claim on record begins, stores that earlier period as a claim of its
-        own, ending where the claim on record begins, and reports it under `added`. The
-        claim on record is not changed, and only a claim this scope can see, in its own
-        scope or a broader one, counts as on record here. A period already stored this
-        way is not stored twice: restating it reinforces the claim that holds it, and an
-        even earlier start stores only the part before that claim begins. A restatement
-        that also names `expires_at` is handled as a repeat instead, so the expiry lands
-        on the claim on record.
+        for both axes. Left out, `recorded_at` is the instant the write takes the store's
+        write lock, which is also the instant it retires anything it displaces, so a
+        write that waited for another writer is not believed from before its wait.
+        `valid_from` left out is `recorded_at` when that was given. When neither was
+        given, `valid_from` is that same instant under the lock, so both clocks come from
+        one reading and whatever the write ends stops exactly where it starts; with
+        `valid_to` given it is instead the instant of this call, the one `valid_to` is
+        checked against below. A `recorded_at` that is given is stored as it is. The
+        write lock is taken by the store's `batch()`, as `SQLiteStore.batch()` takes it;
+        `RemoteStore.batch()` takes none, and only yields the store, so there the instant
+        is simply the one at which the write's transaction begins. See `Store.batch`.
+
+        Restating a value the store already holds, with a `valid_from` before the claim
+        on record begins, stores that earlier period as a claim of its own, ending where
+        the claim on record begins, and reports it under `added`. The claim on record is
+        not changed, and only a claim this scope can see, in its own scope or a broader
+        one, counts as on record here. A period already stored this way is not stored
+        twice: restating it reinforces the claim that holds it, and an even earlier
+        start stores only the part before that claim begins. A restatement that also
+        names `expires_at` is handled as a repeat instead, so the expiry lands on the
+        claim on record.
 
         `valid_to` at or before `valid_from` is a `ValueError`, matching what
         `memory_remember` does with the same interval. Both ends arrive in one call here,
@@ -1690,10 +1721,14 @@ class Memvara:
         retiring (the record was wrong and is kept); an erased claim is gone, and
         `history()` shows a gap. It must be in the future, or it is a `ValueError`: a
         claim that is already due would be erased by the next sweep, so storing it
-        writes something only to delete it. `expire_reason` says why ("a temporary access
-        code"), is erased with the claim, and is a `ValueError` without `expires_at`, like
-        `until_reason` without `valid_to`. It is at most 500 characters. Writing a fact
-        the store already holds puts the expiry on the claim on record.
+        writes something only to delete it. It is checked when the call is made and again
+        when the write takes the store's write lock, so a write that waited behind another
+        writer until its expiry had passed is refused the same way and writes nothing, not
+        even the closing of a claim named by `replaces`. `expire_reason` says why ("a
+        temporary access code"), is erased with the claim, and is a `ValueError` without
+        `expires_at`, like `until_reason` without `valid_to`. It is at most 500
+        characters. Writing a fact the store already holds puts the expiry on the claim on
+        record.
 
         `**meta` is the caller's, with the exception of the keys the engine stores there
         itself — see `RESERVED_META`, and note that two of them are a ranking override.
@@ -1776,12 +1811,8 @@ class Memvara:
         pred = self.registry.normalize(predicate)
         now = utcnow()
         began = valid_from or recorded_at or now
-        if expires_at is not None and as_utc(expires_at) <= now:
-            raise ValueError(
-                f"expires_at ({as_utc(expires_at).isoformat()}) is not in the future. A "
-                "claim that is already due would be erased by the next sweep, so this "
-                "would write a fact only to delete it. If the fact should not be kept, "
-                "do not store it; if it should be kept for a while, give a later instant.")
+        if expires_at is not None:
+            _refuse_expired(expires_at, now)
         if valid_to is not None and as_utc(valid_to) <= as_utc(began):
             raise ValueError(
                 f"valid_to ({as_utc(valid_to).isoformat()}) is not after the instant the "
@@ -1809,19 +1840,28 @@ class Memvara:
         )
         if why_until is not None:
             planned_end(claim, why_until)
+        # With no `recorded_at` from the caller, the claim is recorded when the write takes
+        # the lock rather than now, and with no `valid_from` either it begins then too;
+        # see `_write_claim`. Not with a `valid_to`, which was checked against `began`.
+        stamp: tuple[str, ...] = ()
+        if recorded_at is None:
+            stamp = (("valid_from", "recorded_at")
+                     if valid_from is None and valid_to is None else ("recorded_at",))
         if replaces is not None:
             # A named replacement is a supersession, so it is `supersede()`, with its
             # checks, its closure instant and its one transaction, and not a second copy
             # of them that can drift. Nothing has been written yet, so a refusal there
             # leaves the store as it was.
-            return self.supersede(replaces, claim, sources=sources, close=close,
-                                  reason=why_replaced, tenant=tenant, user=user,
-                                  agent=agent, session=session)
+            return self._supersede(replaces, claim, sources=sources, close=close,
+                                   reason=why_replaced, stamp=stamp, refuse_expired=True,
+                                   tenant=tenant, user=user, agent=agent,
+                                   session=session)
         # `memory_type` rather than the resolved type on the claim: passing the resolved
         # one would make every write an assertion, including the ones that only took the
         # predicate's default, and the default is not an opinion. See `Reconciler._retype`.
         receipt = self._write_claim(claim, sources, close=closure(close),
-                                    asserted_type=memory_type)
+                                    asserted_type=memory_type, stamp=stamp,
+                                    refuse_expired=True)
         # Only a write that landed beside everything: one that closed a predecessor has
         # already found its slot, and one that added nothing was already known.
         if self.advise_replacements and receipt.added and not receipt.closed:
@@ -1941,12 +1981,31 @@ class Memvara:
                 ep.scope = claim.scope
         return fresh
 
+    def _citable(self, scope: Scope, sources: Sequence[str | Episode] | None,
+                 ) -> Sequence[str | Episode] | None:
+        """The caller's sources that a claim at `scope` may cite.
+
+        A turn named by id is kept when it is stored and `scope` can see it
+        (`Scope.visible`), and left out otherwise. Ids are not secret, so without this a
+        caller could make a claim cite another scope's text: `why()` hides such a turn,
+        but `erase(sources=True)` would still reach it. An id that no turn has is left out
+        the same way, so the claim returned cannot tell the caller which ids exist
+        elsewhere. A new `Episode` is kept as it is; `_cite` explains the scope it gets.
+        """
+        ids = [s for s in sources or () if isinstance(s, str)]
+        if not ids:
+            return sources
+        allowed = {e.id for e in scope.visible(self.store.get_episodes(ids).values())}
+        return [s for s in sources or () if not isinstance(s, str) or s in allowed]
+
     def _write_claim(self, claim: Claim, sources: Sequence[str | Episode] | None,
                      retire: Claim | None = None,
                      at: datetime | None = None,
                      close: Closure = "ended",
                      asserted_type: MemoryType | None = None,
-                     reason: str | None = None) -> WriteReceipt:
+                     reason: str | None = None,
+                     stamp: tuple[str, ...] = (),
+                     refuse_expired: bool = False) -> WriteReceipt:
         """Store new source turns, optionally close out a predecessor, assert the claim.
 
         One transaction over all of it. Separately committed, a crash between the turn
@@ -1969,8 +2028,23 @@ class Memvara:
         it: the turns stored here and the predecessor closed here both happen outside
         that call, so neither is in the receipt it hands back, and a receipt that omits
         what the write did is read as a write that did not do it.
+
+        `stamp` names the claim's instants the caller left out: `recorded_at`, and
+        `valid_from` too when neither was given. Each is set to the instant this
+        transaction takes the write lock, and the reconciler retires whatever the claim
+        displaces at that same instant, so a displaced value's belief ends exactly where
+        the new one's begins, and with `valid_from` stamped, an ending lands exactly where
+        the new value starts. Taken when the call began, a write that waited for another
+        writer's lock was believed from before the wait while the value it retired was
+        believed until after it, and a read of the past inside the wait returned both.
+
+        `refuse_expired` is set by `remember()`, which refuses an `expires_at` that is not
+        in the future when it is called. The same check is made again at the instant this
+        transaction takes the write lock, before anything is written, because a write that
+        waited for another writer can take the lock after its expiry has passed, and the
+        next sweep would then erase the claim as soon as it was stored.
         """
-        episodes = self._cite(claim, sources)
+        episodes = self._cite(claim, self._citable(claim.scope, sources))
         if self.redactor is not None:
             # The other door into `add_episode`. `remember(sources=[Episode(...)])`
             # writes turns here rather than through `WritePipeline`, so without this the
@@ -1981,19 +2055,30 @@ class Memvara:
                 redact_episode(self.redactor, ep,
                                telemetry=self.writer.telemetry)
         with transaction(self.store):
+            # On `SQLiteStore` the transaction holds the write lock from its first
+            # statement, so from this instant no other writer can commit before this one.
+            now = utcnow()
+            # `remember()` checked the expiry when it was called, and a write that waited
+            # for another writer's lock can take it after the expiry has passed. Stored,
+            # the claim would be erased by the next sweep. Checked again at the instant
+            # the write is stamped with, before anything is written.
+            if refuse_expired and claim.expires_at is not None:
+                _refuse_expired(claim.expires_at, now)
+            for name in stamp:
+                setattr(claim, name, now)
             for ep in episodes:
                 self.store.add_episode(ep)
             if retire is not None:
-                # `at` is never actually `None` here — `supersede`, the only caller that
-                # passes `retire`, always computes it — but the signature cannot say
-                # "these two arrive together" and the consequence of a `None` slipping
-                # through is not a crash: it would reopen an interval that was already
-                # closed, or write a NULL `invalidated_at` that reads as *not retired*
-                # beside an `invalidated_by` saying otherwise. A supersession that leaves
-                # two live values is the exact failure the transaction below exists to
-                # prevent, so there is a fallback rather than a cast: the new claim's
-                # `recorded_at`, which is a real instant on either axis.
-                when = at if at is not None else claim.recorded_at
+                # With no `at`, the closure lands on the new claim's own instant on the
+                # axis it closes: an ending where the new claim begins, its `valid_from`,
+                # and a retirement where its record was made, its `recorded_at`. Either
+                # may have been stamped just above, so `supersede` leaves `at` unset and
+                # the instant is read here. A `None` must never reach `close_out` itself:
+                # it would reopen an interval that was already closed, or write a NULL
+                # `invalidated_at` that reads as *not retired* beside an `invalidated_by`
+                # saying otherwise.
+                when = at if at is not None else (
+                    claim.valid_from if close == "ended" else claim.recorded_at)
                 began = as_utc(retire.valid_from)
                 close_out(retire, when, claim.id, close, reason)
                 # One `put_claim` rather than `invalidate` + `set_valid_to`, for the
@@ -2003,7 +2088,8 @@ class Memvara:
                 # keeps running.
                 self.store.put_claim(retire)
             receipt = self.writer.assert_claim(claim, close=close,
-                                               asserted_type=asserted_type)
+                                               asserted_type=asserted_type,
+                                               now=now if stamp else None)
             # Indexed on the same terms `add()` indexes its turns. Costs one encode per
             # turn, and skipping it would make a turn stored this way findable by text
             # and not by meaning — an asymmetry nothing at the call site could explain.
@@ -2086,7 +2172,11 @@ class Memvara:
         `"ended"` closes the old claim where the world changed, which is where the new
         claim begins: its `valid_from`. `"retired"` closes belief in the old claim when
         the new record was made: its `recorded_at`. `remember(replaces=...)` comes through
-        here and gets the same instants. `sources` means what it means on `remember`, and
+        here and gets the same instants; when it was given no `recorded_at`, the new
+        record is made at the instant the write takes the store's write lock, so that is
+        where a retirement lands too, and when it was given no `valid_from` either, the
+        new claim begins at that instant and an ending lands there. `sources` means what
+        it means on `remember`, and
         is here for the same reason: a replayed update arrives as a new turn *and* a new
         value, and the two have to land together.
 
@@ -2114,53 +2204,84 @@ class Memvara:
         log be imported twice. Raising rather than quietly asserting the
         new value keeps the call all-or-nothing: a supersession that lost its predecessor
         is not a partial success, it is two live answers to one question.
+
+        The old claim is read, checked and closed in one transaction that holds the
+        database's write lock from before the read, so a claim another writer ended,
+        retired or erased while this call waited is refused as above rather than closed
+        again from a copy read before that write. That holds on a store whose `batch()`
+        takes the write lock when it begins, as `SQLiteStore.batch()` does.
+        `RemoteStore.batch()` takes no lock and only yields the store, and on a store
+        like that another writer can commit between the read and the write; see
+        `Store.batch`.
         """
+        return self._supersede(old_claim_id, new_claim, at=at, sources=sources,
+                               close=close, reason=reason, stamp=(), refuse_expired=False,
+                               tenant=tenant, user=user, agent=agent, session=session)
+
+    def _supersede(self, old_claim_id: str, new_claim: Claim, *,
+                   at: datetime | None = None,
+                   sources: Sequence[str | Episode] | None = None,
+                   close: str = "ended", reason: str | None = None,
+                   stamp: tuple[str, ...], refuse_expired: bool,
+                   tenant=None, user=None, agent=None, session=None) -> WriteReceipt:
+        """`supersede()`, with two choices its signature does not offer, both made by
+        `remember(replaces=...)`. `stamp` names the instants that call was given none of:
+        the new claim takes each when the write takes the lock, and the old claim is
+        closed at the new claim's instant on the axis `close` names. `refuse_expired`
+        checks the new claim's `expires_at` again at that instant, as `remember()` does
+        for every write. See `_write_claim`."""
         how, why = closure(close), closure_reason(reason)
-        old = self.get(old_claim_id, tenant=tenant, user=user, agent=agent,
-                       session=session)
-        if old is None:
-            raise KeyError(
-                f"no claim {old_claim_id!r} in scope "
-                f"{self._scope(tenant, user, agent, session).key()}"
-            )
-        # A retired claim has nothing left to replace under either reading. An ended one
-        # can still be retired: the value stopped being true, and later we learn it was
-        # never true at all. That is a correction of history, which is what the replay of
-        # a mutation log this method exists for contains, and the closure witness is a
-        # list for exactly that sequence. What an ended claim cannot be is ended again.
-        if old.invalidated_at is not None or (how == "ended" and not old.is_live()):
-            # A replay of the same supersession is not a conflict. Importing a mutation
-            # log twice replays each update twice, and the second time the old claim is
-            # already closed, the same way, by a claim holding the same value. That
-            # writes nothing and names the successor, so a re-run import completes.
-            successor = self._replayed(old, new_claim, how, tenant=tenant, user=user,
-                                       agent=agent, session=session)
-            if successor is not None:
-                return WriteReceipt(reinforced=[successor])
-            raise ValueError(
-                f"claim {old_claim_id!r} is already {old.state}, so there is nothing "
-                f"left to {'end' if how == 'ended' else 'retire'}. Nothing was written. "
-                "Write the new value on its own, or name the claim that holds the "
-                "current value.")
-        # A replacement that names no scope adopts the one it replaces. `Claim.scope`
-        # defaults to `Scope()`, whose tenant is the literal string "default", so a
-        # hand-built claim — which is the documented way to call this — retired Alice's
-        # value correctly and then filed its successor in a *different tenant*. Measured:
-        # after one such call the handle's own tenant held nothing at all and the new
-        # value sat under `default/*/*/*`, readable by anyone else who had also never set
-        # a tenant. Nothing raised, and `history()` went quiet because a slot key hashes
-        # the owner in, so the timeline simply split.
-        #
-        # This is the same defect `_cite` fixes for a caller-built `Episode`, from the
-        # same cause, and the fix is deliberately the same shape: inherit rather than
-        # guess. A claim that *does* name a scope is left alone — superseding across
-        # scopes on purpose stays possible, and `_write_claim` still authorizes it.
-        if new_claim.scope == Scope():
-            new_claim = replace(new_claim, scope=old.scope)
-        if at is None:
-            at = new_claim.valid_from if how == "ended" else new_claim.recorded_at
-        return self._write_claim(new_claim, sources, retire=old, at=at, close=how,
-                                 reason=why)
+        with transaction(self.store):
+            old = self.get(old_claim_id, tenant=tenant, user=user, agent=agent,
+                           session=session)
+            if old is None:
+                raise KeyError(
+                    f"no claim {old_claim_id!r} in scope "
+                    f"{self._scope(tenant, user, agent, session).key()}"
+                )
+            # A retired claim has nothing left to replace under either reading. An ended
+            # one can still be retired: the value stopped being true, and later we learn
+            # it was never true at all. That is a correction of history, which is what the
+            # replay of a mutation log this method exists for contains, and the closure
+            # witness is a list for exactly that sequence. What an ended claim cannot be
+            # is ended again.
+            if old.invalidated_at is not None or (how == "ended" and not old.is_live()):
+                # A replay of the same supersession is not a conflict. Importing a
+                # mutation log twice replays each update twice, and the second time the
+                # old claim is already closed, the same way, by a claim holding the same
+                # value. That writes nothing and names the successor, so a re-run import
+                # completes.
+                successor = self._replayed(old, new_claim, how, tenant=tenant, user=user,
+                                           agent=agent, session=session)
+                if successor is not None:
+                    return WriteReceipt(reinforced=[successor])
+                raise ValueError(
+                    f"claim {old_claim_id!r} is already {old.state}, so there is nothing "
+                    f"left to {'end' if how == 'ended' else 'retire'}. Nothing was "
+                    "written. Write the new value on its own, or name the claim that "
+                    "holds the current value.")
+            # A replacement that names no scope adopts the one it replaces. `Claim.scope`
+            # defaults to `Scope()`, whose tenant is the literal string "default", so a
+            # hand-built claim — which is the documented way to call this — retired
+            # Alice's value correctly and then filed its successor in a *different
+            # tenant*. Measured: after one such call the handle's own tenant held nothing
+            # at all and the new value sat under `default/*/*/*`, readable by anyone else
+            # who had also never set a tenant. Nothing raised, and `history()` went quiet
+            # because a slot key hashes the owner in, so the timeline simply split.
+            #
+            # This is the same defect `_cite` fixes for a caller-built `Episode`, from the
+            # same cause, and the fix is deliberately the same shape: inherit rather than
+            # guess. A claim that *does* name a scope is left alone — superseding across
+            # scopes on purpose stays possible, and `_write_claim` still authorizes it.
+            if new_claim.scope == Scope():
+                new_claim = replace(new_claim, scope=old.scope)
+            # With no `at`, `_write_claim` closes the old claim at the new one's
+            # `valid_from` under "ended", where the world changed, and at its
+            # `recorded_at` under "retired", when the new record was made, after stamping
+            # either under the lock.
+            return self._write_claim(new_claim, sources, retire=old, at=at, close=how,
+                                     reason=why, stamp=stamp,
+                                     refuse_expired=refuse_expired)
 
     def _replayed(self, old: Claim, new_claim: Claim, how: str, **scope: Any) -> Claim | None:
         """The claim that already closed `old` exactly as this call asks, or `None`.
@@ -2209,7 +2330,9 @@ class Memvara:
         believes and that has not ended. That is the values in force now and any value
         stored to begin later, which is believed from the moment it is recorded; leaving
         that one out would let the forgotten slot answer again when it began. A value that
-        has already ended is history and is left as it is. Under `close="ended"` the
+        has already ended is history and is left as it is, and so is a value whose
+        retirement is already recorded, even one dated to take effect later: it is
+        retired, and no later closure changes a retired claim. Under `close="ended"` the
         ending is clamped to each value's own start, as every ending is, so a value that
         has not begun by `at` is ended where it would have begun and is true at no instant.
 
@@ -2242,10 +2365,17 @@ class Memvara:
 
         `reason` says why, and is recorded on every claim this closes, where `history()`
         and `why()` show it. At most 500 characters; see `types.closure_reason`.
+
+        The slot is read, and the closing instant taken, inside the transaction that
+        closes it, which holds the database's write lock from before the read. So a value
+        another writer added or ended while this call waited for the lock is seen as that
+        writer left it, and nothing is closed at an instant before it was recorded.
+        That holds on a store whose `batch()` takes the write lock when it begins, as
+        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
+        the store, and on a store like that another writer can commit between the read
+        and the write; see `Store.batch`.
         """
         scope = self._scope(tenant, user, agent, session)
-        clock = utcnow()
-        now = at or clock
         how = closure(close)
         why = closure_reason(reason)
         pred = self.registry.normalize(predicate)
@@ -2270,9 +2400,16 @@ class Memvara:
         # from the moment it is recorded. A lookup of live values left it believed, so
         # the forgotten slot answered again when that value began (#282). A value that
         # has already ended is history and is left as it is.
-        retired = [c for c in self._unended(scope.tenant, probe.fact_key, clock)
-                   if slot.contains(c.scope)]
-        self._close_all(retired, now, how, why)
+        #
+        # A claim whose retirement is recorded but takes effect later is still believed,
+        # so that lookup returns it. It is retired all the same, and `close_out` leaves a
+        # retired claim as it is, so it is left out rather than reported as closed.
+        with transaction(self.store):
+            clock = utcnow()
+            now = at or clock
+            retired = [c for c in self._unended(scope.tenant, probe.fact_key, clock)
+                       if slot.contains(c.scope) and c.invalidated_at is None]
+            self._close_all(retired, now, how, why)
         return retired
 
     def _unended(self, tenant: str, fact_key: str, at: datetime) -> list[Claim]:
@@ -2299,6 +2436,10 @@ class Memvara:
         row, a concurrent reader can see half of it closed, and for an operation whose
         point is that the set stops answering, a partial answer is worse than either
         outcome. Nothing displaced these claims, so no successor is named.
+
+        Both callers read `claims` inside their own transaction, which this one joins, so
+        the copies written back are the rows as they stood under the write lock, on a
+        store whose `batch()` takes it (`Store.batch`).
         """
         with transaction(self.store):
             for c in claims:
@@ -2448,7 +2589,8 @@ class Memvara:
         metadata. `mime` is the type of the new content; left out, text keeps a stored
         text type and bytes are handed to ingestion to detect, never read under the
         stored type of the content they replace. Raises `KeyError` for a document this
-        scope cannot see, with the same message whether it is missing or elsewhere.
+        scope cannot see, with the same message whether it is missing or elsewhere, and
+        for one another handle or process deleted after this call looked it up.
         """
         scope = self._scope(tenant, user, agent, session)
         return self._documents.update(scope, id_or_custom_id, content=content,
@@ -2675,7 +2817,7 @@ class Memvara:
     def delete(self, claim_id: str, *, at: datetime | None = None,
                close: str = "retired", reason: str | None = None, tenant=None,
                user=None, agent=None, session=None) -> bool:
-        """Retire one claim by id. Returns whether anything was retired.
+        """Retire one claim by id. Returns whether a claim this scope can see has that id.
 
         Deletion here means what `forget` means: the claim stops answering present-tense
         queries, and `history()` and `as_of` still see it. That is the honest reading of
@@ -2697,16 +2839,40 @@ class Memvara:
         Silently false rather than raising for an unknown or out-of-scope id, so the
         method cannot be used as an existence oracle.
 
+        **A claim that is already retired is left exactly as it is**, whichever closure
+        is asked for, and the call still returns True, because the claim it names is
+        retired when it returns. Its retirement instant is when we stopped believing it,
+        and a second delete used to move that instant later and add a second closure
+        record, so every read of the past between the two deletions believed the claim
+        again. `close="ended"` used to give it an end in the world as well, and a second
+        closure record. `close_out` refuses both, and the row is not written. A `reason`
+        given to such a call is not recorded.
+
         `reason` says why, and is recorded on the claim's closure record, where
         `history()` and `why()` show it. At most 500 characters; a longer or blank one is
         a `ValueError` raised before anything is written.
+
+        The claim is read and written back in one transaction that holds the database's
+        write lock from before the read. `put_claim` writes every column, so a copy read
+        outside it would overwrite whatever another writer did in between: an ending that
+        a new value gave the claim would be lost, and a claim that `erase()` had just
+        removed would be written back. Under the lock, an erasure either happens before
+        the read, and this returns `False` and writes nothing, or after the write.
+        That holds on a store whose `batch()` takes the write lock when it begins, as
+        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
+        the store, and on a store like that another writer can commit between the read
+        and the write; see `Store.batch`.
         """
         how, why = closure(close), closure_reason(reason)
-        claim = self.get(claim_id, tenant=tenant, user=user, agent=agent, session=session)
-        if claim is None:
-            return False
-        close_out(claim, at or utcnow(), None, how, why)
-        self.store.put_claim(claim)
+        with transaction(self.store):
+            claim = self.get(claim_id, tenant=tenant, user=user, agent=agent,
+                             session=session)
+            if claim is None:
+                return False
+            if claim.invalidated_at is not None:
+                return True
+            close_out(claim, at or utcnow(), None, how, why)
+            self.store.put_claim(claim)
         return True
 
     def forget_matching(self, query: str, *, close: str, k: int = 20,
@@ -2749,6 +2915,15 @@ class Memvara:
         not offer, and closing it without listing it would break the one promise the
         preview makes. Close one with `forget()` on its slot, or with `delete()` by id.
 
+        The confirming call checks the token, reads the claims and closes them in one
+        transaction that holds the database's write lock from before the read, so a
+        claim another writer closed or erased while this call waited is refused, as
+        above, rather than closed again from a copy read before that write. That holds
+        on a store whose `batch()` takes the write lock when it begins, as
+        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
+        the store, and on a store like that another writer can commit between the read
+        and the write; see `Store.batch`.
+
         >>> mem = Memvara(llm=NullLLM(), user="alice")
         >>> _ = mem.remember("user", "works_at", "Acme")
         >>> preview = mem.forget_matching("Acme", close="ended", k=1)
@@ -2762,31 +2937,42 @@ class Memvara:
         how, why = closure(close), closure_reason(reason)
         if not 1 <= k <= 100:
             raise ValueError(f"k={k} is out of range. A preview lists 1 to 100 matches.")
-        now = utcnow()
         if confirm is None:
+            now = utcnow()
             # No rewrite: the preview lists what this query matches, not what a model's
             # paraphrase of it matches, so the caller confirms the query they wrote.
             hits = self.search(query, k=k, tenant=tenant, user=user, agent=agent,
                                session=session, **PLAIN_READ)
-            matches = {r.claim.id: r.claim.text for r in hits}
+            # A claim whose retirement takes effect later is still in force, so search
+            # returns it, but it is retired and no closure changes it; see `forget`.
+            matches = {r.claim.id: r.claim.text for r in hits
+                       if r.claim.invalidated_at is None}
             token, expires = self._confirmer.issue(list(matches), how, now=now)
             return ForgetPreview(close=how, matches=matches, confirm=token,
                                  expires_at=expires)
-        ids = self._confirmer.check(confirm, how, now=now)
-        found = self._visible(ids, self._scope(tenant, user, agent, session))
-        doomed: list[Claim] = []
-        for claim_id in ids:
-            claim = found.get(claim_id)
-            if claim is None or not claim.is_live(now):
-                # All or nothing. Closing the rest would close a set the caller never
-                # saw, which is the thing the preview exists to prevent.
-                now_is = "no longer visible here" if claim is None else f"now {claim.state}"
-                raise ConfirmationRefused(
-                    f"claim {claim_id} was live when this preview was made and is "
-                    f"{now_is}. Nothing was changed. Run the call again without confirm "
-                    "to see what matches now.")
-            doomed.append(claim)
-        self._close_all(doomed, now, how, why)
+        scope = self._scope(tenant, user, agent, session)
+        # Checked, read and closed in one transaction, which holds the write lock from
+        # before the read: a claim another writer closed or erased while this call waited
+        # is refused, rather than closed again from a copy read before that write.
+        with transaction(self.store):
+            now = utcnow()
+            ids = self._confirmer.check(confirm, how, now=now)
+            found = self._visible(ids, scope)
+            doomed: list[Claim] = []
+            for claim_id in ids:
+                claim = found.get(claim_id)
+                if (claim is None or not claim.is_live(now)
+                        or claim.invalidated_at is not None):
+                    # All or nothing. Closing the rest would close a set the caller never
+                    # saw, which is the thing the preview exists to prevent.
+                    now_is = ("no longer visible here" if claim is None
+                              else f"now {claim.state}")
+                    raise ConfirmationRefused(
+                        f"claim {claim_id} was live when this preview was made and is "
+                        f"{now_is}. Nothing was changed. Run the call again without "
+                        "confirm to see what matches now.")
+                doomed.append(claim)
+            self._close_all(doomed, now, how, why)
         return ForgetResult(close=how, closed=doomed, reason=why)
 
     def link(self, from_id: str, to_id: str, relation: str, *, by: str = "api",
@@ -2805,25 +2991,33 @@ class Memvara:
         elsewhere. `ValueError` for an unknown relation or a claim linked to itself.
 
         Recording the same link twice keeps the first one and returns it. Erasing either
-        claim removes the link.
+        claim removes the link. The check that both claims exist and the write of the
+        link run in one transaction that holds the database's write lock, so a claim
+        erased while this call waited is refused rather than named by a link that
+        outlives it. That holds on a store whose `batch()` takes the write lock when it
+        begins, as `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and
+        only yields the store, and on a store like that another writer can commit
+        between the read and the write; see `Store.batch`.
         """
         rel = link_relation(relation)
         refuse_self_link(from_id, to_id)
         scope = self._scope(tenant, user, agent, session)
-        found = self._visible([from_id, to_id], scope)
-        for claim_id in (from_id, to_id):
-            if claim_id not in found:
-                raise KeyError(f"no claim {claim_id!r} in scope {scope.key()}")
-        put = getattr(self.store, "put_link", None)
-        if put is None:
-            # Not a silent no-op: a link reported as recorded and then absent from
-            # `why()` is a write that lied about itself.
-            raise NotImplementedError(
-                f"{type(self.store).__name__} does not implement put_link(), so it cannot "
-                "record links")
-        # The store returns the row it kept, which is the earlier one when this link was
-        # already recorded, so there is nothing to read back and nothing to race with.
-        return cast(Link, put(scope.tenant, Link(from_id, to_id, rel, utcnow(), by)))
+        with transaction(self.store):
+            found = self._visible([from_id, to_id], scope)
+            for claim_id in (from_id, to_id):
+                if claim_id not in found:
+                    raise KeyError(f"no claim {claim_id!r} in scope {scope.key()}")
+            put = getattr(self.store, "put_link", None)
+            if put is None:
+                # Not a silent no-op: a link reported as recorded and then absent from
+                # `why()` is a write that lied about itself.
+                raise NotImplementedError(
+                    f"{type(self.store).__name__} does not implement put_link(), so it "
+                    "cannot record links")
+            # The store returns the row it kept, which is the earlier one when this link
+            # was already recorded, so there is nothing to read back and nothing to race
+            # with.
+            return cast(Link, put(scope.tenant, Link(from_id, to_id, rel, utcnow(), by)))
 
     def links(self, claim_id: str, *, tenant=None, user=None, agent=None,
               session=None) -> list[Link]:
@@ -2890,41 +3084,60 @@ class Memvara:
         the store cannot answer. Returning `True` while the text is still readable is the
         exact failure this method was added to remove, and reporting it from a return code
         left the door open at the last step.
-        """
-        # Not `get()`, which hides a claim whose expiry has passed: erasing one of those
-        # by name is still an erasure, and must not report that nothing was there.
-        claim = self.store.get_claim(claim_id)
-        if claim is None or not self._scope(tenant, user, agent, session).sees(claim.scope):
-            return False
-        return self._erase_proved(claim_id, sources=sources) is not None
 
-    def _erase_proved(self, claim_id: str, *, sources: bool) -> ErasureProof | None:
-        """Erase one claim and prove it against the disk. `None` if nothing was erased.
-
-        The part of `erase()` after the scope check, shared with `erase_expired()` so
-        there is one erasure path: the store's `erase_claim`, which writes the audit row
-        in the same transaction as the delete, then `prove_erased`. Raises
-        `ErasureIncomplete` when the proof fails.
+        The scope check and the erasure run in one transaction that holds the database's
+        write lock from before the claim is read, so a second erasure of the same claim,
+        in this process or another, finds nothing, returns `False` and records nothing.
+        That holds on a store whose `batch()` takes the write lock when it begins, as
+        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
+        the store, and on a store like that another writer can commit between the read
+        and the write; see `Store.batch`.
         """
-        erase = getattr(self.store, "erase_claim", None)
-        if erase is None:
-            # Deliberately not falling back to `delete()`. A caller who asked to erase
-            # and was told it happened, while the text is still readable, is the failure
-            # this method was added to remove — re-introducing it as a graceful
-            # degradation would be worse than the missing feature.
-            raise NotImplementedError(
-                f"{type(self.store).__name__} does not implement erase_claim(); "
-                "erasure cannot be faked with retirement"
-            )
-        erased = bool(erase(claim_id, sources=sources)["claims"])
-        if not erased:
-            # Raced with another erasure between `get` and here. Nothing was deleted, so
-            # there is nothing to prove and nothing to refuse.
-            return None
+        scope = self._scope(tenant, user, agent, session)
+        done = self._erase_proved(claim_id, sources=sources,
+                                  wanted=lambda claim: scope.sees(claim.scope))
+        return done is not None
+
+    def _erase_proved(self, claim_id: str, *, sources: bool,
+                      wanted: Callable[[Claim], bool]) -> tuple[Claim, ErasureProof] | None:
+        """Erase one claim if `wanted` says so, and prove it against the disk. Returns the
+        claim as it was read and the proof, or `None` if nothing was erased.
+
+        Shared by `erase()` and `erase_expired()` so there is one erasure path: the
+        claim is read, `wanted` decides, and the store's `erase_claim` writes the audit
+        row in the same transaction as the delete, all in one transaction that holds the
+        database's write lock from before the read, on a store whose `batch()` takes it
+        (`Store.batch`). Read outside it, the claim could be changed or erased by
+        another writer before the delete. `prove_erased` runs after that transaction
+        commits. Raises `ErasureIncomplete` when the proof fails.
+        """
+        with transaction(self.store):
+            # Not `get()`, which hides a claim whose expiry has passed: erasing one of
+            # those by name is still an erasure, and must not report that nothing was
+            # there.
+            claim = self.store.get_claim(claim_id)
+            if claim is None or not wanted(claim):
+                return None
+            erase = getattr(self.store, "erase_claim", None)
+            if erase is None:
+                # Deliberately not falling back to `delete()`. A caller who asked to
+                # erase and was told it happened, while the text is still readable, is
+                # the failure this method was added to remove — re-introducing it as a
+                # graceful degradation would be worse than the missing feature.
+                raise NotImplementedError(
+                    f"{type(self.store).__name__} does not implement erase_claim(); "
+                    "erasure cannot be faked with retirement"
+                )
+            if not erase(claim_id, sources=sources)["claims"]:
+                # Another erasure got there first. Under the write lock that cannot
+                # happen, but a store whose `batch()` takes no lock, such as
+                # `RemoteStore`, can still race one between the read and here. Nothing
+                # was deleted, so there is nothing to prove and nothing to refuse.
+                return None
         proof = self.prove_erased(claim_id)
         if not proof.proven:
             raise ErasureIncomplete(proof)
-        return proof
+        return claim, proof
 
     def erase_expired(self, now: datetime | None = None) -> list[ErasedClaim]:
         """Erase every claim whose `expires_at` is at or before `now`, with proof.
@@ -2944,11 +3157,14 @@ class Memvara:
         `docs/INTERNALS.md`, and this method is its one exception.
 
         This runs when a `Memvara` opens a store (unless `expiry_erasure=False`) and
-        hourly in the MCP server. It is safe to run at any time and as often as you like:
-        a claim is re-read just before it is erased, so one whose expiry a later write
-        moved is left alone. A store without `expired_claims()` raises
-        `NotImplementedError`, and a failed proof raises `ErasureIncomplete` with the
-        claims before it already erased and recorded.
+        hourly in the MCP server. It is safe to run at any time and as often as you
+        like: a claim is re-read just before it is erased, in the same transaction as
+        its erasure and under the database's write lock, so one whose expiry a later
+        write moved is left alone, even when that write came from another process while
+        the sweep waited for the lock. That holds on a store whose `batch()` takes the
+        write lock, as `SQLiteStore.batch()` does; see `Store.batch`. A store without
+        `expired_claims()` raises `NotImplementedError`, and a failed proof raises
+        `ErasureIncomplete` with the claims before it already erased and recorded.
 
         >>> from datetime import timedelta
         >>> mem = Memvara(llm=NullLLM(), user="alice")
@@ -2981,19 +3197,18 @@ class Memvara:
             raise
         erased: list[ErasedClaim] = []
         for due in listed:
-            # Read again, because a write since the listing may have moved the expiry
-            # or erased the claim. The window left is the few statements between this
-            # read and the delete.
-            current = self.store.get_claim(due.id)
-            if (current is None or current.expires_at is None
-                    or as_utc(current.expires_at) > at):
+            # Read again, because a write since the listing may have moved the expiry or
+            # erased the claim. `_erase_proved` reads it under the write lock, in the same
+            # transaction as the delete, so no write can land between the check and it.
+            done = self._erase_proved(
+                due.id, sources=False,
+                wanted=lambda c: c.expires_at is not None and as_utc(c.expires_at) <= at)
+            if done is None:
                 continue
-            proof = self._erase_proved(current.id, sources=False)
-            if proof is None:
-                continue
+            current, proof = done
             erased.append(ErasedClaim(claim_id=current.id, scope=current.scope,
-                                      expires_at=current.expires_at, proof=proof,
-                                      expire_reason=current.expire_reason))
+                                      expires_at=cast(datetime, current.expires_at),
+                                      proof=proof, expire_reason=current.expire_reason))
         return erased
 
     def prove_erased(self, claim_id: str) -> ErasureProof:
@@ -4331,6 +4546,13 @@ class Memvara:
         The claim itself is returned whatever the axes say; they describe the evidence
         around it, and withholding the row would turn this method into an existence
         oracle it is explicitly not allowed to be.
+
+        The evidence is also limited to what the caller can see, by the rule every search
+        follows (`Scope.sees`): a source turn written in a scope the caller cannot see is
+        left out of `episodes`, and a claim it superseded in such a scope is left out of
+        `superseded`. A claim the caller can see may cite turns from scopes it cannot. A
+        user-level preference restated in two projects cites a turn from each, and listing
+        both would let one project read the other's text.
         """
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
         scope = self._scope(tenant, user, agent, session)
@@ -4344,16 +4566,20 @@ class Memvara:
         # order a claim cites its turns in is the order they were observed. A turn that
         # has been erased is simply absent — `erase_claim` is allowed to leave provenance
         # dangling, and wave 3 settled that the read is not where that gets discovered.
-        episodes = [e for e in (found.get(s) for s in claim.sources)
-                    if e is not None and _had_happened(e, valid_at, known_at)]
+        # Only the turns this caller can see; see the docstring.
+        cited = [e for e in (found.get(s) for s in claim.sources) if e is not None]
+        episodes = [e for e in scope.visible(cited) if _had_happened(e, valid_at, known_at)]
         # A gate on the list rather than a filter inside it: the supersessions this claim
         # performed were all performed by the one write that recorded it, so `known_at`
         # either admits that write or admits none of them. It also skips the history read
         # in exactly the case where the read could return nothing.
+        #
+        # A slot spans every session and agent of its project, so what this claim
+        # superseded can sit in a sibling session the caller cannot see.
         superseded: list[Claim] = []
         if _displaced_by(claim, known_at):
-            superseded = [c for c in self.store.slot_history(claim.scope.tenant,
-                                                             claim.fact_key)
+            superseded = [c for c in scope.visible(
+                              self.store.slot_history(claim.scope.tenant, claim.fact_key))
                           if c.invalidated_by == claim.id and not self._gone(c)]
         # Links are dated on the belief clock only, like supersessions and for the same
         # reason: a link is something we recorded, not something that happened in the
@@ -4683,7 +4909,10 @@ class Memvara:
         model-learned alias redirects future writes and moves nothing.
 
         Ids survive, nothing is deleted, and each moved claim carries a dated
-        `predicate_rekey` note that `why()` shows, so the change is attributable.
+        `predicate_rekey` note that `why()` shows, so the change is attributable. A slot
+        that another handle or process changes while this runs is left as that writer left
+        it; the report's `written` counts only the rows written, and running this again
+        moves the rest.
         """
         t = tenant if tenant is not None else self.default_scope.tenant
         registry = self.registry

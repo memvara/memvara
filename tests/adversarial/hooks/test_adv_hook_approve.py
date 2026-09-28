@@ -85,16 +85,17 @@ def test_the_approve_list_is_the_servers_read_only_tools(server_tools: dict[str,
 def test_support_tool_names_are_the_names_the_host_record_describes(host: str) -> None:
     """support.TOOL_NAMES restates the records by hand. Each name it gives a tool on `host`
     must match the record's matcher, which decides the names that reach the approve hook,
-    and must join the tool on with the first separator the record lists. When a record
-    changes, this names the table that has gone stale."""
+    and the names must be exactly the record's approve prefixes, each followed by the tool.
+    When a record changes, this names the table that has gone stale."""
     approve = host_record(host).approve
     for form in support.TOOL_NAMES[host]:
         assert re.search(approve.matcher, form.format(tool="memory_search")), (
             f"support.TOOL_NAMES is stale for {host}: {form!r} does not match "
             f"{approve.matcher!r}")
-        assert form.endswith(approve.separators[0] + "{tool}"), (
-            f"support.TOOL_NAMES is stale for {host}: {form!r} does not join the tool on "
-            f"with {approve.separators[0]!r}")
+    forms = {form.removesuffix("{tool}") for form in support.TOOL_NAMES[host]}
+    assert forms == set(approve.prefixes), (
+        f"support.TOOL_NAMES is stale for {host}: it names {sorted(forms)}, and the record "
+        f"approves {sorted(approve.prefixes)}")
 
 
 @pytest.mark.parametrize("host", ("cursor", "opencode"))
@@ -102,15 +103,15 @@ def test_support_tool_names_are_the_names_the_host_record_describes(host: str) -
 @known_bugs.xfail("B58")
 def test_a_read_only_tool_named_with_a_single_underscore_is_approved(
         hooks: Callable[..., HookRunner], host: str, name: str) -> None:
-    """Cursor's and OpenCode's records list "_" as an approve separator, and approve.py,
-    `_tool_leaf`, splits a name at the last separator it holds. Every memvara tool name has
-    an underscore of its own, so a name joined with one underscore, or the bare tool name,
-    splits to its last word, which no read-only tool is."""
+    """Nobody has measured how Cursor and OpenCode spell a memvara tool's name when they
+    ask the approve hook. Their records approve only the Claude Code spelling,
+    `mcp__memvara__`, so a name joined with one underscore, or the bare tool name, is left
+    to the host's prompt, and a read that prompts is one the model learns to avoid.
+    Approving either form on a guess would approve a tool of any server that spells its
+    name that way, so this stays open until the spelling is measured."""
     result = hooks(host).run("approve", tool_name=name)
-    leaf = _approve_module()._tool_leaf(name, host_record(host).approve.separators)
-    if (result.exit_code, result.reply, support.crashes(result), leaf) == (0, None, [], "search"):
-        raise known_bugs.Reproduced(
-            f"B58: approve on {host} splits {name!r} to {leaf!r} and says nothing")
+    if (result.exit_code, result.reply, support.crashes(result)) == (0, None, []):
+        raise known_bugs.Reproduced(f"B58: approve on {host} says nothing about {name!r}")
     assert support.decision_of(host, result.reply) == "allow"
 
 

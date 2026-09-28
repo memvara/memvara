@@ -34,7 +34,11 @@ cites a turn that no longer exists.
 **The status says what happened.** `queued` when written, `extracting` while the pipeline
 runs, then `done` when every chunk has been read, `stored` when some chunk was kept
 unread because the caller passed `extract=False`, or `failed` with an `error`. A failed
-document is still stored and its chunks are still searchable.
+document is still stored and its chunks are still searchable. Each status after the first
+is written onto the row as the store holds it then (`_put_status`), so a document another
+writer deleted while it was extracted stays deleted, and a change another writer made
+meanwhile is kept. When another writer stored new content meanwhile, the status is not
+written, and the caller is handed the document as the store holds it.
 
 **Content that is not plain text goes through ingestion.** A URL, `bytes`, or a mime
 type that is not plain text is handed to `memvara.ingest.extract`, with the instance's
@@ -297,32 +301,55 @@ class DocumentService:
     def update(self, scope: Scope, ref: str, *, content: str | bytes | None,
                title: str | None, meta: Mapping[str, Any] | None,
                filepath: str | None, mime: str | None, extract: bool) -> Document:
+        """Change a stored document, reading its row again under the write lock.
+
+        The document is looked up first, outside any transaction, for its scope and its
+        stored type, and new content is read then too, because ingestion can fetch a URL
+        or call a model. The row and its chunks are read again inside the transaction
+        that writes them, which holds the write lock on a store whose `batch()` takes
+        it, as `SQLiteStore`'s does (see `Store.batch`), and the caller's changes are
+        made to that copy. Writing back the copy read first used to undo whatever
+        another writer changed in between, and brought a document deleted in between
+        back, chunks and all. A document deleted in between raises `KeyError`, as a
+        missing one does.
+        """
         _check_filepath(filepath)
         fields = _check_meta(meta)
+        store = self.store
         doc = self.require(scope, ref)
-        if title is not None:
-            doc.title = self._redact(title, doc.scope)
-        if filepath is not None:
-            doc.filepath = filepath
-        if meta is not None:
-            doc.meta = fields
-        if content is None:
+        title = self._redact(title, doc.scope)
+        found_title: str | None = None
+        text = ""
+        if content is not None:
+            # The mime the new content is read under: the one passed; otherwise the
+            # stored one for text when that is a text type; otherwise none, so ingestion
+            # detects it. Reading new bytes under a stale stored type would hand a PDF's
+            # replacement, say an image, to the PDF reader.
+            if mime is None and isinstance(content, str) and is_plain_text(doc.mime):
+                mime = doc.mime
+            text, found_title, mime = self._text(doc.scope, content, None, mime)
+        with transaction(store):
+            current = store.get_document(doc.scope.tenant, doc.id)
+            if current is None:
+                raise KeyError(f"no document {ref!r} in scope {scope.key()}")
+            if title is not None:
+                current.title = title
+            elif found_title is not None:
+                current.title = found_title
+            if filepath is not None:
+                current.filepath = filepath
+            if meta is not None:
+                current.meta = fields
             if mime is not None:
-                doc.mime = mime
-            doc.updated_at = utcnow()
-            self.store.put_document(doc)
-            return doc
-        # The mime the new content is read under: the one passed; otherwise the stored
-        # one for text when that is a text type; otherwise none, so ingestion detects it.
-        # Reading new bytes under a stale stored type would hand a PDF's replacement,
-        # say an image, to the PDF reader.
-        if mime is None and isinstance(content, str) and is_plain_text(doc.mime):
-            mime = doc.mime
-        text, found_title, doc.mime = self._text(doc.scope, content, None, mime)
-        if title is None and found_title is not None:
-            doc.title = found_title
-        return self._finish(self._store(
-            doc, text, self.store.document_chunks(doc.scope.tenant, doc.id), extract))
+                current.mime = mime
+            if content is None:
+                current.updated_at = utcnow()
+                store.put_document(current)
+                return current
+            stored = self._store(current, text,
+                                 store.document_chunks(current.scope.tenant, current.id),
+                                 extract)
+        return self._finish(stored)
 
     def _store(self, doc: Document, text: str, old: Sequence[DocumentChunk],
                extract: bool) -> _Stored:
@@ -375,7 +402,9 @@ class DocumentService:
                        previous, previous_error, extract)
 
     def _finish(self, stored: _Stored) -> Document:
-        """Index the new chunks, then extract, and record the outcome as the status."""
+        """Index the new chunks, then extract, and record the outcome as the status.
+        Returns the document to hand back to the caller, which is the one the store holds
+        when the status could not be written (`_as_stored`)."""
         doc, fresh, kept, previous, previous_error, extract = stored
         store = self.store
         # A transaction of its own, after the rows are durable, as `Memvara.add` does:
@@ -392,11 +421,44 @@ class DocumentService:
             else:
                 doc.status, doc.error = previous, previous_error
             doc.updated_at = utcnow()
-            store.put_document(doc)
-            return doc
+            return doc if self._put_status(doc) else self._as_stored(doc)
         retry = [] if previous in (None, "done") else self._unread(doc, kept)
-        self._extract(doc, fresh + retry)
-        return doc
+        return self._extract(doc, fresh + retry)
+
+    def _put_status(self, doc: Document) -> bool:
+        """Write `doc`'s status, error and `updated_at` onto its row as the store holds
+        it now, in one transaction. Returns whether it did.
+
+        Nothing is written when the row is gone, or holds other content than `doc`,
+        because another writer deleted the document or gave it new content after `_store`
+        wrote it. Indexing and extraction run between the two, outside any transaction,
+        and extraction can include a model call. Writing back the whole of `doc`, as this
+        module once did, brought a deleted document back and undid a title, a path or
+        metadata another writer had set meanwhile. A status belongs to the content it
+        describes, so a document with new content keeps the status its own write gives it.
+        """
+        store = self.store
+        with transaction(store):
+            current = store.get_document(doc.scope.tenant, doc.id)
+            if current is None or current.content_hash != doc.content_hash:
+                return False
+            current.status, current.error = doc.status, doc.error
+            current.updated_at = doc.updated_at
+            store.put_document(current)
+        return True
+
+    def _as_stored(self, doc: Document) -> Document:
+        """The document as the store holds it, after `_put_status` refused to write `doc`'s
+        status. Returned to the caller in place of `doc`.
+
+        A refusal means another writer changed the content or deleted the document since
+        this call stored it. Returning `doc` reported a status and a chunk count the store
+        never held, and `memory_add_document` repeated them as what was stored. With new
+        content stored meanwhile, this is that version, with its own status and chunk
+        count. With the document deleted, it is `doc`, as this call last knew it.
+        """
+        current = self.store.get_document(doc.scope.tenant, doc.id)
+        return doc if current is None else current
 
     def _unread(self, doc: Document, episode_ids: Sequence[str]) -> list[Episode]:
         """Kept chunks that no claim cites yet, readied to be read again.
@@ -406,14 +468,18 @@ class DocumentService:
         chunk stored with `extract=False` loses that mark, because this call asked for
         extraction. A chunk the model already read and found nothing in is read once
         more, which is the cost of not recording attempts on the episode.
+
+        The chunks are read inside the transaction that clears the mark, under the write
+        lock, because `add_episode` writes a whole row back: a chunk read before it and
+        erased in between, by a delete of the document, would otherwise be written back.
         """
         store = self.store
-        cited = {s for c in store.claims_citing_any(doc.scope.tenant, episode_ids)
-                 for s in c.sources}
-        found = store.get_episodes([e for e in dict.fromkeys(episode_ids)
-                                    if e not in cited])
         out: list[Episode] = []
         with transaction(store):
+            cited = {s for c in store.claims_citing_any(doc.scope.tenant, episode_ids)
+                     for s in c.sources}
+            found = store.get_episodes([e for e in dict.fromkeys(episode_ids)
+                                        if e not in cited])
             for ep in found.values():
                 if DOCUMENT_EXTRACT in ep.meta:
                     ep.meta = {k: v for k, v in ep.meta.items() if k != DOCUMENT_EXTRACT}
@@ -421,13 +487,22 @@ class DocumentService:
                 out.append(ep)
         return out
 
-    def _extract(self, doc: Document, episodes: Sequence[Episode]) -> None:
-        """Run the write pipeline over `episodes` and record how it went. With nothing
-        left to read, the document is `done`."""
+    def _extract(self, doc: Document, episodes: Sequence[Episode]) -> Document:
+        """Run the write pipeline over `episodes`, record how it went, and return the
+        document to hand back to the caller. With nothing left to read, the document is
+        `done`.
+
+        Nothing is read when the document was deleted or given new content before its
+        extraction could begin: its chunks may be erased already. When the status cannot
+        be written, before extraction or after it, the document returned is the one the
+        store holds (`_as_stored`); a document deleted before its extraction began keeps
+        the status `queued` it was stored with."""
         doc.status = "done"
         if episodes:
             doc.status = "extracting"
-            self.store.put_document(doc)
+            if not self._put_status(doc):
+                doc.status = "queued"
+                return self._as_stored(doc)
             try:
                 receipt = self.mem.writer.reextract(list(episodes))
             except Exception as exc:
@@ -445,7 +520,7 @@ class DocumentService:
                 else:
                     doc.status = "done"
         doc.updated_at = utcnow()
-        self.store.put_document(doc)
+        return doc if self._put_status(doc) else self._as_stored(doc)
 
     def _release(self, tenant: str, episode_ids: Sequence[str],
                  at: datetime) -> tuple[list[str], list[str]]:
@@ -477,14 +552,23 @@ class DocumentService:
         return retired, unlinked
 
     def delete(self, scope: Scope, ref: str) -> DeleteResult:
-        doc = self.resolve(scope, ref)
-        if doc is None:
-            return DeleteResult(id=ref, deleted=False)
+        """Erase a document, its chunk rows and their episodes, and release the claims
+        that cite them, in one transaction.
+
+        The document and its chunk list are read inside that transaction, under the
+        write lock on a store whose `batch()` takes it, as `SQLiteStore`'s does (see
+        `Store.batch`). Listed before it, the chunks a concurrent `update_document` stored
+        in between were never erased: their episodes stayed on disk, text and all,
+        belonging to no document, after the delete had reported success.
+        """
         store = self.store
-        tenant = doc.scope.tenant
-        episode_ids = list(dict.fromkeys(
-            c.episode_id for c in store.document_chunks(tenant, doc.id)))
         with transaction(store):
+            doc = self.resolve(scope, ref)
+            if doc is None:
+                return DeleteResult(id=ref, deleted=False)
+            tenant = doc.scope.tenant
+            episode_ids = list(dict.fromkeys(
+                c.episode_id for c in store.document_chunks(tenant, doc.id)))
             retired, unlinked = self._release(tenant, episode_ids, utcnow())
             # The rows first: a chunk episode is protected while its document lists it.
             chunks = store.delete_document(tenant, doc.id)

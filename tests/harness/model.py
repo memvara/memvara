@@ -105,6 +105,15 @@ def in_states(row: Row, states: Collection[str], valid_at: datetime,
     return retired or world
 
 
+def _overlap(a_from: datetime, a_to: datetime | None, b_from: datetime,
+             b_to: datetime | None) -> bool:
+    """`reconcile._overlaps`: two half-open intervals share an instant. One of no length
+    shares none."""
+    if (a_to is not None and a_to <= a_from) or (b_to is not None and b_to <= b_from):
+        return False
+    return (a_to is None or a_to > b_from) and (b_to is None or b_to > a_from)
+
+
 class ReferenceStore:
     """The rows one store should hold, and what each read should return."""
 
@@ -217,7 +226,10 @@ class ReferenceStore:
                 return Expect(reinforced=[keep.id])
             return self._add(op, slot, live, decide_from, valid_from, clock_start, t)
 
-        matches = [r for r in live if r.obj == op.obj]
+        # `Reconciler._retract`'s slot: without a row whose retirement is recorded, which
+        # no later closure changes.
+        closable = [r for r in live if r.invalidated_at is None]
+        matches = [r for r in closable if r.obj == op.obj]
         if not matches:
             # A tombstone whose expiry has passed does not count as the retraction on
             # record, just as `live_at` above leaves an expired row out of a repeated fact.
@@ -227,7 +239,7 @@ class ReferenceStore:
                 keep = min(prior, key=self._tie)
                 keep.observations += 1
                 return Expect(reinforced=[keep.id], reinforced_reported=False)
-            if live:
+            if closable:
                 return Expect()
         return self._tombstone(op, matches, decide_from, valid_from, clock_start, t)
 
@@ -242,7 +254,10 @@ class ReferenceStore:
         if op.recorded_at is None:
             e.stamps.append(Stamp(handle, "recorded_at"))
         if clock_start:
-            e.stamps.append(Stamp(handle, "valid_from"))
+            # Given neither instant, a write takes both from one reading under the lock,
+            # unless it was given a `valid_to`, which was checked against the call.
+            e.stamps.append(Stamp(handle, "valid_from", "recorded_at_of", handle)
+                            if op.valid_to is None else Stamp(handle, "valid_from"))
         self.add(row)
         e.new = handle
         return row
@@ -274,13 +289,15 @@ class ReferenceStore:
         return end, (min(covering, key=self._tie) if covering else None)
 
     def _close(self, row: Row, e: Expect, by: str, boundary: datetime | None,
-               close: str, clock_boundary: bool) -> None:
+               close: str, clock_boundary: bool, recorded_default: bool) -> None:
         """`types.close_out` through `Reconciler._retire`: an ending at the successor's
-        start, never before the row's own; or a retirement at the reconciler's clock."""
+        start, never before the row's own; or a retirement at the reconciler's clock,
+        which is the successor's `recorded_at` when the write was given none."""
         e.closed.append(row.id)
         if close == "retired":
             if row.invalidated_at is None:
-                e.stamps.append(Stamp(row.id, "invalidated_at"))
+                e.stamps.append(Stamp(row.id, "invalidated_at", "recorded_at_of", by)
+                                if recorded_default else Stamp(row.id, "invalidated_at"))
             return
         if clock_boundary:
             # The successor's start came from the clock, so it is later than this row's
@@ -298,7 +315,16 @@ class ReferenceStore:
              decide_from: datetime, valid_from: datetime | None, clock_start: bool,
              t: datetime) -> Expect:
         e = Expect(added=True)
-        victims = ([r for r in live if r.polarity > 0 and r.obj != op.obj]
+        # Every value recorded by `t` that is neither retired nor ended by then, which
+        # includes one written to begin later, and only one true at some instant the new
+        # row is true. A row whose retirement is recorded competes with nothing, even one
+        # still believed at `t`: no later closure changes it (`Reconciler._occupants`).
+        victims = ([r for r in self.rows.values()
+                    if r.slot == slot and r.polarity > 0 and r.obj != op.obj
+                    and not r.expired(t) and r.recorded_at <= t
+                    and r.invalidated_at is None
+                    and (r.valid_to is None or r.valid_to > t)
+                    and _overlap(r.valid_from, r.valid_to, decide_from, op.valid_to)]
                    if op.predicate in FUNCTIONAL else [])
         newer = [r for r in victims if r.valid_from > decide_from]
         older = sorted((r for r in victims if not r.valid_from > decide_from), key=self._tie)
@@ -315,7 +341,8 @@ class ReferenceStore:
             if row.valid_to is None or row.valid_to > boundary:
                 row.valid_to = boundary
         for v in keep:
-            self._close(v, e, row.id, valid_from, op.close, clock_start)
+            self._close(v, e, row.id, valid_from, op.close, clock_start,
+                        op.recorded_at is None)
         return e
 
     def _tombstone(self, op: Remember, matches: list[Row], decide_from: datetime,
@@ -335,15 +362,19 @@ class ReferenceStore:
         else:
             e.stamps.append(Stamp(row.id, "valid_to"))
         row.invalidated_at = t
-        e.stamps.append(Stamp(row.id, "invalidated_at"))
+        e.stamps.append(Stamp(row.id, "invalidated_at", "recorded_at_of", row.id)
+                        if op.recorded_at is None else Stamp(row.id, "invalidated_at"))
         for v in sorted(matches, key=self._tie):
-            self._close(v, e, row.id, valid_from, op.close, clock_start)
+            self._close(v, e, row.id, valid_from, op.close, clock_start,
+                        op.recorded_at is None)
         return e
 
     def forget(self, op: Forget, t: datetime) -> Expect:
         """`Memvara.forget`: close, at the clock, every row in the slot that the store
         believes and that has not ended. That is the live rows and the rows stored to
-        begin later; an ended row is left as it is.
+        begin later; an ended row is left as it is, and so is a row whose retirement is
+        already recorded, even one dated to take effect later, which no closure changes
+        (`Reconciler._victims`).
 
         Each row is closed through `close_out`: a retirement at the clock, or an ending at
         the clock that never falls before the row's own start. So under `close="ended"` a
@@ -352,7 +383,7 @@ class ReferenceStore:
         slot = (op.user, SUBJECT, op.predicate)
         closed = [r for r in self.rows.values()
                   if r.slot == slot and not r.expired(t) and r.recorded_at <= t
-                  and (r.invalidated_at is None or r.invalidated_at > t)
+                  and r.invalidated_at is None
                   and (r.valid_to is None or r.valid_to > t)]
         for r in closed:
             if op.close == "retired":
@@ -372,12 +403,15 @@ class ReferenceStore:
     def delete(self, op: Delete, t: datetime) -> Expect:
         """`Memvara.delete`: close one row the caller can read, through `close_out`: a
         retirement at the clock, or an ending at the clock that never falls before the
-        row's own start."""
+        row's own start. A row already retired is left as it is, whichever closure is
+        asked for, and the call still returns True."""
         e = Expect(returned=False)
         row = self.rows.get(op.handle)
         if row is None or row.user != op.user or row.expired(t):
             return e
         e.returned = True
+        if row.invalidated_at is not None:
+            return e
         if op.close == "retired":
             e.stamps.append(Stamp(row.id, "invalidated_at"))
             return e
@@ -511,7 +545,11 @@ class Stamp:
     `source="wall"` means the value must lie inside the operation's window, and is then
     copied from the store. `source="valid_from_of"` means the value must equal the named
     row's `valid_from` after that row's own stamps are copied: an ending dated at a
-    successor whose start was itself taken from the clock.
+    successor whose start was itself taken from the clock. `source="recorded_at_of"` is
+    the same for the named row's `recorded_at`: a retirement at the instant a write that
+    was given no `recorded_at` recorded its own row, which is the one instant that write
+    takes from the clock under the write lock, and the start of a row written with
+    neither `valid_from` nor `recorded_at`, which takes that same instant.
     """
 
     handle: str

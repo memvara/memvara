@@ -468,6 +468,24 @@ def test_an_end_whose_memory_was_erased_after_it_was_read_is_not_applied():
     assert [r.reason for r in receipt.proposals_refused] == ["not_applied"]
 
 
+def test_an_end_whose_turn_was_erased_while_the_model_ran_is_not_applied():
+    """An end cites the turn the model read it from. When another writer erased that turn
+    during the run, as a delete of the document it was a chunk of does, the end was still
+    applied, and its retraction cited a turn that no longer existed."""
+    mem = memory(ScriptedChat())
+    old = mem.remember("user", "works_at", "Acme").added[0]
+
+    def erase_turn_then_end(tools, results):
+        turn = [ep.id for ep in mem.store.iter_episodes("acme") if ep.content == FINISHED]
+        assert mem.store.erase_episodes(turn) == 1
+        return [("propose_end", {"claim_id": old.id, "reason": "x", "source_index": 0})]
+
+    mem.writer.llm = ScriptedChat([search("Acme")], erase_turn_then_end)
+    receipt = mem.add(FINISHED)
+    assert mem.get(old.id).state == "live", "an end read from an erased turn was applied"
+    assert [r.reason for r in receipt.proposals_refused] == ["not_applied"]
+
+
 def test_an_end_naming_no_turn_is_invalid():
     mem = memory(ScriptedChat())
     old = mem.remember("user", "works_at", "Acme").added[0]

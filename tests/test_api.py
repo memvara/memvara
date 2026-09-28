@@ -1206,6 +1206,77 @@ def test_delete_is_visible_to_as_of_queries_from_before_it(mem):
     assert [c.object for c in mem.get_all(as_of=before)] == ["Lisbon"]
 
 
+def test_a_second_delete_leaves_the_first_retirement_as_it_was(mem):
+    """A retirement records when we stopped believing a claim, and a second `delete()`
+    moved that instant later and added a second closure record. Every read of the past
+    between the two deletions then believed the claim again: history was rewritten, not
+    appended to. The second call now changes nothing, and still returns True, because
+    the claim it names is retired when it returns."""
+    claim = mem.remember("user", "likes", "tea").added[0]
+    assert mem.delete(claim.id, reason="asked to") is True
+    first = mem.store.get_claim(claim.id)
+    between = first.invalidated_at + timedelta(microseconds=1)
+    assert mem.get_all(known_at=between) == []
+    assert mem.delete(claim.id, at=utcnow() + timedelta(seconds=1), reason="again") is True
+    second = mem.store.get_claim(claim.id)
+    assert second.invalidated_at == first.invalidated_at, "the retirement moved"
+    assert second.meta == first.meta, "a second closure was recorded"
+    assert mem.get_all(known_at=between) == []
+
+
+def test_a_retirement_is_never_moved_by_close_out():
+    """The same rule in the one function every closure goes through, so that no other
+    caller can move a retirement either, earlier or later."""
+    import copy
+
+    from memvara.types import close_out
+    retired_at = utcnow()
+    claim = Claim(subject="user", predicate="likes", object="tea",
+                  valid_from=retired_at - timedelta(days=1),
+                  recorded_at=retired_at - timedelta(days=1))
+    close_out(claim, retired_at, None, "retired")
+    before = copy.deepcopy((claim.invalidated_at, claim.invalidated_by, claim.meta))
+    for at in (retired_at - timedelta(hours=1), retired_at + timedelta(hours=1)):
+        close_out(claim, at, "cl_other", "retired", "again")
+        assert (claim.invalidated_at, claim.invalidated_by, claim.meta) == before
+
+
+def test_ending_a_retired_claim_leaves_both_clocks_and_its_record_as_they_were(mem):
+    """The same flaw from the other clock. `delete(close="ended")` on a claim that was
+    already retired set its `valid_to` and added a second closure record, `ended`, so
+    history showed a claim we had stopped believing as one that later stopped being
+    true, and a read of the past after the new end no longer found it true during the
+    period we believed it. A retired claim is now left exactly as it is."""
+    import copy
+
+    claim = mem.remember("user", "allergic_to", "pollen").added[0]
+    assert mem.delete(claim.id, reason="the allergy is walnuts") is True
+    retired = copy.deepcopy(mem.store.get_claim(claim.id))
+    assert mem.delete(claim.id, close="ended", reason="no longer applies") is True
+    after = mem.store.get_claim(claim.id)
+    assert after.valid_to is None, "the retired claim was ended"
+    assert after.meta == retired.meta, "a second closure record was added"
+    assert (after.invalidated_at, after.invalidated_by) == (retired.invalidated_at,
+                                                           retired.invalidated_by)
+
+
+def test_close_out_leaves_a_retired_claim_alone_whatever_the_closure():
+    import copy
+
+    from memvara.types import close_out
+    retired_at = utcnow()
+    claim = Claim(subject="user", predicate="likes", object="tea",
+                  valid_from=retired_at - timedelta(days=1),
+                  recorded_at=retired_at - timedelta(days=1))
+    close_out(claim, retired_at, None, "retired")
+    before = copy.deepcopy((claim.valid_to, claim.invalidated_at, claim.invalidated_by,
+                            claim.meta))
+    for at in (retired_at - timedelta(hours=1), retired_at + timedelta(hours=1)):
+        close_out(claim, at, "cl_other", "ended", "it ended")
+        assert (claim.valid_to, claim.invalidated_at, claim.invalidated_by,
+                claim.meta) == before
+
+
 def test_delete_of_an_unknown_id_is_false_not_an_error(mem):
     assert mem.delete("cl_never_existed") is False
 

@@ -16,12 +16,11 @@ Nothing is written. Once the repository's own value ends, the user-wide one answ
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Iterable
 
 from ..schema import PredicateRegistry
 from ..store import Store
-from ..types import Claim, Scope, fact_key_for
+from ..types import Claim, Scope, fact_key_for, stored_scope
 
 __all__ = ["shadowed"]
 
@@ -36,6 +35,11 @@ def shadowed(store: Store, registry: PredicateRegistry, claims: Iterable[Claim],
     store without `occupied_slots` is asked one `count_competing` per slot, and a store
     with neither, or one that raises `NotImplementedError` from them, leaves the read
     unshadowed rather than failing it. A read with no project costs nothing.
+
+    A candidate's project slot is the candidate's own scope with the reader's project,
+    built with `stored_scope`. A claim stored before '*' and '' were refused can hold one
+    of them at some level, and the slot's scope keeps that value, as `Scope.ancestors`
+    does. Built through `Scope`, it was refused again, and the whole read raised.
     """
     project = scope.project
     if project is None:
@@ -49,8 +53,10 @@ def shadowed(store: Store, registry: PredicateRegistry, claims: Iterable[Claim],
         # project slot can never hold a value for it and there is nothing to ask.
         if not spec.functional or not spec.project_scoped:
             continue
-        slot_of[claim.id] = fact_key_for(replace(claim.scope, project=project),
-                                         claim.subject_key, claim.predicate)
+        own = claim.scope
+        slot_of[claim.id] = fact_key_for(
+            stored_scope(own.tenant, own.user, own.agent, own.session, project=project),
+            claim.subject_key, claim.predicate)
     if not slot_of:
         return frozenset()
     occupied = _occupied(store, scope.tenant, set(slot_of.values()))

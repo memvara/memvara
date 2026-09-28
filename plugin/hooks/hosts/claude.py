@@ -80,9 +80,9 @@ HOST = Host(
     reentry_field="stop_hook_active",
     approve=ApproveSpec(
         matcher="mcp__.*memvara.*",
-        #: How a namespaced tool name splits into its leaf. `mcp__memvara__memory_search`
-        #: and `mcp__plugin_memvara_memvara__memory_search` both end in the leaf.
-        separators=("__",),
+        #: `mcp__memvara__memory_search` from a server configured as `memvara`, and
+        #: `mcp__plugin_memvara_memvara__memory_search` from this plugin's own server.
+        prefixes=("mcp__memvara__", "mcp__plugin_memvara_memvara__"),
         decision_key="permissionDecision",
         reason_key="permissionDecisionReason",
         allow="allow",

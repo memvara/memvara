@@ -1,5 +1,6 @@
-"""The thread check of `test_adv_threads.py`, with sixteen threads of 500 operations
-each, so that far more interleavings are tried than a pull request can wait for."""
+"""The thread check of `test_adv_threads.py`, `erase` included, with sixteen threads of
+500 operations each, so that far more interleavings are tried than a pull request can wait
+for."""
 
 from __future__ import annotations
 

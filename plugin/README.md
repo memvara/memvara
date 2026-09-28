@@ -134,6 +134,11 @@ the MCP server. `extraction_chunks` and `agentic_extraction` are the two that
 are off by default. No hook reads those; the MCP server reads them from
 `MEMVARA_FEATURE_<NAME>`.
 
+Everything the hooks keep under `~/.memvara` is readable by your account
+only. The logs there quote your prompts and the model's replies, so every
+directory is 0700 and every file 0600, and a hook takes any wider
+permission off a file or directory an earlier version created.
+
 ## Your own agent
 
 A plugin does not install into LangChain, CrewAI, or a loop you wrote.

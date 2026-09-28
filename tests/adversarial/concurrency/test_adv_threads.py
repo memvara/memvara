@@ -1,14 +1,16 @@
 """Many threads writing through one handle leave a store that is intact and consistent.
 
 The threads draw their operations from a seeded random generator: `remember`, a
-retraction, `forget` and `delete`, over two users and three predicates. `erase` is not in
-the mix; these tests do not cover erasing under concurrency yet. The order the threads
-interleave in is not fixed, so the test checks what must hold after any order rather than
-one expected state:
+retraction, `forget`, `delete` and `erase`, over two users and three predicates. The order
+the threads interleave in is not fixed, so the test checks what must hold after any order
+rather than one expected state:
+- no thread raised, so no `erase()` reported an erasure it could not prove;
 - the file passes `check_store_integrity`;
 - no single-valued slot has two live values;
 - no row ends before it begins;
-- every claim a write acknowledged still exists.
+- every claim a write acknowledged still exists, unless an `erase()` reported erasing it;
+- every claim an `erase()` reported erasing is gone and has its erasure record, so no
+  `delete()` running beside the erasure wrote the claim back.
 
 `nightly/test_adv_threads_nightly.py` runs the same check with more threads and more
 operations.
@@ -35,8 +37,10 @@ VALID_FROM = (None, None, INSTANTS[1], INSTANTS[3])
 
 @dataclass
 class Log:
-    """What the threads were told happened: each acknowledged claim, with its user."""
+    """What the threads were told happened: each acknowledged claim, with its user, and
+    each claim an `erase()` reported erasing."""
     added: dict[str, str] = field(default_factory=dict)
+    erased: set[str] = field(default_factory=set)
     errors: list[BaseException] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -47,14 +51,19 @@ def worker(mem: Memvara, seed: int, operations: int, log: Log) -> None:
         for _ in range(operations):
             user = rng.choice(USERS)
             predicate = rng.choice(sorted(POOLS))
-            kind = rng.choices(["remember", "retract", "forget", "delete"],
-                               weights=[6, 1, 1, 1])[0]
-            if kind == "delete":
+            kind = rng.choices(["remember", "retract", "forget", "delete", "erase"],
+                               weights=[6, 1, 1, 1, 1])[0]
+            if kind in ("delete", "erase"):
                 with log.lock:
-                    known = sorted(log.added.items())
+                    known = sorted((claim_id, owner) for claim_id, owner in log.added.items()
+                                   if claim_id not in log.erased)
                 if known:
                     claim_id, owner = rng.choice(known)
-                    mem.delete(claim_id, user=owner)
+                    if kind == "delete":
+                        mem.delete(claim_id, user=owner)
+                    elif mem.erase(claim_id, user=owner):
+                        with log.lock:
+                            log.erased.add(claim_id)
             elif kind == "forget":
                 mem.forget("user", predicate, user=user)
             else:
@@ -87,8 +96,12 @@ def run_threads(path: pathlib.Path, threads: int, operations: int, seed: int) ->
         for c in rows:
             assert c.valid_to is None or c.valid_to >= c.valid_from, (
                 f"{c.id} ends at {c.valid_to}, before it starts at {c.valid_from}")
-        gone = sorted(set(log.added) - ids)
+        gone = sorted(set(log.added) - log.erased - ids)
         assert not gone, f"acknowledged claims are gone: {gone}"
+        back = sorted(log.erased & ids)
+        assert not back, f"erased claims are back in the store: {back}"
+        unrecorded = sorted(c for c in log.erased if mem.store.erasure_record(c) is None)
+        assert not unrecorded, f"erased claims have no erasure record: {unrecorded}"
     assert check_store_integrity(path) == []
 
 

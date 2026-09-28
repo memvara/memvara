@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+Upgrading notes are in `docs/UPGRADING.md`.
+
 ### Added
 
 - **`bench/mutation.py` measures how many deliberate bugs in a module the tests catch.**
@@ -203,6 +205,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   filtering took 7.3 ms (best of 200 runs on a laptop). The method is optional and listed
   in `OMITTABLE`: a store without it keeps working and closes the same values, reading the
   slot whole. `docs/UPGRADING.md` says what the new member does to `isinstance(x, Store)`.
+- **`Scope.visible(items)`** returns the items whose `scope` a reader at that scope can
+  see, deciding `Scope.sees` once per distinct scope. `why()` uses it on a claim's source
+  turns, which keeps `why()` on a claim citing 365 turns at 1.7 ms instead of the 6.1 ms a
+  per-turn check cost.
 
 ### Fixed
 
@@ -464,8 +470,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   - Restating a period the store already holds, such as the same earlier start a second
     time, reinforces the claim for that period and stores nothing. Restating from an
     even earlier start stores only the part not yet held.
-  - A repeat that names `expires_at` is still a repeat, so the expiry lands on the claim
-    on record.
+  - A caller's repeat that names `expires_at` is still a repeat, so the expiry lands on
+    the claim on record. A model's restatement is stored for its earlier period like
+    any other, and its expiry stays on the claim it creates.
   - `memory_remember`'s reply no longer says such a fact stopped being true where the
     stored claim begins; it says the same value is stored from there.
   - **Not covered yet: a turn that `add()` takes for a repeat in tier 0**, before
@@ -548,6 +555,330 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   an embedder of the same width every search compared two unrelated vector spaces without
   an error. The clear now runs first, so a refusal leaves the old embedder everywhere.
   #324.
+- **The store's erasure methods read what they erase under the write lock.**
+  `SQLiteStore.erase_claim`, `erase_episodes` and `purge` each read what to erase before
+  their first write, outside the write lock. Two `erase_claim` calls on one claim at once,
+  from two handles or two processes, could both find the row, and the second wrote an
+  erasure record, and reported the claim erased, although it had erased nothing.
+  `erase_episodes` could erase a turn that a claim had come to cite in the meantime, so
+  that claim's provenance pointed at nothing. `purge` listed the vectors it blanks and
+  counts before it took the lock, so a claim written in between lost its row while its
+  vector was left out of both. Each now runs in one `batch()`, which holds the lock from
+  before its first read.
+- **A mem0 import no longer brings back a claim another writer erased during it.** The
+  importer keeps the claim each memory's previous event wrote, and an UPDATE event
+  retires that claim by writing the importer's copy back. If another handle or process
+  ended, retired or erased the claim between the two events, the import undid that
+  change; an erased claim came back, text included, beside its own erasure record.
+  `write_note` now reads the claim again under the write lock, closes the stored row, and
+  retires nothing when the claim is gone or no longer live.
+- **Deleting a document erases the chunks a new version stored while it waited.**
+  `delete_document()` listed the document's chunks before its transaction and erased only
+  those. The chunks an `update_document()` from another handle or process stored in
+  between stayed on disk, text and all, belonging to no document, after the delete had
+  reported success. The delete now reads the document and its chunk list inside its
+  transaction, under the write lock.
+
+### Security
+
+- **A repeated value no longer reinforces a claim in a scope its writer cannot see.**
+  Writing a fact the store already holds reinforces the claim on record, and the lookup
+  that finds that claim matched on owner (tenant and user) only. So a fact remembered in
+  project A, when project B already held it, reinforced B's claim: nothing was stored in
+  A, A's reads returned nothing, and the receipt reported the fact as already known. The
+  same happened between two sessions or two agents of one project, and from the user's own
+  level into a project. A repeat now reinforces only a claim in the writer's own scope or
+  a broader one it reads, and is otherwise stored as its own claim in its own scope. A
+  retraction that repeats one already recorded, and a word-for-word repeat of a turn,
+  follow the same rule. GHSA-xcp9-68f5-6g9q.
+- **`why()` and `memory_why` list only the source turns and superseded claims the caller
+  can see.** A claim can cite turns from several scopes: a user-level preference restated
+  in two projects cites a turn from each. `why()` returned all of them, so one project
+  could read another project's turn text through a claim they both see. Turns and
+  superseded claims from a scope the caller cannot see, such as another project or a
+  sibling session, are now left out. This also covers claims that absorbed a write before
+  the first fix. GHSA-xcp9-68f5-6g9q.
+- **A write in one session or agent no longer closes a value a sibling session or agent
+  holds.** The claims competing for a slot include every session and agent of the project.
+  A new value or a retraction in session s2 ended the value session s1 held, which s2
+  cannot read, and returned it in s2's receipt, so `memory_remember` showed s2 the ended
+  value. A supersession or retraction now closes only claims in the writer's own scope, a
+  broader scope it reads, or a narrower scope beneath it. A user-level write still ends a
+  value a session holds. GHSA-xcp9-68f5-6g9q.
+- **A claim can cite only turns its writer can see.** `remember(sources=[...])`,
+  `supersede()` and the `memory_remember` tool's `sources` argument took any turn id and
+  stored it. Ids are not secret, so a caller could make a claim cite another scope's turn,
+  which `erase(sources=True)` could then reach. An id of a turn in a scope the claim
+  cannot see, or of no turn at all, is now left out without an error, so the claim
+  returned does not tell the caller which ids exist. A new `Episode` passed in `sources`
+  is stored as before. GHSA-xcp9-68f5-6g9q.
+- **A turn counts as extracted only when its own scope can see a claim citing it.**
+  `pending_extraction()` and `reextract()` treated a turn as done when any claim in the
+  tenant cited it, including one in another project that had absorbed the write. Such a
+  turn is now pending again, so an extraction worker reads it and stores the fact in the
+  turn's own scope. GHSA-xcp9-68f5-6g9q.
+- **The plugin's approve hook approves only the tools of the server named `memvara`.** The
+  hook answers "allow" for memvara's read-only memory tools, so the agent host skips its
+  permission prompt. It matched a tool by the last segment of its name, such as
+  `memory_recall`, and never checked the server. Claude Code, Codex, Copilot and Cursor
+  run the hook for any tool name that contains `memvara`, so there a tool named
+  `memory_recall` on any MCP server whose name contains `memvara` ran without a prompt.
+  OpenCode's shim asks the hook about every permission request, so there any server's tool
+  whose name ended in `__memory_recall` did. Each host now lists the exact prefixes of the
+  server keyed `memvara`, which every installer writes, and a tool is approved only when
+  its whole name is one of them followed by a read-only tool's name. A server renamed from
+  `memvara` is asked about on every read. The hook sees only the server's key, so a
+  different server configured under the key `memvara` itself is still approved;
+  `SECURITY.md` lists that as a known limitation. GHSA-69rp-jj7j-cgh4.
+- **Two writers on one store no longer both fill a single-valued slot.** A write looked up
+  the slot before it held the database's write lock, because Python's `sqlite3` module
+  begins a transaction only at the first write statement. Two handles on one file, such as
+  the MCP server and the hooks' daemon, could each find the slot empty and each add a
+  value, and both values stayed live, with neither ending where the other began. Two
+  writes of the same value could store it twice in the same way, instead of reinforcing
+  one claim. `SQLiteStore.batch()`, in which `remember()` and `add()` look up the slot,
+  now begins with `BEGIN IMMEDIATE`, so a write holds the lock from before its first
+  lookup. A second writer waits until the first commits, then finds its value and ends it,
+  or reinforces it when the value is the same. A writer that waits longer than SQLite's
+  five-second busy timeout still gets `database is locked`, now before its batch has run.
+  `docs/UPGRADING.md` says who else this changes. GHSA-pmx8-j968-wpqw.
+- **A write that waited for another writer is no longer believed from before its wait.**
+  `remember()` given no `recorded_at` recorded the claim at the instant it was called, but
+  retired whatever the claim displaced at the instant it ran, after it had taken the write
+  lock. With `close="retired"`, the old value's belief ended at the later instant and the
+  new value's began at the earlier one, so a read of the past between the two returned
+  both values. The gap was microseconds for a write that took the lock at once, and as
+  long as the wait for one that waited, up to SQLite's five-second busy timeout. The
+  default `recorded_at` is now the instant the write takes the lock, which is also the
+  instant it retires what it displaces, so the old value's belief ends exactly where the
+  new one's begins. `remember(replaces=...)` does the same. A write given neither
+  `recorded_at` nor `valid_from` also begins at that instant, so its two instants still
+  come from one reading and whatever it ends stops exactly where it starts; with a
+  `valid_to` and no `valid_from`, it still begins at the instant of the call. A
+  `recorded_at` the caller passes is stored as it is. `remember()` refuses an `expires_at`
+  that is not in the future, and it now checks it again at the instant the write takes the
+  lock: a write that waited until after its expiry was stored already expired, and the
+  next sweep erased it. Such a write now raises the same `ValueError` and writes nothing.
+  `docs/UPGRADING.md` says who can notice the difference. GHSA-w7cf-jc6v-fq6h.
+- **`delete()` no longer undoes another writer's ending or brings back an erased claim.**
+  `delete()` read the claim, and then wrote the whole row back later, outside any
+  transaction. If another writer ended the claim in between, for example with a new value
+  that superseded it, the copy `delete()` had read overwrote the ending, so the claim was
+  retired with no end and no pointer to the value that replaced it. If `erase()` removed
+  the claim in between, `erase()` reported success, and the delete then wrote the claim
+  back, its text included, beside its own erasure record. `delete()` now reads and writes
+  the claim in one transaction that holds the database's write lock from before the read,
+  so an ending made in the meantime is kept, and a claim erased in the meantime stays
+  erased and `delete()` returns `False`. The other methods that read a claim before they
+  write it now do the same. `forget()` and `forget_matching()` close the claims as they
+  stand once the lock is held, and `forget_matching()` refuses a claim closed in the
+  meantime. `supersede()` and `remember(replaces=...)` refuse a claim closed in the
+  meantime, `link()` refuses a claim erased in the meantime, a second `erase()` of one
+  claim returns `False` and records nothing, and the expiry sweep leaves a claim whose
+  expiry was moved in the meantime. GHSA-vgpm-hrr4-g649.
+- **A consolidation pass no longer undoes a write made while it ran.** `consolidate()`
+  reads a snapshot of the live claims, decides what to change, and wrote the changed
+  claims back whole. A claim that another handle or process ended, retired or erased
+  between the snapshot and the write was written back as the snapshot held it: the ending
+  was undone, so two values of one slot were live, and an erased claim came back, text
+  included, beside its own erasure record. The pass now reads each row again inside the
+  transaction that writes it, under the write lock, and writes it only if it is still
+  exactly as the snapshot read it. A row that changed is left as the other writer left it,
+  and the next pass decides about it again. The two rows one merge changes are written
+  together or not at all. The counts `consolidate()` returns are still what each stage
+  decided, and the `consolidate.rows_written` metric counts only the rows written.
+  GHSA-xw5r-jx55-x5px.
+- **`add()` of a repeated turn no longer undoes a write made while it ran.** When a turn
+  repeats one already stored, or restates a stored claim closely enough, `add()` reads the
+  claims it restates and reinforces them later, in the transaction that follows
+  extraction, which can include a model call. The reinforcement wrote the copy read
+  earlier back whole, so a claim that another handle or process ended, retired or erased
+  in between had that change undone; an erased claim came back, text included, beside its
+  own erasure record. The reinforcement now reads each claim again under the write lock
+  and leaves alone a claim that is gone or no longer live. GHSA-c96v-h8jv-9jj4.
+- **The identity and predicate repairs no longer undo a write made while they ran.**
+  `backfill_entities()`, `backfill_predicates()` (which `merge_predicate()` runs) and
+  `split_entity()` read the claims they may change, decide, and wrote the changed claims
+  back whole. A claim that another handle or process ended, retired or erased in between
+  was written back as the pass had read it, so the other writer's change was undone; an
+  erased claim came back, text included, beside its own erasure record. Each pass now
+  reads its rows again inside the transaction that writes them, under the write lock, and
+  writes a slot's claims only if every one of them is still exactly as the pass read it. A
+  slot another writer changed is left as that writer left it, and running the pass again
+  applies it. `RekeyReport.written` and `MergeReport.written` count only the rows written,
+  and `SplitReport` has a new `written` count that does the same. GHSA-cvvf-2vpp-cv9w.
+- **A document deleted while it was being extracted or updated no longer comes back.**
+  `add_document()` and `update_document()` store a document's chunks and then index and
+  extract them outside any transaction, which can include a model call. Each status after
+  that was recorded by writing back the whole document as it had been read before. A
+  document that another handle or process deleted in between came back, title and path
+  included, after its delete had reported erasing it, and a title, path or metadata
+  another writer set in between was undone. `update_document()` also wrote back the
+  document it had read before reading new content, so a document deleted in between came
+  back, with the new chunks. Each status is now written onto the row as the store holds
+  it, under the write lock, and only while the row still holds the content the status
+  describes, and a document deleted before its extraction begins is not read.
+  `update_document()` reads the document again under the write lock and raises `KeyError`
+  for one deleted in the meantime. A re-add that retries unread chunks reads them under
+  the write lock as well, so it cannot write back a chunk that a delete erased. When
+  another writer stored new content in between, so that a status is not written,
+  `add_document()` and `update_document()` return the document as the store holds it,
+  rather than their own copy with a status and a chunk count that were never stored.
+  GHSA-3324-rp58-x533.
+- **A turn erased while it was being read no longer leaves facts behind.** `add()` and
+  the extraction of a document's chunks write the claims they read after the model call,
+  if there is one. A `purge()` or a `delete_document()` from another handle or process
+  that erased the turn in between did not stop them: the claims were written anyway,
+  citing a turn that no longer existed, so facts read from the erased text outlived the
+  erasure that had reported removing it. The claim transaction now reads again, under the
+  write lock, which of its turns are still stored. It drops a claim whose every turn is
+  gone, and the others cite only the turns still stored. An end that agentic extraction
+  proposed from a gone turn is reported as `not_applied`. A turn that restates a stored
+  claim reinforces it in the same transaction, and a restatement whose every turn is gone
+  is skipped as well, so the claim gains no observation and the receipt does not list it.
+  GHSA-pw35-phw9-hwm9.
+- **Erasing a vector another process wrote now removes it from the vector file.** A store
+  blanked an erased claim's or turn's row in `<db>.vecs` only inside the part of the file
+  it had mapped. When another process had written the vector after this store mapped the
+  file, or this store held no vector when it opened, `erase()`, `erase_claim()` and
+  `purge()` reported success and the vector stayed on disk, where the text can be
+  recovered from it. They now open the file if needed and blank a row outside the mapping
+  through the file itself. `prove_erased()` certified such an erasure, because it counted
+  only database rows. `erase()` now records which row of the vector file the vector held,
+  and the proof reads that row from the file itself and reports it as `vector_file`, so
+  a vector left on disk makes the proof fail and `erase()` raise `ErasureIncomplete`. The
+  new column moves the SQLite store to schema 17. GHSA-p37g-qr47-wjxj.
+- **A retired claim is no longer closed again.** `delete()` set a claim's
+  `invalidated_at`, the instant the store stopped believing it, again on every call, and
+  added another closure record. A second call moved that instant later, so every read of
+  the past between the two calls believed the claim again. Ending a retired claim did the
+  same from the other clock: `delete(close="ended")`, which is what `memory_end` does for
+  one claim, set `valid_to` on a claim `memory_forget` had retired and added a second
+  closure record, so `memory_history` showed it as a fact that ended rather than one we
+  took back, while the tool replied that nothing had changed. A claim that is already
+  retired is now left exactly as it is, whichever closure is asked for: `delete()` writes
+  nothing and returns `True`, and a `reason` given to that call is not recorded.
+  `close_out`, which every closure goes through, changes neither clock of a retired claim
+  and adds no record. `memory_forget` on a retired claim now says it is already retired
+  and that nothing changed, instead of "Retired claim", and so it does when another writer
+  retired the claim while the call ran, which it tells by reading the claim again after
+  its write and comparing the reason on record with its own. A claim whose retirement is
+  recorded but dated to take effect later is retired too, so a new value, a retraction,
+  `forget()` and `forget_matching()` leave it out of what they close. GHSA-97rw-w92g-4p83.
+- **A second value scheduled for a single-valued slot now replaces the first.** A value
+  written to begin in the future is believed from the moment it is recorded, but the
+  reconciler compared a new value only with the values in force at the time of the
+  write. So a second scheduled value did not end the first, and from their start both
+  were live, as were any later ones. Every value that is believed, not retired and not
+  yet ended now competes, scheduled ones included, by the rules that already applied: one
+  that begins earlier ends where the new value begins, one that begins at the same instant
+  collapses, and one that begins later ends the new value. A value the write leaves
+  unchanged, such as one already ended where the new value begins, is no longer written
+  again, named as replaced by the new value, or listed in `receipt.closed`.
+  GHSA-rc7c-jpmj-jrfc.
+- **A model's expiry can no longer erase a claim the caller asserted.** When a new claim
+  repeated one on record and carried an `expires_at`, the reconciler put that expiry on
+  the claim on record, whoever proposed it. Model output could therefore erase a caller's
+  claim: single-call extraction accepted any instant in its output, one in the past
+  included, which hid the claim at once, and an agentic `propose_claim` that repeated a
+  stored fact put its expiry on it, so the next sweep after that instant erased it. Only a
+  caller's repeat, from `remember()` or an importer, now moves an expiry onto a claim on
+  record. A model's repeat reinforces the claim and leaves its expiry as it was, a model's
+  expiry is kept only on a claim its own proposal creates, and single-call extraction,
+  which is offered no expiry, drops any it returns. GHSA-h9pm-mpg7-8324.
+- **The MCP server no longer writes a reply line that is not JSON.** A request whose `id`
+  was `NaN`, `Infinity` or `-Infinity`, which are not JSON, or a number too large for a
+  double, such as `1e400`, was accepted, and the reply echoed the id as a bare `NaN` or
+  `Infinity`. A strict parser such as JavaScript's `JSON.parse` cannot read that line, so
+  the client lost the reply or its session. A request whose id is, or holds inside an
+  object or array, one of those numbers is now a parse error (-32700), answered with a
+  null id, and the server's encoder refuses to write a number JSON cannot carry. A reply
+  that holds one anywhere is answered instead with a JSON-RPC internal error (-32603)
+  carrying the request's id, the reason is written to standard error, and the server goes
+  on serving. The same numbers anywhere else in a request, such as in a tool's arguments,
+  are read as before and go to the tool's own argument check, because no reply copies
+  them. GHSA-fwrg-wp6q-jcqm.
+- **The files the plugin's hooks keep are now readable by your account only.** The hooks
+  wrote their logs and state under `~/.memvara/.hooks` with the default modes, which
+  under the usual umask are 0755 for a directory and 0644 for a file, so every account
+  on the machine could read them. They hold text a person or a model wrote:
+  `capture.log` keeps up to 200 characters of a model reply it could not use,
+  `recall-sample.log` (when switched on) the first 90 characters of each prompt and 70 of
+  each memory recalled for it, and
+  `capture-state.json` the path of every transcript the capture hook has mined, beside
+  `recall.log`, `hooks.log`, `usage.jsonl` and the lock files. `~/.memvara` itself was
+  0755 when a hook, `memvara-mcp login` or `memvara-mcp init` created it. Every directory
+  from `~/.memvara` down is now created 0700 and every file 0600, by the Python hooks and
+  by the OpenCode plugin's shim, and a hook takes any permission for group and others off
+  a directory or file that already has it, the first time it uses it in a process.
+  `login` and `init` create the directory 0700, and take any permission for group and
+  others off a `~/.memvara` that already has it. GHSA-6vr5-q59v-r6vw.
+- **OpenCode transcripts are written privately and removed after capture.** OpenCode
+  gives a plugin no transcript, so the OpenCode plugin wrote each session's messages, a
+  whole conversation, to `$TMPDIR/memvara-opencode/<session>.jsonl` for the capture hook
+  to read, with the default modes and for a day. On Linux `$TMPDIR` is usually the shared
+  `/tmp`, so every account on the machine could read the conversation, and another
+  account could have made that directory first. The transcript now goes to
+  `~/.memvara/.hooks/opencode`, 0600 in a 0700 directory, and is removed when the capture
+  reading it is done. A newer transcript is written to a new private file and renamed
+  over the old one, so a capture still reading the older transcript keeps reading all of
+  it. The plugin removes the transcripts an earlier version left in `$TMPDIR` when it
+  loads, and remembers a digest of what it last handed to capture, so a repeated idle
+  event still starts no second capture, and a changed conversation of the same length
+  does. GHSA-4x4r-q9f2-rgfc.
+- **The repr of a server configuration no longer shows the hosted API key.**
+  `ServerConfig` kept two of its secrets, `db_key` and `confirm_secret`, out of its repr,
+  but not `api_key`, the bearer token for the hosted service in cloud mode. Anything that
+  printed the configuration as text printed the token with it: a debug log line, an
+  exception message that included the object, or a traceback formatter that shows local
+  variables. `api_key` is now kept out of the repr like the other two.
+  GHSA-jvw9-7mmg-8qcr.
+- **No level of a scope can be `"*"` or the empty string.** A scope's key writes a level
+  that is not bound as `*`, and it wrote a level set to `"*"` or `""` the same way. So a
+  claim written by a handle bound to `user="*"` or `user=""` had the key of a claim
+  written for the whole tenant, and every other user's `get()`, `why()`, `links()` and
+  `produced()` returned it, and the turns behind it, while `get_all()` and `search()` did
+  not. The same held at the project, agent and session levels, and a document's name
+  lookup found such a document for a caller in the scope above it. Building a `Scope` with
+  either value at any level now raises `ValueError`, naming the level and the value, so
+  every constructor, `scope()`, `bind()`, the scope keywords of every call, a hand-built
+  `Episode`, the mem0 layer, the integrations and both hosted clients refuse it. The
+  server refuses `MEMVARA_TENANT`, `MEMVARA_USER`, `MEMVARA_AGENT` or `MEMVARA_SESSION`
+  set to `*` with a `ConfigError` naming the variable, and an empty one still means unset.
+  Rows a store already holds under either value are read back as stored, and no scope a
+  caller can build reads them: their key no longer matches an unbound level, a slot read
+  does not reach them, a document name lookup compares the scope's columns, and a new turn
+  is not taken for a repeat of one of theirs. `docs/UPGRADING.md` says how to find such
+  rows. GHSA-9pxq-xw2r-73hp.
+- **Erasing a memory through the mem0 layer or an adapter erases every version of it.**
+  The mem0 layer's `Memory`, the CrewAI storage and the LangGraph store erase a memory
+  their framework deletes when they are built with `on_delete="erase"`. Each erased only
+  the claim that held the memory's current value. When a value changes, memvara keeps the
+  earlier value as a claim of its own, ended rather than retired, with its own vector and,
+  in the mem0 layer, its own source turn. So after the adapter reported the memory
+  erased, the earlier text was still on disk, and `history()`, `why()` and a search that
+  includes ended claims still returned it. A field that a LangGraph `put` had dropped,
+  which is retired, stayed in the same way. Each adapter now erases every version, each
+  with its vector and its source turns, and each defines a version by what its framework
+  calls one memory. For `Memory.delete()` the versions are the claims the memory's own
+  updates link through `invalidated_by`, in its slot: the claims the named one replaced,
+  back to the first value, and the claims that replaced it, up to the current value. A
+  many-valued fact such as `likes` keeps several memories in one slot, and erasing one of
+  them leaves the others. Naming an earlier version's id now erases the whole memory,
+  its current value included, and the reply lists the ids it erased under `erased`. For
+  a CrewAI record the versions are every claim on the record's slot, and a `reset()` with
+  a `scope_prefix` erases them as `delete()` does; `delete()` still counts records. For a
+  LangGraph item they are every claim that has held one of its fields, a dropped field
+  included. No adapter erases a claim that `Memvara.erase()` would refuse to erase at its
+  scope: each erases in its own scope and in the broader scopes it reads, and never in a
+  sibling session or agent, a narrower scope or another user's scope, even where such a
+  claim shares the slot or is linked into the chain. A record or item with no current
+  value, such as one that an earlier delete retired, is still not found by `delete()`,
+  and `purge()` erases it. A hosted deployment gives `Memory` no store to read the slot
+  from, so there it follows the chain with `history()`, `get()` and `why()`. The
+  LangChain chat history erases only with `clear()` and `on_clear="purge"`, which purges
+  its whole scope and so already took every version, and the LlamaIndex adapter has no
+  deletion. `docs/UPGRADING.md` says who can notice the difference. GHSA-f3q4-8479-2fw4.
 
 - **A store whose embedder record is missing or unreadable now says so when it opens,
   and records the embedder again.** `<db>.embedder.json` names the embedder that wrote a

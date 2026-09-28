@@ -703,6 +703,34 @@ def test_clear_can_be_opted_into_as_a_real_erasure(mem, monkeypatch):
     assert history.messages == [] and mem.count(session="s1") == 0
 
 
+def test_a_purging_clear_erases_every_version_of_what_the_session_learned(mem,
+                                                                          monkeypatch):
+    """`clear()` purges the whole scope the history writes to, so a value the session
+    changed is erased along with the value that replaced it. A purge selects by scope, not
+    by memory, which is why this adapter needs no per-memory rule for what counts as a
+    version. Another session's memory is outside the scope and stays."""
+    install_langchain(monkeypatch)
+    messages = fake_messages_module()
+    history = lc.MemvaraChatMessageHistory(mem, session="s1", on_clear="purge",
+                                          transcript_warning=False)
+    other = lc.MemvaraChatMessageHistory(mem, session="s2", on_clear="purge",
+                                        transcript_warning=False)
+    history.add_messages([messages.HumanMessage(content="I live in Berlin")])
+    history.add_messages([messages.HumanMessage(content="I live in Lisbon")])
+    other.add_messages([messages.HumanMessage(content="I live in Rome")])
+    assert [(c.object, c.state) for c in mem.history("user", "lives_in", session="s1")] == [
+        ("Berlin", "ended"), ("Lisbon", "live")]
+
+    history.clear()
+
+    assert mem.history("user", "lives_in", session="s1") == []
+    found = [r.text for r in mem.search("Berlin Lisbon", session="s1",
+                                        states=("live", "ended", "retired"),
+                                        include_episodes=True)]
+    assert [text for text in found if "Berlin" in text or "Lisbon" in text] == []
+    assert [c.object for c in mem.history("user", "lives_in", session="s2")] == ["Rome"]
+
+
 def test_clear_can_be_opted_into_as_a_no_op_for_a_memory_that_outlives_the_session(
         mem, monkeypatch):
     install_langchain(monkeypatch)
@@ -1287,6 +1315,66 @@ def test_erase_mode_removes_the_text_and_the_turn_behind_it(mem):
     assert mem.stats()["episodes"] == 0
 
 
+EVERY_STATE = ("live", "ended", "retired")
+
+
+def test_erase_mode_erases_every_version_of_the_record(mem):
+    """An update keeps the text it replaced as its own claim, ended rather than retired,
+    and that claim is a version of the record. Erasing only the current claim returned 1
+    while `history()` still held the earlier text, so every version goes now. A
+    neighbouring record is not a version of this one, and neither is the same record in
+    another user's storage, so both are left exactly as they were."""
+    storage = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES, on_delete="erase")
+    theirs = ca.MemvaraStorage(mem, user="bob", types=CREWAI_TYPES)
+    first = saved(storage, record("Alice lives in Berlin"))[0]
+    storage.update(record("Alice lives in Lisbon", id=first.id,
+                          created_at=first.created_at))
+    neighbour = saved(storage, record("Alice likes pizza"))[0]
+    saved(theirs, record("Alice lives in Berlin", id=first.id))
+    subject = note_subject(first.id, prefix=ca.SUBJECT_PREFIX)
+    versions = mem.history(subject, NOTE_PREDICATE)
+    assert [(c.object, c.state) for c in versions] == [
+        ("Alice lives in Berlin", "ended"), ("Alice lives in Lisbon", "live")]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert storage.delete(record_ids=[first.id]) == 1
+
+    assert storage.get_record(first.id) is None
+    assert mem.history(subject, NOTE_PREDICATE) == []
+    found = [r.text for r in mem.search("Berlin Lisbon", states=EVERY_STATE)]
+    assert [text for text in found if "Berlin" in text or "Lisbon" in text] == []
+    assert [mem.why(c.id) for c in versions] == [None, None]
+    assert all(mem.prove_erased(c.id).proven for c in versions)
+    # The tenant now holds the neighbour and bob's copy, one claim and one vector each.
+    assert mem.stats() == {"episodes": 0, "claims": 2, "live_claims": 2,
+                           "ended_claims": 0, "invalidated": 0, "embeddings": 2}
+    assert storage.get_record(neighbour.id).content == "Alice likes pizza"
+    assert theirs.get_record(first.id).content == "Alice lives in Berlin"
+
+
+def test_erase_mode_leaves_the_same_record_in_a_sibling_session(mem):
+    """Two sessions of one user share a record's slot, because a slot's key leaves the
+    session out. Erasing the record in one session must not reach the other session's
+    versions of it, the current one or an earlier one."""
+    mine = ca.MemvaraStorage(mem, user="alice", session="s1", types=CREWAI_TYPES,
+                             on_delete="erase")
+    sibling = ca.MemvaraStorage(mem, user="alice", session="s2", types=CREWAI_TYPES)
+    first = saved(mine, record("Alice lives in Berlin"))[0]
+    saved(sibling, record("Alice lives in Rome", id=first.id))
+    sibling.update(record("Alice lives in Oslo", id=first.id))
+    mine.update(record("Alice lives in Lisbon", id=first.id))
+    subject = note_subject(first.id, prefix=ca.SUBJECT_PREFIX)
+
+    assert mine.delete(record_ids=[first.id]) == 1
+
+    assert mem.history(subject, NOTE_PREDICATE, session="s1") == []
+    assert [(c.object, c.state)
+            for c in mem.history(subject, NOTE_PREDICATE, session="s2")] == [
+        ("Alice lives in Rome", "ended"), ("Alice lives in Oslo", "live")]
+    assert sibling.get_record(first.id).content == "Alice lives in Oslo"
+
+
 def test_retire_mode_is_the_informed_choice_and_stays_silent(mem):
     storage = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES, on_delete="retire")
     first = saved(storage, record("Alice lives in Berlin"))[0]
@@ -1343,6 +1431,24 @@ def test_resetting_one_crewai_scope_erases_only_that_subtree(storage, mem):
     assert [r.content for r in storage.list_records()] == ["keep"]
     assert mem.history(note_subject(drop.id, prefix=ca.SUBJECT_PREFIX),
                        NOTE_PREDICATE) == []
+
+
+def test_resetting_one_crewai_scope_erases_every_version_of_its_records(storage, mem):
+    """A scoped reset erases its records one at a time, the same way an erasing `delete()`
+    does, so a record updated before the reset loses the text it had before the update
+    as well as its current text."""
+    drop = saved(storage, record("Alice lives in Berlin", scope="/drop"))[0]
+    storage.update(record("Alice lives in Lisbon", id=drop.id, scope="/drop",
+                          created_at=drop.created_at))
+    saved(storage, record("Alice likes pizza", scope="/keep"))
+
+    storage.reset("/drop")
+
+    assert mem.history(note_subject(drop.id, prefix=ca.SUBJECT_PREFIX),
+                       NOTE_PREDICATE) == []
+    found = [r.text for r in mem.search("Berlin Lisbon", states=EVERY_STATE)]
+    assert [text for text in found if "Berlin" in text or "Lisbon" in text] == []
+    assert [r.content for r in storage.list_records()] == ["Alice likes pizza"]
 
 
 # --- listing -------------------------------------------------------------------------

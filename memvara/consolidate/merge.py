@@ -150,7 +150,7 @@ def merge_pass(sweep: Sweep, embedder: Embedder, registry: PredicateRegistry, *,
             groups.setdefault(claim.fact_key, []).append(claim)
 
     retired = 0
-    for group in groups.values():
+    for slot, group in groups.items():
         if len(group) < 2:
             # The common case by far, and the one that must cost nothing: no vectors are
             # read and no comparison is set up for a slot holding a single answer.
@@ -185,9 +185,11 @@ def merge_pass(sweep: Sweep, embedder: Embedder, registry: PredicateRegistry, *,
                     continue
                 absorbed.add(j)
                 _absorb(keeper, group[j], registry, at)
-                sweep.touch(group[j])
+                # One unit per slot: the survivor holds the duplicate's evidence only if
+                # the duplicate is retired in the same write. See `Sweep.touch`.
+                sweep.touch(group[j], unit=slot)
                 retired += 1
-            sweep.touch(keeper)
+            sweep.touch(keeper, unit=slot)
     if sweep.telemetry is not None:
         # Emitted at zero on purpose, and this is the stage where that matters most.
         # Merge reporting 0 forever while `consolidate.claims_per_slot` climbs is the
