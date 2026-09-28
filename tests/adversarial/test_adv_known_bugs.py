@@ -41,10 +41,17 @@ def _read_only_tools() -> set[str]:
     return {tool.name for tool in TOOLS if not tool.writes}
 
 
-def test_a_known_bug_marker_accepts_only_the_bugs_own_symptom() -> None:
+#: A bug registered for the tests of the registry itself. A real entry leaves the registry
+#: when its bug is fixed, which is what happened to B2, the entry these tests first used.
+SYNTHETIC = known_bugs.KnownBug("B998", 998, "a bug registered for the registry's own tests")
+
+
+def test_a_known_bug_marker_accepts_only_the_bugs_own_symptom(
+        monkeypatch: pytest.MonkeyPatch) -> None:
     """Each marker absorbs only known_bugs.Reproduced, which a test raises after it has
     seen the bug's exact symptom. Any other failure in the same test fails loudly."""
-    mark = known_bugs.xfail("B2").mark
+    monkeypatch.setitem(known_bugs.KNOWN_BUGS, SYNTHETIC.id, SYNTHETIC)
+    mark = known_bugs.xfail("B998").mark
     assert mark.kwargs["strict"] is True
     assert mark.kwargs["raises"] is known_bugs.Reproduced
 
@@ -54,44 +61,42 @@ def test_a_known_bug_marker_cites_the_repository_its_issue_is_in(
     """The nightly run files its issues in memvara/build-health, and the entries filed by
     hand before that are in memvara/memvara. A marker citing a bare number in the wrong
     repository would send its reader to an unrelated issue."""
-    assert known_bugs.xfail("B2").mark.kwargs["reason"].startswith("B2, memvara/memvara#266:")
+    monkeypatch.setitem(known_bugs.KNOWN_BUGS, SYNTHETIC.id, SYNTHETIC)
+    assert known_bugs.xfail("B998").mark.kwargs["reason"] == (
+        "B998, memvara/memvara#998: a bug registered for the registry's own tests")
     monkeypatch.setitem(known_bugs.KNOWN_BUGS, "B999", known_bugs.KnownBug(
         "B999", 12, "a break the nightly run pinned", repo="memvara/build-health"))
     assert known_bugs.xfail("B999").mark.kwargs["reason"] == (
         "B999, memvara/build-health#12: a break the nightly run pinned")
 
 
-# -- B2: a bound write ends the user-wide value --------------------------------------
+# -- B2, fixed: a bound write ended the user-wide value -------------------------------
+#
+# A value written in a session or by an agent is a local value that shadows the
+# user-wide one there (#266). `tests/test_scope_shadow.py` has the rest of the rule.
 
 @pytest.mark.parametrize("level", LEVELS)
-@known_bugs.xfail("B2")
 def test_a_bound_write_leaves_the_user_wide_value_live(level: str) -> None:
     mem = stores.memory()
     user = mem.scope(user="u")
     user.remember("user", "lives_in", "Berlin")
     mem.scope(user="u", **{level: "one"}).remember("user", "lives_in", "Paris")
-    live = _live(user)
-    if not live and _ended(user) == ["Berlin"]:
-        raise known_bugs.Reproduced(f"B2: the {level}-bound write ended the user-wide value")
-    assert live == ["Berlin"]
+    assert _live(user) == ["Berlin"]
+    assert _ended(user) == []
 
 
 @pytest.mark.parametrize("level", LEVELS)
-@known_bugs.xfail("B2")
 def test_a_bound_write_leaves_its_siblings_on_the_user_wide_value(level: str) -> None:
     mem = stores.memory()
     user = mem.scope(user="u")
     user.remember("user", "lives_in", "Berlin")
     mem.scope(user="u", **{level: "one"}).remember("user", "lives_in", "Paris")
-    sibling = _live(mem.scope(user="u", **{level: "two"}))
-    if not sibling and _ended(user) == ["Berlin"]:
-        raise known_bugs.Reproduced(f"B2: a sibling {level} lost the user-wide value")
-    assert sibling == ["Berlin"]
+    assert _live(mem.scope(user="u", **{level: "two"})) == ["Berlin"]
 
 
 @pytest.mark.parametrize("level", LEVELS)
 def test_a_bound_scope_reads_its_own_value_in_place_of_the_user_wide_one(level: str) -> None:
-    """Passes today and must keep passing after the B2 fix: the shadow side of the rule."""
+    """The shadow side of the rule, which held before the fix and holds after it."""
     mem = stores.memory()
     mem.scope(user="u").remember("user", "lives_in", "Berlin")
     mem.scope(user="u", **{level: "one"}).remember("user", "lives_in", "Paris")
@@ -153,18 +158,15 @@ def test_remember_takes_a_string_memory_type_or_refuses_it_by_name() -> None:
     assert claim.memory_type is MemoryType.PROCEDURAL
 
 
-# -- B7: a session inside a project reading its own global fact -------------------------
+# -- B7, fixed: a session inside a project reading its own global fact ------------------
 
-@known_bugs.xfail("B7")
 def test_a_session_inside_a_project_reads_the_global_facts_it_writes() -> None:
     """A global predicate clears only the project, so the claim lands at the session with
-    no project, and the session's own ancestors never include that scope (#273)."""
+    no project. The session's chain now includes that scope (#273)."""
     session = stores.memory().scope(user="u", project="github.com/o/a", session="s1")
     [claim] = session.add("I live in Berlin.").added
-    seen = [c.id for c in session.get_all()]
-    if not seen and (claim.scope.project, claim.scope.session) == (None, "s1"):
-        raise known_bugs.Reproduced("B7: the claim sits where the session's reads never look")
-    assert seen == [claim.id]
+    assert (claim.scope.project, claim.scope.session) == (None, "s1")
+    assert [c.id for c in session.get_all()] == [claim.id]
     assert session.why(claim.id) is not None
 
 

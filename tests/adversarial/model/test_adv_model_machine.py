@@ -11,6 +11,12 @@ history of a run rather than one step, and one check at the end of each run:
 - when the run ends, the store file passes `check_store_integrity` (I14). Each run keeps
   its store in a file of its own for this reason, and the file is deleted afterwards.
 
+Every operation that takes a scope draws one from `model.LEVELS`: the user level, two
+sibling sessions, an agent with and without a session, and a project with and without a
+session. So a value written in a session meets the user-wide value and a sibling's, a
+global fact written inside the project is filed at the session with no project, and every
+read is checked from each of those scopes (#266, #273).
+
 The value pools are small, so two operations often touch the same slot or value, and a
 second `remember` rule writes only `lives_in` at three instants: two in the past, so that
 two values often begin at the same moment, and one in the future, so that the slot often
@@ -54,14 +60,17 @@ from harness.clock import FAR_FUTURE, INSTANTS
 from harness.drive import ModelDivergence, Pair, format_program
 from harness.invariants import check_store_integrity
 from harness.known_bugs import KNOWN_BUGS
-from harness.model import (POOLS, USERS, Delete, Erase, EraseExpired, Expect, Forget, Lapse,
-                           Op, Remember)
+from harness.model import (LEVELS, POOLS, USERS, Delete, Erase, EraseExpired, Expect, Forget,
+                           Lapse, Op, Remember)
 
 VALID_FROM = st.sampled_from([None, None, *INSTANTS, FAR_FUTURE])
 VALID_TO = st.sampled_from([None, None, None, INSTANTS[2], INSTANTS[4], FAR_FUTURE])
 RECORDED_AT = st.sampled_from([None, None, None, *INSTANTS])
 CONFIDENCE = st.sampled_from([1.0, 1.0, 0.5, 0.4])
 EXPIRES_AT = st.sampled_from([None, None, None, FAR_FUTURE])
+#: The scope an operation is bound to. The user level is drawn as often as the others
+#: together, so the one level every scope reads is written often enough to collide.
+LEVEL = st.sampled_from([""] * (len(LEVELS) - 1) + [name for name in LEVELS if name])
 
 #: The open bugs this machine steers around, by their ids in `known_bugs`. None today.
 STEERED: tuple[str, ...] = ()
@@ -98,44 +107,45 @@ class MemoryMachine(RuleBasedStateMachine):
           data=st.data(), polarity=st.sampled_from([1, 1, 1, -1]),
           valid_from=VALID_FROM, recorded_at=RECORDED_AT, confidence=CONFIDENCE,
           close=st.sampled_from(["ended", "ended", "retired"]), expires_at=EXPIRES_AT,
-          valid_to=VALID_TO)
+          valid_to=VALID_TO, level=LEVEL)
     def remember(self, user: str, predicate: str, data: st.DataObject, polarity: int,
                  valid_from: datetime | None, recorded_at: datetime | None,
                  confidence: float, close: str, expires_at: datetime | None,
-                 valid_to: datetime | None) -> None:
+                 valid_to: datetime | None, level: str) -> None:
         obj = data.draw(st.sampled_from(POOLS[predicate]))
         self._apply(Remember(user, predicate, obj, polarity, valid_from, recorded_at,
-                             confidence, close, expires_at, valid_to))
+                             confidence, close, expires_at, valid_to, level))
 
     @rule(user=st.sampled_from(USERS), obj=st.sampled_from(POOLS["lives_in"]),
-          valid_from=st.sampled_from([INSTANTS[1], INSTANTS[3], FAR_FUTURE]))
-    def remember_a_home(self, user: str, obj: str, valid_from: datetime) -> None:
+          valid_from=st.sampled_from([INSTANTS[1], INSTANTS[3], FAR_FUTURE]), level=LEVEL)
+    def remember_a_home(self, user: str, obj: str, valid_from: datetime,
+                        level: str) -> None:
         """Values of the one single-valued predicate, at three instants only. Two are in
         the past, so that two values often begin at the same moment and one collapses
         the other. The third is in the future, so that the slot often holds a value
         stored to begin later when it is forgotten or ended. The `remember` rule alone
         put one there too rarely: in 80 random runs of 25 steps, no `forget` met one."""
-        self._apply(Remember(user, "lives_in", obj, valid_from=valid_from))
+        self._apply(Remember(user, "lives_in", obj, valid_from=valid_from, level=level))
 
     @rule(user=st.sampled_from(USERS), predicate=st.sampled_from(sorted(POOLS)),
-          close=st.sampled_from(["retired", "ended"]))
-    def forget(self, user: str, predicate: str, close: str) -> None:
+          close=st.sampled_from(["retired", "ended"]), level=LEVEL)
+    def forget(self, user: str, predicate: str, close: str, level: str) -> None:
         """Both closures, so ending a slot is driven too, with the clamp of an ending
         onto the start of a row that has not begun."""
-        self._apply(Forget(user, predicate, close))
+        self._apply(Forget(user, predicate, close, level))
 
     @precondition(lambda self: bool(self.pair.model.real_ids))
     @rule(user=st.sampled_from(USERS), data=st.data(),
-          close=st.sampled_from(["retired", "ended"]))
-    def delete(self, user: str, data: st.DataObject, close: str) -> None:
+          close=st.sampled_from(["retired", "ended"]), level=LEVEL)
+    def delete(self, user: str, data: st.DataObject, close: str, level: str) -> None:
         handle = data.draw(st.sampled_from(sorted(self.pair.model.real_ids)))
-        self._apply(Delete(user, handle, close))
+        self._apply(Delete(user, handle, close, level))
 
     @precondition(lambda self: bool(self.pair.model.real_ids))
-    @rule(user=st.sampled_from(USERS), data=st.data())
-    def erase(self, user: str, data: st.DataObject) -> None:
+    @rule(user=st.sampled_from(USERS), data=st.data(), level=LEVEL)
+    def erase(self, user: str, data: st.DataObject, level: str) -> None:
         handle = data.draw(st.sampled_from(sorted(self.pair.model.real_ids)))
-        self._apply(Erase(user, handle))
+        self._apply(Erase(user, handle, level))
 
     @precondition(lambda self: any(r.expires_at == FAR_FUTURE
                                    for r in self.pair.model.rows.values()))

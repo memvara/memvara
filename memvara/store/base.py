@@ -483,11 +483,11 @@ OMITTABLE: dict[str, str] = {
                          "at once.",
     "erase_episodes": "as put_document; deleting a document erases its chunks with it.",
     "count_competing": "the write receipt's accumulation report falls back to "
-                       "len(competing_claims()), and read-side shadowing uses it only "
-                       "when occupied_slots is missing too.",
-    "occupied_slots": "read-side shadowing falls back to one count_competing per slot, "
-                      "and without that too, a read bound to a project returns a "
-                      "user-wide value beside the project's own.",
+                       "len(competing_claims()).",
+    "occupied_slots": "read-side shadowing falls back to one competing_claims per slot. "
+                      "A store that raises NotImplementedError from that too, as "
+                      "RemoteStore does, returns a broader value beside a narrower "
+                      "level's own.",
     "unended_claims": "forget() reads the slot's whole history with slot_history and "
                       "picks the values to close with Claim.is_unended, so its cost grows "
                       "with every value the slot has held rather than with the few it "
@@ -580,13 +580,22 @@ class Store(Protocol):
         """
         ...
 
-    def occupied_slots(self, tenant: str, fact_keys: Collection[str]) -> set[str]:
+    def occupied_slots(self, tenant: str, fact_keys: Collection[str], *,
+                       scopes: Sequence[Scope] | None = None) -> set[str]:
         """The keys among `fact_keys` whose slot holds at least one live claim, now.
 
-        The batched form of `count_competing(...) > 0`, for read-side shadowing
-        (`memvara/retrieve/shadow.py`), which has to ask it about every candidate slot of
-        one read. One query per read rather than one per slot. Present tense only, with
-        the same liveness predicate as `competing_claims`.
+        With `scopes`, only a claim stored at exactly one of those scopes counts. A slot's
+        key leaves out the agent and the session, so without it the answer would count a
+        sibling session's value, which the reader cannot see.
+
+        The batched form of `competing_claims`, for read-side shadowing
+        (`memvara/retrieve/shadow.py`), which asks it about every candidate slot of one
+        read, with the levels of the reader's chain that are narrower than the candidate.
+        One query per level at which a candidate sits rather than one per slot. Present
+        tense only, with the same liveness predicate as `competing_claims`.
+
+        A store that implemented this before `scopes` existed has to accept it: the
+        shadowing always passes it.
         """
         ...
 

@@ -1070,8 +1070,8 @@ def test_two_users_in_one_tenant_do_not_collide(rec, store):
 def test_a_new_session_leaves_a_sibling_sessions_value_alone(rec, store):
     # Agent and session are outside the fact key, so two sessions' values share a slot.
     # A write in s2 used to end the value s1 held, which s2 cannot read, and hand it back
-    # in s2's receipt. A write now closes only claims in its own scope, the broader ones
-    # it reads, and the narrower ones beneath it (`Reconciler._in_reach`).
+    # in s2's receipt. A new value now ends only claims at exactly its own scope
+    # (`Reconciler._at_scope`).
     old = rec.apply(claim("lives_in", "Berlin",
                           scope=Scope("acme", "alice", "asst", "s1"))).claim
     res = rec.apply(claim("lives_in", "Lisbon",
@@ -1080,13 +1080,35 @@ def test_a_new_session_leaves_a_sibling_sessions_value_alone(rec, store):
     assert store.get_claim(old.id).is_live()
 
 
-def test_a_new_session_still_retires_the_value_its_agent_holds(rec, store):
-    # A durable fact on record at a level the session reads is still the same fact
-    # whichever session observes the change, so learning "I moved to Lisbon" in a fresh
-    # session retires the old city held for the agent.
+def test_a_new_session_leaves_the_value_its_agent_holds_live(rec, store):
+    # A session's value is a local value (#266). Up to 0.17.0, learning "I moved to
+    # Lisbon" in a fresh session ended the city held for the agent, for every session of
+    # that agent. Now both stay live, and the session reads its own value in place of the
+    # agent's (`memvara.retrieve.shadow`).
     old = rec.apply(claim("lives_in", "Berlin", scope=Scope("acme", "alice", "asst"))).claim
     res = rec.apply(claim("lives_in", "Lisbon",
                           scope=Scope("acme", "alice", "asst", "s2")))
+    assert res.action == "add"
+    assert res.invalidated == []
+    assert store.get_claim(old.id).is_live()
+
+
+def test_a_new_value_still_ends_the_value_at_its_own_scope(rec, store):
+    old = rec.apply(claim("lives_in", "Berlin",
+                          scope=Scope("acme", "alice", "asst", "s2"))).claim
+    res = rec.apply(claim("lives_in", "Lisbon",
+                          scope=Scope("acme", "alice", "asst", "s2")))
+    assert [c.id for c in res.invalidated] == [old.id]
+    assert store.get_claim(old.id).state == "ended"
+
+
+def test_a_retraction_in_a_session_still_ends_the_value_it_reads(rec, store):
+    # A retraction leaves no value of its own to answer in the session, so it still ends
+    # the value the session reads from its agent's level (`Reconciler._in_reach`).
+    old = rec.apply(claim("lives_in", "Berlin", scope=Scope("acme", "alice", "asst"))).claim
+    res = rec.apply(claim("lives_in", "Berlin", polarity=-1,
+                          scope=Scope("acme", "alice", "asst", "s2")))
+    assert res.action == "retract"
     assert [c.id for c in res.invalidated] == [old.id]
 
 

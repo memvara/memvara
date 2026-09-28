@@ -15,6 +15,7 @@ import pytest
 from harness.clock import FAR_FUTURE, INSTANTS
 from harness.drive import Pair
 from harness.model import Delete, Erase, EraseExpired, Forget, Lapse, Remember
+from memvara.types import utcnow
 
 I0, I1, I2, I3, I4, I5 = INSTANTS
 
@@ -289,3 +290,44 @@ def test_a_value_ended_before_a_scheduled_one_begins_is_not_closed_again(
     pair.apply(Remember("u1", "lives_in", "Paris", valid_from=FAR_FUTURE))
     e = pair.apply(Remember("u1", "lives_in", "Rome", valid_from=FAR_FUTURE))
     assert e.closed == ["r2"]
+
+
+# -- scopes below a user (#266, #273) ------------------------------------------------------
+
+def test_a_value_written_in_a_session_leaves_the_user_wide_one_live(pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I0))
+    e = pair.apply(Remember("u1", "lives_in", "Paris", valid_from=I2, level="s1"))
+    assert e.closed == [] and pair.model.rows["r1"].state == "live"
+    now = utcnow()
+    assert pair.model.visible("u1", now=now, level="s1") == {"r2"}
+    assert pair.model.visible("u1", now=now, level="s2") == {"r1"}
+    assert pair.model.visible("u1", now=now, level="s1", shadowed=False) == {"r1", "r2"}
+
+
+def test_a_user_wide_value_leaves_an_agents_own_value_live(pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Paris", valid_from=I0, level="a1/s1"))
+    e = pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I2))
+    assert e.closed == [] and pair.model.rows["r1"].state == "live"
+
+
+def test_a_retraction_in_a_session_still_ends_the_user_wide_value(pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I0))
+    e = pair.apply(Remember("u1", "lives_in", "Berlin", polarity=-1, level="s1"))
+    assert e.closed == ["r1"]
+
+
+def test_a_global_fact_from_a_session_inside_the_project_is_filed_without_it(
+        pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Berlin", level="P/s1"))
+    pair.apply(Remember("u1", "collects", "stamps", level="P/s1"))
+    assert pair.model.rows["r1"].level == (None, None, "s1")
+    assert pair.model.rows["r2"].level[0] is not None
+    e = pair.apply(Forget("u1", "lives_in", level="P/s1"))
+    assert e.closed == ["r1"]
+
+
+def test_a_sessions_row_is_read_by_id_only_from_its_own_chain(pair: Pair) -> None:
+    pair.apply(Remember("u1", "likes", "tea", level="s1"))
+    assert pair.apply(Delete("u1", "r1", level="s2")).returned is False
+    assert pair.apply(Erase("u1", "r1")).returned is False
+    assert pair.apply(Erase("u1", "r1", level="s1")).returned is True

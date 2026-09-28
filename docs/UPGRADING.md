@@ -7,6 +7,73 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A session's or an agent's value no longer ends the user-wide value
+
+### What changed
+
+A value written by a handle or server bound to a session (`session=`, `MEMVARA_SESSION`) or
+to an agent (`agent=`, `MEMVARA_AGENT`) is now a local value. It answers inside that session
+or agent, and the user-wide value stays live for everyone else (#266):
+
+- A new value ends only the values stored at exactly its own scope. A session's new value
+  no longer ends the user-wide value, and a user-level write no longer ends the value a
+  session or an agent holds. A session's value and its agent's value are separate in the
+  same way.
+- A present-tense read takes a single-valued fact from the narrowest level of its chain
+  that holds one, as a repository's own value already did. So a session reads its own
+  value, a sibling session and the user level read the user-wide value, and when the
+  session's value ends, the user-wide value answers there again.
+- A read at another instant (`valid_at`, `known_at`, `as_of`), `count()`, `get()` and
+  `why()` are not shadowed, so they can return both values.
+- A retraction ("I no longer live in Berlin") is unchanged. It leaves no value of its own
+  behind, so it still ends the value wherever the writer reads it from, and a user-level
+  retraction still ends a session's value.
+- A repeat of a value the writer can see still reinforces that claim, wherever it is
+  stored.
+
+A session or agent bound inside a repository also reads the global facts it writes
+(#273). A predicate declared global, such as `lives_in`, is filed at the writer's scope
+with only the project cleared, so a session inside a repository filed it at that session
+with no project, which its own reads did not include: `get_all()` and `search()` left it
+out and `why()` returned `None`. `Scope.ancestors()` now includes the project-less form of
+the reader's own session and agent, after the project levels and before the user. For a
+reader bound to user u, project P, agent a and session s, the chain is (u, P, a, s),
+(u, P, a), (u, P), (u, a, s), (u, a), (u), then the tenant. The chain of a reader bound to
+no project, or to no agent and no session, is unchanged.
+
+### Who this changes
+
+Only deployments that bind a session or an agent. A store opened with a user and,
+optionally, a project, which is what the plugin does by default, behaves as before.
+
+If you bind sessions or agents, a session no longer changes what other sessions and the
+user level read, and a user-level write no longer overrides a session's own value inside
+that session. `forget()` and `history()` at a broad scope still reach down into every
+session and agent beneath it, so `forget()` at the user level still closes a session's
+value.
+
+**Nothing written before the upgrade is reopened.** A user-wide value that a session-bound
+or agent-bound write ended before this release stays ended, and a session's value that a
+user-level write ended stays ended. No migration changes them, because the store cannot
+tell such an ending from one the user meant. To restore a value, state it again where it
+was lost: `remember()` it at the user level for the user-wide value, or in the session for
+the session's own. `history()` shows the ended value and the claim that ended it.
+
+If you implement the `Store` protocol and have an `occupied_slots` method, it must accept a
+keyword-only `scopes` argument: the shadowing always passes it, and a claim stored at
+exactly one of those scopes is the only kind that counts. A store without `occupied_slots`
+is asked `competing_claims` once per slot instead, and `count_competing` is no longer asked
+by the shadowing at all.
+
+### How to find it in your code
+
+Search for `session=`, `agent=`, `MEMVARA_SESSION` and `MEMVARA_AGENT`. For each binding you
+find, check whether code relies on a session's write replacing the user-wide value for
+other readers; if it does, write the value without the session. To find values that an
+earlier release ended from a session, read `history(subject, predicate)` at the user level
+and look for a claim with `state == "ended"` whose `invalidated_by` names a claim with a
+session or an agent in its scope.
+
 ## Erasing through the mem0 layer or an adapter erases every version of the memory
 
 ### What changed
@@ -549,7 +616,9 @@ only the turns from the reader's own project and the levels above it.
 **If you bind servers or handles to sessions or agents,** a new value or a retraction in
 one session no longer ends the value a sibling session or agent holds; both stay live, each
 visible only in its own session. A value at a level both read, such as the user's own, is
-still ended by either, and a user-level write still ends a value a session holds.
+still ended by either, and a user-level write still ends a value a session holds. The next
+release changes the last two for a new value; see *A session's or an agent's value no
+longer ends the user-wide value* above.
 
 **If you pass turn ids in `sources`,** to `remember()`, `supersede()` or `memory_remember`,
 an id of a turn in a scope the claim cannot see, or of no turn at all, is now left out of

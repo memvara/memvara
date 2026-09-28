@@ -585,8 +585,13 @@ class PredicateRegistry:
         live — and `history()` reported no history for a claim `get_all()` returns.
 
         A predicate the vocabulary declares global is not project-relative, so its claims
-        sit one level above a project: one slot for the whole store, and readable from
-        inside every project because visibility widens upward. Everything else partitions.
+        are filed with the project cleared and the agent and the session kept: a
+        user-level write lands at user level, and a session's write at that session with
+        no project. Its key is then the same in every repository, and it is readable from
+        inside every project, because `Scope.ancestors` includes the project-less form of
+        each level the reader is bound to (#273). Clearing the agent and the session as
+        well would make a session's value user-wide, and a session's value is a local
+        value (#266). Everything else partitions.
         """
         if self.spec(predicate).project_scoped or scope.project is None:
             return scope

@@ -1256,9 +1256,9 @@ def test_a_turn_cited_only_by_a_claim_out_of_its_sight_is_still_pending_extracti
 
 def test_a_repeated_turn_still_reinforces_the_global_fact_it_filed_from_a_session():
     """A global predicate clears only the project, so a turn written in a session inside a
-    repository files its fact at that session with no project, which the turn's own
-    ancestors do not include. It is still the turn's own claim: a repeat reinforces it,
-    and the turn is not offered for extraction again."""
+    repository files its fact at that session with no project, a level that is not the
+    turn's own scope. It is still the turn's own claim: a repeat reinforces it, and the
+    turn is not offered for extraction again."""
     with _alice() as mem:
         s = mem.scope(project=PROJ_A, session="s1")
         [claim] = s.add("I live in Berlin.").added
@@ -1271,8 +1271,7 @@ def test_a_repeated_turn_still_reinforces_the_global_fact_it_filed_from_a_sessio
 def test_a_new_value_in_one_session_leaves_a_sibling_sessions_value_alone():
     """A slot spans every session and agent of its project. A write in session s2 used
     to end the value session s1 held, which s2 cannot read, and hand it back in s2's
-    receipt. A write now closes only claims in its own scope, the broader scopes it
-    reads, and the narrower scopes beneath it."""
+    receipt. A new value now ends only claims at exactly its own scope."""
     with _alice() as mem:
         mem.remember("user", "lives_in", "Berlin", session="s1")
         receipt = mem.remember("user", "lives_in", "Paris", session="s2")
@@ -1297,14 +1296,26 @@ def test_a_retraction_in_one_session_leaves_a_sibling_sessions_value_alone():
         assert [c.id for c in mem.get_all(session="s1")] == [theirs.id]
 
 
-def test_a_broader_write_still_closes_a_session_value_beneath_it():
-    """Reaching down is the documented behaviour of a slot operation, as it is for
-    `forget()` and `history()`: a user-level write ends the value a session holds. Only
-    the sideways reach, into a sibling, was the leak."""
+def test_a_broader_write_leaves_a_session_value_beneath_it_live():
+    """A session's value is a local value (#266). Up to 0.17.0 a user-level write ended
+    the value a session held, as `forget()` and `history()` reach down into a session.
+    Now the session keeps its value and reads it in place of the user-wide one."""
     with _alice() as mem:
         mem.remember("user", "lives_in", "Berlin", session="s1")
         receipt = mem.remember("user", "lives_in", "Paris")
+        assert receipt.invalidated == []
+        assert [c.object for c in mem.get_all(session="s1")] == ["Berlin"]
+        assert [c.object for c in mem.get_all()] == ["Paris"]
+
+
+def test_a_broader_retraction_still_closes_a_session_value_beneath_it():
+    """A retraction leaves no value of its own, so it still reaches down, as `forget()`
+    does: a user-level retraction ends the value a session holds."""
+    with _alice() as mem:
+        mem.remember("user", "lives_in", "Berlin", session="s1")
+        receipt = mem.remember("user", "lives_in", "Berlin", polarity=-1)
         assert [c.object for c in receipt.invalidated] == ["Berlin"]
+        assert mem.get_all(session="s1") == []
 
 
 def test_remember_cites_only_turns_the_writer_can_see():

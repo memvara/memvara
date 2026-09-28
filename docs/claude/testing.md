@@ -150,7 +150,7 @@ A server started on the same file with the child environment opens it in the sam
 **A bug the suite finds lands at once as a failing test marked `xfail(strict=True)`.** The marker cites a GitHub issue, and the fix follows in its own PR. The bugs registered before 2026-09-27 have their issues in memvara/memvara. A bug the nightly run files has its issue in the private repository memvara/build-health, so its `KnownBug` entry sets `repo="memvara/build-health"`, and the marker cites the issue as `memvara/build-health#<number>`.
 
 - **Strict mode keeps the marker honest.** When the fix lands, the test starts passing and strict mode fails the run until the fix PR removes the marker.
-- **Registering a bug.** `tests/harness/known_bugs.py` lists each open bug, and `known_bugs.xfail("B2")` builds its marker.
+- **Registering a bug.** `tests/harness/known_bugs.py` lists each open bug, and `known_bugs.xfail("B45")` builds its marker.
 - **A marker absorbs only its own bug.** The test raises `known_bugs.Reproduced` after it has seen that bug's exact symptom, and the marker accepts nothing else. Any other failure in the same test, even an exception of the same type, fails the run, so a new bug cannot hide behind a known one.
 - **Nothing is weakened.** Never skip, delete or weaken a test to make the run green.
 
@@ -169,7 +169,7 @@ A server started on the same file with the child environment opens it in the sam
 - **Known bugs are steered around.** An operation that would trigger an open bug is skipped, so the machine keeps finding new bugs instead of the known ones. It steers around none today. The last was #275, a retraction dated in the future whose tombstone ended before it began, which the machine found and which is now fixed; `STEERED` in the machine's module lists the bugs it avoids. The test prints how many steps it ran and how many it skipped for each bug (`pytest -s` shows the line). It fails if skips pass a tenth of all steps, and `STEERED` may name only a bug still in the registry, so a fixed bug's detour cannot outlive it.
 - **It catches the mistakes it is meant to catch.** It was run against four deliberate faults, each in a scratch copy of the code, and the fast tier failed on every one. Dropping the belief floor from `state_predicate`, and dropping the parentheses in `_either` that keep the floor in force, were each caught at once by the belief-floor check. Making `_is_after` non-strict, and making `close_out` close both clocks, were each caught by the state machine.
 
-What the model leaves out is listed in its module docstring. This first stage has one scope per user; projects, agents and sessions come with the #266 fix, which changes how those scopes interact.
+What the model leaves out is listed in its module docstring. It models the scopes below a user that `LEVELS` in `tests/harness/model.py` names: two sibling sessions, an agent with and without a session, and a project with and without a session. Every operation the state machine draws is bound to one of them, so a session's value meets the user-wide value and a sibling's, and a global fact written inside the project is filed at the session with no project. After each operation, `Pair.check` also reads from each of those scopes: `get_all` in the present, where a narrower level's value hides a broader one (#266); `count`, which is not shadowed; `get_all` over two states and at a later instant; one search; `history` of each predicate; and `get` of every row. Run against a reconciler that still ended values in a broader or a narrower scope, the fast tier's machine diverged at the second operation of its first failing run.
 
 `tests/harness/invariants.py` checks a closed store file for the damage a crash or a bad write leaves: SQLite's and FTS5's own integrity checks, a claim missing from the text index or the embeddings, a vector slot both used and free, a provenance edge that names a claim or an episode that is gone, and an erased claim that still exists. The state machine runs these checks on its store file at the end of every run, and the crash tests run them on the store a killed process leaves behind. With `key=`, they open an encrypted store through `sqlcipher3`.
 
@@ -245,7 +245,7 @@ After the last session the store is read once more with expiry switched off, so 
 
 **Answer gold** checks the answer to one turn: the turn its `turn` names, or the last one. In the scripted layer, the answer is every memory memvara showed the agent in that turn: each tool's text and each hook's injected context, in order, leaving out any read that found nothing and the session-start hook's first line, which names the scope the store is bound to rather than any memory. `must_contain` and `must_not_contain` compare whole words and ignore case and punctuation, using `phrase_in` from `benchmarks/agent_memory/normalization.py`, which is the benchmark's own normalization and token rule. They do not apply the length ceiling or the competitor check that the benchmark's `matches_value` adds for a short answer, because memvara's replies are long by design and a history reply names every value a slot has held. `must_not_match` is a regular expression, for checks about lines, such as stored text that must not start a line of its own. `abstain` passes when the answer is empty: every tool in the turn replied that it found nothing, and no hook injected any memory.
 
-**A known bug** is attached to the one gold item it breaks, with the symptom it causes: `"known_bugs": {"<gold id>": {"bug": "B2", "symptom": {"states": ["ended"]}}}`. That item's test gets the bug's strict expected-failure marker. The test raises `known_bugs.Reproduced` only when the failure shows exactly that symptom: the same states for a store item, or the given words in the answer for an answer item. Any other failure fails the run.
+**A known bug** is attached to the one gold item it breaks, with the symptom it causes: `"known_bugs": {"<gold id>": {"bug": "B45", "symptom": {"states": ["ended"]}}}`. That item's test gets the bug's strict expected-failure marker. The test raises `known_bugs.Reproduced` only when the failure shows exactly that symptom: the same states for a store item, or the given words in the answer for an answer item. Any other failure fails the run.
 
 **The negative control** plays the scenario for an agent with no memory: no seed, no server and no hook, so every answer is empty and the store holds nothing. At least one gold item must fail then. If none does, the gold cannot tell memvara working from memvara absent.
 
@@ -365,7 +365,7 @@ The checklist is a list of everything the suite has to test, together with the t
 | `hook` | hook that a host in `plugin/hooks/hosts/` fires | `hook:claude/recall` |
 | `inv` | numbered invariant in `docs/INTERNALS.md`, and bullet under "Invariants and assumptions" on a `docs/claude/` page | `inv:I3`, `inv:MM5` |
 | `silent` | silent failure mode that the `memvara/telemetry.py` docstring lists | `silent:predicate-explosion` |
-| `bug` | open bug in `tests/harness/known_bugs.py` | `bug:B2` |
+| `bug` | open bug in `tests/harness/known_bugs.py` | `bug:B45` |
 
 These details explain how some of the sources are read:
 
@@ -400,7 +400,7 @@ Three kinds of test cover nothing, because none of them shows that anything work
 - a test marked `skip` without a condition;
 - a test in `quarantine/`.
 
-A known bug is covered differently. Its item is covered by the test that carries its strict expected failure, `known_bugs.xfail("B2")`, so registering a bug and pinning it is all the checklist needs. A `covers` mark cannot name a bug.
+A known bug is covered differently. Its item is covered by the test that carries its strict expected failure, `known_bugs.xfail("B45")`, so registering a bug and pinning it is all the checklist needs. A `covers` mark cannot name a bug.
 
 **The baseline.** `tests/harness/checklist_baseline.txt` lists the items that no test covers today, one per line. The fast tier fails in two cases, and each failure lists the items concerned:
 

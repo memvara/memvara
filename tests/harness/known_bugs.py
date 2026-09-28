@@ -1,6 +1,6 @@
 """Bugs the adversarial suite has found and not yet fixed, one entry per GitHub issue.
 
-A test that reproduces one of these carries `xfail("B2")`, a strict expected failure
+A test that reproduces one of these carries `xfail("B45")`, a strict expected failure
 that cites the issue. The test raises `Reproduced` only after it has seen that bug's own
 symptom, and the marker accepts nothing else:
 
@@ -37,10 +37,6 @@ class KnownBug:
 
 
 KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
-    KnownBug("B2", 266, "a session-bound or agent-bound write ends the user-wide value"),
-    KnownBug("B7", 273, "a session bound inside a project cannot read the global facts it "
-             "writes"),
-
     KnownBug("B23", 300, "a store refused for its embedder has already been migrated"),
     KnownBug("B24", 301, "a store refused as too new leaves its SQLite connection open"),
 

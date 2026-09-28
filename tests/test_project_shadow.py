@@ -154,7 +154,7 @@ def test_a_purge_with_no_project_still_takes_every_project():
 # -- what shadowing costs, and stores that cannot answer it ------------------------------
 
 class Counting:
-    """A store that counts the slot lookups shadowing makes, and can hide either one."""
+    """A store that counts the slot lookups shadowing makes, and can hide any method."""
 
     def __init__(self, inner, *, hide=()):
         self._inner, self._hide = inner, set(hide)
@@ -169,7 +169,7 @@ class Counting:
                 self.batched += 1
                 return value(*a, **k)
             return batched
-        if name == "count_competing":
+        if name == "competing_claims":
             def single(*a, **k):
                 self.single += 1
                 return value(*a, **k)
@@ -198,30 +198,37 @@ def test_the_slot_lookups_of_one_read_are_one_store_query():
 
 
 def test_a_store_without_the_batched_lookup_falls_back_to_one_per_slot():
+    """`competing_claims` is required on the store protocol, so it is the fallback: it
+    returns the slot's live claims, and their scopes say which level holds each."""
     mem, store = wrapped(hide={"occupied_slots"})
     assert objects(mem.scope(project=APP).get_all()) == ["emacs"]
     assert store.single >= 1
 
 
-def test_a_store_with_neither_lookup_reads_unshadowed_rather_than_raising():
-    """Both lookups are optional on the store protocol. Without either, a read cannot
-    tell whether the project has its own value, so it returns what is stored."""
-    mem, _ = wrapped(hide={"occupied_slots", "count_competing"})
+def test_a_store_without_either_optional_lookup_still_shadows():
+    """`count_competing` answers how many claims a slot holds, not at which scope, so the
+    shadowing no longer asks it. A store that lacks it and `occupied_slots` still shadows
+    through `competing_claims`."""
+    mem, store = wrapped(hide={"occupied_slots", "count_competing"})
     app = mem.scope(project=APP)
-    assert objects(app.get_all()) == ["emacs", "vim"]
-    assert sorted(r.claim.object for r in app.search("editor")) == ["emacs", "vim"]
+    assert objects(app.get_all()) == ["emacs"]
+    assert [r.claim.object for r in app.search("editor")] == ["emacs"]
+    assert store.single >= 2
 
 
 def test_a_store_that_declares_the_lookups_but_cannot_answer_reads_unshadowed(monkeypatch):
-    """`RemoteStore` has both methods and raises `NotImplementedError` from each, because
-    the hosted API has no slot lookup."""
+    """`RemoteStore` has the methods and raises `NotImplementedError` from each, because
+    the hosted API has no slot lookup. Without an answer, a read cannot tell whether the
+    project has its own value, so it returns what is stored rather than failing."""
     mem = make()
 
     def cannot(*a, **k):
         raise NotImplementedError("no endpoint")
     monkeypatch.setattr(mem.store, "occupied_slots", cannot)
-    monkeypatch.setattr(mem.store, "count_competing", cannot)
     assert objects(mem.scope(project=APP).get_all()) == ["emacs", "vim"]
+    fallback, store = wrapped(hide={"occupied_slots"})
+    monkeypatch.setattr(store._inner, "competing_claims", cannot)
+    assert objects(fallback.scope(project=APP).get_all()) == ["emacs", "vim"]
 
 
 def test_search_asks_about_shadowing_only_for_results_it_would_return(monkeypatch):

@@ -19,6 +19,11 @@ landing beside them unnoticed.
   `Explanation`, `ErasureProof`, `MemoryType`, `Derivation`, `CLOSURES`, `close_out()`,
   `closure_reason()`, `closure_reasons()`, `Link`, `ForgetPreview`, `ForgetResult`,
   `fact_key_for()`, `owner_key()`.
+- Scope resolution: `Scope.ancestors()`, `Scope.sees()` and `Scope.contains()` in
+  `memvara/types.py`; `memvara/retrieve/shadow.py`, which picks a single-valued fact from the
+  narrowest level; `Reconciler._at_scope` and `Reconciler._in_reach` in
+  `memvara/write/reconcile.py`. Tests: `tests/test_scope_shadow.py`,
+  `tests/test_project_shadow.py`.
 - The confirmation token behind `forget_matching`: `memvara/confirm.py` — `Confirmer`,
   `ConfirmationRefused`, `CONFIRM_TTL`.
 - Primary: `memvara/core.py` — `Memvara`, the whole public API, plus `ScopedMemvara` for a
@@ -63,12 +68,33 @@ values retired, model calls made, and whether extraction was deferred.
 
 Scope is a five-part key — tenant, user, project, agent, session — held by `Scope` and
 flattened by `owner_key()`, which folds only tenant and user because it also scopes entity
-identity. The project is mixed into `fact_key_for()` directly instead, so that two repositories
-keep separate slots while `software:postgresql` stays one entity across both. It is bound where the store is opened, not passed per call by a model, which
-is what stops a tool call reaching another user's memory. A level left unset is `None`, and
+identity. The project is mixed into `fact_key_for()` directly instead, so that two
+repositories keep separate slots while `software:postgresql` stays one entity across both.
+The scope is bound where the store is opened, not passed per call by a model, which is
+what stops a tool call reaching another user's memory. A level left unset is `None`, and
 `Scope.key()` writes it as `*`, so no level may hold `"*"` or `""`: `Scope` refuses both with
 a `ValueError`. Rows stored before that refusal are rebuilt by `stored_scope()`, and their
 keys never match a scope a caller can build; `docs/INTERNALS.md` has the details.
+
+A reader reads from a chain of scopes, `Scope.ancestors()`, narrowest first: its own scope,
+its agent inside its project, the project, the same session and agent outside the project,
+the user and the tenant, leaving out each level it is not bound to. The project-less
+session and agent levels exist because a predicate declared global, such as `lives_in`, is
+filed at the writer's scope with only the project cleared (`PredicateRegistry.slot_scope`),
+so a session inside a repository has to read that level to see what it wrote (#273).
+
+The fact key leaves out the agent and the session, so the user-wide value, each session's
+and each agent's value share one slot. They do not compete. A value written in a session
+or by an agent is a local value (#266): a new value ends only the values stored at exactly
+its own scope (`Reconciler._at_scope`), and a present-tense read takes a single-valued fact
+from the first level of its chain that holds one (`memvara/retrieve/shadow.py`). A
+repository's own value hides the user-wide one the same way. Reads at another instant,
+`count()` and reads by id are not shadowed. A retraction is the exception on the write
+side: it leaves no value of its own, so it still ends the value wherever the writer reads
+it from, and a user-level retraction reaches down into a session (`Reconciler._in_reach`).
+`forget()` and `history()` at a broad scope also reach down into every session and agent
+beneath it. `docs/INTERNALS.md` has the details under *The chain a reader reads from* and
+*A narrower scope's own value shadows a broader one*.
 
 ## Three states, and three different endings
 
