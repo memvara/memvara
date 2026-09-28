@@ -42,6 +42,7 @@ from .embed.fingerprint import (
     fingerprint_of,
     local_model,
     read_fingerprint,
+    read_fingerprint_at,
     sidecar_path,
     stored_dim,
     write_fingerprint,
@@ -961,10 +962,19 @@ class Memvara:
         # ~/.memvara/db.key, and a library call should not do either unless asked.
         # `key_env` is the mapping `MEMVARA_DB_KEY` is read from instead of the process
         # environment; the MCP server passes the environment its configuration came from.
+        # A store file an older version wrote is upgraded as it opens, and that older
+        # version cannot open it afterwards. So an embedder that cannot read its vectors
+        # is refused before the upgrade (#300), through `before_upgrade`, and not only by
+        # `_check_embedder` after it. `reembed=True` asks to change the embedder, so it
+        # skips this. The default embedder that check chooses is kept, so it is chosen once.
+        self._chosen_default: Embedder | None = None
         self.store = store if store is not None else SQLiteStore(
-            path or ":memory:", encryption=encryption, key_env=key_env)
+            path or ":memory:", encryption=encryption, key_env=key_env,
+            before_upgrade=(None if reembed
+                            else self._refuse_before_upgrade(path or ":memory:", embedder)))
         try:
-            self.embedder = embedder if embedder is not None else self._default_embedder()
+            self.embedder = (embedder if embedder is not None
+                             else self._chosen_default or self._default_embedder())
             # Default to no LLM on purpose: the deterministic path is the product, and the
             # library must be fully usable with no API key. What is *not* on purpose is
             # doing that silently — see `_warn_if_degraded`.
@@ -1234,13 +1244,42 @@ class Memvara:
         a deleted store must not choose the model for the new one.
         """
         dim = stored_dim(self.store)
+        return self._default_for(dim, None if dim is None else read_fingerprint(self.store))
+
+    @staticmethod
+    def _default_for(dim: int | None, recorded: EmbedderFingerprint | None) -> Embedder:
+        """The default embedder for a store whose vectors have width `dim` (None when it
+        holds none) and whose record reads `recorded`; see `_default_embedder`."""
         if dim is None:
             return default_embedder()
-        recorded = read_fingerprint(self.store)
         model = local_model(recorded)
         if model is None and recorded is None and dim == PREVIOUS_DEFAULT_DIM:
             model = PREVIOUS_DEFAULT_MODEL
         return default_embedder(model=model) if model is not None else default_embedder()
+
+    def _refuse_before_upgrade(self, db_path: str,
+                               embedder: Embedder | None) -> Callable[[int | None], None]:
+        """The `before_upgrade` check for `SQLiteStore`: refuse an embedder of another
+        width than the stored vectors, before an older file is upgraded.
+
+        It is the width half of `_check_embedder`, which runs again after the open and
+        does the rest. With no `embedder` given, it chooses the default the way
+        `_default_embedder` does, from the width and the record, and keeps it.
+        """
+        def check(width: int | None) -> None:
+            if width is None:
+                return
+            recorded = read_fingerprint_at(db_path)
+            chosen = embedder
+            if chosen is None:
+                chosen = self._chosen_default = self._default_for(width, recorded)
+            mine = fingerprint_of(chosen)
+            if recorded is not None and recorded.dim != width:
+                recorded = None
+            if mine.dim != width:
+                raise EmbedderMismatchError(
+                    self._mismatch_message(mine, recorded, width, label=db_path))
+        return check
 
     def _check_embedder(self, migrate: bool) -> None:
         """Refuse to open a store this embedder cannot read, before anything writes to it.
@@ -1342,10 +1381,11 @@ class Memvara:
         return path if isinstance(path, str) and path else type(self.store).__name__
 
     def _mismatch_message(self, mine: EmbedderFingerprint,
-                          recorded: EmbedderFingerprint | None, actual: int) -> str:
+                          recorded: EmbedderFingerprint | None, actual: int, *,
+                          label: str | None = None) -> str:
         origin = f", written by {recorded.name}" if recorded is not None else ""
         return (
-            f"{self._store_label()}: this store holds {actual}-dimensional vectors"
+            f"{label or self._store_label()}: this store holds {actual}-dimensional vectors"
             f"{origin}, but the configured embedder is {mine}. Every search would raise "
             f"'query dim {mine.dim} != index dim {actual}' while writes kept succeeding, "
             "so the store would keep growing and none of it would be retrievable.\n"

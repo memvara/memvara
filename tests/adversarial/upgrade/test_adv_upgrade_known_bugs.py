@@ -1,6 +1,5 @@
-"""Three bugs the upgrade tests found. Two are pinned as strict expected failures that
-accept only their own symptom (#300, #301); the third is fixed (#299), and its test runs
-as a normal test."""
+"""Three bugs the upgrade tests found, all fixed (#299, #300, #301). Each test that pinned
+one runs as a normal test."""
 
 from __future__ import annotations
 
@@ -37,13 +36,12 @@ def test_the_server_refuses_a_store_from_a_newer_version_without_a_traceback(
     assert "Traceback" not in done.stderr
 
 
-@known_bugs.xfail("B23")
 @pytest.mark.parametrize("tag", [t for t, v in golden.RELEASES.items() if v < SCHEMA_VERSION])
 def test_a_store_refused_for_its_embedder_is_left_at_its_old_version(
         tag: str, tmp_path: pathlib.Path) -> None:
-    """A refused open should leave the file as it was. Today the constructor migrates the
-    store and commits before the embedder check refuses it, so the release that wrote
-    the store can no longer open it."""
+    """A refused open leaves the file as it was. The constructor used to migrate the store
+    and commit before the embedder check refused it, so the release that wrote the store
+    could no longer open it (#300). The check now runs before the upgrade."""
     db = golden.unpack(tag, tmp_path)
     with pytest.raises(EmbedderMismatchError):
         Memvara(str(db), embedder=HashingEmbedder(dim=256), llm=NullLLM())
@@ -64,11 +62,10 @@ def refuse(db: pathlib.Path) -> None:
 
 @pytest.mark.skipif(sys.version_info < (3, 13),
                     reason="Python before 3.13 does not report an unclosed SQLite connection")
-@known_bugs.xfail("B24")
 def test_a_refused_open_closes_the_connection_it_opened(tmp_path: pathlib.Path) -> None:
-    """A failed open must not hold the database file until garbage collection. Today the
-    constructor releases its presence lock but never closes its connection, which
-    Python 3.13 reports as an unclosed database when the connection is collected."""
+    """A failed open must not hold the database file until garbage collection. The
+    constructor used to release its presence lock but not close its connection, which
+    Python 3.13 reports as an unclosed database when the connection is collected (#301)."""
     db = newer_store(tmp_path)
     with warnings.catch_warnings(record=True) as seen:
         warnings.simplefilter("always")
