@@ -11,6 +11,33 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A retraction far less confident than the value it names no longer ends it.** A new
+  value closes the value on record only when it is worth at least half as much
+  (`AUTHORITY_SHARE`); below that both stay and the write reports a dispute. A retraction
+  skipped that rule, so a model's retraction at confidence 0.05, read from a turn, ended a
+  fact the user had stated at 1.0. A retraction now faces the same rule. Below half, the
+  value stays live, the retraction is kept only as its tombstone, and `receipt.disputed`
+  reports a `Dispute` whose new field `retraction` is true. `memory_add` says so in a
+  note that names `memory_end` and `memory_forget` as the tools that close the value. `remember(polarity=-1)` at its default confidence of 1.0
+  and the fast path's retractions at 0.95 are not affected. #307 (B30).
+- **A backdated retraction's tombstone is no longer returned by reads of the past.** A
+  retraction written with a `recorded_at` in the past stored a tombstone closed on both
+  clocks at the moment of the call rather than at its own `recorded_at`, so
+  `get_all(as_of=...)` and `search(..., as_of=...)` at an instant between the two
+  returned it as a live negative claim. The tombstone now closes both clocks at the
+  instant its write is recorded, so no read at any instant returns it. #317 (B45).
+- **Sending the same retraction dated in the future again is a repeat.** The retracted
+  value stays live until the retraction's date, so every repeat still found it, ended it
+  again at the same instant, wrote one more tombstone and reported the value ended in
+  its receipt. A repeat now reinforces the tombstone on record and reports nothing ended,
+  as a repeat of a retraction dated now already did. A retraction dated sooner still ends
+  the value sooner. #349 (B69).
+- **Writing the same value twice for a period that is already over stores it once.**
+  With Paris live from March, `remember("user", "lives_in", "Rome", valid_from=January)`
+  stores Rome from January to March. Writing it again stored a second, identical Rome
+  claim, and a read of February returned Rome twice. The second write now reinforces the
+  claim on record, reports it under `reinforced` and stores nothing. The same holds for a
+  value written twice with the same `valid_to`. #351 (B70).
 - **The benchmark refuses a `--timeout` of NaN or infinity.** `bench/evalkit.py` checked
   `timeout <= 0`, which a NaN passes, so `--timeout nan` reached the reader's client as its
   timeout. It now asks for a finite number of seconds above zero, and so does
