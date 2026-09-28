@@ -55,7 +55,9 @@ HOST = Host(
     #: run fails, by the single-call extraction (`lib.extract.TIMEOUT_SEC`, 90s), plus the
     #: writes. Only this host runs agentic capture, because only here is `claude` the
     #: first extractor. The hook hands its work to a detached child and returns at once, so
-    #: the longer limit holds no turn open.
+    #: the client applies this limit to a process that ends in milliseconds; the child is
+    #: bounded by the two extraction limits above. The test that each host's capture limit
+    #: covers its extractions keeps the number honest for a host that does not detach.
     timeouts={"session_start": 20, "recall": 10, "capture": 180, "approve": 5},
     client_configs=("~/.claude.json", "~/.claude/settings.json"),
     config_format="json",
