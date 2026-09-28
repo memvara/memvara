@@ -1372,7 +1372,7 @@ def _accumulated_note(items: Sequence[Accumulation]) -> str:
     """Say when a write added a value beside one that is still answering.
 
     The sibling of `_unextracted_note`, and the same failure shape one step further in:
-    there, content was accepted and quietly not stored; here, a value was stored and the
+    there, a turn was stored and quietly yielded no fact; here, a value was stored and the
     value it was probably meant to replace quietly stayed live. Both report a clean
     success on this transport — `added 1, ended 0` is exactly what a correct replacement
     returns — and neither has any other symptom until a later `memory_recall` answers the

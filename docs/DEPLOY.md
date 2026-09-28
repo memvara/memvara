@@ -54,11 +54,13 @@ per-thread read connection), so a web application should build one at startup an
 `mem.scope(user=...)` per request rather than opening the store per request. For asyncio,
 wrap it once: `AsyncMemvara(Memvara(...))`.
 
-**With no `llm=`, most of a conversation is not stored.** The default `NullLLM` runs the
-deterministic fast path and nothing else, so `add()` keeps only the sentence forms the
-rule extractor recognises and drops the rest. It says so once, loudly, as a
-`DegradedExtractionWarning`, and `WriteReceipt.unextracted` counts the dropped turns on
-every write. `remember()` is unaffected — a structured write never needed a model.
+**With no `llm=`, most of a conversation yields no facts.** The default `NullLLM` runs the
+deterministic fast path and nothing else, so `add()` extracts facts only from the sentence
+forms the rule extractor recognises. Every turn is still kept as a turn, and a recall with
+`include_episodes=True` finds it, but no fact comes out of the rest. `add()` says so once,
+loudly, as a `DegradedExtractionWarning`, and `WriteReceipt.unextracted` counts the turns
+no fact came from on every write. `remember()` is unaffected — a structured write never
+needed a model.
 
 ---
 
