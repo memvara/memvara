@@ -50,6 +50,28 @@ def pytest_addoption(parser: Any) -> None:
 
 def pytest_configure(config: Any) -> None:
     tiers.load_hypothesis_profile(config.getoption("--tier"))
+    # Only paths a person gave. A run given none collects `testpaths` from pyproject.toml,
+    # in the order written there.
+    if config.args_source == pytest.Config.ArgsSource.ARGS:
+        config.args[:] = grouped_by_folder(config.args)
+
+
+def grouped_by_folder(args: list[str]) -> list[str]:
+    """The run's paths, with the paths inside each folder next to each other.
+
+    Given a path in a subfolder of tests/adversarial, then a whole file outside that
+    folder, then a file directly in it, pytest 9.1 collects the last file without the
+    fixtures tests/adversarial/conftest.py defines, and its tests error with "fixture
+    'hook_runner' not found" (#328, #358). With the paths of each folder together, pytest
+    keeps them. The sort is stable and compares the folders and file names of each path,
+    so it changes only the order in which the paths are collected: every path the run
+    was given is still collected, and the tests are independent of their order.
+
+    >>> grouped_by_folder(["tests/adversarial/soak/test_a.py", "tests/test_b.py",
+    ...                    "tests/adversarial/test_c.py::test_d"])
+    ['tests/adversarial/soak/test_a.py', 'tests/adversarial/test_c.py::test_d', 'tests/test_b.py']
+    """
+    return sorted(args, key=lambda arg: pathlib.PurePath(arg.split("::", 1)[0]).parts)
 
 
 def pytest_ignore_collect(collection_path: pathlib.Path, config: Any) -> bool | None:

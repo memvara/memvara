@@ -1,9 +1,13 @@
 """mem0's method surface, mapped onto Memvara.
 
 A drop-in for the calls a mem0 application actually makes, so an existing integration
-runs against memvara without being rewritten. Written against mem0 2.x, where entity ids
-moved into a `filters=` dict (a top-level `user_id=` is rejected), `limit` became
-`top_k`, and `search` grew `threshold`, `rerank` and `explain`.
+runs against memvara without being rewritten. Written against mem0 2.x, compared with the
+real package at 2.0.0 and 2.2.1 by the nightly framework tests. There `add()` and
+`delete_all()` take the entity ids `user_id`, `agent_id` and `run_id` as keywords, while
+`search()` and `get_all()` take them only inside a `filters=` dict and refuse a top-level
+one with `ValueError`; `limit` became `top_k`; and `search` grew `threshold`, `rerank` and
+`explain`. The shim takes every method and argument mem0's `Memory` takes, with mem0's
+defaults, and refuses with `Mem0CompatError` each argument it cannot honour.
 
 Two calls do **not** have an honest translation, and this module refuses each of them
 loudly rather than guessing. That refusal is the useful part: a shim that silently means
@@ -19,6 +23,13 @@ months later.
     mem0 configs name Qdrant, Chroma and OpenAI providers. Memvara's equivalents are
     constructor arguments on `Memvara`, not entries in a provider registry, so there is
     nothing to translate them into.
+
+Four arguments are refused too, when they are given a value; `UNSUPPORTED` gives each
+one's reason. mem0's `expiration_date=` hides a memory until `show_expired=True`, where
+memvara's closest thing, `expires_at`, erases it; so nothing here is ever hidden as
+expired, and `show_expired=True` would ask for memories that cannot exist. `timestamp=`
+is documented by mem0 itself as unsupported outside its hosted platform, and
+`reference_date=` has no memvara reading that means the same thing.
 
 Two behavioural differences are worth knowing before the first surprise:
 
@@ -121,29 +132,82 @@ _NO_CONFIG = (
 )
 
 
-def _reject_entity_kwargs(kwargs: Mapping[str, Any], method: str) -> None:
-    """Reject `user_id=`/`agent_id=`/`run_id=` the way mem0 2.x does.
+def _reject_legacy_kwargs(kwargs: Mapping[str, Any], method: str) -> None:
+    """Refuse the keyword arguments a mem0 2.x method does not take, as mem0 does.
 
-    Accepting them quietly would be the friendlier-looking choice and the wrong one: an
-    application that still passes them is running against a 1.x contract, and every
-    *other* 1.x assumption it makes (`limit=`, a default `threshold`) differs too. Fail
-    on the first one, naming the fix.
+    `search()` and `get_all()` take the entity ids only inside `filters=`, and mem0 2.x
+    refuses a top-level `user_id=` there with `ValueError`, so the shim raises the same
+    type and a caller's `except` clause catches both (#359). Any other unknown argument
+    is a `TypeError`, naming the renamed ones: an application that still passes `limit=`
+    is running against a 1.x contract, and every other 1.x assumption it makes differs
+    too.
     """
     if not kwargs:
         return
-    parts = [f"{method}() got unexpected keyword argument(s): "
-             + ", ".join(sorted(kwargs))]
     entity = sorted(k for k in kwargs if k in ENTITY_FILTERS)
     if entity:
         shown = ", ".join(f"{k!r}: {kwargs[k]!r}" for k in entity)
-        parts.append(
-            f"mem0 2.x moved entity ids into filters=; pass filters={{{shown}}} instead."
+        raise ValueError(
+            f"Top-level entity parameters {', '.join(entity)} are not supported in "
+            f"{method}(). Use filters={{{shown}}} instead."
         )
+    parts = [f"{method}() got unexpected keyword argument(s): "
+             + ", ".join(sorted(kwargs))]
     renamed = sorted(k for k in kwargs if k in RENAMED_ARGS)
     if renamed:
         parts.append("mem0 2.x renamed "
                      + ", ".join(f"{k}= to {RENAMED_ARGS[k]}=" for k in renamed) + ".")
     raise TypeError(" ".join(parts))
+
+
+def _with_entities(filters: Mapping[str, Any] | None,
+                   ids: Mapping[str, str | None]) -> Mapping[str, Any] | None:
+    """`filters` with the entity ids `add()` and `delete_all()` take as keywords added.
+
+    mem0 2.x's `add()` requires one of them and its `delete_all()` takes them, so a mem0
+    call site passes them there (#359). `ids` maps each of `ENTITY_FILTERS`' names to
+    what the caller passed. The shim's own `filters=` still works; an id given both ways
+    must agree.
+    """
+    assert set(ids) == set(ENTITY_FILTERS), ids
+    given = {key: value for key, value in ids.items() if value is not None}
+    if not given:
+        return filters
+    merged = dict(filters or {})
+    for key, value in given.items():
+        # A None in filters names no scope, as a None keyword does.
+        if merged.get(key) is not None and merged[key] != value:
+            raise ValueError(f"{key}={value!r} and filters={{{key!r}: {merged[key]!r}}} "
+                             "name two different scopes; pass one")
+        merged[key] = value
+    return merged
+
+
+#: The mem0 arguments this shim takes and refuses when given a value, each with why.
+UNSUPPORTED = {
+    "expiration_date": "mem0's expiration_date= hides a memory until show_expired=True, "
+                       "where memvara's closest thing erases it outright "
+                       "(Memvara.remember(expires_at=...)).",
+    "show_expired": "nothing here is ever hidden as expired, because memvara erases an "
+                    "expiring fact rather than hiding it, so there is nothing for "
+                    "show_expired=True to show.",
+    "timestamp": "mem0 documents timestamp= as unsupported outside its hosted platform.",
+    "reference_date": "reference_date= has no memvara reading that means the same "
+                      "thing; Memvara.search(valid_at=...) reads the world as of a date.",
+}
+
+
+def _refuse_unsupported(method: str, **given: Any) -> None:
+    """Refuse, with `Mem0CompatError`, each mem0 argument this shim cannot honour that
+    was given a value, with the reason `UNSUPPORTED` gives for it (#360)."""
+    # Each argument's own default means "not given": None, except show_expired's False. A
+    # False passed to one of the others is a value like any other, and is refused.
+    named = sorted(name for name, value in given.items()
+                   if value is not (False if name == "show_expired" else None))
+    if named:
+        raise Mem0CompatError(
+            f"{method}() does not support {', '.join(f'{n}=' for n in named)}. "
+            + " ".join(UNSUPPORTED[name] for name in named))
 
 
 def _memory_type(raw: str | MemoryType) -> MemoryType:
@@ -233,11 +297,16 @@ class Memory:
     # -- writing ---------------------------------------------------------------
 
     def add(self, messages: str | Mapping[str, Any] | Iterable[Any], *,
-            filters: Mapping[str, Any] | None = None,
+            user_id: str | None = None,
+            agent_id: str | None = None,
+            run_id: str | None = None,
             metadata: Mapping[str, Any] | None = None,
+            timestamp: Any = None,
+            expiration_date: Any = None,
             infer: bool = True,
             memory_type: str | MemoryType | None = None,
             prompt: str | None = None,
+            filters: Mapping[str, Any] | None = None,
             **legacy: Any) -> dict[str, list[dict[str, Any]]]:
         """Ingest messages. Returns mem0's `{"results": [{"id", "memory", "event"}]}`.
 
@@ -249,8 +318,15 @@ class Memory:
         A supersession appears as an ADD and a DELETE rather than mem0's single UPDATE,
         because memvara wrote a new claim and retired the old one; the retired id is still
         readable through `history()`.
+
+        `user_id`, `agent_id` and `run_id` scope the write as mem0's do; with none of them
+        it inherits the wrapped `Memvara`'s scope. `filters=` is this shim's own spelling
+        of the same thing, kept for code written against it.
         """
-        _reject_entity_kwargs(legacy, "add")
+        _reject_legacy_kwargs(legacy, "add")
+        _refuse_unsupported("add", timestamp=timestamp, expiration_date=expiration_date)
+        filters = _with_entities(filters, {"user_id": user_id, "agent_id": agent_id,
+                                           "run_id": run_id})
         if prompt is not None:
             raise Mem0CompatError(
                 "prompt= overrides mem0's extraction prompt. Memvara's prompt belongs to "
@@ -323,8 +399,12 @@ class Memory:
         return rows
 
     def update(self, memory_id: str, data: str | None = None, *,
-               text: str | None = None) -> dict[str, str]:
-        """Always raises. See `_NO_UPDATE` — a claim is immutable by construction."""
+               text: str | None = None, metadata: Mapping[str, Any] | None = None,
+               expiration_date: Any = None) -> dict[str, str]:
+        """Always raises. See `_NO_UPDATE` — a claim is immutable by construction.
+
+        It takes every argument mem0's `update()` takes, so a call site that passes them
+        meets this refusal rather than a `TypeError` (#360)."""
         raise Mem0CompatError(_NO_UPDATE)
 
     def delete(self, memory_id: str) -> dict[str, Any]:
@@ -437,16 +517,22 @@ class Memory:
                     pending.append(claim.id)
         return sorted(found.values(), key=lambda c: (c.recorded_at, c.id))
 
-    def delete_all(self, *, filters: Mapping[str, Any] | None = None,
+    def delete_all(self, user_id: str | None = None, agent_id: str | None = None,
+                   run_id: str | None = None, *, filters: Mapping[str, Any] | None = None,
                    **legacy: Any) -> dict[str, Any]:
         """Erase a scope for real: claims, episodes, embeddings and text index.
 
         This one *is* erasure — it is `Memvara.purge()` — which makes it the call a
         deletion request should route to, and the reason `delete()` can afford to be
         honest about retiring instead.
+
+        `user_id`, `agent_id` and `run_id` name the scope as mem0's do (#359), and
+        `filters=` is this shim's own spelling of the same thing.
         """
-        _reject_entity_kwargs(legacy, "delete_all")
-        kw = self._scope_kw(filters)
+        _reject_legacy_kwargs(legacy, "delete_all")
+        kw = self._scope_kw(_with_entities(filters, {"user_id": user_id,
+                                                     "agent_id": agent_id,
+                                                     "run_id": run_id}))
         if not kw:
             raise ValueError(
                 "delete_all() with no filters would erase the entire tenant. Name the "
@@ -469,9 +555,11 @@ class Memory:
 
     # -- reading ---------------------------------------------------------------
 
-    def search(self, query: str, *, filters: Mapping[str, Any] | None = None,
-               top_k: int = 10, threshold: float | None = None, rerank: bool = False,
-               explain: bool = False, rewrite: bool = False,
+    def search(self, query: str, *, top_k: int = 20,
+               filters: Mapping[str, Any] | None = None,
+               threshold: float | None = None, rerank: bool = False,
+               explain: bool = False, reference_date: Any = None,
+               show_expired: bool = False, rewrite: bool = False,
                **legacy: Any) -> dict[str, list[dict[str, Any]]]:
         """Hybrid retrieval, in mem0's response shape.
 
@@ -500,8 +588,13 @@ class Memory:
         `Memvara.search`, because mem0's `search()` makes no model call and a caller
         moving from mem0 is promised the same deterministic hybrid retrieval. It has no
         mem0 counterpart.
+
+        `top_k` defaults to 20, as mem0's does (#361). `reference_date=` and
+        `show_expired=True` are refused with `Mem0CompatError`; see the module docstring.
         """
-        _reject_entity_kwargs(legacy, "search")
+        _reject_legacy_kwargs(legacy, "search")
+        _refuse_unsupported("search", reference_date=reference_date,
+                            show_expired=show_expired)
         if rerank and getattr(self.memvara.reader, "reranker", None) is None:
             raise Mem0CompatError(
                 "rerank=True asks for a cross-encoder pass, and this Memvara has no "
@@ -528,12 +621,18 @@ class Memory:
         claim = self.memvara.get(memory_id)
         if claim is None or not claim.is_live():
             return None
-        return self._row(claim)
+        row = self._row(claim)
+        # mem0's get() row carries `score`, empty because nothing was searched (#360).
+        row["score"] = None
+        return row
 
-    def get_all(self, *, filters: Mapping[str, Any] | None = None, top_k: int = 100,
+    def get_all(self, *, filters: Mapping[str, Any] | None = None, top_k: int = 20,
+                show_expired: bool = False,
                 **legacy: Any) -> dict[str, list[dict[str, Any]]]:
-        """Every live memory in scope, newest first."""
-        _reject_entity_kwargs(legacy, "get_all")
+        """Up to `top_k` live memories in scope, newest first. `top_k` defaults to 20, as
+        mem0's does (#361)."""
+        _reject_legacy_kwargs(legacy, "get_all")
+        _refuse_unsupported("get_all", show_expired=show_expired)
         claims = self.memvara.get_all(**self._scope_kw(filters))[:top_k]
         return {"results": [self._row(c) for c in claims]}
 
@@ -642,9 +741,28 @@ class Memory:
     # -- construction -----------------------------------------------------------
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any]) -> "Memory":
-        """Always raises. mem0 configs name providers memvara has no registry for."""
+    def from_config(cls, config_dict: Mapping[str, Any] | None = None,
+                    **config: Any) -> "Memory":
+        """Always raises. mem0 configs name providers memvara has no registry for.
+
+        The argument is named `config_dict`, as mem0's is (#360), and any other spelling
+        is taken too, so every call meets this refusal rather than a `TypeError`."""
         raise Mem0CompatError(_NO_CONFIG)
+
+    # -- lifetime ----------------------------------------------------------------
+
+    def close(self) -> None:
+        """Close the wrapped `Memvara`, as mem0's `close()` releases its connections.
+
+        The `Memvara` is closed whether this shim built it or was handed it, because the
+        shim is backed by it: a caller that closes the shim is done with the memory."""
+        self.memvara.close()
+
+    def __enter__(self) -> "Memory":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def __repr__(self) -> str:
         return f"<mem0.Memory on_delete={self.on_delete} of {self.memvara!r}>"

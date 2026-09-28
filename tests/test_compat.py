@@ -40,7 +40,7 @@ from memvara.compat import (
 )
 from memvara.compat import mem0_import
 from memvara.compat._notes import ensure_note_predicate
-from memvara.compat.mem0 import _memory_type, _reject_entity_kwargs
+from memvara.compat.mem0 import _memory_type, _reject_legacy_kwargs
 from memvara.compat.mem0_import import _confidence, _parse_ts
 from memvara.llm import TruncatedResponse
 
@@ -529,19 +529,100 @@ def test_memory_type_with_inference_would_override_the_registry(api):
         api.add("hello", memory_type="procedural_memory")
 
 
-def test_top_level_entity_ids_are_rejected_the_way_mem0_2x_rejects_them(api):
-    with pytest.raises(TypeError, match=r"filters=\{'user_id': 'alice'\}"):
-        api.add("hello", user_id="alice")
+def test_add_and_delete_all_take_the_entity_ids_mem0_2x_takes():
+    """mem0 2.x's add() requires one of user_id, agent_id and run_id, and its
+    delete_all() takes them, so a mem0 call site passes them there (#359). The Memvara is
+    unbound, so the id alone decides whose memory it is."""
+    with Memvara(embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        api = Memory(mem)
+        api.add("I live in Berlin", user_id="alice")
+        assert [c.object for c in mem.get_all(user="alice")] == ["Berlin"]
+        assert mem.get_all(user="bob") == []
+        api.delete_all(user_id="alice")
+        assert mem.get_all(user="alice") == []
+
+
+def test_an_entity_id_given_two_ways_must_agree(api):
+    api.add("I live in Berlin", user_id="alice", filters={"user_id": "alice"})
+    with pytest.raises(ValueError, match="two different scopes"):
+        api.add("I live in Paris", user_id="alice", filters={"user_id": "bob"})
+
+
+def test_search_and_get_all_refuse_a_top_level_entity_id_the_way_mem0_2x_does(api):
+    """mem0 2.x refuses it there with ValueError, naming filters= (#359)."""
+    with pytest.raises(ValueError, match=r"filters=\{'user_id': 'alice'\}"):
+        api.search("hello", user_id="alice")
+    with pytest.raises(ValueError, match=r"get_all\(\)"):
+        api.get_all(user_id="alice")
     with pytest.raises(TypeError, match="renamed limit= to top_k="):
         api.search("hello", limit=5)
-    with pytest.raises(TypeError, match="get_all"):
-        api.get_all(user_id="alice")
-    with pytest.raises(TypeError, match="delete_all"):
-        api.delete_all(user_id="alice")
 
 
-def test_reject_entity_kwargs_is_a_no_op_when_there_is_nothing_to_reject():
-    assert _reject_entity_kwargs({}, "add") is None
+def test_reject_legacy_kwargs_is_a_no_op_when_there_is_nothing_to_reject():
+    assert _reject_legacy_kwargs({}, "add") is None
+
+
+@pytest.mark.parametrize("call, says", [
+    (lambda m: m.add("hi", timestamp=1700000000), "does not support timestamp="),
+    (lambda m: m.add("hi", expiration_date="2030-01-01"),
+     "does not support expiration_date="),
+    (lambda m: m.search("hi", reference_date="2024-01-01"),
+     "does not support reference_date="),
+    (lambda m: m.search("hi", show_expired=True), "does not support show_expired="),
+    (lambda m: m.get_all(show_expired=True), "does not support show_expired="),
+    (lambda m: m.update("cl_x", text="x", metadata={"a": 1}, expiration_date="2030-01-01"),
+     "immutable"),
+], ids=["add timestamp", "add expiration_date", "search reference_date",
+        "search show_expired", "get_all show_expired", "update with every argument"])
+def test_a_mem0_argument_the_shim_cannot_honour_is_refused_by_name(api, call, says):
+    """The shim takes every argument mem0 2.x takes, so each one it cannot honour is
+    refused with Mem0CompatError rather than a TypeError (#360), naming it."""
+    with pytest.raises(Mem0CompatError, match=says):
+        call(api)
+
+
+def test_false_counts_as_given_except_for_show_expired(api):
+    with pytest.raises(Mem0CompatError, match="reference_date="):
+        api.search("hi", reference_date=False)
+    assert api.search("hi", show_expired=False)["results"] == []
+
+
+def test_a_none_in_filters_does_not_disagree_with_a_keyword_id():
+    with Memvara(embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        Memory(mem).add("I live in Berlin", user_id="alice", filters={"user_id": None})
+        assert [c.object for c in mem.get_all(user="alice")] == ["Berlin"]
+
+
+def test_a_refusal_gives_only_the_reasons_for_what_was_passed(api):
+    with pytest.raises(Mem0CompatError) as refused:
+        api.get_all(show_expired=True)
+    assert "show_expired=True to show" in str(refused.value)
+    assert "timestamp" not in str(refused.value) and "reference_date" not in str(refused.value)
+
+
+def test_the_defaults_are_mem0s(api):
+    """mem0 2.x's search() and get_all() return up to 20 results (#361)."""
+    import inspect  # noqa: PLC0415
+
+    assert inspect.signature(Memory.search).parameters["top_k"].default == 20
+    assert inspect.signature(Memory.get_all).parameters["top_k"].default == 20
+
+
+def test_a_row_from_get_carries_mem0s_score_key(api):
+    added = api.add("I live in Berlin")["results"][0]
+    assert api.get(added["id"])["score"] is None
+
+
+def test_close_closes_the_memvara_and_the_with_statement_calls_it():
+    closed = []
+
+    class Backing:
+        def close(self):
+            closed.append(True)
+
+    with Memory(Backing()) as shim:  # type: ignore[arg-type]
+        assert isinstance(shim, Memory)
+    assert closed == [True]
 
 
 def test_a_metadata_filter_says_memvara_filters_by_scope(api):

@@ -1230,6 +1230,54 @@ def test_search_respects_limit_and_the_min_score_floor(storage):
     assert storage.search(query, limit=5, min_score=0.99) == []
 
 
+def test_an_exact_duplicate_scores_as_the_same_text_and_comes_first(storage):
+    """CrewAI compares the first result's score with its consolidation threshold, 0.85,
+    so the score is the similarity its contract names. Memvara's fused ranking score put
+    an exact duplicate at 0.50 (#364)."""
+    saved(storage, record("Alice prefers tea in the morning"),
+          record("Bob deploys on Fridays"))
+    [(first, score), *_] = storage.search(crew_embed(storage, "Alice prefers tea in the morning"))
+    assert first.content == "Alice prefers tea in the morning"
+    assert score == pytest.approx(1.0)
+
+
+def test_a_store_that_cannot_return_a_vector_is_scored_by_encoding_the_text(mem, monkeypatch):
+    """A cloud deployment's RemoteStore raises NotImplementedError for get_embedding: no
+    endpoint returns a stored vector. The score then comes from encoding the record's text
+    with the same embedder, rather than from a crash on the first search."""
+    storage = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES)
+    saved(storage, record("Alice prefers tea in the morning"))
+
+    def no_endpoint(claim_id):
+        raise NotImplementedError("No endpoint reads a stored vector back")
+
+    monkeypatch.setattr(mem.store, "get_embedding", no_endpoint)
+    [(first, score)] = storage.search(crew_embed(storage, "Alice prefers tea in the morning"))
+    assert first.content == "Alice prefers tea in the morning"
+    assert score == pytest.approx(1.0)
+
+
+def test_a_record_whose_vector_is_all_zeros_scores_zero(mem, monkeypatch):
+    """Cosine similarity has no value against a zero vector, which a hashing embedder
+    gives a text with no tokens. The score is 0.0, the bottom of CrewAI's range, rather
+    than a division by zero."""
+    storage = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES)
+    saved(storage, record("Alice prefers tea in the morning"))
+    query = crew_embed(storage, "Alice prefers tea in the morning")
+    monkeypatch.setattr(mem.store, "get_embedding", lambda claim_id: [0.0] * len(query))
+    [(first, score)] = storage.search(query)
+    assert first.content == "Alice prefers tea in the morning"
+    assert score == 0.0
+
+
+def test_the_write_lock_is_one_reentrant_lock(storage):
+    """crewai 1.10.1 takes `storage.write_lock` around a batch of writes (#363). It has to
+    be the same lock on every read, and taking it twice on one thread must not block."""
+    assert storage.write_lock is storage.write_lock
+    with storage.write_lock, storage.write_lock:
+        saved(storage, record("Alice prefers tea in the morning"))
+
+
 def test_a_metadata_filter_is_refused_because_post_filtering_would_lie_about_recall(
         storage):
     """Applied after ranking, it silently returns fewer results than asked for — and the
