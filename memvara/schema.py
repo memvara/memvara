@@ -392,6 +392,9 @@ class PredicateRegistry:
         # alias, and `canonical is None` marks the key as claimed by two predicates.
         self._strict: dict[tuple[str, ...], tuple[int, str | None]] = {}
         self._loose: dict[tuple[str, ...], tuple[int, str | None]] = {}
+        #: The content words of each form of each predicate, its name first, for
+        #: `_overlap`.
+        self._forms: dict[str, list[frozenset[str]]] = {}
         self._cache: dict[str, Resolution] = {}
         self._stale = True
         self.max_learned = max_learned
@@ -407,16 +410,19 @@ class PredicateRegistry:
     def _reindex(self) -> None:
         """Rebuild every derived index from `_specs`.
 
-        Rebuilt wholesale rather than patched incrementally because specs are replaced,
-        not just added - `learn_alias` swaps a spec for a copy carrying one more alias,
-        and an incrementally-maintained index would keep serving the old one's entries
-        forever. The registry is a few hundred rows and this runs on registration, not
-        on lookup.
+        Rebuilt wholesale after `register`, because registering can replace a spec, and
+        an index patched for a replacement would keep serving the old spec's entries.
+        `learn_alias` is the one change patched in place: it only adds a form to a spec,
+        and a registry past its learned cap can learn thousands of aliases from one model
+        reply, where a rebuild per alias made the write quadratic (#309).
         """
         self._alias = {}
         self._strict = {}
         self._loose = {}
+        self._forms = {}
         for spec in self._specs.values():
+            self._forms[spec.name] = [frozenset(_strict_key(_slugify(form)))
+                                      for form in (spec.name, *spec.aliases)]
             self._add_keys(spec.name, spec.name, tier=0)
             for alias in spec.aliases:
                 slug = _slugify(alias)
@@ -489,11 +495,10 @@ class PredicateRegistry:
     # -- resolution support --------------------------------------------------
 
     def _overlap(self, tokens: frozenset[str], name: str) -> int:
-        spec = self._specs[name]
-        best = 0
-        for form in (spec.name, *spec.aliases):
-            best = max(best, len(tokens & frozenset(_strict_key(_slugify(form)))))
-        return best
+        # The content words of each form are kept in `_forms`, because this runs for
+        # every predicate on every `nearest`, and slugifying every alias again each time
+        # made a write of many invented spellings quadratic (#309).
+        return max((len(tokens & form) for form in self._forms[name]), default=0)
 
     def _affinity(self, tokens: frozenset[str], name: str) -> tuple[int, bool, str]:
         """Sort key: most shared content words, then declared over learned, then name.
@@ -663,7 +668,19 @@ class PredicateRegistry:
         slug = _slugify(surface)
         if not slug or slug in spec.aliases or slug == spec.name:
             return spec
-        return self.register(replace(spec, aliases=spec.aliases + (slug,)))
+        spec = replace(spec, aliases=spec.aliases + (slug,))
+        self._specs[spec.name] = spec
+        # A new alias can change how another surface resolves, so the cache goes.
+        self._cache.clear()
+        if not self._stale:
+            # Added to the built index, not rebuilt: `_add_keys` gives the same result in
+            # any order, so one more alias leaves the index a rebuild would produce. A
+            # rebuild per alias made one write of many invented spellings quadratic (#309).
+            if slug not in self._specs:
+                self._alias[slug] = spec.name
+            self._add_keys(slug, spec.name, tier=1)
+            self._forms[spec.name].append(frozenset(_strict_key(slug)))
+        return spec
 
     def functional(self, predicate: str) -> bool:
         return self.spec(predicate).functional

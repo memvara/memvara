@@ -37,20 +37,10 @@ class KnownBug:
 
 
 KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
-    KnownBug("B23", 300, "a store refused for its embedder has already been migrated"),
-    KnownBug("B24", 301, "a store refused as too new leaves its SQLite connection open"),
 
 
-    KnownBug("B26", 303, "malformed model output makes add() raise instead of dropping the "
-             "item"),
-    KnownBug("B28", 305, "a claim the trust boundary drops still costs a model call and "
-             "leaves a learned predicate"),
-    KnownBug("B29", 306, "a claim with no subject is filed under the user, and a list "
-             "object is stored as Python text"),
     KnownBug("B30", 307, "a model retraction at low confidence ends a fact the user "
              "asserted"),
-    KnownBug("B32", 309, "invented predicates past the learned cap make one write take "
-             "quadratic time"),
     KnownBug("B45", 317, "a backdated retraction's tombstone is live in reads of the past"),
     KnownBug("B69", 349, "a repeated future-dated retraction writes a new tombstone each "
              "time"),

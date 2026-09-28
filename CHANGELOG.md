@@ -45,6 +45,49 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   the session. So a value written by a session inside the repository hid the user-wide
   value from every other reader in that repository, who then read no value at all. The
   check now asks only about the levels of the reader's own chain.
+- **The benchmark refuses a `--timeout` of NaN or infinity.** `bench/evalkit.py` checked
+  `timeout <= 0`, which a NaN passes, so `--timeout nan` reached the reader's client as its
+  timeout. It now asks for a finite number of seconds above zero, and so does
+  `bench/extract_cost.py`'s `--timeout`, which had no check at all. #431.
+- **Malformed output from an extraction model is dropped, not raised on.** A backend that
+  does no validation of its own could return an item that is not an object, a
+  `source_index` that is a list, an infinite polarity, a confidence of `10**400`, or a
+  reply that is not a list at all. `add()` raised on each, and the fast path's facts from
+  the same call were lost with it. The write path now drops such an item, or the whole
+  reply when it is not a list, before anything else reads it, and returns a receipt. This
+  holds when `extraction_chunks` cuts a long turn into pieces, too. #303.
+- **A claim with no subject, or with an object that is not text, is dropped.** One with no
+  subject used to be filed under `user`, where it could end the user's own value, and an
+  object that was a list was stored as its Python text, such as `['Porto']`. A subject
+  or an object that is a finite number is still stored as its text. #306.
+- **A claim dropped as ungrounded costs no model call and teaches no predicate.** The
+  grounding check now runs before a new predicate is acquired, so a dropped claim no
+  longer spends an acquisition call or takes one of the 200 learned-predicate slots.
+  #305.
+- **A confidence that is not a finite number is read as the default, 0.7.** NaN used to be
+  read as 0.0, a guess that could displace nothing, and infinity as 1.0.
+- **An open that refuses a store's embedder leaves an older store file as it was.**
+  `SQLiteStore` upgrades a file an older version wrote as it opens it, and commits the
+  upgrade; `Memvara` then checked its embedder and refused one of another width. So the
+  refused file had already been upgraded, and the release that wrote it could no longer
+  open it. The width check now also runs before the upgrade: `SQLiteStore` takes a new
+  keyword, `before_upgrade`, which it calls with the width of the stored vectors before it
+  writes anything to an older file, and `Memvara` refuses there with the same
+  `EmbedderMismatchError`. This covers an embedder you pass and the default one.
+  `reembed=True` still upgrades the file and re-encodes it. #300.
+- **A store whose open fails closes its database connection.** A store refused because a
+  newer version wrote it released its lock but left its SQLite connection open until
+  garbage collection, so on Windows the caller could not delete or replace the file, and
+  Python 3.13 warned about an unclosed database. #301.
+- **A model reply with thousands of invented predicates no longer stalls a write.** Past
+  the cap of 200 learned predicates, each new spelling is folded onto the nearest known
+  predicate as an alias. Each alias rebuilt the registry's whole index, and each search
+  for the nearest predicate read every alias again, so one `add()` took time that grew
+  with the square of the number of invented spellings: 100 to 130 seconds for 5,000 on a
+  laptop. An alias is now added to the index in place, and each predicate's words are kept
+  once, so the same write takes about 6 seconds. The model is still called 201 times,
+  and every predicate resolves as before. #309.
+
 - **A hook answers a payload nested too deeply to decode as it answers an empty one.**
   `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
   Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload

@@ -854,7 +854,9 @@ class _ClassifyingLLM:
         return {"cardinality": "one", "volatility": "slow", "memory_type": "semantic"}
 
 
-LONG_TURN = "A long sentence the deterministic rules will not touch at all here."
+# It names the scripted claim's object, so the claim is grounded and is not dropped
+# before its predicate is acquired (#305).
+LONG_TURN = "A long sentence about my penny black the deterministic rules will not touch."
 
 
 def test_a_learned_predicate_survives_a_restart(tmp_path):
@@ -869,7 +871,7 @@ def test_a_learned_predicate_survives_a_restart(tmp_path):
 
     second = _ClassifyingLLM()
     with Memvara(path, embedder=HashingEmbedder(dim=64), llm=second, user="alice") as m2:
-        m2.add("A different long sentence the rules will also not touch at all.")
+        m2.add("A different long sentence about a penny black the rules will not touch.")
     assert second.classify_calls == 0, "the schema must be read back, not re-derived"
 
 
