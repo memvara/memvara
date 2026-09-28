@@ -78,7 +78,6 @@ SPELLINGS = 5_000
 BOUND = 60.0
 
 
-@known_bugs.xfail("B32")
 def test_five_thousand_invented_predicates_are_written_within_a_minute(
         scripted: Make) -> None:
     """#309. Past the learned-predicate cap, each new spelling is folded onto an existing
