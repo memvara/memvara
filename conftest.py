@@ -50,7 +50,10 @@ def pytest_addoption(parser: Any) -> None:
 
 def pytest_configure(config: Any) -> None:
     tiers.load_hypothesis_profile(config.getoption("--tier"))
-    config.args[:] = grouped_by_folder(config.args)
+    # Only paths a person gave. A run given none collects `testpaths` from pyproject.toml,
+    # in the order written there.
+    if config.args_source == pytest.Config.ArgsSource.ARGS:
+        config.args[:] = grouped_by_folder(config.args)
 
 
 def grouped_by_folder(args: list[str]) -> list[str]:

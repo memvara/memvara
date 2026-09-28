@@ -216,3 +216,15 @@ def test_the_root_conftests_examples_still_run() -> None:
     spec.loader.exec_module(module)
     failures, attempted = doctest.testmod(module, verbose=False)
     assert (failures, attempted > 0) == (0, True)
+
+
+def test_a_run_given_no_paths_keeps_the_testpaths_order(tmp_path: pathlib.Path) -> None:
+    """A run given no paths collects `testpaths` from pyproject.toml, `tests` and then
+    `memvara`. The root conftest groups only the paths a person gave, so that order holds."""
+    run = _collect(tmp_path)
+    assert run.returncode == pytest.ExitCode.OK, run.stdout[-2000:] + run.stderr[-2000:]
+    collected = [line for line in run.stdout.splitlines() if "::" in line]
+    first_package = next(i for i, line in enumerate(collected) if line.startswith("memvara/"))
+    assert collected[0].startswith("tests/"), collected[:3]
+    assert all(line.startswith("memvara/") for line in collected[first_package:]), (
+        "every test under tests/ comes before the doctests in memvara/")
