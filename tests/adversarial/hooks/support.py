@@ -192,9 +192,10 @@ MORE_HOSTILE: Mapping[str, tuple[bytes, Mapping[str, str]]] = {
 
 #: The payloads that are not a JSON object once they are read. A hook must answer each
 #: one exactly as it answers `{}`: plugin/hooks/core/envelope.py, `read_event`, says that
-#: anything unreadable becomes an empty event.
+#: anything unreadable becomes an empty event. `json.loads` raises RecursionError on the
+#: deep nesting, not ValueError, and every hook body used to crash on it (#346, B64).
 UNREADABLE = ("empty stdin", "text that is not JSON", "a JSON list",
-              "invalid UTF-8, read strictly")
+              "invalid UTF-8, read strictly", "nesting 100,000 levels deep")
 
 #: The line run.py writes when a hook's body raised and its last guard kept the exit code
 #: at 0 (plugin/hooks/run.py, `main`). A line about handing capture to a child is not one.
@@ -633,18 +634,3 @@ def check_no_extraction(hostile: Hostile) -> None:
     assert hostile.clis.calls("codex") == []
 
 
-#: The hostile payload that B64 is about.
-DEEP = "nesting 100,000 levels deep"
-
-
-def pin_deep_nesting(hostile: Hostile, host: str, hook: str) -> None:
-    """B64: json.loads raises RecursionError on the payload, which neither
-    plugin/hooks/lib/ipc.py, `payload`, nor core/envelope.py, `read_event`, catches, so the
-    hook's body raises and only run.py's last guard keeps the exit code at 0."""
-    if hook == "capture" and hostile.clis is None:
-        pytest.skip(NO_FAKES)
-    crashed = [line for line in crashes(hostile.runs[host, hook, DEEP])
-               if "RecursionError" in line]
-    if crashed:
-        raise known_bugs.Reproduced(f"B64: {hook} on {host}: {crashed[0]}")
-    check_read_as_empty(hostile, host, hook, DEEP)

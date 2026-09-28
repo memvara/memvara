@@ -11,6 +11,44 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **An open that refuses a store's embedder leaves an older store file as it was.**
+  `SQLiteStore` upgrades a file an older version wrote as it opens it, and commits the
+  upgrade; `Memvara` then checked its embedder and refused one of another width. So the
+  refused file had already been upgraded, and the release that wrote it could no longer
+  open it. The width check now also runs before the upgrade: `SQLiteStore` takes a new
+  keyword, `before_upgrade`, which it calls with the width of the stored vectors before it
+  writes anything to an older file, and `Memvara` refuses there with the same
+  `EmbedderMismatchError`. This covers an embedder you pass and the default one.
+  `reembed=True` still upgrades the file and re-encodes it. #300.
+- **A store whose open fails closes its database connection.** A store refused because a
+  newer version wrote it released its lock but left its SQLite connection open until
+  garbage collection, so on Windows the caller could not delete or replace the file, and
+  Python 3.13 warned about an unclosed database. #301.
+- **A model reply with thousands of invented predicates no longer stalls a write.** Past
+  the cap of 200 learned predicates, each new spelling is folded onto the nearest known
+  predicate as an alias. Each alias rebuilt the registry's whole index, and each search
+  for the nearest predicate read every alias again, so one `add()` took time that grew
+  with the square of the number of invented spellings: 100 to 130 seconds for 5,000 on a
+  laptop. An alias is now added to the index in place, and each predicate's words are kept
+  once, so the same write takes about 6 seconds. The model is still called 201 times,
+  and every predicate resolves as before. #309.
+
+- **A hook answers a payload nested too deeply to decode as it answers an empty one.**
+  `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
+  Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
+  such as `{"prompt": [[[...]]]}` 100,000 levels deep crashed the body of every hook.
+  The exit code stayed 0, but the hook printed nothing: session start gave the model no
+  memories and showed no status line. The only trace was a `failed hook=... RecursionError`
+  line in `~/.memvara/.hooks/hooks.log`. `payload()` in `plugin/hooks/lib/ipc.py` and
+  `read_event()` in `plugin/hooks/core/envelope.py` now read such a payload as an empty
+  one. #346 (B64).
+- **`memory_recall` refuses `ranked` without conversation turns as an argument error.**
+  `ranked=true` needs turns to rank, so it takes `include_episodes=true` and no
+  `memory_types`. The library refused the other combinations with a `ValueError`, which
+  reached the model through the server's catch-all as `memory_recall failed: ValueError:
+  ...`, a Python exception rather than a mistake in its arguments. The tool now refuses
+  them itself, before the store is asked, with a message that says which argument to
+  change. #316 (B39).
 - **`memory_add` no longer says a stored turn was not stored.** When extraction
   recognised no fact in a turn, the note said the turn "carried something extraction did
   not recognise and [was] not stored", right after the reply gave the turn's id.
