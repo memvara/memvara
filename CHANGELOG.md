@@ -11,13 +11,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
-- **A refusal, or a reply to a read that finds nothing, quotes at most 80 characters of
-  the argument.** Both quoted the whole value, so a long argument was copied into the
-  model's context a second time: `memory_recall` with a `k` of 100,000 characters was
-  refused in 100,053 characters, and `memory_search` for a 100,000-character query that
-  matched nothing answered in 100,135. Both now quote the first 80 characters of the
-  value as Python spells it and add `(shortened from N characters)`. A value short enough
-  is quoted whole, as before. #313 (B36).
+- **A reply that quotes a caller's argument quotes at most 80 characters of it.** A
+  refusal quoted the whole value it refused, and the reply to a read that found nothing
+  quoted the whole query, so a long argument was copied into the model's context a second
+  time: `memory_recall` with a `k` of 100,000 characters was refused in 100,053
+  characters, and `memory_search` for a 100,000-character query that matched nothing
+  answered in 100,135. Every refusal from the argument checks now quotes at most 80
+  characters of the value and adds `(shortened from N characters)`, and so do the no-match
+  replies of `memory_search`, `memory_recall`, `memory_forget_matching` and
+  `memory_end_matching`, a timestamp that cannot be read (whose parser message repeated
+  the value), a claim id `memory_forget`, `memory_end` or `memory_why` cannot find,
+  `memory_remember`'s `replaces`, and `memory_profile`'s query and bucket names. A string
+  is cut before it is quoted, so an escape such as `\u2028` is never cut in half. A value
+  of 80 characters or fewer is quoted whole, as before. #313 (B36).
 - **Capture logs a line on every path where it decides to do nothing.** It returned
   without a line when a hook had triggered the Stop, when the payload named no
   transcript, when the transcript path named no file, when the transcript's size could

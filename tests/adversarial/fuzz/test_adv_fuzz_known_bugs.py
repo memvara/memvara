@@ -127,7 +127,7 @@ def test_a_refusal_quotes_only_a_short_part_of_the_value_it_refuses(
     assert len(replies) == 1 and replies[0]["result"]["isError"] is True, replies
     assert changed(before, rows(shared_server.db)) == []
     text = text_of(replies[0])
-    assert LONG not in text and "(shortened from 100,002 characters)" in text, text[:300]
+    assert LONG not in text and "(shortened from 100,000 characters)" in text, text[:300]
     assert len(text) < 2_000, len(text)
 
 
@@ -141,9 +141,39 @@ def test_a_read_that_finds_nothing_quotes_only_a_short_part_of_the_query(
         assert len(replies) == 1 and replies[0]["result"]["isError"] is False, replies
         texts[tool] = text_of(replies[0])
     assert not any(LONG in text for text in texts.values()), texts.keys()
-    assert all("(shortened from 100,002 characters)" in text for text in texts.values())
+    assert all("(shortened from 100,000 characters)" in text for text in texts.values())
     assert all(len(text) < 2_000 for text in texts.values()), {
         tool: len(text) for tool, text in texts.items()}
+
+
+@pytest.mark.parametrize("tool, arguments", [
+    ("memory_since", {"since": LONG}),
+    ("memory_profile", {"since": LONG}),
+    ("memory_forget", {"claim_id": LONG}),
+    ("memory_end", {"claim_id": LONG}),
+    ("memory_why", {"claim_id": LONG}),
+    ("memory_remember", {"predicate": "likes", "object": "tea", "replaces": LONG}),
+    ("memory_profile", {"query": "q" * 2000, "buckets": {LONG: ["likes"]}}),
+    ("memory_forget_matching", {"query": "m" * 500, "reason": "r" * 500}),
+], ids=["a timestamp", "a timestamp on profile", "memory_forget's id", "memory_end's id",
+        "memory_why's id", "memory_remember's replaces", "a profile's query and bucket",
+        "a matching query and reason"])
+def test_every_reply_that_quotes_an_argument_quotes_only_a_short_part_of_it(
+        mcp: Start, tool: str, arguments: dict[str, Any]) -> None:
+    """The review of the fix for #313 found the same whole quote in these replies, and
+    in the parser's own message about a timestamp it cannot read."""
+    server = mcp()
+    server.initialize()
+    replies = exchange(server, call_line(1, tool, arguments))
+    assert len(replies) == 1, replies
+    text = text_of(replies[0])
+    long_values = [value for value in (*arguments.values(), *arguments.get("buckets", {}))
+                   if isinstance(value, str) and len(value) > 80]
+    assert long_values
+    for value in long_values:
+        assert value not in text, (tool, text[:300])
+    assert "(shortened from " in text, text[:300]
+    assert len(text) < 3_000, len(text)
 
 
 # -- B37: the key pattern's $ matches before a final newline -----------------------------

@@ -96,21 +96,32 @@ def _describe(value: Any) -> str:
     return "an object"
 
 
-#: Longest part of a refused value, as `repr` spells it, that a refusal quotes. A refusal
-#: is read by a model, so a value of any length would be copied whole into its context a
-#: second time (#313); this is enough to recognise the value and see what is wrong with it.
+#: Longest part of a caller's value that a refusal or a reply quotes. Both are read by a
+#: model, so a value of any length would be copied whole into its context a second time
+#: (#313); this is enough to recognise the value and see what is wrong with it.
 QUOTE_LIMIT = 80
 
 
 def shown(value: Any) -> str:
-    """`repr(value)`, shortened past `QUOTE_LIMIT` characters, saying that it was.
+    """Quote a caller's value as `repr` spells it, shortened when it is long.
+
+    A string longer than `QUOTE_LIMIT` characters is cut to that many before it is
+    quoted, so an escape such as `\\u2028` is never cut in half, and the quote says how
+    long the whole value was. Any other value is quoted with `repr` and cut the same way.
 
     >>> shown("tea")
     "'tea'"
     >>> long = shown("y" * 100_000)
-    >>> long.endswith("… (shortened from 100,002 characters)"), len(long) < 130
+    >>> long.endswith("'… (shortened from 100,000 characters)"), len(long) < 130
     (True, True)
+    >>> cut = shown("a" * 79 + "\\u2028" * 5)
+    >>> cut.endswith("a\\\\u2028'… (shortened from 84 characters)")
+    True
     """
+    if isinstance(value, str):
+        if len(value) <= QUOTE_LIMIT:
+            return repr(value)
+        return f"{value[:QUOTE_LIMIT]!r}… (shortened from {len(value):,} characters)"
     text = repr(value)
     if len(text) <= QUOTE_LIMIT:
         return text
@@ -261,7 +272,8 @@ def _checked(label: str, value: Any, spec: Mapping[str, Any],
     allowed = spec.get("enum")
     if allowed is not None and value not in allowed:
         raise ToolError(
-            f"{label} must be one of {', '.join(repr(a) for a in allowed)}, got {shown(value)}")
+            f"{label} must be one of {', '.join(repr(a) for a in allowed)}, "
+            f"got {shown(value)}")
 
     # The string counterpart of `maximum`, and it exists for the same reason a numeric
     # bound does: an argument nothing checks is one every later turn pays for. A subject
