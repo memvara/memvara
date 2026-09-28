@@ -214,14 +214,16 @@ def test_no_count_is_kept_when_the_status_line_is_switched_off(monkeypatch):
     assert not os.path.exists(counts.COUNTS_DIR)
 
 
-def _recall(monkeypatch, tmp_path, block: str, standing: str = "") -> _Replies:
+def _recall(monkeypatch, tmp_path, block: str, standing: str = "",
+            logs: "list[str] | None" = None) -> _Replies:
     replies = _Replies()
     monkeypatch.setattr(recall, "SEEN_DIR", str(tmp_path / "recalled"))
     monkeypatch.setattr(recall, "payload", lambda: {
         "session_id": SESSION, "prompt": "which database does billing use",
         "cwd": str(tmp_path)})
     monkeypatch.setattr(recall, "write", replies)
-    monkeypatch.setattr(recall, "log_line", lambda *a, **k: None)
+    monkeypatch.setattr(recall, "log_line", (lambda name, text: logs.append(text))
+                        if logs is not None else (lambda *a, **k: None))
     monkeypatch.setattr(recall, "due_capture_alert", lambda: "")
     monkeypatch.setattr(recall, "due_alert_for_model", lambda: "")
     monkeypatch.setattr(recall, "fast_recall", lambda *a, **k: (block, True, ""))
@@ -248,6 +250,19 @@ def test_recall_does_not_count_a_memory_already_in_context(monkeypatch, tmp_path
 def test_recall_counts_a_standing_update_on_a_turn_with_nothing_new(monkeypatch, tmp_path):
     _recall(monkeypatch, tmp_path, "", "Standing:\n⋈ - rule one\n⋈ - rule two")
     assert counts.read(SESSION)["recalled"] == 2
+
+
+def test_recall_logs_what_it_injected_on_a_turn_with_nothing_new(monkeypatch, tmp_path):
+    """On a host with no status line the log is the only account (#338). A turn where
+    nothing new matched but the standing preferences changed still injects them, so its
+    line must not read like a turn that injected nothing."""
+    standing = "Standing:\n⋈ - rule one\n⋈ - rule two"
+    logs: list[str] = []
+    _recall(monkeypatch, tmp_path, "", standing, logs=logs)
+    assert logs == [f"recalled=0 repeats=0 injected={len(standing)}c standing=updated"]
+    logs.clear()
+    _recall(monkeypatch, tmp_path, "", logs=logs)
+    assert logs == ["recalled=0 repeats=0"]
 
 
 def _capture(monkeypatch, tmp_path, stored: int, failed: "list[str]") -> None:

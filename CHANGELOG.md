@@ -47,6 +47,29 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   the session. So a value written by a session inside the repository hid the user-wide
   value from every other reader in that repository, who then read no value at all. The
   check now asks only about the levels of the reader's own chain.
+- **The hosted client reads the lists a write receipt fills to say what the write did.**
+  `accumulated`, `disputed`, `collapsed`, `retyped`, `agentic_fallback` and
+  `proposals_refused` were never read from a hosted receipt, so a write through
+  `RemoteMemvara` reported them empty, and a server in cloud mode left out the notes
+  `memory_remember` writes from them: a value added beside live ones, a weaker value
+  stored beside a stronger one, a value closed at the instant it began, and a fact
+  re-filed under another memory type. `hydrate.receipt` now reads each one, and a
+  deployment that does not send one still hydrates, with it empty. The hosted service
+  itself does not send them yet; until memvara-cloud's renderer does, a hosted receipt
+  still reports them empty. #334 (B52), this repository's half.
+- **A write receipt read through the hosted client reports `ungrounded` and `polluted`.**
+  The deployment sends both counts, and `RemoteMemvara` never read them, so a hosted
+  receipt always said 0: a caller could not tell that the write refused claims an
+  extraction model proposed, and a server in cloud mode never wrote the note about
+  ungrounded claims. Both are read now, and a deployment that does not send them still
+  hydrates, with 0. #335 (B53).
+- **Recall logs a line when nothing is configured and when nothing matches.** Both
+  outcomes were reported only on the status line, and Codex, Copilot and OpenCode show
+  none, so on those hosts a missing store and an empty answer left the same trace: no
+  reply and no log line. Recall now writes `skipped=not configured` or `recalled=0
+  repeats=N` to `~/.memvara/.hooks/recall.log`, the same shape as the line a recall that
+  injected something writes. When nothing new matched but the standing preferences
+  changed, the line adds what was injected: `injected=<N>c standing=updated`. #338 (B56).
 - **A retraction far less confident than the value it names no longer ends it.** A new
   value closes the value on record only when it is worth at least half as much
   (`AUTHORITY_SHARE`); below that both stay and the write reports a dispute. A retraction
