@@ -17,6 +17,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   extraction model proposed, and a server in cloud mode never wrote the note about
   ungrounded claims. Both are read now, and a deployment that does not send them still
   hydrates, with 0. #335 (B53).
+- **An open that refuses a store's embedder leaves an older store file as it was.**
+  `SQLiteStore` upgrades a file an older version wrote as it opens it, and commits the
+  upgrade; `Memvara` then checked its embedder and refused one of another width. So the
+  refused file had already been upgraded, and the release that wrote it could no longer
+  open it. The width check now also runs before the upgrade: `SQLiteStore` takes a new
+  keyword, `before_upgrade`, which it calls with the width of the stored vectors before it
+  writes anything to an older file, and `Memvara` refuses there with the same
+  `EmbedderMismatchError`. This covers an embedder you pass and the default one.
+  `reembed=True` still upgrades the file and re-encodes it. #300.
+- **A store whose open fails closes its database connection.** A store refused because a
+  newer version wrote it released its lock but left its SQLite connection open until
+  garbage collection, so on Windows the caller could not delete or replace the file, and
+  Python 3.13 warned about an unclosed database. #301.
 - **A model reply with thousands of invented predicates no longer stalls a write.** Past
   the cap of 200 learned predicates, each new spelling is folded onto the nearest known
   predicate as an alias. Each alias rebuilt the registry's whole index, and each search
