@@ -98,7 +98,7 @@ EXACT_WORDS = frozenset({"allow"} | {event for events in EVENTS.values()
 
 #: The hosts whose capture run.py hands to a child in a new session, so that the client's
 #: turn is never held (hosts/<id>.py, `detach_capture`).
-DETACHES = frozenset({"codex", "copilot", "cursor"})
+DETACHES = frozenset({"claude", "codex", "copilot", "cursor"})
 
 #: The limit, in seconds, each host gives each hook: the hook contract the design names
 #: (session start 20, recall 10, approve 5, capture 180), as each host record declares it
