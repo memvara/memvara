@@ -14,9 +14,10 @@ What it does differently from mem0 and friends:
 * **The write path avoids the LLM.** Hash dedupe, near-duplicate detection, a salience
   gate, and rule-based extraction run first; the model is consulted only for turns that
   survive all of them, batched. `WriteReceipt.llm_calls` reports the cost every time.
-  With no `llm=` there is no fourth tier at all, so turns the rules do not recognise are
-  not stored — `Memvara()` warns once about that, and `WriteReceipt.unextracted` counts
-  it per write.
+  With no `llm=` there is no fourth tier at all, so a turn the rules do not recognise
+  yields no fact. The turn itself is kept, and `recall(include_episodes=True)` finds it;
+  `Memvara()` warns once about the missing facts, and `WriteReceipt.unextracted` counts
+  them per write.
 * **Retrieval is hybrid and time-aware.** BM25 fused with vector search, reranked by
   recency decay tuned per predicate, and every result explains why it surfaced.
 * **Nothing is silently lost.** Superseded facts are retired, never deleted, and every

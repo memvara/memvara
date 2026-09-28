@@ -30,9 +30,76 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     `config_dict` and still refuses. #360 (B81).
   - `search()` and `get_all()` defaulted to `top_k` 10 and 100, where mem0 defaults to 20
     for both. Both now default to 20. #361 (B82).
-
-  `docs/UPGRADING.md` says what the changed exception type and the smaller `get_all()`
-  default mean for code written against the shim.
+- **A hook answers a payload nested too deeply to decode as it answers an empty one.**
+  `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
+  Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
+  such as `{"prompt": [[[...]]]}` 100,000 levels deep crashed the body of every hook.
+  The exit code stayed 0, but the hook printed nothing: session start gave the model no
+  memories and showed no status line. The only trace was a `failed hook=... RecursionError`
+  line in `~/.memvara/.hooks/hooks.log`. `payload()` in `plugin/hooks/lib/ipc.py` and
+  `read_event()` in `plugin/hooks/core/envelope.py` now read such a payload as an empty
+  one. #346 (B64).
+- **`memory_recall` refuses `ranked` without conversation turns as an argument error.**
+  `ranked=true` needs turns to rank, so it takes `include_episodes=true` and no
+  `memory_types`. The library refused the other combinations with a `ValueError`, which
+  reached the model through the server's catch-all as `memory_recall failed: ValueError:
+  ...`, a Python exception rather than a mistake in its arguments. The tool now refuses
+  them itself, before the store is asked, with a message that says which argument to
+  change. #316 (B39).
+- **`memory_add` no longer says a stored turn was not stored.** When extraction
+  recognised no fact in a turn, the note said the turn "carried something extraction did
+  not recognise and [was] not stored", right after the reply gave the turn's id.
+  `memory_recall` with `include_episodes` returns that turn word for word: only the fact
+  was not stored. A model that believed the note could send the turn again, which stores
+  it twice, or tell the user nothing was saved. The note now says the turn was stored,
+  that no fact was extracted from it, and that a recall with `include_episodes=true`
+  finds it; the advice that follows it is unchanged. The packaged skill said the same
+  thing in `references/write-and-correct.md`, and says what happens now. #353 (B73).
+- **`memory_recall`'s description names only the arguments the server serves.** It
+  said that the tool rewrites the query "(query_rewrite)" and that "ranked and synthesize
+  each add one more call". A server started with `MEMVARA_FEATURE_QUERY_REWRITE=0` or
+  `MEMVARA_FEATURE_SYNTHESIS=0` removes that argument from the schema, so a model that
+  followed the description was refused with `unknown argument(s)`. The description now
+  drops each argument its switch removes, and with query rewrite off it no longer says
+  the query is rewritten. With every feature on, it reads exactly as before. #295 (B19).
+- **Two defaults stated in tool descriptions are declared in the schema.**
+  `memory_recall.include_episodes` ("Default false") and `memory_remember.extractor`
+  ("Defaults to 'api'") had no `default` in their input schemas; each handler supplied
+  the value itself. Both schemas now declare it, so `tools/list` shows it to a client and
+  the validator fills it, and the handlers read the filled value. Behaviour is unchanged:
+  an empty `extractor` is still read as `api`. #296 (B20).
+- **The plugin's approve hook lets the two document readers run without a prompt.**
+  `memory_get_document` and `memory_list_documents` only read, and the server marks both
+  `readOnlyHint`, but they were missing from the hook's list of read-only tools
+  (`READ_ONLY` in `plugin/hooks/approve.py`). So the host asked the person every time an
+  agent read a stored document. The list now matches the server's read-only tools
+  exactly, and a test fails if the two ever differ. #267 (B3).
+- **The plugin's hooks find a local store configured in Codex's, Cursor's or OpenCode's
+  own MCP config.** The hooks read the store's variables from the client's config, and
+  they read only JSON with the servers under `mcpServers` and the variables under `env`.
+  Codex keeps its servers in `~/.codex/config.toml` under `[mcp_servers.<name>]`, Cursor
+  in `~/.cursor/mcp.json`, which the hooks did not read, and OpenCode under `mcp` with the
+  variables under `environment`. On those three hosts session start and recall behaved as
+  if nothing were configured, and said nothing, so memory was absent from every session.
+  The hooks now read all three shapes, and Cursor's record lists `~/.cursor/mcp.json`. On
+  Python 3.10, which has no `tomllib`, a small reader in `plugin/hooks/lib/toml_servers.py`
+  reads the tables and the string values the hooks need from Codex's file. Agentic
+  capture had its own copy of the old reader, so on Codex and OpenCode it started the
+  memvara server with the hook's own interpreter and without the store the client names;
+  it now reads the same blocks. A hosted install was not affected. #341 (B59).
+- **A reply that quotes a caller's argument quotes at most 80 characters of it.** A
+  refusal quoted the whole value it refused, and the reply to a read that found nothing
+  quoted the whole query, so a long argument was copied into the model's context a second
+  time: `memory_recall` with a `k` of 100,000 characters was refused in 100,053
+  characters, and `memory_search` for a 100,000-character query that matched nothing
+  answered in 100,135. Every refusal from the argument checks now quotes at most 80
+  characters of the value and adds `(shortened from N characters)`, and so do the no-match
+  replies of `memory_search`, `memory_recall`, `memory_forget_matching` and
+  `memory_end_matching`, a timestamp that cannot be read (whose parser message repeated
+  the value), a claim id `memory_forget`, `memory_end` or `memory_why` cannot find,
+  `memory_remember`'s `replaces`, and `memory_profile`'s query and bucket names. A string
+  is cut before it is quoted, so an escape such as `\u2028` is never cut in half. A value
+  of 80 characters or fewer is quoted whole, as before. #313 (B36).
 
 ## [0.17.0] — 2026-09-28
 
