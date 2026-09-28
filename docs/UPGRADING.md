@@ -39,6 +39,33 @@ for an unknown argument; the shim now takes each of them and refuses it with
 
 ---
 
+## A retraction far less confident than the value it names does not end it
+
+### What changed
+
+A retraction (`remember(..., polarity=-1)`, or a negative claim extracted from a turn)
+now faces the rule a new value faces: it closes a value on record only when its
+`confidence` is at least half of that value's (`AUTHORITY_SHARE`, 0.5). Below that, the
+value stays live, the retraction is stored only as its tombstone, and the receipt
+reports a `Dispute` on `receipt.disputed` with `retraction=True`. It used to end the
+value whatever its confidence (#307).
+
+### Who this changes
+
+**If you pass a low `confidence` with `polarity=-1`**, for example 0.3 against a value
+written at the default 1.0, the value is no longer ended. Pass the confidence you mean,
+or close the value by id with `delete(claim_id, close="ended")`.
+
+A retraction at the default confidence of 1.0, and the fast path's retractions at 0.95,
+end values exactly as before.
+
+### How to find it in your code
+
+Search for `polarity=-1` next to a `confidence=` argument, and check
+`receipt.disputed` after such a write.
+
+---
+
 ## Erasing through the mem0 layer or an adapter erases every version of the memory
 
 ### What changed

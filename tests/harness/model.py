@@ -230,7 +230,15 @@ class ReferenceStore:
         # no later closure changes.
         closable = [r for r in live if r.invalidated_at is None]
         matches = [r for r in closable if r.obj == op.obj]
-        if not matches:
+        # Only a match the retraction would change: one already ended at or before the
+        # retraction's start, by the same retraction dated in the future and sent before,
+        # is left alone (#349).
+        changed = [r for r in matches if op.close == "retired" or r.valid_to is None
+                   or r.valid_to > max(decide_from, r.valid_from)]
+        # The authority rule a new value faces (#307).
+        closing = [r for r in changed if op.confidence >= AUTHORITY_SHARE * r.confidence]
+        disputed = [r.id for r in changed if r not in closing]
+        if not closing:
             # A tombstone whose expiry has passed does not count as the retraction on
             # record, just as `live_at` above leaves an expired row out of a repeated fact.
             prior = [r for r in self.rows.values()
@@ -238,10 +246,11 @@ class ReferenceStore:
             if prior:
                 keep = min(prior, key=self._tie)
                 keep.observations += 1
-                return Expect(reinforced=[keep.id], reinforced_reported=False)
-            if closable:
+                return Expect(reinforced=[keep.id], reinforced_reported=False,
+                              disputed=disputed)
+            if closable and not matches:
                 return Expect()
-        return self._tombstone(op, matches, decide_from, valid_from, clock_start, t)
+        return self._tombstone(op, closing, disputed, valid_from, clock_start, t)
 
     def _new_row(self, op: Remember, valid_from: datetime | None, clock_start: bool,
                  t: datetime, e: Expect) -> Row:
@@ -331,39 +340,58 @@ class ReferenceStore:
         if not older and op.predicate not in DECLARED:
             existing = len([r for r in live if r.polarity > 0])
             e.accumulated = existing or None
+        # History: a later value is on record, so this one ends where that begins, or
+        # earlier if the caller gave an earlier end.
+        end = op.valid_to
+        if newer:
+            boundary = min(r.valid_from for r in newer)
+            if end is None or end > boundary:
+                end = boundary
+        if end is not None:
+            # `Reconciler.apply`, step 3: a row that is already over is a repeat when a
+            # believed row of its value already holds its whole period (#351).
+            value = (op.user, SUBJECT, op.predicate, op.obj, op.polarity)
+            covering = [r for r in self.rows.values()
+                        if r.value == value and not r.expired(t) and r.recorded_at <= t
+                        and (r.invalidated_at is None or r.invalidated_at > t)
+                        and r.valid_from <= decide_from
+                        and r.valid_to is not None and r.valid_to >= end]
+            if covering:
+                repeat = min(covering, key=self._tie)
+                repeat.observations += 1
+                if op.expires_at is not None:
+                    repeat.expires_at = op.expires_at
+                return Expect(reinforced=[repeat.id])
         keep = [v for v in older if op.confidence >= AUTHORITY_SHARE * v.confidence]
         e.disputed = [v.id for v in older if v not in keep]
         row = self._new_row(op, valid_from, clock_start, t, e)
-        if newer:
-            # History: a later value is on record, so this one ends where that begins, or
-            # earlier if the caller gave an earlier end.
-            boundary = min(r.valid_from for r in newer)
-            if row.valid_to is None or row.valid_to > boundary:
-                row.valid_to = boundary
+        row.valid_to = end
         for v in keep:
             self._close(v, e, row.id, valid_from, op.close, clock_start,
                         op.recorded_at is None)
         return e
 
-    def _tombstone(self, op: Remember, matches: list[Row], decide_from: datetime,
+    def _tombstone(self, op: Remember, matches: list[Row], disputed: list[str],
                    valid_from: datetime | None, clock_start: bool, t: datetime) -> Expect:
-        """A retraction: a row closed on both clocks at the reconciler's clock, then the
-        matching live rows ended at the retraction's own start.
+        """A retraction: a row closed on both clocks at the instant it is recorded, then
+        the matching live rows ended at the retraction's own start.
 
-        The world clock closes at the clock or at the row's own start, whichever is later.
-        That is the rule every closure follows (`types.not_before_start`), so a retraction
-        dated in the future leaves a row whose interval is empty rather than inverted
-        (#275)."""
-        e = Expect()
+        That instant is the reconciler's clock, or the `recorded_at` the write was given,
+        so a backdated tombstone is believed at no instant (#317). The world clock closes
+        there or at the row's own start, whichever is later. That is the rule every
+        closure follows (`types.not_before_start`), so a retraction dated in the future
+        leaves a row whose interval is empty rather than inverted (#275)."""
+        e = Expect(disputed=disputed)
         row = self._new_row(op, valid_from, clock_start, t, e)
-        row.valid_to = None
-        if valid_from is not None and valid_from > t:
-            row.valid_to = valid_from
+        if op.recorded_at is not None:
+            row.invalidated_at = op.recorded_at
+            row.valid_to = max(op.recorded_at, row.valid_from)
         else:
-            e.stamps.append(Stamp(row.id, "valid_to"))
-        row.invalidated_at = t
-        e.stamps.append(Stamp(row.id, "invalidated_at", "recorded_at_of", row.id)
-                        if op.recorded_at is None else Stamp(row.id, "invalidated_at"))
+            e.stamps.append(Stamp(row.id, "invalidated_at", "recorded_at_of", row.id))
+            if valid_from is not None and valid_from > t:
+                row.valid_to = valid_from
+            else:
+                e.stamps.append(Stamp(row.id, "valid_to", "recorded_at_of", row.id))
         for v in sorted(matches, key=self._tie):
             self._close(v, e, row.id, valid_from, op.close, clock_start,
                         op.recorded_at is None)
