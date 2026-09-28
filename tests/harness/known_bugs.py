@@ -50,7 +50,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "that does waits for an interactive measurement"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
-    KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
     KnownBug("B50", 332, "add() drops a turn repeated word for word after the value it "
              "stated has changed"),
     # Found by the framework tests against the real packages.

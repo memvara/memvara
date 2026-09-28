@@ -11,6 +11,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A write receipt read through the hosted client reports `ungrounded` and `polluted`.**
+  The deployment sends both counts, and `RemoteMemvara` never read them, so a hosted
+  receipt always said 0: a caller could not tell that the write refused claims an
+  extraction model proposed, and a server in cloud mode never wrote the note about
+  ungrounded claims. Both are read now, and a deployment that does not send them still
+  hydrates, with 0. #335 (B53).
 - **Recall logs a line when nothing is configured and when nothing matches.** Both
   outcomes were reported only on the status line, and Codex, Copilot and OpenCode show
   none, so on those hosts a missing store and an empty answer left the same trace: no
