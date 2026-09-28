@@ -3,11 +3,8 @@
 The approve hook answers a host's permission check for a memvara tool. It allows a tool
 in its READ_ONLY list and says nothing about any other, which leaves the host to ask the
 person (plugin/hooks/approve.py). That list must be the tools the server marks read-only,
-`readOnlyHint` in its `tools/list`, as a client sees it over stdio.
-
-#267 (B3) is already pinned for the two document tools the list misses
-(test_adv_known_bugs.py). While B3 is registered, those two are left out here, and any
-other difference between the lists fails.
+`readOnlyHint` in its `tools/list`, as a client sees it over stdio. The list used to
+miss the two document readers (#267, B3).
 """
 
 from __future__ import annotations
@@ -26,21 +23,12 @@ from harness.stdio import McpProcess
 
 from . import support
 
-#: The two read-only tools that #267 is about.
-B3_MISSING = frozenset({"memory_get_document", "memory_list_documents"})
-
-
 def _approve_module() -> ModuleType:
     """plugin/hooks/approve.py. plugin/hooks is not a package, so its folder goes on the
     path first."""
     if str(HOOKS_DIR) not in sys.path:
         sys.path.insert(0, str(HOOKS_DIR))
     return importlib.import_module("approve")
-
-
-def _known_gap() -> frozenset[str]:
-    """The tools B3 leaves out of the approve list, while B3 is registered."""
-    return B3_MISSING if "B3" in known_bugs.KNOWN_BUGS else frozenset()
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +66,7 @@ def test_the_approve_list_is_the_servers_read_only_tools(server_tools: dict[str,
     read_only = {name for name, only_reads in server_tools.items() if only_reads}
     allowed = set(_approve_module().READ_ONLY)
     assert allowed - read_only == set(), "approved, but the server does not mark it read-only"
-    assert read_only - allowed <= _known_gap(), "read-only on the server, but not approved"
+    assert read_only <= allowed, "read-only on the server, but not approved"
 
 
 @pytest.mark.parametrize("host", support.HOSTS)
@@ -120,7 +108,7 @@ def test_every_host_approves_exactly_the_read_only_tools(
         approvals: support.Runs, server_tools: dict[str, bool], host: str) -> None:
     wrong = []
     for (asked_on, name, tool), outcome in approvals.results.items():
-        if asked_on != host or tool in _known_gap():
+        if asked_on != host:
             continue
         result = support.result_of(outcome)
         decision = support.decision_of(host, result.reply)

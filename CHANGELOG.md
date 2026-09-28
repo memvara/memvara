@@ -11,6 +11,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The plugin's approve hook lets the two document readers run without a prompt.**
+  `memory_get_document` and `memory_list_documents` only read, and the server marks both
+  `readOnlyHint`, but they were missing from the hook's list of read-only tools
+  (`READ_ONLY` in `plugin/hooks/approve.py`). So the host asked the person every time an
+  agent read a stored document. The list now matches the server's read-only tools
+  exactly, and a test fails if the two ever differ. #267 (B3).
 - **The plugin captures what is said in a headless Claude Code session.** Capture was
   registered on Claude Code as an async Stop hook, so that a 12 to 14 second extraction
   never held a turn open. `claude -p` cancels an async hook when the process exits, so a
