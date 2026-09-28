@@ -1878,6 +1878,7 @@ class IngestStats:
     ended: int = 0
     retired: int = 0
     skipped: int = 0
+    repeated: int = 0
     unextracted: int = 0
     llm_calls: int = 0
     wall_ms: float = 0.0
@@ -1941,6 +1942,7 @@ def ingest(mem: Any, sessions: Iterable[Sequence[Turn]],
         stats.ended += len(receipt.ended)
         stats.retired += len(receipt.retired)
         stats.skipped += receipt.skipped
+        stats.repeated += receipt.repeated
         stats.unextracted += receipt.unextracted
         stats.llm_calls += receipt.llm_calls
     stats.wall_ms = (time.perf_counter() - start) * 1000
@@ -2499,6 +2501,7 @@ def retrieval_block(ingest_stats: IngestStats, read: RetrievalStats) -> str:
          f"{ingest_stats.added:,} / {ingest_stats.reinforced:,} / "
          f"{ingest_stats.ended:,} / {ingest_stats.retired:,}"),
         ("turns carrying no durable fact", f"{ingest_stats.skipped:,}"),
+        ("turns repeating a stored turn or claim", f"{ingest_stats.repeated:,}"),
         ("turns that reached extraction and yielded nothing",
          f"{ingest_stats.unextracted:,}"),
         ("LLM calls on the write path", f"{ingest_stats.llm_calls:,}"),

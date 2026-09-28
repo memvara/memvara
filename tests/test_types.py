@@ -363,6 +363,14 @@ def test_receipt_stays_quiet_when_nothing_was_lost():
     assert "unextracted" not in str(WriteReceipt(added=[mk()]))
 
 
+def test_receipt_shows_repeated_turns_apart_from_skipped_ones():
+    """#439. A repeated turn restated a stored fact, and a skipped turn carried none, so
+    the two are shown as two numbers. `repeated` appears only when non-zero, like the
+    other counts a write rarely moves."""
+    assert "skip=1 repeated=2" in str(WriteReceipt(skipped=1, repeated=2))
+    assert "repeated" not in str(WriteReceipt(skipped=1))
+
+
 def test_the_receipt_splits_what_it_closed_by_which_clock_stopped():
     """One field could not answer "which of the two happened", and callers had to ask.
 

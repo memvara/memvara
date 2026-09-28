@@ -70,7 +70,9 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
    claim for 2023-05-01, states another value and goes on to extraction. A restatement
    dated before the claim begins is not a repeat either (#318): tier 0 sends the claim's
    value, dated to the turn, to the reconciler, which stores it for the earlier period as
-   it does for `remember()`.
+   it does for `remember()`. Each exact repeat and each restatement is counted on
+   `receipt.repeated`, not on `receipt.skipped`, because the turn carries a fact that is
+   already stored (#439).
 
    The two cases cost different amounts. A turn said again after its value ended is
    extracted again, so a turn that needed the model the first time costs a model call
@@ -78,7 +80,7 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
    rebuilt from the old claims. A near-duplicate dated before its claim costs no call,
    because tier 0 already knows which claim the turn restates and only the date is new.
 2. **Tier 1 needs no model.** `SalienceGate` drops turns that carry no durable fact and
-   counts them on `receipt.skipped`. What survives goes to `FastExtractor`, which emits a
+   counts them on `receipt.skipped`, which counts nothing else. What survives goes to `FastExtractor`, which emits a
    claim only for a form it recognises with confidence and emits nothing otherwise.
 3. **Tier 2 is the only tier that calls a model.** The turns that passed the gate and
    produced no fast-path claim are batched into one `llm.extract()` call. A predicate the

@@ -171,6 +171,18 @@ def test_add_reaches_the_ingest_endpoint_and_returns_a_receipt(recorded):
     assert isinstance(receipt, WriteReceipt) and receipt.episode_ids == ["ep_1"]
 
 
+def test_a_hosted_receipt_reads_repeated_turns_and_hydrates_without_them(recorded):
+    """#439. A deployment that counts repeats apart sends `repeated` beside `skipped`. A
+    deployment older than that sends no `repeated` key and still counts its repeats in
+    `skipped`. Its receipt must still hydrate, with `repeated` at 0: that is the number it
+    reported, and the client has no way to split `skipped` after the fact."""
+    older = recorded(_receipt(skipped=2)).add("I moved to Berlin")
+    assert (older.skipped, older.repeated) == (2, 0)
+
+    newer = recorded(_receipt(skipped=1, repeated=1)).add("I moved to Berlin")
+    assert (newer.skipped, newer.repeated) == (1, 1)
+
+
 def test_add_folds_an_unknown_message_key_into_metadata(recorded):
     """The facade's request models are `extra="forbid"`, so a stray key beside `role` and
     `content` is a 422 rather than a field somebody quietly loses."""

@@ -308,7 +308,7 @@ def test_re_adding_identical_content_reinforces_without_a_call():
     assert store.stats()["claims"] == before          # no new claim
     assert store.get_claim(claim_id).observation_count == 2
     assert [c.id for c in receipt.reinforced] == [claim_id]
-    assert receipt.skipped == 1
+    assert receipt.repeated == 1
     store.close()
 
 
@@ -349,6 +349,40 @@ def test_near_duplicate_restatement_reinforces_instead_of_adding():
     store.close()
 
 
+def test_a_repeated_turn_is_counted_apart_from_a_turn_with_no_fact():
+    """#439. `skipped` counts turns that carry no durable fact, and the receipt showed it
+    as `no-fact`. Tier 0 added its repeats to the same number: an exact repeat of a stored
+    turn, and a turn worded like a stored claim. Both carry a fact, one already stored, so
+    a caller who wrote five restatements read `no-fact 5` and concluded the turns were
+    empty. A repeat is now counted in `repeated`, and `skipped` keeps only the turn the
+    salience gate dropped."""
+    llm = CountingLLM()
+    pipe, store, _ = build(llm)
+    claim = pipe.add([ep("I live in Berlin.")]).added[0]
+
+    receipt = pipe.add([ep("thanks"), ep("I live in Berlin."), ep(claim.text)])
+
+    assert receipt.skipped == 1, "only the acknowledgement carried no fact"
+    assert receipt.repeated == 2, "the exact repeat and the near-duplicate, one each"
+    assert [c.id for c in receipt.reinforced] == [claim.id, claim.id]
+    assert receipt.added == [] and llm.total_calls == 0
+    store.close()
+
+
+@pytest.mark.parametrize("second", ["exact", "near"])
+def test_each_kind_of_repeat_counts_one(second):
+    """The two kinds of repeat tier 0 finds, one at a time, so a count of 2 above cannot
+    come from one kind counted twice."""
+    pipe, store, _ = build()
+    claim = pipe.add([ep("I live in Berlin.")]).added[0]
+    turn = "I live in Berlin." if second == "exact" else claim.text
+
+    receipt = pipe.add([ep(turn)])
+
+    assert (receipt.skipped, receipt.repeated) == (0, 1)
+    store.close()
+
+
 def test_the_claims_a_batch_restates_are_read_again_in_one_query(monkeypatch):
     """The claim transaction reads every claim tier 0 queued for a reinforcement again,
     under the write lock, before it reinforces it. It read them one `get_claim` at a time,
@@ -369,7 +403,7 @@ def test_the_claims_a_batch_restates_are_read_again_in_one_query(monkeypatch):
     turns = [ep(berlin.text), ep(berlin.text + "."), ep(acme.text)]
     receipt = pipe.add(turns)
 
-    assert receipt.skipped == 3 and receipt.added == []
+    assert receipt.repeated == 3 and receipt.added == []
     assert asked == [sorted([berlin.id, acme.id])]
     stored = store.get_claim(berlin.id)
     assert stored.observation_count == 3
@@ -547,7 +581,7 @@ def test_a_repeat_does_not_reinforce_a_claim_that_has_been_retired():
     receipt = pipe.add([ep("I live in Berlin.")])
 
     assert receipt.reinforced == []
-    assert receipt.skipped == 1, "the turn is still recognised as a repeat"
+    assert receipt.repeated == 1, "the turn is still recognised as a repeat"
     assert store.get_claim(claim.id).observation_count == 1
     store.close()
 
@@ -579,7 +613,7 @@ def test_a_turn_repeated_after_its_value_ended_is_stored_and_extracted():
     receipt = pipe.add([again])
 
     assert receipt.episode_ids == [again.id] != first.episode_ids
-    assert receipt.skipped == 0
+    assert receipt.repeated == 0
     assert [(c.object, c.valid_from) for c in receipt.added] == [("Berlin", again.ts)]
     assert lives_in(store) == ["Berlin"]
     assert store.stats()["episodes"] == 3
@@ -598,7 +632,7 @@ def test_a_replay_converges_although_the_value_ended_after_the_turn():
     replay = pipe.add([ep(text, ts=at) for text, at in turns])
 
     assert replay.episode_ids == first.episode_ids
-    assert replay.skipped == 2 and replay.added == []
+    assert replay.repeated == 2 and replay.added == []
     assert store.stats()["episodes"] == 2 and store.stats()["claims"] == claims
     assert lives_in(store) == ["Paris"]
     store.close()
@@ -633,7 +667,7 @@ def test_a_copy_dated_before_every_stored_copy_is_stored_and_extracted():
 
     receipt = pipe.add([earlier])
 
-    assert receipt.episode_ids == [earlier.id] and receipt.skipped == 0
+    assert receipt.episode_ids == [earlier.id] and receipt.repeated == 0
     [added] = receipt.added
     assert (added.valid_from, added.valid_to) == (T0, T0 + 30 * DAY)
     assert first.added[0].id not in {c.id for c in receipt.reinforced}
@@ -651,7 +685,7 @@ def test_a_batch_holding_a_turn_and_an_earlier_copy_stores_both():
     receipt = pipe.add([later, earlier, between])
 
     assert receipt.episode_ids == [later.id, earlier.id, earlier.id]
-    assert receipt.skipped == 1 and store.stats()["episodes"] == 2
+    assert receipt.repeated == 1 and store.stats()["episodes"] == 2
     store.close()
 
 
@@ -680,8 +714,8 @@ def test_a_store_without_the_time_argument_still_finds_repeats():
     retry = pipe.add([ep("I live in Berlin.", ts=T0 + 30 * DAY)])
     earlier = pipe.add([ep("I live in Berlin.", ts=T0)])
 
-    assert retry.episode_ids == first.episode_ids and retry.skipped == 1
-    assert earlier.episode_ids != first.episode_ids and earlier.skipped == 0
+    assert retry.episode_ids == first.episode_ids and retry.repeated == 1
+    assert earlier.episode_ids != first.episode_ids and earlier.repeated == 0
     assert inner.stats()["episodes"] == 2
     inner.close()
 
@@ -704,7 +738,7 @@ def test_a_copy_dated_after_the_turn_is_ignored_when_the_store_ignores_the_time(
 
     earlier = pipe.add([ep("I live in Berlin.", ts=T0)])
 
-    assert earlier.episode_ids != first.episode_ids and earlier.skipped == 0
+    assert earlier.episode_ids != first.episode_ids and earlier.repeated == 0
     assert inner.stats()["episodes"] == 2
     inner.close()
 
@@ -790,7 +824,7 @@ def test_a_near_duplicate_dated_before_the_claim_is_kept_for_the_earlier_period(
     assert (added.object, added.valid_from, added.valid_to) == ("tea", T0, april.valid_from)
     assert (added.sources, added.scope) == ([turn.id], SCOPE)
     assert (added.derivation, added.extractor) == (Derivation.FAST_PATH, "tier0/restated")
-    assert receipt.skipped == 0 and receipt.reinforced == []
+    assert receipt.repeated == 0 and receipt.reinforced == []
     assert again.added == [] and [c.id for c in again.reinforced] == [added.id]
     assert store.get_claim(april.id).observation_count == 1
     assert llm.total_calls == 0
@@ -913,7 +947,7 @@ def test_a_restatement_whose_turn_is_purged_before_it_is_applied_reinforces_noth
 
         monkeypatch.setattr(WritePipeline, "_tier1", tier1)
         receipt = adder.scope(session="s1").add(tea.text)
-        assert receipt.skipped == 1, "the turn was not read as a restatement"
+        assert receipt.repeated == 1, "the turn was not read as a restatement"
         assert receipt.reinforced == []
         assert other.store.get_claim(tea.id) == before, "the claim was reinforced"
     finally:
@@ -1852,7 +1886,8 @@ def test_empty_input():
     llm = CountingLLM()
     pipe, store, _ = build(llm)
     receipt = pipe.add([])
-    assert (receipt.llm_calls, receipt.added, receipt.skipped) == (0, [], 0)
+    assert (receipt.llm_calls, receipt.added, receipt.skipped,
+            receipt.repeated) == (0, [], 0, 0)
     assert llm.total_calls == 0
     store.close()
 
@@ -2003,7 +2038,7 @@ def test_the_whole_pipeline_is_deterministic():
         for t in turns:
             r = pipe.add([Episode(content=t, scope=SCOPE)])
             totals.append((r.llm_calls, len(r.added), len(r.invalidated),
-                           len(r.reinforced), r.skipped))
+                           len(r.reinforced), r.skipped, r.repeated))
         result = (totals, live(store))
         store.close()
         return result
@@ -2175,7 +2210,7 @@ def test_a_retry_after_that_crash_converges_instead_of_duplicating():
     pipe.reconciler.apply = original
     receipt = pipe.add([ep(text)])
     assert receipt.episode_ids == [broken.id]
-    assert receipt.skipped == 1
+    assert receipt.repeated == 1
     assert store.stats()["episodes"] == 1
     assert live(store) == []
     # Still findable, as a turn rather than as a fact.
@@ -2194,7 +2229,7 @@ def test_a_line_repeated_inside_one_batch_is_still_stored_once():
     first, second = ep("My name is Goldy."), ep("My name is Goldy.")
     receipt = pipe.add([first, second, ep("I live in Berlin.")])
     assert receipt.episode_ids == [first.id, first.id, receipt.episode_ids[2]]
-    assert receipt.skipped == 1
+    assert receipt.repeated == 1
     assert store.stats()["episodes"] == 2
     store.close()
 

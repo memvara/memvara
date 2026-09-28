@@ -1106,8 +1106,17 @@ suggestion must not turn it into an exception the caller retries.
   period, as it does for `remember()` (#283). No model is called. A retraction is never
   a near-duplicate, because its tombstone is closed as it is written and the search
   finds only live claims.
+
+  Every turn tier 0 reads as a repeat, exact or near-duplicate, is counted in
+  `receipt.repeated`. The count is made when tier 0 decides, so a repeat whose claims
+  another writer closed before the claim transaction still counts, although
+  `receipt.reinforced` does not list those claims. A near-duplicate dated before its claim
+  is not a repeat and is not counted. Until #439 these turns were counted in
+  `receipt.skipped`, which the MCP summary shows as `no-fact`, so a restatement read as a
+  turn with nothing in it.
 - **Tier 1 (no LLM):** `SalienceGate` drops turns carrying no durable fact
-  (count them in `receipt.skipped`), then `FastExtractor` handles what it can.
+  (count them in `receipt.skipped`, and only them), then `FastExtractor` handles what it
+  can.
 - **Tier 2 (LLM):** only the turns that survived both and produced no fast-path claim are
   batched into a single `llm.extract(...)` call. Map `source_index` back to the
   originating episode for provenance. Unknown predicates trigger one
@@ -2782,7 +2791,9 @@ seconds for 300,000 claims on a loaded laptop, 88.5 microseconds a claim, so ten
 covers about 6.8 million claims. A holder that dies lets go at once, so the wait runs long
 only while the holder is alive. The lock is asked for in tries of a quarter of a second
 (`_LOCK_TRY`, in `_reserve`), because Python acts on Ctrl-C only between calls into SQLite:
-one ten-minute wait inside SQLite would have held an interrupt back until it ended. The
+one ten-minute wait inside SQLite would have held an interrupt back until it ended. Python
+loses an interrupt that arrives while it is running a finalizer, such as a `__del__`, as it
+does in any program, and a second Ctrl-C then ends the wait within one try (#440). The
 60-second wait for a clear, in `_hold_presence`, is still one wait inside SQLite, as it was
 before this change. The reserved lock leaves every open store's shared lock alone, so a
 store that is merely open delays nobody. `_creating` lets go by closing its connection,

@@ -299,7 +299,7 @@ def test_two_turns_differing_only_inside_a_redacted_span_collapse_into_one():
     second = mem.add("call me at 555-987-6543")
 
     assert second.episode_ids == first.episode_ids
-    assert second.skipped == 1
+    assert second.repeated == 1
     assert len(list(mem.store.iter_episodes())) == 1
     mem.close()
 

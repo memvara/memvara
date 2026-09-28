@@ -1196,7 +1196,10 @@ def _receipt(value: WriteReceipt, extractor: str) -> dict[str, Any]:
             "added": [_memory(c) for c in value.added],
             "invalidated": [_memory(c) for c in value.invalidated],
             "reinforced": [_memory(c) for c in value.reinforced],
-            "skipped": value.skipped, "unextracted": value.unextracted,
+            "skipped": value.skipped,
+            # The field memvara-cloud's renderer is to send for #439. A deployment that
+            # does not send it counts its repeats in `skipped`.
+            "repeated": value.repeated, "unextracted": value.unextracted,
             "ungrounded": value.ungrounded, "polluted": value.polluted,
             "unregistered": value.unregistered, "llm_calls": value.llm_calls,
             "latency_ms": value.latency_ms, "deferred": value.deferred, "note": note,
