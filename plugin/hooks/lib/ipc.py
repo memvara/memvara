@@ -490,8 +490,17 @@ def _read_config(path: str) -> "dict | None":
     return data if isinstance(data, dict) else None
 
 
-def _read_server_env() -> "dict[str, str]":
-    """The client config files' memvara env block, read from disk. See `server_env`."""
+def server_blocks() -> "list[dict]":
+    """Every memvara server block in the client's config files, in the order they are read,
+    each as `{"command": str | None, "args": list, "env": dict | None}` whatever shape the
+    client keeps it in.
+
+    OpenCode puts the command and its arguments in one list, which is split here. The
+    hooks' `server_env` takes the first block with variables, and agentic capture
+    (`lib.agentic`) takes the first with a command, so the two read one list and cannot
+    disagree about the shapes they understand.
+    """
+    found = []
     for path in _CLIENT_CONFIGS:
         data = _read_config(path)
         if data is None:
@@ -501,11 +510,26 @@ def _read_server_env() -> "dict[str, str]":
             if not isinstance(servers, dict):
                 continue
             for name, block in servers.items():
-                if "memvara" not in name.lower() or not isinstance(block, dict):
+                if "memvara" not in str(name).lower() or not isinstance(block, dict):
                     continue
+                command, args = block.get("command"), block.get("args")
+                if isinstance(command, list):
+                    command, args = (command[0] if command else None), command[1:]
                 env = block.get(env_key)
-                if isinstance(env, dict):
-                    return {str(k): str(v) for k, v in env.items()}
+                found.append({
+                    "command": command if isinstance(command, str) else None,
+                    "args": [str(arg) for arg in args] if isinstance(args, list) else [],
+                    "env": ({str(k): str(v) for k, v in env.items()}
+                            if isinstance(env, dict) else None),
+                })
+    return found
+
+
+def _read_server_env() -> "dict[str, str]":
+    """The client config files' memvara env block, read from disk. See `server_env`."""
+    for block in server_blocks():
+        if block["env"] is not None:
+            return block["env"]
     return {}
 
 

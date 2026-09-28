@@ -20,8 +20,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   if nothing were configured, and said nothing, so memory was absent from every session.
   The hooks now read all three shapes, and Cursor's record lists `~/.cursor/mcp.json`. On
   Python 3.10, which has no `tomllib`, a small reader in `plugin/hooks/lib/toml_servers.py`
-  reads the tables and the string values the hooks need from Codex's file. A hosted
-  install was not affected. #341 (B59).
+  reads the tables and the string values the hooks need from Codex's file. Agentic
+  capture had its own copy of the old reader, so on Codex and OpenCode it started the
+  memvara server with the hook's own interpreter and without the store the client names;
+  it now reads the same blocks. A hosted install was not affected. #341 (B59).
 
 ## [0.17.0] — 2026-09-28
 
