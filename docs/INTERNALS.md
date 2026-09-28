@@ -643,6 +643,20 @@ claim:
    the claim it restates here too, rather than taking it for a repeat (#318); see the
    tier-0 entry under *`memvara/write/`* below.
 
+   **A claim that is already over repeats the claim that holds its period.** A claim is
+   over when the caller gave its `valid_to`, or when a different value that begins later
+   ends it (step 2: a single-valued slot stores a value dated before the live one as
+   history). Such a claim is not live, so the check above cannot find it. After step 2
+   has set the candidate's end, the reconciler looks for a claim of the same value that
+   the store believes, that the writer can see, and that holds the candidate's whole
+   period: it begins no later than the candidate (`_is_after`, so precision counts) and
+   ends no earlier. If there is one, the candidate is a duplicate of it, which is
+   reinforced, and nothing is inserted. A repeat that names an `expires_at` counts only a
+   claim in exactly its own scope, as above. Without this, `remember("lives_in", "Rome",
+   valid_from=January)` written twice while Paris is live from March stored January to
+   March twice, and every read of February returned Rome twice (#351). A claim that
+   holds only part of the period does not count, and the candidate is stored whole.
+
    "Can see" is `Scope.sees`: the writer's own scope and the broader ones it reads, such
    as the user-wide scope above a project. `value_key` covers the owner and not the
    project, agent or session, so the lookup also finds the same value in a sibling
@@ -665,7 +679,8 @@ claim:
 
    **A candidate closes a victim only if it is worth at least half of it**, measured on
    `confidence` — `AUTHORITY_SHARE`. Below that the incumbent stays live, the candidate is
-   stored beside it, the action is `add`, and a `Dispute` names both values. The rule
+   stored beside it, the action is `add`, and a `Dispute` names both values. A retraction
+   faces the same rule; step 3 says what it does instead. The rule
    reads `confidence` and not `Derivation` because the write paths already encode source
    authority as a number and say so — `write.fast.CONFIDENCE` is 0.95 rather than 1.0,
    with a comment explaining that the headroom is what keeps user-asserted claims above
@@ -719,15 +734,37 @@ claim:
    `forget()` uses when a store has it, is optional.
 3. **Retraction** — candidate has `polarity == -1`: close out matching live claims in a
    scope the candidate can reach (see "A write never closes a sibling's claim" below) and
-   store the negative claim as a tombstone (invalidated *and* ended at `now`, so it can
-   never be live) rather than as a live fact. Like every other closure
+   store the negative claim as a tombstone rather than as a live fact. The tombstone is
+   invalidated *and* ended at the instant its write is recorded, so its belief interval
+   is empty and no read at any instant returns it. That instant is `now` for an ordinary
+   write and the given `recorded_at` for a backdated one. A backdated tombstone used to
+   close at `now`, so reads of the past between its `recorded_at` and the call returned
+   it as a live negative claim (#317). Like every other closure
    (`types.not_before_start`), the tombstone's world clock never closes before its own
    `valid_from`. So a retraction dated in the future leaves a tombstone whose interval is
-   empty rather than inverted, and its belief clock still closes at `now`. The matches
-   are **ended**, not retired:
+   empty rather than inverted, and its belief clock still closes when it is recorded.
+   The matches are **ended**, not retired:
    every negative form the write path produces is "no longer" / "used to" / "not any
    more", which is the world moving on. `close="retired"` is the caller saying the
    original was never true.
+
+   **A retraction faces the authority rule** of step 2. A match that the retraction is
+   worth less than half of (`AUTHORITY_SHARE`) stays live and is reported as a `Dispute`
+   with `retraction=True`, and the tombstone is still stored. The model tier produces
+   negatives at whatever confidence it gives, and before #307 one at 0.05 ended a fact the
+   user stated at 1.00.
+
+   **A retraction closes only a match it changes.** Ending a match whose world clock
+   already stops at or before the retraction's `valid_from` changes nothing, so such a
+   match is neither closed again nor reported. That is the case of the same retraction
+   dated in the future, sent a second time: its target stays live until that date, so the
+   lookup still finds it. When the retraction closes nothing, and a tombstone for the
+   same value that the writer can see is on record, the retraction is a repeat: it
+   reinforces that tombstone, reports nothing ended, and stores no second one. A dispute
+   is still reported on a repeat, because the value it names is still live. Before #349 a
+   repeat of a future-dated retraction ended its target again, wrote one more tombstone
+   and reported the value ended every time. A retraction that names a value on record and
+   closes nothing, with no tombstone on record, still stores its tombstone.
 4. **Accumulate** — otherwise insert. `action="add"`.
 
 ```python

@@ -113,7 +113,18 @@ value's stored claims begin, or reinforces a stored claim that already holds tha
 period),
 conflict (the predicate holds one value, so the incoming claim supersedes the old one),
 retraction (the incoming claim has `polarity == -1`, so matching live claims are closed out),
-or accumulate (insert alongside). `Memvara.supersede()` is the explicit form of the second
+or accumulate (insert alongside). An incoming claim that is already over, because the
+caller gave its end or because a later value ends it, is also an exact duplicate when a
+stored claim of its value that the writer can see holds its whole period; that claim is
+reinforced and nothing is inserted.
+
+A retraction is stored as a tombstone, closed on both clocks at the instant its write is
+recorded, which is the given `recorded_at` for a backdated write, so no read at any
+instant returns it. It faces the same authority rule as a new value (`AUTHORITY_SHARE`):
+a match it is worth less than half of stays live and is reported as a `Dispute` with
+`retraction=True`. It closes only a match it changes, so a second copy of a retraction
+dated in the future closes nothing, reinforces the tombstone on record and reports
+nothing ended. `Memvara.supersede()` is the explicit form of the second
 outcome for a caller who already knows which claim is being replaced. In a conflict, the old
 values are every value believed and neither retired nor ended yet, including one written to
 begin later, that is true at some instant the incoming claim is true; `docs/INTERNALS.md` has

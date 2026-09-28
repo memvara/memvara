@@ -117,7 +117,10 @@ MASSED_SHARE = 0.1
 
 #: The least a candidate may be worth, as a share of the claim it would close, and still
 #: close it. Below this the incumbent stays live, the candidate is stored beside it, and
-#: the write reports a `Dispute`.
+#: the write reports a `Dispute`. A retraction is a candidate too: below this share the
+#: value it names stays live, the retraction is kept only as its tombstone, and the
+#: `Dispute` is marked as a retraction's. Before #307 a retraction skipped the rule, so a
+#: model's retraction at 0.05 ended a fact the user stated at 1.0.
 #:
 #: **Why confidence is the axis, and `Derivation` is not.** The write paths already encode
 #: source authority as a number, deliberately: `write.fast.CONFIDENCE` is 0.95 rather than
@@ -353,6 +356,7 @@ class Reconciler:
         # 1. Exact duplicate: the same assertion is already live. Re-observation is
         #    evidence, not a new fact.
         separate = False
+        found: Sequence[Claim] = ()
         if claim.polarity > 0:
             found = self.store.find_by_value(tenant, claim.value_key)
             # Reinforcing an expired claim would hand this new statement to the sweep.
@@ -413,33 +417,7 @@ class Reconciler:
             elif live_same:
                 keep = self._canonical_of(live_same)
             if keep is not None:
-                # Decided before the write, because `reinforce` performs the single
-                # `put_claim` that persists both the reinforcement and the re-filing.
-                # Reporting it afterwards would need a second write for no gain.
-                if (asserted_type is MemoryType.PROCEDURAL
-                        and not self._may_be_procedural(keep)):
-                    # The candidate was already refused above; the same rule applies to
-                    # the type asserted for the claim on record.
-                    asserted_type = MemoryType.SEMANTIC
-                retyped = self._retype(keep, asserted_type) or self.file_by_subject(keep)
-                if claim.expires_at is not None and claim.derivation is Derivation.USER:
-                    # A repeat that names an expiry puts it on the claim on record, which
-                    # is in this repeat's own scope (see above) and which `reinforce`
-                    # then writes. Otherwise the expiry would be dropped with the
-                    # candidate, and a fact the caller asked to have erased would stay
-                    # forever. A repeat that names none leaves an existing expiry alone,
-                    # as an omitted `memory_type` does.
-                    #
-                    # Only a caller's repeat does this. A model's expiry is kept only on
-                    # a claim its proposal creates: a model repeating a claim on record
-                    # reinforces it and leaves its expiry as it was, because an expiry
-                    # erases, and a model may neither retire nor erase anything.
-                    keep.expires_at = claim.expires_at
-                    keep.expire_reason = claim.expire_reason
-                return ReconcileResult(
-                    "reinforce",
-                    self.reinforce(keep, claim.sources, self._observed_at(claim, t)),
-                    [], retyped=retyped, restated=restated)
+                return self._repeat(claim, keep, t, asserted_type, restated)
 
         # 2. Retraction: the user is taking something back.
         if claim.polarity < 0:
@@ -447,6 +425,29 @@ class Reconciler:
 
         # 3. Conflict, then 4. accumulate.
         superseded, newer = self._victims(claim, t, owner)
+        if newer:
+            # This claim is history: something already on record was true *later*. Close
+            # its valid interval where the next value begins, so it is retrievable via
+            # `as_of` and `history` but never answers a present-tense question. It is not
+            # invalidated — we still believe it, it simply stopped being true.
+            boundary = min(c.valid_from for c in newer)
+            if claim.valid_to is None or claim.valid_to > boundary:
+                claim.valid_to = boundary
+        if claim.valid_to is not None:
+            # A claim that is already over, because a later value ends it or because the
+            # caller gave its end, is a repeat when a claim of the same value that the
+            # store believes and the writer can see already holds its whole period. The
+            # duplicate check in step 1 sees live claims only, and a claim whose period is
+            # over is not live, so without this the same write made twice stored its
+            # period twice, and every read of that period returned the value twice (#351).
+            held = self._held(claim, found, t, owner)
+            if claim.expires_at is not None:
+                # As in step 1: a repeat that names an expiry reinforces only a claim in
+                # exactly its own scope, so the expiry cannot land on a broader claim.
+                held = [c for c in held if c.scope == claim.scope]
+            keep = self._covering(claim, held, claim.valid_to)
+            if keep is not None:
+                return self._repeat(claim, keep, t, asserted_type, None)
         # Before `put_claim`, or this claim is itself an occupant of the slot it is
         # asking about. `superseded` first, so the ordinary single-valued write —
         # registered predicate, victim found — short-circuits without a lookup. It is
@@ -458,14 +459,6 @@ class Reconciler:
         accumulated = (None if superseded or separate
                        else self._accumulation(claim, t, owner))
         superseded, disputed = self._outranked(claim, superseded)
-        if newer:
-            # This claim is history: something already on record was true *later*. Close
-            # its valid interval where the next value begins, so it is retrievable via
-            # `as_of` and `history` but never answers a present-tense question. It is not
-            # invalidated — we still believe it, it simply stopped being true.
-            boundary = min(c.valid_from for c in newer)
-            if claim.valid_to is None or claim.valid_to > boundary:
-                claim.valid_to = boundary
         self.store.put_claim(claim)
         if superseded:
             # The new value's `valid_from` is when the old one stopped being true — not
@@ -477,6 +470,42 @@ class Reconciler:
                                    retyped=refiled)
         return ReconcileResult("add", claim, [], accumulated, disputed=disputed,
                                retyped=refiled)
+
+    def _repeat(self, claim: Claim, keep: Claim, t: datetime,
+                asserted_type: MemoryType | None,
+                restated: Claim | None) -> ReconcileResult:
+        """Reinforce `keep`, the claim on record that `claim` repeats, and report it.
+
+        Every repeat ends here: a live duplicate, a restatement of an earlier period that
+        a stored claim already holds, and a claim already over whose period a stored claim
+        holds. So each of them re-files the claim and carries an expiry the same way.
+        """
+        # Decided before the write, because `reinforce` performs the single `put_claim`
+        # that persists both the reinforcement and the re-filing. Reporting it afterwards
+        # would need a second write for no gain.
+        if (asserted_type is MemoryType.PROCEDURAL
+                and not self._may_be_procedural(keep)):
+            # The candidate was already refused; the same rule applies to the type
+            # asserted for the claim on record.
+            asserted_type = MemoryType.SEMANTIC
+        retyped = self._retype(keep, asserted_type) or self.file_by_subject(keep)
+        if claim.expires_at is not None and claim.derivation is Derivation.USER:
+            # A repeat that names an expiry puts it on the claim on record, which is in
+            # this repeat's own scope (each caller sees to that) and which `reinforce`
+            # then writes. Otherwise the expiry would be dropped with the candidate, and a
+            # fact the caller asked to have erased would stay forever. A repeat that names
+            # none leaves an existing expiry alone, as an omitted `memory_type` does.
+            #
+            # Only a caller's repeat does this. A model's expiry is kept only on a claim
+            # its proposal creates: a model repeating a claim on record reinforces it and
+            # leaves its expiry as it was, because an expiry erases, and a model may
+            # neither retire nor erase anything.
+            keep.expires_at = claim.expires_at
+            keep.expire_reason = claim.expire_reason
+        return ReconcileResult(
+            "reinforce",
+            self.reinforce(keep, claim.sources, self._observed_at(claim, t)),
+            [], retyped=retyped, restated=restated)
 
     @staticmethod
     def _may_be_procedural(claim: Claim) -> bool:
@@ -799,12 +828,7 @@ class Reconciler:
         expired one is gone to every read, and a claim in a sibling project, agent or
         session is not one the writer can read.
         """
-        hide = getattr(self.store, "hide_expired", True)
-        held = [c for c in found
-                if owner_key(c.scope) == owner and claim.scope.sees(c.scope)
-                and c.recorded_at <= t
-                and (c.invalidated_at is None or c.invalidated_at > t)
-                and not (hide and expired(c, t))]
+        held = self._held(claim, found, t, owner)
         end = min(c.valid_from for c in seen)
         while True:
             reaching = [c.valid_from for c in held
@@ -815,9 +839,33 @@ class Reconciler:
             end = min(reaching)
         if claim.valid_to is not None and claim.valid_to < end:
             end = claim.valid_to
+        return end, self._covering(claim, held, end)
+
+    def _held(self, claim: Claim, found: Sequence[Claim], t: datetime,
+              owner: str) -> list[Claim]:
+        """The claims in `found`, the stored claims of `claim`'s value, that are on
+        record for its writer: the store believes them at `t`, the writer can see them,
+        and their expiry has not passed.
+
+        A retired claim says the record was wrong, an expired one is gone to every read,
+        and a claim in a sibling project, agent or session is not one the writer can
+        read, so none of those counts.
+        """
+        hide = getattr(self.store, "hide_expired", True)
+        return [c for c in found
+                if owner_key(c.scope) == owner and claim.scope.sees(c.scope)
+                and c.recorded_at <= t
+                and (c.invalidated_at is None or c.invalidated_at > t)
+                and not (hide and expired(c, t))]
+
+    def _covering(self, claim: Claim, held: Sequence[Claim],
+                  end: datetime) -> Claim | None:
+        """The claim in `held` that already holds the whole period from `claim`'s start to
+        `end`, or `None`. With more than one, the earliest recorded, as `_canonical_of`
+        chooses."""
         covering = [c for c in held if c.valid_to is not None and c.valid_to >= end
                     and not _is_after(c, claim)]
-        return end, (self._canonical_of(covering) if covering else None)
+        return self._canonical_of(covering) if covering else None
 
     def _occupants(self, tenant: str, fact_key: str, t: datetime,
                    owner: str) -> list[Claim]:
@@ -1072,7 +1120,23 @@ class Reconciler:
             matches = list(slot)
         matches.sort(key=lambda c: (c.recorded_at, c.id))
 
-        if not matches:
+        # Only a match this retraction would change counts as one it closes. Ending a claim
+        # whose world clock already stops at or before the retraction's start changes
+        # nothing, and that is exactly the target of the same retraction dated in the
+        # future, sent before: it stays live until that date, so it is still found here.
+        # Closing it again rewrote the claim to the same instant, reported it as ended
+        # again and wrote one more tombstone on every repeat (#349).
+        changed = [c for c in matches if close == "retired" or c.valid_to is None
+                   or as_utc(c.valid_to) > not_before_start(claim.valid_from, c)]
+        # A retraction faces the authority rule a new value faces (`AUTHORITY_SHARE`). A
+        # model reading a turn produces negatives too, at whatever confidence it gives,
+        # and one it marked as a guess must not end a fact someone stated. Such a match
+        # stays live and is reported as a `Dispute`, as it would be against a new value
+        # at the same confidence (#307).
+        closing, disputed = self._outranked(claim, changed)
+        disputed = [replace(d, retraction=True) for d in disputed]
+
+        if not closing:
             # Folding this retraction into an expired tombstone would have the sweep
             # erase this one too. And only a tombstone the writer can see counts as this
             # retraction already processed, by the rule the re-observation branch above
@@ -1082,7 +1146,10 @@ class Reconciler:
                 if owner_key(c.scope) == owner), t)
             if prior:
                 # We have already processed this exact retraction; re-running it must not
-                # accumulate tombstones. Provenance still merges.
+                # accumulate tombstones. Provenance still merges. A match the retraction
+                # is not confident enough to end is still reported, because it is still
+                # live, and an empty receipt would read as a retraction that named
+                # nothing on record.
                 #
                 # Deliberately no `_retype` here, unlike the re-observation branch above.
                 # `keep` is a retraction tombstone rather than a fact, and a caller
@@ -1094,8 +1161,8 @@ class Reconciler:
                 return ReconcileResult(
                     "noop",
                     self.reinforce(keep, claim.sources, self._observed_at(claim, t)),
-                    [])
-            if target and slot:
+                    [], disputed=disputed)
+            if target and slot and not matches:
                 # A named retraction that hit nothing. Object matching is exact (modulo
                 # entity identity), so "peanut" does not retract "Peanuts" — and writing
                 # a tombstone here would leave a record that looks exactly like one that
@@ -1109,30 +1176,30 @@ class Reconciler:
         # The retraction is stored as a tombstone: born already invalidated, so it can
         # never be live and never answers a query, but "why did you stop believing that?"
         # still has an answer with source episodes attached. Discarding it would be the
-        # only place in the system where evidence is thrown away.
+        # only place in the system where evidence is thrown away. It is stored when every
+        # match outranked it too, as the tombstone of a retraction that was disputed.
         #
         # Both axes here, and this is the one row where that is right. A tombstone is not
         # an assertion about the world at all — it is bookkeeping — so there is no true
         # interval to preserve and nothing an audit loses by it being unreachable from
         # either clock. Everything the retraction *says* lives on the claims below.
-        claim.invalidated_at = t
-        # The world clock closes at the write, or at the tombstone's own start when the
-        # retraction is dated later than the write. Every other closure follows the same
-        # rule (`not_before_start`). Without it, a retraction dated in the future stored
-        # a row that ended before it began. With it, that row's interval is empty.
-        claim.valid_to = not_before_start(t, claim)
+        #
+        # Both clocks close at the instant the tombstone is recorded, which is `t` for an
+        # ordinary write and earlier for a backdated one (`recorded_at` in the past). Its
+        # belief interval is then empty, so no read at any instant returns it. Closing
+        # at `t` left a backdated tombstone believed, and valid, from its `recorded_at`
+        # until the moment of the call, so reads of that past returned it (#317).
+        recorded = as_utc(claim.recorded_at)
+        claim.invalidated_at = recorded
+        # The world clock closes at that instant, or at the tombstone's own start when the
+        # retraction is dated later. Every other closure follows the same rule
+        # (`not_before_start`). Without it, a retraction dated in the future stored a row
+        # that ended before it began. With it, that row's interval is empty.
+        claim.valid_to = not_before_start(recorded, claim)
         self.store.put_claim(claim)
 
         collapsed: list[Collapse] = []
-        # **`AUTHORITY_SHARE` is deliberately not consulted here**, and it is worth saying
-        # why so this does not read as a place the rule was forgotten. A retraction writes
-        # a tombstone that is born invalidated — "we stopped believing X" — and leaving
-        # the target live beside it would put both sentences in the store at once, which
-        # is a worse record than either. Nothing needs it in practice either: every
-        # negative this write path can produce comes from `write/fast.py` at 0.95 or from
-        # a caller naming a confidence on `remember(polarity=-1)`, and 0.95 outranks
-        # everything the shipped paths write.
-        if matches:
+        if closing:
             # **A retraction is a world event, not a correction**, so it ends its targets
             # rather than retiring them. Every negative the write path can produce says
             # the same kind of thing — "I no longer work at X", "I used to live in X",
@@ -1145,9 +1212,10 @@ class Reconciler:
             #
             # A retraction dated in the past ("I stopped working there in March") closes
             # the interval in March, not today — same distinction as a supersession.
-            collapsed = self._retire(matches, t, claim.id, claim.valid_from, close=close,
+            collapsed = self._retire(closing, t, claim.id, claim.valid_from, close=close,
                                      reason=reason)
-        return ReconcileResult("retract", claim, matches, collapsed=collapsed)
+        return ReconcileResult("retract", claim, closing, disputed=disputed,
+                               collapsed=collapsed)
 
 
 # --- late-alias backfill --------------------------------------------------------
