@@ -24,6 +24,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   newer version wrote it released its lock but left its SQLite connection open until
   garbage collection, so on Windows the caller could not delete or replace the file, and
   Python 3.13 warned about an unclosed database. #301.
+- **A model reply with thousands of invented predicates no longer stalls a write.** Past
+  the cap of 200 learned predicates, each new spelling is folded onto the nearest known
+  predicate as an alias. Each alias rebuilt the registry's whole index, and each search
+  for the nearest predicate read every alias again, so one `add()` took time that grew
+  with the square of the number of invented spellings: 100 to 130 seconds for 5,000 on a
+  laptop. An alias is now added to the index in place, and each predicate's words are kept
+  once, so the same write takes about 6 seconds. The model is still called 201 times,
+  and every predicate resolves as before. #309.
+
 - **A hook answers a payload nested too deeply to decode as it answers an empty one.**
   `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
   Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
