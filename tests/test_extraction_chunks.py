@@ -229,6 +229,23 @@ def test_a_source_index_outside_the_piece_is_dropped_not_moved():
     store.close()
 
 
+@pytest.mark.parametrize("reply", [
+    pytest.param([None], id="an-item-that-is-null"),
+    pytest.param(["user lives_in Lisbon"], id="an-item-that-is-text"),
+    pytest.param({"claims": []}, id="an-object-instead-of-a-list"),
+    pytest.param(None, id="nothing-at-all"),
+])
+def test_a_malformed_reply_for_a_piece_is_dropped_not_raised_on(reply):
+    """#303 on the path that cuts a long turn into pieces: each piece's reply is mapped
+    back to the batch before the rest of the write path checks it, so the mapping must
+    drop what is malformed itself rather than read it."""
+    llm = PieceLLM(lambda eps: reply)
+    pipe, store = build(llm, extraction_chunks=True)
+    receipt = pipe.add([ep(long_turn("The offsite is booked in Lisbon for May."))])
+    assert receipt.added == [] and len(llm.calls) > 1
+    store.close()
+
+
 # -- repeats across pieces --------------------------------------------------------------
 
 
