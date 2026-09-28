@@ -25,6 +25,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   from memvara's hybrid retrieval; they are now returned in order of that similarity, and
   `min_score` is compared with it. `docs/UPGRADING.md` covers a direct caller of
   `search()`. #364 (B85).
+- **The benchmark refuses a `--timeout` of NaN or infinity.** `bench/evalkit.py` checked
+  `timeout <= 0`, which a NaN passes, so `--timeout nan` reached the reader's client as its
+  timeout. It now asks for a finite number of seconds above zero, and so does
+  `bench/extract_cost.py`'s `--timeout`, which had no check at all. #431.
 - **Malformed output from an extraction model is dropped, not raised on.** A backend that
   does no validation of its own could return an item that is not an object, a
   `source_index` that is a list, an infinite polarity, a confidence of `10**400`, or a
