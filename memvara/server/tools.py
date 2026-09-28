@@ -1717,7 +1717,8 @@ def _interval_note(claims: Sequence[Claim], continued: frozenset[str],
 
     `continued` names the claims whose period is over only because the same value is
     already stored from where they end (see `_continued`). The fact did not stop being
-    true there, so their note says what holds instead.
+    true there, so their note says what holds instead. It does not say the value is in
+    force now, because the stored claim it continues into may be over too.
 
     `now` is the one instant the reply is written for. `_continued` decides against the
     same instant, so the two cannot disagree about a claim that ends between two
@@ -1735,11 +1736,12 @@ def _interval_note(claims: Sequence[Claim], continued: frozenset[str],
         elif c.valid_to is not None and c.valid_to <= now:
             if c.id in continued:
                 head = (
-                    f"note: stored for the period before {_stamp(c.valid_to)}, where the "
-                    "same value is already stored and still in force, so the two "
-                    f"together say it has held since {_stamp(c.valid_from)}. "
-                    "memory_recall returns the value already stored, not this claim, "
-                    "which answers about the earlier period only.")
+                    f"note: stored only for the period before {_stamp(c.valid_to)}, "
+                    "because the same value is already stored from that instant on, so "
+                    "together they say it held from "
+                    f"{_stamp(c.valid_from)}. This claim answers about the earlier "
+                    "period only; memory_recall returns the stored claim that is in "
+                    "force now, if there is one, and not this claim.")
             else:
                 head = (
                     f"note: stored as a fact that had already stopped being true at "
@@ -1763,11 +1765,14 @@ def _continued(ctx: ToolContext, subject: str, predicate: str, claims: Sequence[
     Restating a stored fact with a start earlier than the claim on record stores the
     earlier period as a claim of its own, ending where the value's stored claims begin
     (`Reconciler._earlier_period`): the claim on record, or a claim for an earlier period
-    that a previous restatement stored and that runs up to it. That new claim is over,
-    but the fact is not: a believed claim of the same value holds it from the same
-    instant. A value that began before a different, later value is over because the
-    value changed. The receipt reads the same for the two, so one read of the slot tells
-    them apart.
+    that a previous restatement stored and that runs up to it. A write that overlaps part
+    of a stored claim's period is stored only for the parts no stored claim holds
+    (#435), so a piece can end where a stored claim of the value begins. Such a claim is
+    over, but the fact did not stop there: a believed claim of the same value holds it
+    from the same instant. That stored claim may itself be over, so the note does not
+    say the value is in force now. A value that began before a different, later value
+    is over because the value changed. The receipt reads the same for the two, so one
+    read of the slot tells them apart.
 
     The read is made only when the note can apply: when an added claim is over at `now`
     and the store, not the caller, set its end. `until` is the caller's `true_until`, or

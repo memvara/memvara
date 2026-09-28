@@ -20,7 +20,7 @@ from memvara.schema import (
     Volatility,
 )
 from memvara.store import SQLiteStore
-from memvara.types import Claim, Episode, Scope, close_out, utcnow
+from memvara.types import Claim, Derivation, Episode, Scope, close_out, utcnow
 from memvara.write import Reconciler
 
 
@@ -408,20 +408,26 @@ def test_restating_from_an_even_earlier_start_adds_only_the_period_not_yet_held(
 
 def test_a_restatement_still_covers_a_gap_between_two_stored_periods(rec, store):
     """Tea is stored for February to March and again from June, with nothing between. A
-    restatement from January says it held throughout, so its period runs to June: the
-    claim for February to March does not reach June, so it does not move the end, and
-    stopping at February would drop March to June, which the store does not hold."""
+    restatement from January says it held throughout, so it covers every period before
+    June that the store does not hold: January to February and March to June. The claim
+    for February to March does not reach June, so it does not move the end, and stopping
+    at February would drop March to June. Up to #435 the restatement was stored for all of
+    January to June, and February to March was then stored twice."""
     june = utcnow() - timedelta(days=90)
     february, march = june - timedelta(days=120), june - timedelta(days=90)
     january = february - timedelta(days=30)
-    rec.apply(claim("likes", "tea", valid_from=june, recorded_at=june), now=june)
-    store.put_claim(claim("likes", "tea", valid_from=february, valid_to=march,
-                          recorded_at=february))
+    live = rec.apply(claim("likes", "tea", valid_from=june, recorded_at=june),
+                     now=june).claim
+    between = claim("likes", "tea", valid_from=february, valid_to=march,
+                    recorded_at=february)
+    store.put_claim(between)
 
     res = rec.apply(claim("likes", "tea", valid_from=january, sources=["ep_2"]))
 
     assert res.action == "add"
-    assert (res.claim.valid_from, res.claim.valid_to) == (january, june)
+    assert pieces_of(res) == [(january, february), (march, june)]
+    assert reinforced_by(res) == [between.id]
+    assert res.restated is not None and res.restated.id == live.id
 
 
 def test_a_retired_earlier_period_does_not_make_a_restatement_a_repeat(rec, store):
@@ -1554,6 +1560,428 @@ def test_eligibility_is_untouched_by_temporal_ordering(rec, store):
                         temporal_precision="year"), now=at(2025, 6, 1))
     rec.apply(claim("likes", "Lisbon", valid_from=at(2025, 12, 1)), now=at(2026, 9, 3))
     assert live_objects(store, claim("likes", "x")) == ["Lisbon", "London"]
+
+
+# --- a write that overlaps part of a stored period (#435) ---------------------
+
+#: The instant every write in this section is reconciled at. Every period below is over
+#: by then unless a test says otherwise.
+LATER = at(2026, 9, 1)
+
+
+def stored(rec, predicate: str, obj: str, start, end=None, **kw) -> Claim:
+    """Write a value for a period and return the claim the write stored."""
+    res = rec.apply(claim(predicate, obj, valid_from=start, valid_to=end, **kw), now=LATER)
+    assert res.action == "add", "the premise: the period is stored as a claim of its own"
+    return res.claim
+
+
+def pieces_of(res) -> list[tuple]:
+    """The periods a write stored, in order: `res.claim`, then each further piece."""
+    parts = [res.claim] + [p.claim for p in res.also if p.action == "add"]
+    return [(p.valid_from, p.valid_to) for p in parts]
+
+
+def reinforced_by(res) -> list[str]:
+    """The ids of the stored claims that a write which also stored a piece reinforced."""
+    return [p.claim.id for p in res.also if p.action == "reinforce"]
+
+
+def values_at(store, c: Claim, when) -> list[str]:
+    return sorted(x.object for x in store.competing_claims(
+        c.scope.tenant, c.fact_key, valid_at=when, known_at=LATER))
+
+
+@pytest.mark.covers("inv:MM11")
+def test_a_write_that_overlaps_part_of_a_stored_period_stores_only_the_rest(rec, store):
+    """#435, the issue's example. Rome is stored for January to March, and Rome is then
+    written for February to April. February to March is already held, so the write
+    reinforces the stored claim and stores Rome only for March to April. Stored whole, the
+    second claim overlapped the first, and a read of 15 February returned Rome twice."""
+    first = stored(rec, "lives_in", "Rome", at(2026, 1, 1), at(2026, 3, 1))
+
+    res = rec.apply(claim("lives_in", "Rome", valid_from=at(2026, 2, 1),
+                          valid_to=at(2026, 4, 1), sources=["ep_2"]), now=LATER)
+
+    assert res.action == "add" and res.invalidated == []
+    assert pieces_of(res) == [(at(2026, 3, 1), at(2026, 4, 1))]
+    assert res.claim.sources == ["ep_2"]
+    assert reinforced_by(res) == [first.id]
+    kept = store.get_claim(first.id)
+    assert (kept.valid_from, kept.valid_to) == (at(2026, 1, 1), at(2026, 3, 1)), (
+        "no stored claim is rewritten")
+    assert kept.observation_count == 2 and kept.sources == ["ep_1", "ep_2"]
+    assert values_at(store, first, at(2026, 2, 15)) == ["Rome"]
+    assert values_at(store, first, at(2026, 3, 15)) == ["Rome"]
+    assert len(store.find_by_value("acme", first.value_key)) == 2
+
+
+@pytest.mark.covers("inv:MM11")
+def test_a_write_that_spans_both_sides_of_a_stored_period_is_stored_in_two_pieces(
+        rec, store):
+    """Rome is stored for March to May, and Rome is then written for January to July. The
+    write holds two periods the store does not: January to March and May to July. Each is
+    stored as a claim of its own, citing the write's sources, and the stored claim is
+    reinforced for the overlap and left as it was."""
+    held = stored(rec, "lives_in", "Rome", at(2026, 3, 1), at(2026, 5, 1))
+
+    res = rec.apply(claim("lives_in", "Rome", valid_from=at(2026, 1, 1),
+                          valid_to=at(2026, 7, 1), sources=["ep_2"]), now=LATER)
+
+    assert res.action == "add"
+    assert pieces_of(res) == [(at(2026, 1, 1), at(2026, 3, 1)),
+                              (at(2026, 5, 1), at(2026, 7, 1))]
+    parts = [res.claim] + [p.claim for p in res.also if p.action == "add"]
+    assert len({p.id for p in parts}) == 2
+    assert all(p.sources == ["ep_2"] for p in parts)
+    assert all(store.get_claim(p.id) is not None for p in parts)
+    assert reinforced_by(res) == [held.id]
+    kept = store.get_claim(held.id)
+    assert (kept.valid_from, kept.valid_to, kept.observation_count) == (
+        at(2026, 3, 1), at(2026, 5, 1), 2)
+    for month in (2, 4, 6):
+        assert values_at(store, held, at(2026, month, 15)) == ["Rome"]
+
+
+def test_a_write_over_several_stored_periods_is_stored_in_each_gap(rec, store):
+    """More stored claims can mean more gaps: February to March and May to June are
+    stored, so a write for January to July is stored for the three periods between."""
+    a = stored(rec, "likes", "tea", at(2026, 2, 1), at(2026, 3, 1))
+    b = stored(rec, "likes", "tea", at(2026, 5, 1), at(2026, 6, 1))
+
+    res = rec.apply(claim("likes", "tea", valid_from=at(2026, 1, 1),
+                          valid_to=at(2026, 7, 1), sources=["ep_2"]), now=LATER)
+
+    assert pieces_of(res) == [(at(2026, 1, 1), at(2026, 2, 1)),
+                              (at(2026, 3, 1), at(2026, 5, 1)),
+                              (at(2026, 6, 1), at(2026, 7, 1))]
+    assert reinforced_by(res) == [a.id, b.id]
+
+
+def test_an_open_ended_write_over_a_closed_stored_period_begins_where_it_ends(rec, store):
+    """Rome is stored for January to March, and Rome is then written from February with
+    no end. The piece the store does not hold begins where the stored claim ends, and it
+    is live now."""
+    held = stored(rec, "lives_in", "Rome", at(2026, 1, 1), at(2026, 3, 1))
+
+    res = rec.apply(claim("lives_in", "Rome", valid_from=at(2026, 2, 1),
+                          sources=["ep_2"]), now=LATER)
+
+    assert res.action == "add"
+    assert pieces_of(res) == [(at(2026, 3, 1), None)]
+    assert res.claim.is_live(LATER)
+    assert reinforced_by(res) == [held.id]
+    assert values_at(store, held, at(2026, 2, 15)) == ["Rome"]
+
+
+def test_a_write_that_outlasts_a_live_claim_stores_the_period_after_it_ends(rec, store):
+    """Tea is live now and stored to end in December. Tea written from now with no end
+    holds a period the store does not: from December on. The live claim is reinforced and
+    that period is stored. Before #435 the write was a repeat of the live claim, and the
+    period after December was dropped."""
+    held = stored(rec, "likes", "tea", at(2026, 1, 1), at(2026, 12, 1))
+
+    res = rec.apply(claim("likes", "tea", valid_from=LATER, sources=["ep_2"]), now=LATER)
+
+    assert res.action == "add"
+    assert pieces_of(res) == [(at(2026, 12, 1), None)]
+    assert reinforced_by(res) == [held.id]
+
+
+def test_a_piece_beside_its_own_live_value_is_not_reported_as_an_accumulation(rec, store):
+    """`collects` is declared by nobody, so a new value beside a live one is reported as
+    an accumulation. The piece a write stores after its own live claim ends is not a
+    second answer, so it is not reported, even with another value live in the slot."""
+    stored(rec, "collects", "stamps", at(2026, 1, 1), at(2026, 12, 1))
+    rec.apply(claim("collects", "vinyl", valid_from=at(2026, 1, 1)), now=LATER)
+
+    res = rec.apply(claim("collects", "stamps", valid_from=LATER, sources=["ep_2"]),
+                    now=LATER)
+
+    assert res.action == "add" and pieces_of(res) == [(at(2026, 12, 1), None)]
+    assert res.accumulated is None
+
+
+def test_a_write_inside_a_stored_period_is_still_a_repeat(rec, store):
+    """Rome is stored for January to June. February to April holds nothing new, so the
+    write reinforces the stored claim and stores nothing (#351)."""
+    held = stored(rec, "lives_in", "Rome", at(2026, 1, 1), at(2026, 6, 1))
+
+    res = rec.apply(claim("lives_in", "Rome", valid_from=at(2026, 2, 1),
+                          valid_to=at(2026, 4, 1), sources=["ep_2"]), now=LATER)
+
+    assert res.action == "reinforce" and res.claim.id == held.id and res.also == []
+    assert len(store.find_by_value("acme", held.value_key)) == 1
+
+
+def test_a_write_that_two_stored_periods_cover_together_is_a_repeat_of_both(rec, store):
+    """January to March and March to June are stored. No one claim holds February to
+    April, but the two together do, so the write stores nothing and reinforces both."""
+    a = stored(rec, "likes", "tea", at(2026, 1, 1), at(2026, 3, 1))
+    b = stored(rec, "likes", "tea", at(2026, 3, 1), at(2026, 6, 1))
+
+    res = rec.apply(claim("likes", "tea", valid_from=at(2026, 2, 1),
+                          valid_to=at(2026, 4, 1), sources=["ep_2"]), now=LATER)
+
+    assert res.action == "reinforce" and res.claim.id == a.id
+    assert [(p.action, p.claim.id) for p in res.also] == [("reinforce", b.id)]
+    assert [store.get_claim(c.id).observation_count for c in (a, b)] == [2, 2]
+    assert len(store.find_by_value("acme", a.value_key)) == 2
+
+
+def test_a_restatement_before_the_live_claim_that_two_stored_periods_hold_is_a_repeat(
+        rec, store):
+    """#283 with #435. Tea is live from June and stored for January to March and March to
+    May. Tea for February to April starts before the live claim, so it is a restatement
+    of an earlier period, and the caller's end, April, bounds that period. No one claim
+    holds February to April, but the two stored ones do together, so the write stores
+    nothing, reinforces both, and still names the live claim it restated."""
+    live = stored(rec, "likes", "tea", at(2026, 6, 1))
+    a = stored(rec, "likes", "tea", at(2026, 1, 1), at(2026, 3, 1))
+    b = stored(rec, "likes", "tea", at(2026, 3, 1), at(2026, 5, 1))
+
+    res = rec.apply(claim("likes", "tea", valid_from=at(2026, 2, 1),
+                          valid_to=at(2026, 4, 1), sources=["ep_2"]), now=LATER)
+
+    assert res.action == "reinforce" and res.claim.id == a.id
+    assert [(p.action, p.claim.id) for p in res.also] == [("reinforce", b.id)]
+    assert res.restated is not None and res.restated.id == live.id
+    assert len(store.find_by_value("acme", a.value_key)) == 3
+
+
+def test_a_write_three_stored_periods_hold_is_a_repeat_of_each(rec, store):
+    """The stored claims can overlap each other, as claims stored directly or before #435
+    can. January to March, March to May and 20 March to June hold February to April
+    between them, the last two overlapping, so the write reinforces all three."""
+    periods = [(at(2026, 1, 1), at(2026, 3, 1)), (at(2026, 3, 1), at(2026, 5, 1)),
+               (at(2026, 3, 20), at(2026, 6, 1))]
+    held = [claim("likes", "tea", valid_from=start, valid_to=end, recorded_at=start)
+            for start, end in periods]
+    for c in held:
+        store.put_claim(c)
+
+    res = rec.apply(claim("likes", "tea", valid_from=at(2026, 2, 1),
+                          valid_to=at(2026, 4, 1), sources=["ep_2"]), now=LATER)
+
+    assert res.action == "reinforce"
+    assert [res.claim.id] + [p.claim.id for p in res.also] == [c.id for c in held]
+    assert len(store.find_by_value("acme", held[0].value_key)) == 3
+
+
+def test_a_write_of_no_length_is_stored_as_it_is(rec, store):
+    """`remember()` refuses a period that ends where it begins, but `Reconciler.apply`
+    takes whatever a caller builds. Such a period overlaps nothing, so it is stored as it
+    was before #435 rather than being cut into pieces."""
+    instant = at(2026, 2, 1)
+
+    res = rec.apply(claim("likes", "tea", valid_from=instant, valid_to=instant),
+                    now=LATER)
+
+    assert res.action == "add" and res.also == []
+    assert pieces_of(res) == [(instant, instant)]
+
+
+def test_a_write_that_overlaps_no_stored_period_is_stored_whole(rec, store):
+    held = stored(rec, "lives_in", "Rome", at(2026, 1, 1), at(2026, 3, 1))
+
+    res = rec.apply(claim("lives_in", "Rome", valid_from=at(2026, 4, 1),
+                          valid_to=at(2026, 5, 1), sources=["ep_2"]), now=LATER)
+
+    assert res.action == "add" and res.also == []
+    assert pieces_of(res) == [(at(2026, 4, 1), at(2026, 5, 1))]
+    assert store.get_claim(held.id).observation_count == 1
+
+
+def test_a_piece_ends_where_a_later_different_value_begins(rec, store):
+    """Rome is stored for January to March, and Paris is live from April. Rome written
+    from February ends where Paris begins, as a whole write would, so the piece is March
+    to April. Paris begins after the write, so the write leaves it alone."""
+    held = stored(rec, "lives_in", "Rome", at(2026, 1, 1), at(2026, 3, 1))
+    paris = stored(rec, "lives_in", "Paris", at(2026, 4, 1))
+
+    res = rec.apply(claim("lives_in", "Rome", valid_from=at(2026, 2, 1),
+                          sources=["ep_2"]), now=LATER)
+
+    assert res.action == "add" and res.invalidated == []
+    assert pieces_of(res) == [(at(2026, 3, 1), at(2026, 4, 1))]
+    assert reinforced_by(res) == [held.id]
+    kept = store.get_claim(paris.id)
+    assert kept.valid_to is None and kept.invalidated_at is None
+
+
+def test_a_piece_supersedes_what_the_whole_write_would_and_at_the_same_instant(
+        rec, store):
+    """Rome is stored for January to March, and Paris is live from 15 January. Rome
+    written from February, in a slot that holds one value, ends Paris where the write
+    begins: February, not March where the stored piece begins. Rome holds from February,
+    through the claim on record until March and the new piece after it, so ending Paris
+    in March would leave two values true from February to March."""
+    held = stored(rec, "lives_in", "Rome", at(2026, 1, 1), at(2026, 3, 1))
+    paris = stored(rec, "lives_in", "Paris", at(2026, 1, 15))
+
+    res = rec.apply(claim("lives_in", "Rome", valid_from=at(2026, 2, 1),
+                          sources=["ep_2"]), now=LATER)
+
+    assert res.action == "supersede"
+    assert pieces_of(res) == [(at(2026, 3, 1), None)]
+    assert [c.id for c in res.invalidated] == [paris.id]
+    ended = store.get_claim(paris.id)
+    assert ended.valid_to == at(2026, 2, 1) and ended.invalidated_at is None
+    assert ended.invalidated_by == res.claim.id
+    assert reinforced_by(res) == [held.id]
+    for month in (2, 4):
+        assert values_at(store, held, at(2026, month, 15)) == ["Rome"]
+
+
+def test_a_write_the_store_already_holds_ends_nothing(rec, store):
+    """A write whose whole period stored claims already hold is a repeat, and a repeat
+    ends nothing, whether one claim holds the period or two do together (#351). Paris,
+    live from 15 January, stays live."""
+    stored(rec, "lives_in", "Rome", at(2026, 1, 1), at(2026, 3, 1))
+    stored(rec, "lives_in", "Rome", at(2026, 3, 1), at(2026, 6, 1))
+    paris = stored(rec, "lives_in", "Paris", at(2026, 1, 15))
+
+    res = rec.apply(claim("lives_in", "Rome", valid_from=at(2026, 2, 1),
+                          valid_to=at(2026, 4, 1), sources=["ep_2"]), now=LATER)
+
+    assert res.action == "reinforce" and res.invalidated == []
+    kept = store.get_claim(paris.id)
+    assert kept.valid_to is None and kept.invalidated_at is None
+
+
+@pytest.mark.parametrize("precision, start", [("month", at(2025, 6, 1)),
+                                              ("year", at(2025, 1, 1))])
+def test_a_piece_after_a_period_stated_by_month_or_year_begins_at_an_exact_instant(
+        rec, store, precision, start):
+    """Tea is stored from 15 June 2025 to March 2026. Tea "since June 2025", or "since
+    2025", until April 2026 names a start the stored claim cannot be said to begin after
+    (`_bounds`), so only March to April is new. The piece begins at the stored claim's
+    exact end, so it carries no month or year precision: that precision described the
+    write's own start."""
+    held = stored(rec, "likes", "tea", at(2025, 6, 15), at(2026, 3, 1))
+
+    res = rec.apply(claim("likes", "tea", valid_from=start, temporal_precision=precision,
+                          valid_to=at(2026, 4, 1), sources=["ep_2"]), now=LATER)
+
+    assert pieces_of(res) == [(at(2026, 3, 1), at(2026, 4, 1))]
+    assert res.claim.temporal_precision is None
+    assert reinforced_by(res) == [held.id]
+
+
+def test_the_first_piece_keeps_the_precision_of_the_start_it_keeps(rec, store):
+    held = stored(rec, "likes", "tea", at(2026, 3, 1), at(2026, 4, 1))
+
+    res = rec.apply(claim("likes", "tea", valid_from=at(2026, 1, 1),
+                          temporal_precision="month", valid_to=at(2026, 6, 1)),
+                    now=LATER)
+
+    assert pieces_of(res) == [(at(2026, 1, 1), at(2026, 3, 1)),
+                              (at(2026, 4, 1), at(2026, 6, 1))]
+    first, second = [res.claim] + [p.claim for p in res.also if p.action == "add"]
+    assert (first.temporal_precision, second.temporal_precision) == ("month", None)
+    assert reinforced_by(res) == [held.id]
+
+
+def test_only_a_stored_period_the_writer_can_see_covers_part_of_a_write(rec, store):
+    """Project A holds the value for January to March, and project B cannot read it, so
+    B's write for February to April is stored whole. A user-wide claim is one B reads,
+    so it does count."""
+    elsewhere = database(PROJECT_A, valid_from=at(2026, 1, 1), valid_to=at(2026, 3, 1),
+                         recorded_at=at(2026, 1, 1))
+    store.put_claim(elsewhere)
+
+    res = rec.apply(database(PROJECT_B, valid_from=at(2026, 2, 1),
+                             valid_to=at(2026, 4, 1), sources=["ep_2"]), now=LATER)
+
+    assert res.action == "add" and res.also == []
+    assert pieces_of(res) == [(at(2026, 2, 1), at(2026, 4, 1))]
+    assert store.get_claim(elsewhere.id).observation_count == 1
+
+    wide = database(SCOPE, valid_from=at(2026, 5, 1), valid_to=at(2026, 7, 1),
+                    recorded_at=at(2026, 5, 1))
+    store.put_claim(wide)
+    res = rec.apply(database(PROJECT_B, valid_from=at(2026, 6, 1),
+                             valid_to=at(2026, 8, 1), sources=["ep_3"]), now=LATER)
+
+    assert pieces_of(res) == [(at(2026, 7, 1), at(2026, 8, 1))]
+    assert reinforced_by(res) == [wide.id]
+
+
+@pytest.mark.parametrize("scope, counts", [(PROJECT_B, True), (SCOPE, False)],
+                         ids=["stored in the writer's scope", "stored user-wide"])
+def test_a_partial_write_that_names_an_expiry_counts_only_its_own_scope(
+        rec, store, scope, counts):
+    """A caller's repeat that names an expiry reinforces only a claim in exactly its own
+    scope and moves the expiry onto it, so a fact the caller asked to have erased is
+    erased. A write that overlaps part of such a claim does the same for the overlap, and
+    its pieces carry the expiry. A user-wide claim is not in the project's own scope, so it does not count,
+    the write is stored whole, and the user-wide claim keeps no expiry."""
+    held = database(scope, valid_from=at(2026, 1, 1), valid_to=at(2026, 3, 1),
+                    recorded_at=at(2026, 1, 1))
+    store.put_claim(held)
+    expiry = utcnow() + timedelta(days=30)
+
+    res = rec.apply(database(PROJECT_B, valid_from=at(2026, 2, 1), valid_to=at(2026, 4, 1),
+                             expires_at=expiry, derivation=Derivation.USER,
+                             sources=["ep_2"]), now=LATER)
+
+    start = at(2026, 3, 1) if counts else at(2026, 2, 1)
+    assert pieces_of(res) == [(start, at(2026, 4, 1))]
+    assert res.claim.expires_at == expiry
+    assert reinforced_by(res) == ([held.id] if counts else [])
+    assert store.get_claim(held.id).expires_at == (expiry if counts else None)
+
+
+# --- a backdated write changes belief only from the time of the call (#436) ---
+
+@pytest.mark.covers("inv:MM10")
+def test_a_backdated_retraction_that_retires_does_so_at_the_time_of_the_call(rec, store):
+    """#436. A retraction written with a past `recorded_at` and `close="retired"` retires
+    the value at the time of the call, not at its `recorded_at`. The belief clock records
+    what the store believed and when, and it is never rewritten, so a read of belief
+    between the two instants still returns the value. Only the tombstone's own interval
+    sits at its `recorded_at` (#317)."""
+    now = utcnow()
+    january, february = now - timedelta(days=60), now - timedelta(days=30)
+    tea = rec.apply(claim("likes", "tea", valid_from=january, recorded_at=january),
+                    now=now).claim
+
+    res = rec.apply(claim("likes", "tea", polarity=-1, valid_from=february,
+                          recorded_at=february, sources=["ep_2"]),
+                    now=now, close="retired")
+
+    assert [c.id for c in res.invalidated] == [tea.id]
+    kept = store.get_claim(tea.id)
+    assert kept.invalidated_at == now and kept.valid_to is None
+    between = february + timedelta(days=10)
+    assert [c.id for c in store.competing_claims(
+        "acme", tea.fact_key, valid_at=between, known_at=between)] == [tea.id]
+    assert store.competing_claims("acme", tea.fact_key, valid_at=between,
+                                  known_at=now) == []
+    assert store.get_claim(res.claim.id).invalidated_at == february
+
+
+@pytest.mark.covers("inv:MM10")
+def test_a_backdated_supersession_that_retires_does_so_at_the_time_of_the_call(
+        rec, store):
+    """#436. The same rule for a new value in a slot that holds one: Lisbon, written with
+    a past `recorded_at` and `close="retired"`, retires Berlin at the time of the call.
+    Before the call the store believed Berlin, and a read of that past still says so."""
+    now = utcnow()
+    long_ago, moved = now - timedelta(days=800), now - timedelta(days=30)
+    berlin = rec.apply(claim("lives_in", "Berlin", valid_from=long_ago,
+                             recorded_at=long_ago), now=long_ago).claim
+
+    res = rec.apply(claim("lives_in", "Lisbon", valid_from=moved, recorded_at=moved,
+                          sources=["ep_2"]), now=now, close="retired")
+
+    assert res.action == "supersede" and [c.id for c in res.invalidated] == [berlin.id]
+    kept = store.get_claim(berlin.id)
+    assert kept.invalidated_at == now and kept.valid_to is None
+    between = moved + timedelta(days=10)
+    assert sorted(c.object for c in store.competing_claims(
+        "acme", berlin.fact_key, valid_at=between, known_at=between)) == ["Berlin",
+                                                                          "Lisbon"]
 
 
 # --- quantity is not identity ------------------------------------------------

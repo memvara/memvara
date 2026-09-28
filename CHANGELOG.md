@@ -145,6 +145,40 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   claim, and a read of February returned Rome twice. The second write now reinforces the
   claim on record, reports it under `reinforced` and stores nothing. The same holds for a
   value written twice with the same `valid_to`. #351 (B70).
+- **A write that overlaps part of a stored period stores only the part not yet held.**
+  With Rome stored for January to March, `remember("user", "lives_in", "Rome",
+  valid_from=February, valid_to=April)` stored a second Rome claim for February to April,
+  and a read of 15 February returned Rome twice. The write now reinforces the stored claim
+  for the overlap and stores Rome only for March to April. A write that spans both sides
+  of a stored claim is stored in two pieces, one before it and one after it, and more
+  stored claims can leave more pieces. Each piece is a claim of its own that cites the
+  write's sources, and no stored claim is rewritten. A write whose whole period stored
+  claims hold between them is a repeat of each of them and stores nothing. The receipt
+  lists the pieces in `added` and the stored claims reinforced for the overlap in
+  `reinforced`, each in the order of their periods. Only a stored claim of the same value
+  that the writer can see and the store still believes counts, as for #351. A write that
+  closes a different value in a single-valued slot closes it exactly as it did when it
+  was stored whole, at the write's own start. Two related cases change with it: a write
+  that outlasts a live claim written with an end still to come stores the period after
+  that end instead of dropping it, and the same write dated in the future, made twice, is
+  now a repeat. A caller's write that names an expiry and finds its value live in its own
+  scope is still a repeat of that claim. `ReconcileResult` has a new field, `also`, that
+  carries the further pieces and the reinforced claims. Two callers that keep one claim
+  per write choose among them: under agentic extraction, a link proposed for a write
+  stored in pieces lands on the claim in force at the time of the write, and the mem0
+  importer keeps the last piece, the one still open, so a later UPDATE or DELETE closes
+  it. #435.
+- **The rule for a backdated write that closes other claims is now stated.** A retraction
+  or a new value written with a `recorded_at` in the past closes what it displaces at the
+  moment of the call on the belief clock: with `close="retired"`, the displaced claims are
+  retired at the time of the call, not at the write's `recorded_at`. The belief clock
+  records what the store believed and when, so what it believed in the past is never
+  rewritten. Only a retraction's own tombstone sits at its `recorded_at` (#317).
+  `supersede()` and `remember(replaces=...)` are the exception, because they take the
+  closing instant as an argument (`at`, which defaults to the new claim's `recorded_at`
+  for a retirement). Nothing changes in behaviour; the rule is now in
+  `docs/INTERNALS.md`, `docs/claude/memory-model.md` and the `remember()` docstring, and
+  tests pin it for a retraction and a supersession. #436.
 - **The benchmark refuses a `--timeout` of NaN or infinity.** `bench/evalkit.py` checked
   `timeout <= 0`, which a NaN passes, so `--timeout nan` reached the reader's client as its
   timeout. It now asks for a finite number of seconds above zero, and so does

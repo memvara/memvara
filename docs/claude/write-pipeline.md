@@ -105,7 +105,9 @@ offered no expiry, has any it returns dropped. The proposals write nothing. A pr
 then `Reconciler.apply()`; a proposed end becomes a retraction with `close="ended"`; a
 proposed link becomes a `claim_links` row. A link from a proposal that restated a live
 value with an earlier start lands on the live claim on record, not on the claim for the
-earlier period (`ReconcileResult.restated`). A proposal naming a memory the model did not
+earlier period (`ReconcileResult.restated`). A link from a proposal stored in pieces
+(#435) lands on the piece or stored claim in force at the time of the write, or on the
+first piece when none is. A proposal naming a memory the model did not
 read in the run, or asking to end or replace one in a broader scope than the write, is
 refused, and every refusal is on
 `receipt.proposals_refused`. A backend without tools, a timeout, an answer that cannot be
@@ -121,10 +123,26 @@ value's stored claims begin, or reinforces a stored claim that already holds tha
 period),
 conflict (the predicate holds one value, so the incoming claim supersedes the old one),
 retraction (the incoming claim has `polarity == -1`, so matching live claims are closed out),
-or accumulate (insert alongside). An incoming claim that is already over, because the
-caller gave its end or because a later value ends it, is also an exact duplicate when a
-stored claim of its value that the writer can see holds its whole period; that claim is
-reinforced and nothing is inserted.
+or accumulate (insert alongside).
+
+**A write stores only the part of its period that the store does not hold (#435).** Once
+the incoming claim's period is settled, which includes being ended early by a later value,
+the reconciler compares it with the stored claims of its value that the store believes and
+the writer can see. A write whose whole period they hold, whether one claim holds it or
+several do together, is a repeat: each of those claims is reinforced and nothing is
+inserted. Otherwise the write is stored once for each part of its period that no stored
+claim holds, and each stored claim that holds some of the period is reinforced. With Rome
+stored for January to March, Rome for February to April is stored for March to April; with
+Rome stored for March to May, Rome for January to July is stored in two pieces, January to
+March and May to July. Each piece cites the write's sources, and no stored claim is
+rewritten. The receipt lists the pieces in `added` and the reinforced claims in
+`reinforced`, each in the order of their periods (`ReconcileResult.also` carries them from
+the reconciler). A single-valued slot closes the other value exactly as the whole write
+would, at the write's own start. The restatement with an earlier start above follows the
+same rule for the period it adds, so a stored claim inside that period is reinforced and
+not stored again. A caller's write that names an expiry counts only claims in its own
+scope, and one that finds its value live in its own scope is still a plain repeat of that
+claim.
 
 A retraction is stored as a tombstone, closed on both clocks at the instant its write is
 recorded, which is the given `recorded_at` for a backdated write, so no read at any

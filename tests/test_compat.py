@@ -805,6 +805,33 @@ def test_re_importing_deliberately_reinforces_rather_than_duplicating(mem, tmp_p
     assert mem.get_all()[0].observation_count == 2
 
 
+def test_a_re_imported_note_stored_in_pieces_is_deleted_where_it_is_still_open(
+        mem, tmp_path):
+    """#435. Berlin is stored for days 0 to 10 and 20 to 30, and nothing is live after day
+    30. Importing "Berlin from day 0" again stores only the parts no claim holds: days 10
+    to 20, and from day 30 on. A DELETE on day 40 must retire the piece that is still
+    open. The importer used to keep the first piece, so the open one stayed live and a
+    memory mem0 had deleted was still returned."""
+    first = write_history(tmp_path / "first.db", [
+        row("h1", "m1", "ADD", 0, new="Lives in Berlin"),
+        row("h2", "m1", "UPDATE", 10, old="Lives in Berlin", new="Lives in Lisbon"),
+        row("h3", "m1", "UPDATE", 20, old="Lives in Lisbon", new="Lives in Berlin"),
+        row("h4", "m1", "UPDATE", 30, old="Lives in Berlin", new="Lives in Rome"),
+    ])
+    import_mem0(mem, history_db=first)
+    (rome,) = mem.get_all()
+    mem.delete(rome.id)
+    again = write_history(tmp_path / "again.db", [
+        row("h5", "m1", "ADD", 0, new="Lives in Berlin"),
+        row("h6", "m1", "DELETE", 40, old="Lives in Berlin"),
+    ])
+
+    receipt = import_mem0(mem, history_db=again, skip_existing=False)
+
+    assert receipt.deleted == 1
+    assert mem.get_all() == []
+
+
 def test_the_note_predicate_is_declared_once_and_persisted(mem, history_db):
     import_mem0(mem, history_db=history_db)
     spec = mem.registry.spec(NOTE_PREDICATE)

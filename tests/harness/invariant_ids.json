@@ -42,7 +42,9 @@
       "MM6": "Every commit `SQLiteStore` makes that can change a turn goes through `_maybe_commit`.",
       "MM7": "A claim's state changes with the clock only at one of its five time columns.",
       "MM8": "A change to the entity fold bumps `SCHEMA_VERSION`.",
-      "MM9": "A write holds the database's write lock from its first lookup."
+      "MM9": "A write holds the database's write lock from its first lookup.",
+      "MM10": "A backdated write changes belief only from the moment of the call.",
+      "MM11": "A write stores only the part of its period the store does not hold."
     },
     "docs/claude/release-and-plugins.md": {
       "RP1": "A published version is final.",

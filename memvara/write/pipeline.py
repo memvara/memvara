@@ -649,10 +649,24 @@ class WritePipeline:
             reason = plan.reason_for(claim) if plan is not None else None
             res = self.reconciler.apply(claim, now=now, reason=reason)
             if plan is not None:
-                plan.observe(claim, res.action, res.claim, res.invalidated, res.restated)
+                plan.observe(claim, res.action, self._linked(res, now), res.invalidated,
+                             res.restated)
             self._absorb(claim, res, receipt, to_embed)
         if plan is not None:
             self._apply_proposals(plan, receipt, now, to_embed, gone)
+
+    @staticmethod
+    def _linked(res: ReconcileResult, now: datetime) -> Claim | None:
+        """The claim a link proposed for this candidate lands on.
+
+        A write that stored claims of its value hold in part is stored in pieces, or
+        repeats several claims (#435), and `ProposalPlan` records one claim for it. That
+        is the one in force at `now`, if one is, because that is the claim a plain repeat
+        reinforces and `recall()` returns; otherwise it is `res.claim`, the first piece.
+        """
+        parts = [res.claim, *(p.claim for p in res.also)]
+        in_force = [c for c in parts if c is not None and c.is_live(now)]
+        return in_force[0] if in_force else res.claim
 
     def _apply_proposals(self, plan: ProposalPlan, receipt: WriteReceipt, now: datetime,
                          to_embed: list[Claim], gone: set[str]) -> None:
@@ -1664,6 +1678,17 @@ class WritePipeline:
             # The retraction tombstone is stored but is not an added fact; only the
             # claims it retired belong in the receipt's visible outcome.
             to_embed.append(res.claim)
+        for part in res.also:
+            # A write whose period stored claims of its value already held in part (#435):
+            # each further piece it stored is added, and each stored claim it reinforced
+            # for the overlap is reinforced, in the order of their periods.
+            if part.action == "add" and part.claim is not None:
+                receipt.added.append(part.claim)
+                to_embed.append(part.claim)
+            elif part.action == "reinforce" and part.claim is not None:
+                receipt.reinforced.append(part.claim)
+            if part.retyped is not None:
+                receipt.retyped.append(part.retyped)
         receipt.invalidated.extend(res.invalidated)
         if res.accumulated is not None:
             # Above the telemetry guard, not inside it: the receipt is the account of

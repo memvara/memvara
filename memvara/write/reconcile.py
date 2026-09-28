@@ -85,6 +85,7 @@ from ..types import (
     MemoryType,
     Retype,
     Scope,
+    _new_id,
     as_utc,
     close_out,
     content_hash,
@@ -198,6 +199,12 @@ class ReconcileResult:
     #: the candidate in the same batch attaches here, because the claim for the earlier
     #: period is over and answers only about that period (`agentic.ProposalPlan`).
     restated: Claim | None = None
+    #: The rest of a write whose period stored claims of its value already hold in part
+    #: (#435), in the order of the periods they hold. Each entry is an `add` for a further
+    #: piece the write stored, or a `reinforce` for a stored claim it reinforced for the
+    #: overlap. `claim` is then the first piece, or, when stored claims hold the whole
+    #: period between them, the first of those claims. Empty for every other write.
+    also: list["ReconcileResult"] = field(default_factory=list)
 
 
 #: What each precision covers, as a lower bound and an exclusive upper bound. `instant`
@@ -411,11 +418,36 @@ class Reconciler:
                 restated = self._canonical_of(seen)
                 if keep is None:
                     claim.valid_to = end
-                    self.store.put_claim(claim)
-                    return ReconcileResult("add", claim, [], retyped=refiled,
-                                           restated=restated)
+                    # A stored claim of the value may still hold part of that period, one
+                    # that ends before the next begins. That part is not new, so only the
+                    # rest is stored, and the claims that hold the overlap are reinforced
+                    # (#435). Nothing else is closed, as before.
+                    gaps, overlapped = self._uncovered(
+                        claim, self._held(claim, found, t, owner), end)
+                    if not gaps:
+                        return self._repeat_all(claim, overlapped, t, asserted_type,
+                                                restated)
+                    pieces, also = self._store_in_pieces(claim, gaps, overlapped, t,
+                                                         asserted_type)
+                    return ReconcileResult("add", pieces[0], [], retyped=refiled,
+                                           restated=restated, also=also)
             elif live_same:
                 keep = self._canonical_of(live_same)
+                if not (claim.expires_at is not None
+                        and claim.derivation is Derivation.USER):
+                    # A live claim holds the start of this write, but it may end before
+                    # the write does: it was written with an end still to come. The
+                    # period after it is new, so the write goes on to step 3, which
+                    # stores only that period and reinforces the claims that hold the rest
+                    # (#435). A caller's write that names an expiry stays a repeat of the
+                    # live claim in its own scope, for the reason given above.
+                    gaps, _ = self._uncovered(claim, self._held_for(claim, found, t, owner),
+                                              claim.valid_to)
+                    if gaps:
+                        keep = None
+                        # The value is live on record, so the piece stored below is not a
+                        # second answer beside it, and it is not reported as one.
+                        separate = True
             if keep is not None:
                 return self._repeat(claim, keep, t, asserted_type, restated)
 
@@ -433,21 +465,23 @@ class Reconciler:
             boundary = min(c.valid_from for c in newer)
             if claim.valid_to is None or claim.valid_to > boundary:
                 claim.valid_to = boundary
-        if claim.valid_to is not None:
-            # A claim that is already over, because a later value ends it or because the
-            # caller gave its end, is a repeat when a claim of the same value that the
-            # store believes and the writer can see already holds its whole period. The
-            # duplicate check in step 1 sees live claims only, and a claim whose period is
-            # over is not live, so without this the same write made twice stored its
-            # period twice, and every read of that period returned the value twice (#351).
-            held = self._held(claim, found, t, owner)
-            if claim.expires_at is not None:
-                # As in step 1: a repeat that names an expiry reinforces only a claim in
-                # exactly its own scope, so the expiry cannot land on a broader claim.
-                held = [c for c in held if c.scope == claim.scope]
-            keep = self._covering(claim, held, claim.valid_to)
-            if keep is not None:
-                return self._repeat(claim, keep, t, asserted_type, None)
+        # The claim's period is now settled. A stored claim of the same value that the
+        # store believes and the writer can see may already hold all of it or part of it.
+        # The duplicate check in step 1 sees live claims only, and a claim whose period is
+        # over, or has not begun, is not live. Without this check, the same write made
+        # twice stored its period twice (#351), and a write that overlapped part of a
+        # stored claim's period stored the overlap a second time (#435). Either way,
+        # every read inside the overlap returned the value twice.
+        held = self._held_for(claim, found, t, owner)
+        keep = self._covering(claim, held, claim.valid_to)
+        if keep is not None:
+            return self._repeat(claim, keep, t, asserted_type, None)
+        # Only the parts of the period that no stored claim holds are stored. When the
+        # stored claims hold the whole period between them, the write is a repeat of each
+        # of them. No stored claim is rewritten.
+        gaps, overlapped = self._uncovered(claim, held, claim.valid_to)
+        if not gaps:
+            return self._repeat_all(claim, overlapped, t, asserted_type, None)
         # Before `put_claim`, or this claim is itself an occupant of the slot it is
         # asking about. `superseded` first, so the ordinary single-valued write —
         # registered predicate, victim found — short-circuits without a lookup. It is
@@ -459,17 +493,21 @@ class Reconciler:
         accumulated = (None if superseded or separate
                        else self._accumulation(claim, t, owner))
         superseded, disputed = self._outranked(claim, superseded)
-        self.store.put_claim(claim)
+        # Where the write begins, before it is cut into pieces. The closures below are
+        # decided on the whole write and land at its start, so a write stored in pieces
+        # closes exactly what it would have closed stored whole, at the same instant.
+        begins = claim.valid_from
+        pieces, also = self._store_in_pieces(claim, gaps, overlapped, t, asserted_type)
         if superseded:
             # The new value's `valid_from` is when the old one stopped being true — not
             # `t`, which is merely when we found out.
-            collapsed = self._retire(superseded, t, claim.id, claim.valid_from,
+            collapsed = self._retire(superseded, t, pieces[0].id, begins,
                                      close=close, reason=reason)
-            return ReconcileResult("supersede", claim, superseded,
+            return ReconcileResult("supersede", pieces[0], superseded,
                                    disputed=disputed, collapsed=collapsed,
-                                   retyped=refiled)
-        return ReconcileResult("add", claim, [], accumulated, disputed=disputed,
-                               retyped=refiled)
+                                   retyped=refiled, also=also)
+        return ReconcileResult("add", pieces[0], [], accumulated, disputed=disputed,
+                               retyped=refiled, also=also)
 
     def _repeat(self, claim: Claim, keep: Claim, t: datetime,
                 asserted_type: MemoryType | None,
@@ -861,14 +899,127 @@ class Reconciler:
                 and (c.invalidated_at is None or c.invalidated_at > t)
                 and not (hide and expired(c, t))]
 
+    def _held_for(self, claim: Claim, found: Sequence[Claim], t: datetime,
+                  owner: str) -> list[Claim]:
+        """`_held`, narrowed for a write that names an expiry to the claims in exactly its
+        own scope. Such a write reinforces only a claim there, as in step 1 of `apply`,
+        so that its expiry cannot land on a broader claim that other scopes read."""
+        held = self._held(claim, found, t, owner)
+        if claim.expires_at is not None:
+            held = [c for c in held if c.scope == claim.scope]
+        return held
+
     def _covering(self, claim: Claim, held: Sequence[Claim],
-                  end: datetime) -> Claim | None:
+                  end: datetime | None) -> Claim | None:
         """The claim in `held` that already holds the whole period from `claim`'s start to
-        `end`, or `None`. With more than one, the earliest recorded, as `_canonical_of`
+        `end`, or `None`. An `end` of `None` is a period with no end, which only a claim
+        with no end holds. With more than one, the earliest recorded, as `_canonical_of`
         chooses."""
-        covering = [c for c in held if c.valid_to is not None and c.valid_to >= end
+        covering = [c for c in held
+                    if (c.valid_to is None if end is None
+                        else c.valid_to is not None and c.valid_to >= end)
                     and not _is_after(c, claim)]
         return self._canonical_of(covering) if covering else None
+
+    @staticmethod
+    def _uncovered(claim: Claim, held: Sequence[Claim], end: datetime | None,
+                   ) -> tuple[list[tuple[datetime, datetime | None]], list[Claim]]:
+        """The parts of `claim`'s period, from its start to `end`, that no claim in `held`
+        holds, and the claims in `held` that hold some of it (#435).
+
+        An `end` of `None` is a period with no end. Each claim holds its own period. A
+        claim that `claim` cannot be said to begin before (`_is_after`) holds the period
+        from `claim`'s start, which is how `_covering` counts it: a write dated "June
+        2025" is held by a claim that begins on 15 June 2025. A claim of no length holds
+        nothing. The parts come in order. The claims come in the order of their periods,
+        and among claims that begin together, the earliest recorded comes first.
+
+        >>> from datetime import datetime, timezone
+        >>> jan, mar, may, jul = (datetime(2026, m, 1, tzinfo=timezone.utc)
+        ...                       for m in (1, 3, 5, 7))
+        >>> def c(start, end=None):
+        ...     return Claim(subject="user", predicate="lives_in", object="Rome",
+        ...                  valid_from=start, valid_to=end)
+        >>> gaps, held = Reconciler._uncovered(c(jan, jul), [c(mar, may)], jul)
+        >>> [(a.month, b.month) for a, b in gaps], len(held)
+        ([(1, 3), (5, 7)], 1)
+        >>> Reconciler._uncovered(c(mar), [c(jan, may)], None)[0] == [(may, None)]
+        True
+        """
+        start = as_utc(claim.valid_from)
+        stop = as_utc(end) if end is not None else None
+        if stop is not None and stop <= start:
+            # A period of no length overlaps nothing, so it is stored as it is, as it was
+            # before #435, unless `_covering` already found it held.
+            return [(start, stop)], []
+        spans: list[tuple[datetime, datetime | None, Claim]] = []
+        for c in held:
+            c_from = as_utc(c.valid_from)
+            c_to = as_utc(c.valid_to) if c.valid_to is not None else None
+            if c_to is not None and c_to <= c_from:
+                continue
+            lo = c_from if _is_after(c, claim) else min(c_from, start)
+            if (stop is None or lo < stop) and (c_to is None or c_to > start):
+                spans.append((lo, c_to, c))
+        gaps: list[tuple[datetime, datetime | None]] = []
+        # How far from the start the claims seen so far hold the period without a break.
+        # `None` means to the end of time.
+        reached: datetime | None = start
+        for lo, hi, _claim in sorted(spans, key=lambda s: s[0]):
+            if reached is None or (stop is not None and reached >= stop):
+                break
+            if lo > reached:
+                gaps.append((reached, lo))
+            reached = None if hi is None else max(reached, hi)
+        if reached is not None and (stop is None or reached < stop):
+            gaps.append((reached, stop))
+        overlapped = sorted((s[2] for s in spans),
+                            key=lambda c: (as_utc(c.valid_from), c.recorded_at, c.id))
+        return gaps, overlapped
+
+    def _repeat_all(self, claim: Claim, keeps: Sequence[Claim], t: datetime,
+                    asserted_type: MemoryType | None,
+                    restated: Claim | None) -> ReconcileResult:
+        """Reinforce every claim in `keeps`, which between them hold `claim`'s whole
+        period, and report the first as `claim` and the rest in `also`."""
+        first, *rest = keeps
+        res = self._repeat(claim, first, t, asserted_type, restated)
+        res.also = [self._repeat(claim, keep, t, asserted_type, None) for keep in rest]
+        return res
+
+    def _store_in_pieces(self, claim: Claim, gaps: Sequence[tuple[datetime, datetime | None]],
+                         overlapped: Sequence[Claim], t: datetime,
+                         asserted_type: MemoryType | None,
+                         ) -> tuple[list[Claim], list[ReconcileResult]]:
+        """Reinforce the stored claims in `overlapped`, then store `claim` for each period
+        in `gaps` (#435). Returns the pieces stored, in order, and the results for `also`:
+        an `add` for each piece after the first, then a `reinforce` for each claim in
+        `overlapped`.
+
+        With one gap that is the whole period and nothing overlapped, which is every write
+        that meets no stored claim of its value, this stores `claim` as it is.
+
+        The first piece is `claim` itself, and each further piece is a copy with an id of
+        its own. Every piece keeps the write's sources, confidence, type and expiry. A
+        piece that begins later than the write keeps no `temporal_precision`: its start is
+        the exact instant where a stored claim ends, and the precision described the
+        write's own start. The reinforcements run first, because a reinforcement is
+        stamped with the write's start (`_observed_at`), and cutting the write moves it.
+        """
+        also = [self._repeat(claim, keep, t, asserted_type, None) for keep in overlapped]
+        start = as_utc(claim.valid_from)
+        # Copied before `claim` is cut, so that each copy starts from the whole write.
+        copies = [replace(claim, id=_new_id("cl"), sources=list(claim.sources),
+                          meta=dict(claim.meta)) for _ in gaps[1:]]
+        pieces = [claim, *copies]
+        for piece, (lo, hi) in zip(pieces, gaps):
+            if lo != start:
+                piece.valid_from = lo
+                piece.temporal_precision = None
+            if hi != (as_utc(piece.valid_to) if piece.valid_to is not None else None):
+                piece.valid_to = hi
+            self.store.put_claim(piece)
+        return pieces, [ReconcileResult("add", p, []) for p in copies] + also
 
     def _occupants(self, tenant: str, fact_key: str, t: datetime,
                    owner: str) -> list[Claim]:

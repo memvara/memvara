@@ -311,16 +311,28 @@ class ReferenceStore:
                 if covering is not None:
                     covering.observations += 1
                     return Expect(reinforced=[covering.id])
-                e = Expect(added=True)
-                row = self._new_row(op, level, valid_from, clock_start, t, e)
-                row.valid_to = end
+                # Only the parts of that period no believed row of the value holds (#435).
+                gaps, overlapped = self._uncovered(decide_from, end,
+                                                   self._held(value, t, reads))
+                if not gaps:
+                    return self._reinforce(op, overlapped, Expect())
+                e = self._reinforce(op, overlapped, Expect(added=True))
+                self._pieces(op, level, gaps, decide_from, valid_from, clock_start, t, e)
                 return e
             if same:
-                keep = min(same, key=self._tie)
-                keep.observations += 1
-                if op.expires_at is not None:
-                    keep.expires_at = op.expires_at
-                return Expect(reinforced=[keep.id])
+                gaps, _ = self._uncovered(decide_from, op.valid_to,
+                                          self._held(value, t, reads))
+                if op.expires_at is not None or not gaps:
+                    keep = min(same, key=self._tie)
+                    keep.observations += 1
+                    if op.expires_at is not None:
+                        keep.expires_at = op.expires_at
+                    return Expect(reinforced=[keep.id])
+                # A live row holds the start of the write and ends before it does: the
+                # period after it is new, and it is stored below (#435). The value is live
+                # on record, so that piece is not a second answer beside it.
+                return self._add(op, level, slot, live, decide_from, valid_from,
+                                 clock_start, t, True)
             # The same value is on record where this repeat may not reinforce it, so the
             # row written below is not a second answer beside it.
             separate = bool(on_record)
@@ -374,6 +386,82 @@ class ReferenceStore:
         e.new = handle
         return row
 
+    def _held(self, value: tuple[str, str, str, str, int], t: datetime,
+              reads: list[Level], level: Level | None = None) -> list[Row]:
+        """`Reconciler._held`: the rows of `value` believed at `t`, not expired, and at a
+        level the writer reads. With `level`, only rows at exactly that level, which is
+        `Reconciler._held_for` for a write that names an expiry."""
+        return [r for r in self.rows.values()
+                if r.value == value and not r.expired(t) and r.recorded_at <= t
+                and r.level in reads
+                and (r.invalidated_at is None or r.invalidated_at > t)
+                and (level is None or r.level == level)]
+
+    def _uncovered(self, start: datetime, end: datetime | None, held: list[Row],
+                   ) -> tuple[list[tuple[datetime, datetime | None]], list[Row]]:
+        """`Reconciler._uncovered`: the parts of the period from `start` to `end` that no
+        row in `held` holds, in order, and the rows that hold some of it, in the order of
+        their periods, earliest recorded first among rows that begin together. A row of no
+        length holds nothing. `end` of `None` is a period with no end."""
+        spans = [r for r in held
+                 if not (r.valid_to is not None and r.valid_to <= r.valid_from)
+                 and (end is None or r.valid_from < end)
+                 and (r.valid_to is None or r.valid_to > start)]
+        gaps: list[tuple[datetime, datetime | None]] = []
+        reached: datetime | None = start
+        for r in sorted(spans, key=lambda r: r.valid_from):
+            if reached is None or (end is not None and reached >= end):
+                break
+            if r.valid_from > reached:
+                gaps.append((reached, r.valid_from))
+            reached = None if r.valid_to is None else max(reached, r.valid_to)
+        if reached is not None and (end is None or reached < end):
+            gaps.append((reached, end))
+        return gaps, sorted(spans, key=lambda r: (r.valid_from, *self._tie(r)))
+
+    def _reinforce(self, op: Remember, rows: list[Row], e: Expect) -> Expect:
+        """`Reconciler._repeat` on each row, in order: one more observation, and a
+        caller's expiry moved onto it."""
+        for row in rows:
+            row.observations += 1
+            if op.expires_at is not None:
+                row.expires_at = op.expires_at
+        e.reinforced = [row.id for row in rows]
+        return e
+
+    def _pieces(self, op: Remember, level: Level, gaps: list[tuple[datetime, datetime | None]],
+                decide_from: datetime, valid_from: datetime | None, clock_start: bool,
+                t: datetime, e: Expect) -> Row:
+        """`Reconciler._store_in_pieces`: one row for each period in `gaps`. The first is
+        `e.new` and the rest go in `e.more`. A piece that begins where the write begins
+        takes that start, stamps and all; a later piece begins where a stored row ends.
+        Every piece is recorded at the instant the first one is. Returns the first."""
+        first: Row | None = None
+        for lo, hi in gaps:
+            if first is None and lo == decide_from:
+                row = self._new_row(op, level, valid_from, clock_start, t, e)
+            else:
+                handle = self.new_handle()
+                row = Row(id=handle, user=op.user, subject=SUBJECT, predicate=op.predicate,
+                          obj=op.obj, polarity=op.polarity, confidence=op.confidence,
+                          valid_from=lo,
+                          recorded_at=op.recorded_at if op.recorded_at is not None else t,
+                          expires_at=op.expires_at, level=level)
+                if op.recorded_at is None:
+                    e.stamps.append(Stamp(handle, "recorded_at") if first is None
+                                    else Stamp(handle, "recorded_at", "recorded_at_of",
+                                               first.id))
+                self.add(row)
+                if first is None:
+                    e.new = handle
+                else:
+                    e.more.append(handle)
+            row.valid_to = hi
+            if first is None:
+                first = row
+        assert first is not None
+        return first
+
     def _earlier_period(self, value: tuple[str, str, str, str, int], live: list[Row],
                         start: datetime, valid_to: datetime | None,
                         t: datetime, reads: list[Level]) -> tuple[datetime, Row | None]:
@@ -403,10 +491,15 @@ class ReferenceStore:
         return end, (min(covering, key=self._tie) if covering else None)
 
     def _close(self, row: Row, e: Expect, by: str, boundary: datetime | None,
-               close: str, clock_boundary: bool, recorded_default: bool) -> None:
+               close: str, clock_boundary: bool, recorded_default: bool,
+               head: bool = True) -> None:
         """`types.close_out` through `Reconciler._retire`: an ending at the successor's
         start, never before the row's own; or a retirement at the reconciler's clock,
-        which is the successor's `recorded_at` when the write was given none."""
+        which is the successor's `recorded_at` when the write was given none.
+
+        `head` is false when the successor is a piece that begins later than the write
+        (#435). The ending is still at the write's start, and when that start came from the
+        clock it is the instant the write was recorded at, which the piece shares."""
         e.closed.append(row.id)
         if close == "retired":
             if row.invalidated_at is None:
@@ -416,7 +509,8 @@ class ReferenceStore:
         if clock_boundary:
             # The successor's start came from the clock, so it is later than this row's
             # start and the clamp cannot apply.
-            e.stamps.append(Stamp(row.id, "valid_to", "valid_from_of", by))
+            e.stamps.append(Stamp(row.id, "valid_to", "valid_from_of", by) if head
+                            else Stamp(row.id, "valid_to", "recorded_at_of", by))
             return
         assert boundary is not None
         edge = max(boundary, row.valid_from)
@@ -455,32 +549,33 @@ class ReferenceStore:
             boundary = min(r.valid_from for r in newer)
             if end is None or end > boundary:
                 end = boundary
-        if end is not None:
-            # `Reconciler.apply`, step 3: a row that is already over is a repeat when a
-            # believed row of its value already holds its whole period (#351).
-            value = (op.user, SUBJECT, op.predicate, op.obj, op.polarity)
-            # Only a row the writer can see counts, and for a repeat that names an expiry,
-            # only one at exactly its own scope (`Reconciler._held`).
-            covering = [r for r in self.rows.values()
-                        if r.value == value and not r.expired(t) and r.recorded_at <= t
-                        and (r.invalidated_at is None or r.invalidated_at > t)
-                        and r.level in chain(level)
-                        and (op.expires_at is None or r.level == level)
-                        and r.valid_from <= decide_from
-                        and r.valid_to is not None and r.valid_to >= end]
-            if covering:
-                repeat = min(covering, key=self._tie)
-                repeat.observations += 1
-                if op.expires_at is not None:
-                    repeat.expires_at = op.expires_at
-                return Expect(reinforced=[repeat.id])
+        # `Reconciler.apply`, step 3: the period is settled, and a write is a repeat when
+        # believed rows of its value already hold all of it (#351). Only a row the writer
+        # can see counts, and for a repeat that names an expiry, only one at exactly its
+        # own scope (`Reconciler._held_for`).
+        value = (op.user, SUBJECT, op.predicate, op.obj, op.polarity)
+        held = self._held(value, t, chain(level),
+                          level if op.expires_at is not None else None)
+        covering = [r for r in held if r.valid_from <= decide_from
+                    and (r.valid_to is None if end is None
+                         else r.valid_to is not None and r.valid_to >= end)]
+        if covering:
+            return self._reinforce(op, [min(covering, key=self._tie)], Expect())
+        # Otherwise only the parts no row holds are stored, and the rows that hold the
+        # rest are reinforced (#435).
+        gaps, overlapped = self._uncovered(decide_from, end, held)
+        if not gaps:
+            return self._reinforce(op, overlapped, Expect())
+        self._reinforce(op, overlapped, e)
         keep = [v for v in older if op.confidence >= AUTHORITY_SHARE * v.confidence]
         e.disputed = [v.id for v in older if v not in keep]
-        row = self._new_row(op, level, valid_from, clock_start, t, e)
-        row.valid_to = end
+        row = self._pieces(op, level, gaps, decide_from, valid_from, clock_start, t, e)
+        # The closures are decided on the whole write and land at its start, whichever
+        # piece begins there.
+        head = row.valid_from == decide_from
         for v in keep:
             self._close(v, e, row.id, valid_from, op.close, clock_start,
-                        op.recorded_at is None)
+                        op.recorded_at is None, head)
         return e
 
     def _tombstone(self, op: Remember, level: Level, matches: list[Row],
@@ -729,6 +824,9 @@ class Expect:
 
     #: The handle of the row this operation adds, fact or tombstone.
     new: str | None = None
+    #: The handles of the further rows a write adds when stored rows of its value hold
+    #: part of its period: each piece after `new`, in the order of their periods (#435).
+    more: list[str] = field(default_factory=list)
     #: Whether `receipt.added` holds the new row. A retraction's tombstone is stored but
     #: is not an added fact.
     added: bool = False

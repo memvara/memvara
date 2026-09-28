@@ -510,14 +510,18 @@ def import_mem0(
         # empty rather than updated.
         written = write_note(mem, claim, episode, retire=previous, at=event.ts)
         imported.add(event.memory_id)
+        # A note the store already holds in part is stored in pieces, and one it holds
+        # whole reinforces the claims that hold it (#435). Both lists are in the order of
+        # their periods, so the last is the one that runs latest, and the one still open
+        # when the note has no end. That is the claim the memory's next event closes.
         if written.added:
             receipt.claims += 1
-            live[event.memory_id] = written.added[0]
+            live[event.memory_id] = written.added[-1]
         else:
             # The slot already holds this exact text: a re-import, or a mem0 UPDATE that
             # restored a previous value. Evidence, not a new fact.
             receipt.duplicates += 1
-            live[event.memory_id] = written.reinforced[0]
+            live[event.memory_id] = written.reinforced[-1]
         sources.append(episode)
 
     receipt.memories = len(imported)

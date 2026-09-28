@@ -3161,7 +3161,7 @@ def test_restating_a_stored_fact_with_an_earlier_start_does_not_say_it_stopped(s
 
     assert body.startswith("added 1, ended 0, retired 0, already-known 0")
     assert "already stopped being true" not in body
-    assert "the same value is already stored and still in force" in body
+    assert "the same value is already stored from that instant on" in body
     assert [c.object for c in server._ctx.memory.get_all(
         valid_at=january + timedelta(days=30))] == ["tea"]
 
@@ -3181,7 +3181,30 @@ def test_restating_from_an_even_earlier_start_does_not_say_it_stopped_either(ser
 
     assert body.startswith("added 1, ended 0, retired 0, already-known 0")
     assert "already stopped being true" not in body
-    assert "the same value is already stored and still in force" in body
+    assert "the same value is already stored from that instant on" in body
+
+
+def test_a_write_over_part_of_a_stored_period_reports_its_pieces_and_does_not_say_it_stopped(
+        server):
+    """#435 through the tool. Tea is stored for March to May, and tea is then written for
+    January to July. Only January to March and May to July are new, so the reply reports
+    two claims added and one already known. The piece for January to March ends only
+    because the same value is stored from March, so its note must not say tea stopped
+    being true in March. That stored claim is over too, so the note must not say the value
+    is in force now either."""
+    now = utcnow()
+    stamp = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    jan, mar, may, jul = (now - timedelta(days=d) for d in (300, 240, 180, 120))
+    text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                     "true_since": stamp(mar), "true_until": stamp(may)})
+    body = text(server, "memory_remember", {"predicate": "likes", "object": "tea",
+                                            "true_since": stamp(jan),
+                                            "true_until": stamp(jul)})
+
+    assert body.startswith("added 2, ended 0, retired 0, already-known 1")
+    assert "the same value is already stored from that instant on" in body
+    assert "still in force" not in body
+    assert len(server._ctx.memory.history("user", "likes")) == 3
 
 
 def test_restating_the_same_earlier_start_twice_is_already_known(server):

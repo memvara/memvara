@@ -48,6 +48,8 @@ JUNE = datetime(2026, 6, 1, tzinfo=TZ)
 JULY = datetime(2026, 7, 1, tzinfo=TZ)
 JULY_MID = datetime(2026, 7, 15, tzinfo=TZ)
 MID_MAR = datetime(2026, 3, 15, tzinfo=TZ)
+MID_FEB = datetime(2026, 2, 15, tzinfo=TZ)
+APR = datetime(2026, 4, 1, tzinfo=TZ)
 AUG = datetime(2026, 8, 1, tzinfo=TZ)
 
 # The reproduction below spans years rather than months, so it stays a past-tense story
@@ -951,6 +953,41 @@ def test_remember_backdates_both_axes_and_the_reads_agree(mem):
     assert mem.get_all(as_of=JUNE) == [], "but we had not heard it in June"
     assert mem.get_all() == [], "and it is over now"
     assert cities(mem.history("user", "lived_in")) == ["Rome"]
+
+
+def test_remember_stores_only_the_part_of_a_period_the_store_does_not_hold(mem):
+    """#435 through `remember()`. Rome is stored for January to March, then written for
+    February to April, then for January to July. Each write stores only the periods no
+    claim of Rome holds yet, and its receipt names those pieces in `added` and the stored
+    claims it reinforced for the overlap in `reinforced`. Every read in that time finds
+    Rome once."""
+    first = mem.remember("user", "lives_in", "Rome", valid_from=JAN, valid_to=MAR).added[0]
+
+    second = mem.remember("user", "lives_in", "Rome", valid_from=MID_FEB, valid_to=APR)
+    assert [(c.valid_from, c.valid_to) for c in second.added] == [(MAR, APR)]
+    assert [c.id for c in second.reinforced] == [first.id]
+
+    third = mem.remember("user", "lives_in", "Rome", valid_from=JAN, valid_to=JULY)
+    assert [(c.valid_from, c.valid_to) for c in third.added] == [(APR, JULY)]
+    assert [c.id for c in third.reinforced] == [first.id, second.added[0].id]
+
+    for when in (MID_FEB, MID_MAR, JUNE):
+        assert cities(mem.get_all(valid_at=when)) == ["Rome"], when
+    assert len(mem.history("user", "lives_in")) == 3
+
+
+def test_a_type_asserted_on_a_write_over_part_of_a_stored_period_refiles_the_overlap(mem):
+    """A repeat that asserts a `memory_type` re-files the claim it reinforces. A write that
+    overlaps part of a stored claim reinforces that claim for the overlap, so it re-files
+    it the same way, and the receipt reports the move in `retyped`."""
+    first = mem.remember("user", "likes", "tea", valid_from=JAN, valid_to=MAR).added[0]
+
+    receipt = mem.remember("user", "likes", "tea", valid_from=MID_FEB, valid_to=APR,
+                           memory_type="episodic")
+
+    assert [c.id for c in receipt.reinforced] == [first.id]
+    assert [(r.claim_id, r.now.value) for r in receipt.retyped] == [(first.id, "episodic")]
+    assert mem.get(first.id).memory_type.value == "episodic"
 
 
 # --- ask(): the three readings, and the one that had no surface ---------------

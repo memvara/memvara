@@ -593,6 +593,32 @@ def test_a_link_from_a_restatement_with_an_earlier_start_lands_on_the_claim_on_r
     assert receipt.proposals_refused == []
 
 
+def test_a_link_from_a_write_stored_in_pieces_lands_on_the_claim_in_force():
+    """#435. Frankfurt is on record until a date next year, and the turn states it with no
+    end. The write reinforces the claim on record and stores a piece from that date on.
+    The link describes the fact, so it lands on the claim in force now, the one a plain
+    repeat's link lands on, and not on the piece, which only begins next year."""
+    next_year = datetime.now(timezone.utc) + timedelta(days=365)
+    mem = memory(ScriptedChat())
+    on_record = mem.remember("user", "deploy_cluster", "Frankfurt", valid_from=T0,
+                             valid_to=next_year).added[0]
+    office = mem.remember("user", "lives_in", "Porto").added[0]
+    mem.writer.llm = ScriptedChat([search("office Porto")], [
+        ("propose_claim", fact("user", "deploy_cluster", "Frankfurt"))], [
+        ("propose_link", {"from_ref": "new-1", "to_ref": office.id,
+                          "relation": "extends"})])
+
+    receipt = mem.add(CLUSTER)
+
+    (piece,) = receipt.added
+    assert (piece.valid_from, piece.valid_to) == (next_year, None)
+    assert [c.id for c in receipt.reinforced] == [on_record.id]
+    assert mem.links(piece.id) == []
+    assert [(k.from_id, k.to_id, k.relation) for k in mem.links(on_record.id)] == [
+        (on_record.id, office.id, "extends")]
+    assert receipt.proposals_refused == []
+
+
 def test_a_link_to_a_proposal_the_guards_refused_is_not_applied():
     mem = memory(ScriptedChat())
     office = mem.remember("user", "lives_in", "Porto").added[0]

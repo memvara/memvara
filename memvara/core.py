@@ -1678,6 +1678,17 @@ class Memvara:
         `RemoteStore.batch()` takes none, and only yields the store, so there the instant
         is simply the one at which the write's transaction begins. See `Store.batch`.
 
+        A `recorded_at` in the past sets when this claim is believed from, and nothing
+        else. When the write closes claims already on record, as a retraction
+        (`polarity=-1`) does or a new value in a single-valued slot does, their belief
+        clock changes at the time of this call and never earlier: with
+        `close="retired"`, they are retired at the time of the call, not at
+        `recorded_at`, so a read of belief between the two instants still returns them.
+        What the store believed in the past is never rewritten. A retraction's tombstone
+        is the one row whose clocks close at its `recorded_at`. `replaces=` is the
+        exception: see `supersede()`, which retires the claim it names at `at` or, by
+        default, at the new claim's `recorded_at`.
+
         Restating a value the store already holds, with a `valid_from` before the claim
         on record begins, stores that earlier period as a claim of its own, ending where
         the claim on record begins, and reports it under `added`. The claim on record is
@@ -1687,6 +1698,16 @@ class Memvara:
         start stores only the part before that claim begins. A restatement that also
         names `expires_at` is handled as a repeat instead, so the expiry lands on the
         claim on record.
+
+        More generally, a write stores only the parts of its period that no claim of the
+        same value holds, among the claims this scope can see and the store believes. With
+        Rome stored for January to March, Rome for February to April stores March to
+        April, and Rome for January to July, with Rome stored for March to May, stores
+        January to March and May to July. The receipt reports each stored piece under
+        `added` and each claim on record that holds part of the period under
+        `reinforced`, both in the order of their periods. A write whose whole period such
+        claims hold between them stores nothing and reinforces each of them. No claim on
+        record is rewritten.
 
         `valid_to` at or before `valid_from` is a `ValueError`, matching what
         `memory_remember` does with the same interval. Both ends arrive in one call here,
