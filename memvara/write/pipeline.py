@@ -51,6 +51,7 @@ ordering loses raw text to a provider timeout, and nothing can reconstruct that.
 
 from __future__ import annotations
 
+import math
 import re
 import warnings
 from contextlib import nullcontext
@@ -101,7 +102,7 @@ from ..telemetry import (
     script_of,
 )
 from ..types import (
-    SELF_SUBJECT, Claim, Closure, Derivation, Episode, Link, MemoryType, WriteReceipt,
+    Claim, Closure, Derivation, Episode, Link, MemoryType, WriteReceipt,
     stored_scope, utcnow,
 )
 from .agentic import (
@@ -129,6 +130,15 @@ _GROUNDING_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_./\-]*")
 def _content_words(text: str) -> list[str]:
     return [w for w in _GROUNDING_WORD_RE.findall(text.lower())
             if w not in _GROUNDING_STOPWORDS and len(w) > 1]
+
+
+def _finite(value: Any) -> float | None:
+    """`value` as a finite float, or None when it is not a number or is not finite."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _wholly_ungrounded(obj: str, source: str) -> bool:
@@ -995,6 +1005,12 @@ class WritePipeline:
         if rec is not None:
             rec.timing(WRITE_EXTRACT_MS, (perf_counter() - extract_t0) * 1000.0)
         receipt.llm_calls += made
+        # First, before anything else reads the items: output from a backend that does no
+        # validation of its own may be anything, and the guard and acquisition below
+        # assume well-formed items. A dropped item also costs no acquisition call and
+        # teaches no predicate (#303, #306). Grounding is checked before acquisition too,
+        # after the guard (#305).
+        raw = self._admissible(raw, episodes, receipt)
         if self.reject_polluted:
             # Before acquisition, deliberately: a predicate that only ever appeared on a
             # claim R1 refused as a duplicate of a known one must not be acquired — that
@@ -1006,6 +1022,7 @@ class WritePipeline:
             # a predicate this deployment refuses must not cost a model call to register.
             raw, dropped = self._registered_only(raw)
             receipt.unregistered += dropped
+        raw = self._grounded(raw, episodes, receipt)
         # Acquisition shares the accumulator: the caller is billed for a write, not for a
         # round trip, and a novel surface form costing a second call is part of the same
         # write. Reported after it, so those tokens are inside the total.
@@ -1017,8 +1034,7 @@ class WritePipeline:
         # second, exactly as it does when one call states a fact twice. One rule for
         # repeats, whichever way the turn was read.
         for item in raw:
-            claim = self._claim_from_dict(item, episodes, now, receipt,
-                                          agentic=plan is not None)
+            claim = self._claim_from_dict(item, episodes, now, agentic=plan is not None)
             if claim is not None:
                 out.setdefault(claim.sources[0], []).append(claim)
                 if plan is not None:
@@ -1168,6 +1184,68 @@ class WritePipeline:
         return ([whole] if whole.shown else []) + cut
 
     # -- predicate identity ---------------------------------------------------
+
+    def _admissible(self, raw: Any, episodes: Sequence[Episode],
+                    receipt: WriteReceipt) -> list[dict[str, Any]]:
+        """The items of one extraction that `_claim_from_dict` could store, in order.
+
+        Everything after this reads the items as well formed, so an item this drops is
+        never guarded, never acquired and never stored. It drops:
+
+        - the whole reply when it is not a list;
+        - an item that is not an object;
+        - an item with no `source_index` naming one of `episodes`, because a claim with
+          no source turn has no provenance;
+        - an item whose subject or predicate is not non-empty text, or whose object is
+          not non-empty text or a finite number. A claim with no subject is not filed
+          under the user, and an object that is a list is not stored as its Python text;
+        A polarity or a confidence that cannot be read is not a reason to drop:
+        `_claim_from_dict` reads a polarity that is not a number, or not finite, as an
+        assertion, and such a confidence as the default.
+        """
+        if not isinstance(raw, list):
+            return []
+        kept: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("source_index")
+            if not isinstance(idx, int) or isinstance(idx, bool) \
+                    or not 0 <= idx < len(episodes):
+                continue
+            subject, predicate, obj = (item.get(k) for k in ("subject", "predicate", "object"))
+            if not (isinstance(subject, str) and subject.strip()
+                    and isinstance(predicate, str) and predicate.strip()):
+                continue
+            if isinstance(obj, bool) or not (
+                    (isinstance(obj, str) and obj.strip())
+                    or (isinstance(obj, (int, float)) and _finite(obj) is not None)):
+                continue
+            kept.append(item)
+        return kept
+
+    def _grounded(self, raw: Sequence[dict[str, Any]], episodes: Sequence[Episode],
+                  receipt: WriteReceipt) -> list[dict[str, Any]]:
+        """The items whose object is grounded in their source turn, counting the rest on
+        `receipt.ungrounded` as `_claim_from_dict` does.
+
+        It runs after the pollution guard and the closed vocabulary, so a claim they
+        refuse is counted by them as before, and before acquisition, so a claim dropped
+        as ungrounded costs no acquisition call and teaches no predicate (#305).
+        """
+        if not self.reject_ungrounded:
+            return list(raw)
+        kept = []
+        for item in raw:
+            text = str(item.get("object", "")).strip()
+            source = episodes[item["source_index"]].content
+            if _wholly_ungrounded(text, source) and not (
+                    self.reject_ungrounded == "auto"
+                    and self._grounding_rescued(text, source)):
+                receipt.ungrounded += 1
+                continue
+            kept.append(item)
+        return kept
 
     def _registered_only(self, raw: Sequence[dict[str, Any]]
                          ) -> tuple[list[dict[str, Any]], int]:
@@ -1377,13 +1455,14 @@ class WritePipeline:
         return best >= calibration_of(self.embedder).grounding_rescue
 
     def _claim_from_dict(self, item: Mapping[str, Any], episodes: Sequence[Episode],
-                         now, receipt: WriteReceipt, *, agentic: bool) -> Claim | None:
-        """Trust boundary for model output: anything malformed is dropped, not repaired.
+                         now, *, agentic: bool) -> Claim | None:
+        """Turn one model item into a claim, repairing the fields that can be repaired.
 
-        `receipt` is threaded through only so a rejection for lack of grounding can be
-        counted where the decision is made -- see `reject_ungrounded`. A structurally
-        malformed item (missing predicate, out-of-range source) is dropped the same way
-        it always was, uncounted; only the new reason has a number attached to it.
+        The item has passed `_admissible` and `_grounded`: it names a source turn, its
+        subject and predicate are text, its object is text or a finite number, and the
+        object is grounded in the turn. What is left to drop here is a predicate that
+        normalizes to nothing, such as `"!!!"`. A polarity, a confidence or a memory type
+        that cannot be read is repaired to its default rather than dropped.
 
         `agentic` is set for the items of an agentic run. Only those may carry an
         `expires_at`, which `agentic._Session._expiry` has checked is a future UTC
@@ -1391,33 +1470,22 @@ class WritePipeline:
         dropped: it used to be accepted as it came, even in the past, and a repeat put it
         on the claim on record.
         """
-        idx = item.get("source_index")
-        if not isinstance(idx, int) or isinstance(idx, bool) or not 0 <= idx < len(episodes):
-            # Without a source we cannot attach provenance, and a claim with no
-            # provenance is exactly what this library exists not to store.
+        ep = episodes[item["source_index"]]
+        subject = str(item["subject"]).strip()
+        predicate = self.registry.normalize(str(item["predicate"]))
+        obj = str(item["object"]).strip()
+        if not predicate:
             return None
-        ep = episodes[idx]
-
-        subject = str(item.get("subject", "") or "").strip() or SELF_SUBJECT
-        predicate = self.registry.normalize(str(item.get("predicate", "") or ""))
-        obj = str(item.get("object", "") or "").strip()
-        if not predicate or not obj:
-            return None
-
-        if self.reject_ungrounded and _wholly_ungrounded(obj, ep.content):
-            if not (self.reject_ungrounded == "auto"
-                    and self._grounding_rescued(obj, ep.content)):
-                receipt.ungrounded += 1
-                return None
 
         try:
             polarity = -1 if int(item.get("polarity", 1)) < 0 else 1
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             polarity = 1
-        try:
-            confidence = min(1.0, max(0.0, float(item.get("confidence", 0.7))))
-        except (TypeError, ValueError):
-            confidence = 0.7
+        # A confidence that is not a finite number is read as the default. NaN has to be
+        # caught before the clamp, which would read it as 0.0: a guess that displaces
+        # nothing, which the model never said.
+        raw_confidence = _finite(item.get("confidence", 0.7))
+        confidence = 0.7 if raw_confidence is None else min(1.0, max(0.0, raw_confidence))
 
         if self.registry.known(predicate):
             # The schema is authoritative over a per-call opinion; otherwise the same

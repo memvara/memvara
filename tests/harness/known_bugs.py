@@ -19,10 +19,8 @@ from dataclasses import dataclass
 
 import pytest
 
-
 class Reproduced(Exception):
     """A known bug's own symptom, seen by the test that pins it."""
-
 
 @dataclass(frozen=True)
 class KnownBug:
@@ -34,7 +32,6 @@ class KnownBug:
     #: memvara/build-health, so an entry it pins names that repository here; the entries
     #: filed by hand before that are in memvara/memvara.
     repo: str = "memvara/memvara"
-
 
 KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B2", 266, "a session-bound or agent-bound write ends the user-wide value"),
@@ -53,12 +50,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B39", 316, "memory_recall reports ranked without include_episodes as a "
              "ValueError"),
 
-    KnownBug("B26", 303, "malformed model output makes add() raise instead of dropping the "
-             "item"),
-    KnownBug("B28", 305, "a claim the trust boundary drops still costs a model call and "
-             "leaves a learned predicate"),
-    KnownBug("B29", 306, "a claim with no subject is filed under the user, and a list "
-             "object is stored as Python text"),
     KnownBug("B30", 307, "a model retraction at low confidence ends a fact the user "
              "asserted"),
     KnownBug("B32", 309, "invented predicates past the learned cap make one write take "
@@ -98,7 +89,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B85", 364, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "
              "consolidation threshold of 0.85, so a repeated memory is stored twice"),
 )}
-
 
 def xfail(bug_id: str) -> pytest.MarkDecorator:
     """The strict expected-failure marker for a registered bug."""
