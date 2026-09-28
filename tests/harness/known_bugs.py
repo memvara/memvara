@@ -54,8 +54,9 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "current one is stored twice"),
     KnownBug("B56", 338, 'on Codex, Copilot and OpenCode, "not configured" and "no matching '
              'memories" look identical'),
-    KnownBug("B58", 340, 'the "_" approve separator never recovers a tool name on Cursor and '
-             "OpenCode"),
+    KnownBug("B58", 340, "on Cursor and OpenCode a read-only memvara tool is never approved: "
+             "the names measured there do not name the server safely, and an approval path "
+             "that does waits for an interactive measurement"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
     KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
