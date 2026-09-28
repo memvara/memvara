@@ -15,7 +15,7 @@ import textwrap
 
 import pytest
 
-from harness import checklist, tiers
+from harness import checklist, known_bugs, tiers
 from memvara.server import config as server_config
 from memvara.server import mcp as mcp_module
 from memvara.server.tools import BY_NAME
@@ -227,7 +227,9 @@ def test_a_host_has_an_item_only_for_the_hooks_it_fires() -> None:
 
 
 def test_every_open_known_bug_is_an_item() -> None:
-    assert "bug:B2" in checklist.bug_items()
+    """Read from the registry itself, since an entry leaves it when its bug is fixed."""
+    assert known_bugs.KNOWN_BUGS
+    assert set(checklist.bug_items()) == {f"bug:{bug}" for bug in known_bugs.KNOWN_BUGS}
 
 
 def test_silent_failure_modes_come_from_the_table_and_from_an_announcement(
@@ -455,7 +457,8 @@ def test_the_checklist_holds_an_item_of_every_kind() -> None:
     found = checklist.items()
     for item in ("tool:memory_recall", "switch:read_only",
                  "tool-switch:memory_add_document/documents", "env:MEMVARA_DB",
-                 "hook:claude/recall", "inv:I8", "silent:predicate-explosion", "bug:B2"):
+                 "hook:claude/recall", "inv:I8", "silent:predicate-explosion",
+                 f"bug:{next(iter(known_bugs.KNOWN_BUGS))}"):
         assert item in found, item
 
 

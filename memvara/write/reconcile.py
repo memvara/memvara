@@ -697,13 +697,14 @@ class Reconciler:
         # is something a vocabulary asks for, never something a string collision supplies.
         spec = self.registry.spec(claim.predicate)
         claim.object_kind = (ObjectKind.ENTITY if spec.carries_edge else ObjectKind.VALUE)
-        # A fact the vocabulary calls global is not project-relative, so it is written at
-        # the level above one. Two consequences follow and both are wanted: its slot has
-        # no project, so saying it in a second repository retires the first value rather
-        # than duplicating it; and it sits at user level, which visibility widens up into,
-        # so it is readable from inside every project. `fact_key_for` needs no special
-        # case. The rule itself lives on the registry because `forget()` and `history()`
-        # have to apply the same one to the probe they look this claim up with.
+        # A fact the vocabulary calls global is not project-relative, so it is written with
+        # the project cleared, and only the project. Two consequences follow and both are
+        # wanted: its slot has no project, so saying it in a second repository at the same
+        # level ends the first value rather than duplicating it; and it sits at a level
+        # every reader of the same user, agent and session reads from inside any project
+        # (`Scope.ancestors`). `fact_key_for` needs no special case. The rule itself lives
+        # on the registry because `forget()` and `history()` have to apply the same one to
+        # the probe they look this claim up with.
         claim.scope = self.registry.slot_scope(claim.predicate, claim.scope)
         self._stamp(claim)
         # Only re-render text the Claim generated for itself; a caller-supplied
@@ -769,32 +770,34 @@ class Reconciler:
         The owner check is redundant with the keys — `fact_key` and `value_key` already
         hash tenant+user — and is kept anyway so the "one person's memory never touches
         another's" invariant is enforced here in readable code, not implied by a hash.
-        Note it is deliberately *not* a full scope match: agent and session are excluded,
-        so "I moved to Lisbon" learned in a new session still retires the old city.
+        It is not a full scope match. The repeat check uses it and then keeps the claims
+        the writer can see (`Scope.visible`), so a session that states the user-wide
+        value again reinforces the user-wide claim instead of writing a copy of it.
         """
         return [c for c in claims if owner_key(c.scope) == owner and c.is_live(t)]
 
     @staticmethod
-    def _in_reach(scope: Scope, claims: Iterable[Claim]) -> list[Claim]:
-        """The claims a write at `scope` may close: in its own scope, in a broader scope it
-        reads, or in a narrower scope beneath it. Never a sibling's.
+    def _at_scope(scope: Scope, claims: Iterable[Claim]) -> list[Claim]:
+        """The claims a new value written at `scope` may end: those stored at exactly
+        `scope`.
 
-        A slot spans every session and agent of its project (`owner_key`), so the claims
-        competing for it include values that sibling sessions and agents hold. Closing
-        one of those changed a record the writer cannot read, and handed it back in the
-        writer's receipt, which is how session s2 could learn what session s1 had
-        stored. Reaching down stays, as it does for `forget()` and `history()`: a
-        user-level write still ends a value a session holds.
+        A slot's key leaves out the agent and the session (`owner_key`), so the values
+        competing for it include the user-wide value, each session's and each agent's.
+        They are separate values for supersession (#266). A value written in a session or
+        by an agent is a local value: it answers inside that session or agent, and the
+        user-wide value stays live for every other reader. A user-wide write leaves a
+        session's or an agent's own value alone in the same way. Which value a reader
+        sees is decided when it reads (`memvara.retrieve.shadow`).
+
+        Up to 0.17.0 a write reached its own scope, the broader scopes it reads and the
+        narrower scopes beneath it. So a session's new value ended the user-wide value
+        for everyone, and only that session could see the new one.
+
+        A retraction reaches further than a new value, but only as far as the writer can
+        see (`_retract`): a session's retraction ends the user-wide value it reads, and a
+        user-level retraction leaves a session's value alone.
         """
-        reach: dict[Scope, bool] = {}
-        out: list[Claim] = []
-        for c in claims:
-            ok = reach.get(c.scope)
-            if ok is None:
-                ok = reach[c.scope] = scope.contains(c.scope) or scope.sees(c.scope)
-            if ok:
-                out.append(c)
-        return out
+        return [c for c in claims if c.scope == scope]
 
     @staticmethod
     def _canonical_of(claims: Sequence[Claim]) -> Claim:
@@ -905,7 +908,7 @@ class Reconciler:
         # changed nothing on either clock, and still named this claim as its successor
         # and listed it in `receipt.closed`.
         if spec.functional:
-            for c in self._in_reach(claim.scope, self._occupants(
+            for c in self._at_scope(claim.scope, self._occupants(
                     claim.scope.tenant, claim.fact_key, t, owner)):
                 if c.value_key != claim.value_key and _overlaps(c, claim):
                     victims[c.id] = c
@@ -920,7 +923,7 @@ class Reconciler:
             # matching nothing.
             fk = fact_key_for(claim.scope, claim.subject_key,
                               self.registry.normalize(other))
-            for c in self._in_reach(claim.scope, self._occupants(
+            for c in self._at_scope(claim.scope, self._occupants(
                     claim.scope.tenant, fk, t, owner)):
                 if _overlaps(c, claim):
                     victims[c.id] = c
@@ -1100,9 +1103,17 @@ class Reconciler:
     def _retract(self, claim: Claim, t: datetime, owner: str,
                  close: Closure = "ended", reason: str | None = None) -> ReconcileResult:
         tenant = claim.scope.tenant
+        # Only the claims the writer can see: its own scope and the broader ones it reads
+        # (`Scope.visible`). A session's retraction therefore ends the user-wide value it
+        # reads, and a user-level retraction leaves a session's or an agent's own value
+        # alone, as a user-level new value does. A slot's key leaves out the agent and the
+        # session, so without this a user-level retraction, above all one that names no
+        # value, ended every session's and every agent's value in the slot, values the
+        # writer cannot read. `forget()` is the call that reaches down into every scope.
+        #
         # Without a claim whose retirement takes effect later, for the reason `_victims`
         # gives: a retraction cannot end it, so it must not be reported as ended.
-        slot = [c for c in self._in_reach(claim.scope, self.store.competing_claims(
+        slot = [c for c in claim.scope.visible(self.store.competing_claims(
                     tenant, claim.fact_key, valid_at=t, known_at=t))
                 if owner_key(c.scope) == owner and c.invalidated_at is None]
 

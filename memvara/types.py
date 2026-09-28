@@ -477,18 +477,26 @@ def content_hash(*parts: str) -> str:
 
 
 def owner_key(scope: "Scope") -> str:
-    """Whose facts these are: tenant plus user, and deliberately nothing else.
+    """Whose facts these are: tenant plus user, and nothing else.
 
     Extraction yields a generic subject ("user"), so the scope's owner is what actually
-    distinguishes people — without it, two users in one tenant collide and Bob's "lives
+    distinguishes people. Without it, two users in one tenant collide, and Bob's "lives
     in Lisbon" silently retires Alice's "lives in Berlin".
 
-    Agent and session are excluded on purpose: a durable fact about a person is the same
-    fact no matter which agent or session observed it, so learning "I moved to Lisbon" in
-    a fresh session must still retire the old city on record at a level that session
-    reads, such as the user's own. The slot therefore spans every session and agent, and
-    a write does not close what a sibling session or agent holds: see
-    `Reconciler._in_reach`.
+    Agent and session are left out because this key also scopes entity identity:
+    `software:postgresql` is one entity for a person whichever agent or session wrote
+    about it. The fact key built on it (`fact_key_for`) leaves them out too, so the
+    claims of one slot include every session's and every agent's value for that
+    question, and `history()` and `forget()` at a broad scope reach all of them.
+
+    That does not make a session's value compete with the user-wide one. A value written
+    in a session, or by an agent, is a local value: it answers inside that session or
+    agent and leaves the user-wide value live for everyone else (#266). The reconciler
+    therefore closes only the values stored at exactly the writer's scope
+    (`Reconciler._at_scope`), and a present-tense read takes a single-valued fact from the
+    narrowest level of its chain that holds one (`memvara.retrieve.shadow`). This
+    reverses the rule of 0.17.0 and earlier, under which a value written in a session
+    ended the value on record at the user's level for every reader.
     """
     return f"{scope.tenant}{OWNER_SEP}{scope.user or ''}"
 
@@ -545,9 +553,14 @@ def fact_key_for(scope: "Scope", subject: str, predicate: str) -> str:
     scope design exists to keep. Slots partition by project; entities do not.
 
     A claim whose predicate is declared global reaches this with `scope.project` already
-    cleared by `Reconciler._canonicalize`, so it occupies one slot for the whole store.
+    cleared by `Reconciler._canonicalize`, so its key is the same in every repository.
     That is how a preference stays one fact while two services' Postgres versions stay
     two.
+
+    The key leaves out the agent and the session, for the reason `owner_key` gives, so
+    one slot holds the values of every agent and session of an owner and project. Which
+    of those values compete is decided by scope, not by the key: a write ends only the
+    values at exactly its own scope, and a read shows the narrowest one it can see.
     """
     return content_hash(owner_key(scope), scope.project or "",
                         default_entity(subject), predicate)
@@ -645,7 +658,8 @@ class Scope:
     Visibility widens *upward only*. A search at session scope also sees that agent's,
     that user's, and the tenant's memory (see `ancestors`), but a search at user scope
     does not descend into individual sessions, and nothing ever reaches sideways into a
-    sibling session, a sibling agent, or another user.
+    sibling session, a sibling agent, or another user. Inside a project, a session or an
+    agent also sees itself outside any project, which is where it files a global fact.
 
     That direction is the useful one: a session should answer from what the user said
     months ago, while its own scratch state stays out of everyone else's results.
@@ -671,10 +685,12 @@ class Scope:
     #: landing in one slot.
     #:
     #: Unset means "not project-relative", and that is a real state rather than a missing
-    #: one. A predicate declared global is written with this cleared, so its claims sit at
-    #: user level: one slot for the whole store, and visible from inside every project
-    #: because visibility widens upward. A preference follows you between repositories;
-    #: what version of Postgres a service runs does not.
+    #: one. A predicate declared global is written with this cleared, and only this: a
+    #: user-level write lands at user level, and a session's write lands at that session
+    #: with no project. Either way its key is the same in every repository, and it is
+    #: visible from inside every project, because `ancestors` includes the project-less
+    #: form of each level the reader is bound to. A preference follows you between
+    #: repositories; what version of Postgres a service runs does not.
     project: str | None = None
 
     def __post_init__(self) -> None:
@@ -710,11 +726,44 @@ class Scope:
     def ancestors(self) -> list["Scope"]:
         """This scope plus every broader scope it inherits from, narrowest first.
 
+        For a reader at tenant t, user u, project P, agent a and session s, the chain is:
+
+        1. (u, P, a, s), the reader's own scope;
+        2. (u, P, a), its agent inside the project;
+        3. (u, P), the project;
+        4. (u, no project, a, s), the same session outside any project;
+        5. (u, no project, a), the same agent outside any project;
+        6. (u), the user;
+        7. the tenant.
+
+        A level the reader is not bound to is left out, so a reader with no agent has no
+        agent levels, and a reader with no project has no project-less copies of its own
+        levels: its chain is its session, its agent, its user and its tenant, as it always
+        was.
+
+        Levels 4 and 5 exist because of `PredicateRegistry.slot_scope`. A predicate
+        declared global, such as `lives_in`, is written at the writer's scope with only
+        the project cleared, so a session inside a repository files it at level 4. Without
+        that level in its own chain, the session could not read the fact it had just
+        written (#273). They come after the project levels, so for one question a value
+        the repository holds is the narrower one; a global predicate is never written with
+        a project, so for the predicates that reach levels 4 and 5 the order between them
+        and the project levels decides nothing.
+
+        The order is the order of precedence. A present-tense read takes a single-valued
+        fact from the first level in this list that holds a value for it
+        (`memvara.retrieve.shadow`).
+
         The broader scopes are built with `stored_scope`. Each one only clears levels
         this scope holds, so it holds no value this scope does not. A scope read back
         from a store with '*' or '' at some level therefore has ancestors like any other,
         instead of raising when one of them is built; they keep that value where they
         keep the level, so their keys, like its own, match no scope a caller can build.
+
+        >>> reader = Scope("t", "u", agent="a", session="s", project="gh/o/r")
+        >>> [s.key() for s in reader.ancestors()]  # doctest: +NORMALIZE_WHITESPACE
+        ['t/u/gh%2Fo%2Fr/a/s', 't/u/gh%2Fo%2Fr/a/*', 't/u/gh%2Fo%2Fr/*/*',
+         't/u/*/a/s', 't/u/*/a/*', 't/u/*/*/*', 't/*/*/*/*']
         """
         out = [self]
         if self.session is not None:
@@ -724,6 +773,10 @@ class Scope:
             out.append(stored_scope(self.tenant, self.user, None, None,
                                     project=self.project))
         if self.project is not None:
+            if self.session is not None:
+                out.append(stored_scope(self.tenant, self.user, self.agent, self.session))
+            if self.agent is not None:
+                out.append(stored_scope(self.tenant, self.user, self.agent, None))
             out.append(stored_scope(self.tenant, self.user, None, None))
         if self.user is not None:
             out.append(stored_scope(self.tenant, None, None, None))

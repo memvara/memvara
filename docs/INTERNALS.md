@@ -553,17 +553,38 @@ move old ones, and `why()` no longer shows a turn from a scope the reader cannot
 `Memvara.why`). Writing the lost fact again with `remember()` in the scope that lost it
 stores it there.
 
-**A write never closes a sibling's claim.** A slot's key names the owner and the project,
-not the agent or session, so the claims competing for one slot include values that sibling
-sessions and agents hold. A supersession or a retraction closes only claims the candidate
-can reach (`Reconciler._in_reach`): those in its own scope, in a broader scope it reads
-(`Scope.sees`), or in a narrower scope beneath it (`Scope.contains`). A sibling's claim is
-left live. Before this rule, a write in session s2 ended the value session s1 held, which
-s2 cannot read, and returned it in s2's receipt, so the `memory_remember` reply showed
-s2 the ended value. Reaching down is unchanged and deliberate, as it is for `forget()`
-and `history()`: a user-level write still ends a value a session holds. The accumulation
-report still counts every live value in the slot, siblings included; it is a count and
-names no value, and counting exactly would mean reading every occupant of the slot.
+**A new value ends only the values at exactly its own scope.** A slot's key names the
+owner and the project, not the agent or the session, so the claims competing for one slot
+include the user-wide value and the values each session and agent holds. A value written
+in a session, or by an agent, is a local value: it answers inside that session or agent,
+and the user-wide value stays live for every other reader (#266). So a supersession closes
+only claims stored at exactly the candidate's scope (`Reconciler._at_scope`). A session's
+new value does not end the user-wide value, a user-wide value does not end a session's or
+an agent's own value, and a session's value and its agent's value are separate in the same
+way. Which of them a reader sees is decided when it reads; see *A narrower scope's own
+value shadows a broader one* below. A sibling's claim has been left alone since 0.17.0:
+before it, a write in session s2 ended the value session s1 held, which s2 cannot read,
+and returned it in s2's receipt.
+
+Up to 0.17.0 a new value reached broader and narrower scopes too. A session's new value
+ended the user-wide value for everyone while only that session could see the new one, and
+a user-level write ended the value a session held. Claims ended that way stay ended: no
+migration reopens them, and restating the value where it was lost restores it
+(`docs/UPGRADING.md`).
+
+**A retraction closes only the claims its writer can see.** A retraction closes the claims
+in its own scope and in the broader scopes it reads (`Scope.visible`, in
+`Reconciler._retract`), never one in a narrower scope or a sibling's. It leaves no value of
+its own to answer in the writer's scope, so a session saying "I no longer live in Berlin"
+ends the user-wide Berlin the session reads. A user-level retraction leaves a session's or
+an agent's own value alone, whether it names that value or names none, because the user
+level cannot read it, and a user-level new value leaves it alone too. Before this rule a
+retraction also reached down into narrower scopes, as `forget()` and `history()` do, and
+since a session's value became a local value that let an untargeted user-level retraction
+end every session's value in the slot. `forget()` is still the call that reaches down into
+every scope. The accumulation report still counts every live value in the slot, siblings
+included; it is a count and names no value, and counting exactly would mean reading every
+occupant of the slot.
 
 **A repeat with an expiry stays in exactly its own scope.** A repeat that names an
 `expires_at` reinforces only a claim in exactly its own scope, not one at a broader scope
@@ -1107,7 +1128,8 @@ suggestion must not turn it into an exception the caller retries.
   in this run (`not_read`), asks to end or replace a memory whose scope is not exactly the
   write's scope (`broader_scope`: reads widen upward, so this is a user-wide memory seen
   from a project or a session, and closing it would close it everywhere, which the
-  deterministic path never does from below), cannot be shaped into a claim or a link
+  deterministic path does from below only for a retraction), cannot be shaped into a
+  claim or a link
   (`invalid`), or
   restates the instructions (`instruction_echo`, `write/agentic.echoes_instructions`).
   Accepted proposals do not write. Proposed memories go through the pollution guard, the
@@ -1687,10 +1709,10 @@ the hosted client's parsing of a response, so maintenance and reads never fail o
 row; a third-party `Store` has to use it for the same reason. A scope derived from such a
 row is built the same way: its ancestors, the scope a global predicate files it in
 (`PredicateRegistry.slot_scope`), the scope a re-extracted turn's claims are counted in
-(`WritePipeline.own_claims`), and the project slot that a read bound to a project checks
-before it hides a user-wide claim (`retrieve/shadow.py`). The first three only clear
-levels, and the slot only replaces the project with the reader's, so none of them holds a
-refused value that neither its source nor the reader held. Re-reading a turn stored under
+(`WritePipeline.own_claims`), and the narrower levels of a reader's chain that a read
+checks before it hides a broader claim (`retrieve/shadow.py`, which takes them from
+`ancestors`). Each of them only clears levels, so none of them holds a refused value that
+neither its source nor the reader held. Re-reading a turn stored under
 either value finishes like any other, and so does a read that returns such a row, such as
 `HybridRetriever.search` given the scope the row is stored under. No scope a caller can
 build reads such a row: `key()` writes a stored `"*"` as `%2A` and a stored `""` as an
@@ -1703,31 +1725,95 @@ path still matches rows by `owner_key` and fact key, so a stored row with a user
 of `""` can still be reinforced, ended or merged by a write at the unbound level above it;
 `docs/UPGRADING.md` says how to find such rows and what to do with them.
 
-### A repository's own value shadows the user-wide one
+### The chain a reader reads from
 
-Before project scope, the local server wrote every fact without a project. Inside a
-repository, a new value for a single-valued, project-relative predicate now lands in the
-repository's slot, whose key includes the project, so it cannot end the older user-wide
-value. Ending it would be wrong anyway, because that value is still the answer in every
-other repository. So both are stored, and `memvara/retrieve/shadow.py` decides at read
-time. A present-tense read bound to project P leaves out a live claim with no project when
-the same owner, subject and single-valued predicate has a live claim in P's slot. The check
-is one store query per read, `Store.occupied_slots(tenant, fact_keys)`, over the distinct
-slots of the candidates the read would otherwise return; a read with no project pays
-nothing. Both slot lookups are optional on the store protocol: a store without
-`occupied_slots` is asked one `count_competing` per slot, and a store with neither, or one
-that raises `NotImplementedError` from them as `RemoteStore` does, returns the read
-unshadowed rather than failing it.
+`Scope.ancestors()` is the list of scopes a reader reads from, narrowest first. Every read
+that enumerates passes it to the store, and `Scope.sees` authorizes an id-addressed read by
+checking a claim's scope against it. For a reader at tenant t, user u, project P, agent a
+and session s, the chain is:
+
+| # | Level | Example key |
+|---|---|---|
+| 1 | the reader's own scope | `t/u/P/a/s` |
+| 2 | its agent inside the project | `t/u/P/a/*` |
+| 3 | the project | `t/u/P/*/*` |
+| 4 | the same session outside any project | `t/u/*/a/s` |
+| 5 | the same agent outside any project | `t/u/*/a/*` |
+| 6 | the user | `t/u/*/*/*` |
+| 7 | the tenant | `t/*/*/*/*` |
+
+A level the reader is not bound to is left out. A reader bound to no project has no levels
+4 and 5, so its chain is its session, its agent, its user and its tenant, as it always
+was, and a reader in a project with no agent and no session has the project, the user and
+the tenant. Nothing reaches sideways: no chain holds a sibling session, a sibling agent or
+another project.
+
+Levels 4 and 5 came with #273. `PredicateRegistry.slot_scope` files a claim whose
+predicate is declared global, such as `lives_in`, at the writer's scope with only the
+project cleared. So a session inside a repository filed its global facts at level 4, which
+its own chain did not include, and it could not read back what it had just written:
+`get_all()` and `search()` left the claim out and `why()` returned `None`. Clearing the
+agent and the session too was the other option, and it was rejected, because it would make
+a session's value user-wide, against the rule that a session's value is a local value.
+Levels 4 and 5 come after the project levels. A global predicate is never filed with a
+project, so for the predicates that reach levels 4 and 5 the order between them and the
+project levels decides nothing; for a project-relative predicate that the same session
+also wrote outside the project, the project's value is the narrower one.
+
+The hosted client builds no chain of its own. It sends its bound scope, and the deployment
+resolves the chain with this same library, so both answer alike
+(`tests/adversarial/parity/test_adv_parity_scope.py`). One answer differs: the hosted
+`count()` is the `total` of a present-tense listing, which is shadowed, so it leaves out a
+broader value a narrower one hides, where the library's `count()` includes it. That
+predates the session rule, since a repository's own value already hid the user-wide value
+from that listing, and making the two agree is a change to the deployment.
+
+### A narrower scope's own value shadows a broader one
+
+A value written inside a repository lands in the repository's slot, whose key includes the
+project, so it cannot end the user-wide value. A value written in a session or by an agent
+shares the user-wide value's slot key, and since #266 it ends only values at exactly its
+own scope (see *A new value ends only the values at exactly its own scope* above). In every
+one of these cases, ending the broader value would be wrong, because it is still the
+answer for every other reader. So both are stored, and `memvara/retrieve/shadow.py` decides
+at read time.
+
+A present-tense read takes a single-valued fact from the first level of the reader's chain
+that holds one. It leaves out a live claim at chain level i when a level before i with the
+same owner, tenant plus user, holds a live claim for the same subject and predicate. The
+slot is spelled the way that level spells it: a level with a project uses the project's
+key, and one without uses the key with no project. A sibling's value is not in the
+reader's chain, so it hides nothing: before #266 the check asked about every claim in the
+project's slot, and a read bound to a repository lost the user-wide value to a value that a
+session inside that repository held. The comparison stays inside one owner, so a value
+written for the whole tenant, which has no user, is never hidden by a user's value, just
+as a user's write never ends it.
+
+The check is one store query for each level of the chain at which a candidate sits, asking
+only about the levels before that one: `Store.occupied_slots(tenant, fact_keys,
+scopes=...)`, which counts only a claim stored at exactly one of `scopes`. A candidate at
+the reader's own level, or with no narrower level of its owner, costs nothing, so a read at
+user level pays nothing. `occupied_slots` is optional on the store protocol, and a store
+that has it must accept `scopes`. A store without it is asked `competing_claims` once per
+slot, and a store that raises `NotImplementedError`, as `RemoteStore` does, returns the
+read unshadowed rather than failing it. `count_competing` answers how many claims a slot
+holds and not where, so shadowing no longer asks it.
 
 It applies to `get_all()` (and so to `standing()`, `profile()` and the MCP tools built on
 them), to `since()`'s `added` half, and to `search()` and `recall()` inside
 `HybridRetriever`, after the graph walk and after every cheaper filter (memory type, belief
-time, anchoring and the score floor), so a candidate those drop never costs a lookup. It does not apply to a read at another instant
-(`valid_at`, `known_at` or `as_of`), because at that instant the repository may not have
-had a value of its own; to many-valued predicates, where both values hold at once; to
-predicates declared global, which are never written with a project; or to `count()` and
-id-addressed reads such as `get()` and `why()`. When the repository's value ends, the
-user-wide value answers there again. Nothing is written.
+time, anchoring and the score floor), so a candidate those drop never costs a lookup. It
+does not apply to a read at another instant (`valid_at`, `known_at` or `as_of`), because
+at that instant the narrower level may not have had a value of its own; to many-valued
+predicates, where both values hold at once; or to `count()` and id-addressed reads such as
+`get()` and `why()`. A level with a project is not asked about a predicate declared
+global, which is never written with a project. When the narrower value ends, the broader
+value answers there again. Nothing is written.
+
+A repeat of a value the writer can see still reinforces that claim, wherever it is stored.
+So a session that states the user-wide value again reinforces the user-wide claim rather
+than storing a copy, and if that session holds a different value of its own, the session's
+value keeps answering there.
 
 ## `Memvara.standing()` and `Memvara.profile()`
 

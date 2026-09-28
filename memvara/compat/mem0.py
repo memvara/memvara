@@ -460,10 +460,11 @@ class Memory:
         `add()` reported with its own ADD row: a restatement dated before the value on
         record, for example, is stored beside it rather than linked to it, and stays.
 
-        A version can sit in another scope of the same user, because a write can end a
-        value held in a broader scope it reads or in a narrower scope beneath it. A value
-        written for the user ends the value a session holds for the same fact, which links
-        the session's claim into the user-level chain. The chain is followed through such
+        A version can sit in another scope of the same user, because a retraction can end
+        a value held in a broader scope its writer reads. A retraction written in a
+        session ends the user-level value for the same fact, which links the session's
+        tombstone into the user-level chain. A new value does not link two scopes,
+        because it ends only a value at its own scope. The chain is followed through such
         a claim, but `erase()` refuses a claim in a scope this `Memory` cannot read, so
         `delete()` leaves it as it is and does not list it. A version in a broader scope
         that this `Memory` reads, such as the user level for a `Memory` bound to a

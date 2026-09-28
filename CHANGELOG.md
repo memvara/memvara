@@ -9,8 +9,44 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Changed
+
+- **A value written in a session, or by an agent, no longer ends the user-wide value.** It
+  is a local value: it answers inside that session or agent, and the user-wide value stays
+  live for every other reader. Before, a session-bound or agent-bound write of a
+  single-valued fact such as `lives_in` ended the user-wide value for everyone, while only
+  that session or agent could see the new value, so every other session and the user level
+  were left with no value at all. A new value now ends only the values stored at exactly
+  its own scope (`Reconciler._at_scope`), so a user-level write no longer ends a session's
+  or an agent's own value either. A present-tense read takes a single-valued fact from the
+  narrowest level of the reader's chain that holds one, which is how a repository's own
+  value already hid the user-wide one (`memvara/retrieve/shadow.py`). Reads at another
+  instant, `count()`, `get()` and `why()` are not shadowed. A retraction closes only the
+  values its writer can see: a session's retraction still ends the user-wide value it
+  reads, but a user-level retraction, named or naming no value, no longer ends a
+  session's or an agent's value. `forget()` and `history()` at a broad scope still reach
+  down into a session. Claims that a session-bound write
+  ended before this release stay ended; restate the value to restore it
+  (`docs/UPGRADING.md`). `Store.occupied_slots` takes a keyword-only `scopes` argument, and
+  a store that implements it must accept it. #266 (B2).
+
 ### Fixed
 
+- **A session or agent bound inside a repository reads the global facts it writes.** A
+  predicate declared global, such as `lives_in`, is filed at the writer's scope with only
+  the project cleared, so a session inside a repository filed it at that session with no
+  project. That level was not in the session's own chain, so `get_all()` and `search()`
+  left the fact out and `why()` returned `None` for it. `Scope.ancestors()` now returns the
+  project-less form of the reader's own session and agent after the project levels and
+  before the user: for user u, project P, agent a and session s, the chain is (u, P, a, s),
+  (u, P, a), (u, P), (u, a, s), (u, a), (u), then the tenant. The chain of a reader bound to
+  no project, or to no agent and no session, is unchanged. #273 (B7).
+- **A value a sibling session holds no longer hides the user-wide value from a
+  repository's reader.** The check that lets a repository's own value hide the user-wide
+  one asked whether the repository's slot held any live value, and a slot's key leaves out
+  the session. So a value written by a session inside the repository hid the user-wide
+  value from every other reader in that repository, who then read no value at all. The
+  check now asks only about the levels of the reader's own chain.
 - **The mem0 shim takes the calls mem0 2.x takes.** `memvara.compat.mem0.Memory` was
   written on the assumption that mem0 2.x moved every entity id into `filters=`. Compared
   with the real `mem0ai` package at 2.0.0 and 2.2.1, it was wrong in four ways, and each is

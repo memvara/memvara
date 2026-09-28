@@ -1712,7 +1712,8 @@ def _where_clause(where: SearchFilter | None, row: str, documents: str,
 
 
 #: Fact keys per `occupied_slots` statement, under SQLite's oldest bound-parameter limit
-#: of 999 with room for the tenant and the liveness clause's own parameters.
+#: of 999 with room for the tenant, the liveness clause's own parameters and the five
+#: parameters of each of the at most seven scopes in a read's chain.
 _SLOT_CHUNK = 900
 
 
@@ -3739,15 +3740,19 @@ class SQLiteStore:
             ).fetchall()
         return [self._row_to_claim(r) for r in rows]
 
-    def occupied_slots(self, tenant: str, fact_keys: Collection[str]) -> set[str]:
+    def occupied_slots(self, tenant: str, fact_keys: Collection[str], *,
+                       scopes: Sequence[Scope] | None = None) -> set[str]:
         """The keys among `fact_keys` whose slot holds a live claim. One query per chunk.
 
-        Chunked because SQLite caps the number of bound parameters in one statement, at
-        999 on older builds. `cl_fact` covers (tenant, fact_key), so each chunk walks
-        index entries.
+        With `scopes`, only a claim stored at exactly one of those scopes counts, through
+        the same `_scope_clause` every read uses. Chunked because SQLite caps the number
+        of bound parameters in one statement, at 999 on older builds; a read's chain has
+        at most seven scopes, so the scope terms fit beside a chunk. `cl_fact` covers
+        (tenant, fact_key), so each chunk walks index entries.
         """
         keys = list(dict.fromkeys(fact_keys))
         live, lp = self._live_clause(None, None, include_invalidated=False)
+        where, wp = ("1=1", []) if scopes is None else self._scope_clause(scopes)
         found: set[str] = set()
         with self._read() as conn:
             for start in range(0, len(keys), _SLOT_CHUNK):
@@ -3755,8 +3760,8 @@ class SQLiteStore:
                 marks = ", ".join("?" * len(chunk))
                 rows = conn.execute(
                     f"SELECT DISTINCT fact_key FROM claims WHERE tenant=? AND "
-                    f"fact_key IN ({marks}) AND {live}",
-                    [tenant, *chunk, *lp]).fetchall()
+                    f"fact_key IN ({marks}) AND {live} AND {where}",
+                    [tenant, *chunk, *lp, *wp]).fetchall()
                 found.update(r["fact_key"] for r in rows)
         return found
 
