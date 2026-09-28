@@ -9,10 +9,9 @@ directory is the corpus, the arms and the harness for closing it.
 The apparatus is complete: the corpus, the five arms, a blinded round trip for a person or
 an agent, a reader behind an API with every parameter pinned and printed, a second
 corpus size ([Two corpus sizes](#two-corpus-sizes)), and two other memory systems that can
-be run as arms beside them ([Two other systems, as arms](#two-other-systems-as-arms)). The
-one run recorded below still used an agent as the reader, which makes it a sanity check and
-not a benchmark; [What one run produced](#what-one-run-produced) is specific about the
-difference, and a run with the hosted reader at both sizes is the next thing to record.
+be run as arms beside them ([Two other systems, as arms](#two-other-systems-as-arms)).
+[What the recorded runs produced](#what-the-recorded-runs-produced) has the first runs with
+a model as the reader, at both corpus sizes, and says what they do and do not show.
 
 ```
 demo/scenario.py    the support history and the question set
@@ -718,10 +717,12 @@ with something plausible.
 
 ---
 
-## What one run produced
+## What the recorded runs produced
+
+### Context size
 
 Context size is deterministic and comes out the same every time. This is real output from
-`demo/harness.py`:
+`demo/harness.py` with the local store:
 
 ```
   arm                 mean chars  max chars  mean ~tokens  items used / turns seen
@@ -734,58 +735,104 @@ Context size is deterministic and comes out the same every time. This is real ou
 ```
 
 `~tokens` is `chars // 4`, an estimate and not a tokenizer — `CHARS_PER_TOKEN` says so.
-The `memvara_structured` row grew from 1,721 to 1,772 characters when the arm moved to
-`recall(valid_at=)`, whose dated header is part of what it renders; the agent run below
-was made at the earlier size.
 `naive_rag` retrieved every visible turn on **0 of 20** questions, so it is a retrieval arm
 throughout rather than `full_transcript` in a different order; the harness prints a warning
-when that stops being true.
+when that stops being true. The hosted memvara arms build smaller contexts than these,
+because the hosted scopes hold different claims; their sizes are in the tables below.
 
-The scores are a different kind of number. One run has been done, **with an agent as the
-reader** — there is no API key in this repository — and hand-audited afterwards to correct
-for the containment judge's known false positives (a correct `correction` answer contains
-its own trap by construction) and false negatives (a correct paraphrase is marked wrong):
+### The model runs, 2026-09-28
 
-| arm | context | correct | genuine traps |
-| --- | ---: | ---: | ---: |
-| `none` (floor) | 0 tok | 10% | 0 |
-| `full_transcript` | 2,451 tok | **100%** | 0 |
-| `naive_rag` | 582 tok | 80% | 0 |
-| `memvara` | 519 tok | 95% | 0 |
-| `memvara_structured` | 430 tok | 95% | 0 |
+Three runs were made with a model as both reader and judge, against the hosted memvara
+arms. All three read the scopes of hosted run `2026-09-25w`, which were written on
+2026-09-25 by `--write-only` and read about 63 hours later. The reader was
+`unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_S`, served by llama.cpp on a private machine, at
+temperature 0, seed 7, 512 output tokens and thinking switched off, with `--judge llm`
+grading with the same model. [`runs/README.md`](runs/README.md) has every pinned setting
+and the files.
 
-**Read `evalkit.FileReader`'s docstring and the banner `demo/harness.py` prints above its
-own table before quoting any of this.** They say, and they are right, that a run whose
-reader is an agent **is not reproducible**: there is no model id, no seed and no
-temperature to put beside the number, and the same contexts answered again will not give
-the same answers. It is a sanity check that the pipeline produces sane answers from real
-retrieval. It is not a benchmark, it cannot rank systems, and it must never sit beside a
-published LOCOMO or LongMemEval score.
+**Read the `memvara` rows as not measured.** The hosted service extracts claims from stored
+turns in a background worker. The claims it wrote into these scopes name the same Qwen
+build as their extractor, so the worker most likely uses the same server as the reader, and
+that server was offline for much of the 63 hours. When the scopes were read, the plain
+`memvara` arm's scopes held 2 to 3 live claims at scale 1 and 5 to 10 at scale 10, out of
+32 to 640 turns. None of them was filed under the plan, an address, the mobile number or
+the serial number. Most were filed in the wrong slot, such as `works_at = "under the
+bench"`, and the one that mentions a phone number is a `prefers` claim quoting the
+mistyped mobile. So the arm was answering from retrieved turns, not from facts, and its
+rows say nothing about what memvara does when extraction works. The service gives no way to
+tell whether the worker had finished, so it is also possible that it had and that this is
+what it produces; either way these rows are not a result.
 
-What it does show, stated as narrowly as it deserves:
+The `memvara_structured` arm does not depend on the worker for its facts: the desk writes
+them directly (17, 11 and 11 per scope). The worker added its own claims beside them in the
+same scopes, and that matters once below.
 
-* **The whole-transcript arm scored 100%.** At this corpus size a careful reader given
-  everything gets everything, so the memory layer earns nothing on accuracy here. What it
-  earns is the size column: **5.6× fewer tokens for 95%** (2,451 → 440; the `memvara` arm
-  is 4.7×). That is a claim about a *slope* — retrieval context is flat in corpus length
-  while transcript context is linear — and this run has exactly one corpus size, so the
-  slope is argued and not measured. A corpus ten times longer is what would turn it into
-  evidence.
-* **`naive_rag` was the only arm that genuinely lost information**, and its four failures
-  were exactly the bitemporal ones. That is the comparison the corpus was built for.
-* **The trap metric produced no signal at all.** Zero genuine traps in every arm, including
-  the one with no time handling: the reader never gave a superseded value, so `naive_rag`'s
-  four misses were wrong in some other way. The failure mode the product describes needs a
-  reader that skims. This is reported rather than dropped, because `trapped` is the
-  headline column, and it is the column that did not move.
-* **The floor is 10%, which is two questions of twenty** — and an arm with no context
-  abstains on the two `unanswerable` questions by construction, which the harness itself
-  flags as an artefact. Read the floor as at or near zero on the eighteen questions that
-  have an answer.
-* **The two memvara arms tie at 95%**, which is the result to be most careful with: the
-  `memvara` arm reached it with an empty claim tier, so its 95% is lexical episode
-  retrieval scoring well on a corpus small enough for that to work, not bitemporal
-  reasoning doing its job.
+Scale 1, the authored corpus (60.8 turns visible per question on average):
+
+| arm | context | correct | trapped, `ended` | trapped, `retired` | trapped, all |
+|---|---:|---:|---:|---:|---:|
+| `none` (floor) | 0 tok | 10% | 0 / 9 | 0 / 5 | 0 / 15 |
+| `full_transcript` (ceiling) | 2,451 tok | 100% | 0 / 9 | 0 / 5 | 0 / 15 |
+| `naive_rag` | 582 tok | 75% | 0 / 9 | 0 / 5 | 0 / 15 |
+| `memvara` (not measured, see above) | 259 tok | 50% | 2 / 9 | 2 / 5 | 4 / 15 |
+| `memvara_structured` | 334 tok | 80% | 0 / 9 | 0 / 5 | 0 / 15 |
+
+Scale 10, the same history padded with generated tickets (607.5 turns visible):
+
+| arm | context | correct | trapped, `ended` | trapped, `retired` | trapped, all |
+|---|---:|---:|---:|---:|---:|
+| `none` (floor) | 0 tok | 10% | 0 / 9 | 0 / 5 | 0 / 15 |
+| `full_transcript` (ceiling) | 23,013 tok | 95% | 0 / 9 | 0 / 5 | 0 / 15 |
+| `naive_rag` | 473 tok | 35% | 0 / 9 | 2 / 5 | 2 / 15 |
+| `memvara` (not measured, see above) | 418 tok | 35% | 3 / 9 | 1 / 5 | 4 / 15 |
+| `memvara_structured` | 320 tok | 75% | 1 / 9 | 0 / 5 | 1 / 15 |
+
+Context is the report's mean `~tokens`. `trapped` counts answers that gave the superseded
+value, over the questions that have one: nine whose value `ended`, five whose value was
+`retired`, and one more whose closure is neither.
+
+**The noise floor is zero at scale 1.** The scale-1 run was repeated over the same scopes
+with its own checkpoint file. All 100 answers and every verdict were identical, so at
+temperature 0 and seed 7 this reader and judge give the same result twice on the same
+contexts. That measures the reader, not the store: on 2026-09-23 two runs over the same
+scopes differed by one question on `memvara_structured` (80% and 85%), because the worker
+was still adding claims between them (8 to 9 claims in one, 8 to 13 in the other).
+
+What the numbers show, stated as narrowly as they deserve:
+
+* **At scale 10, `memvara_structured` kept its accuracy and `naive_rag` did not.** The
+  structured arm went from 80% to 75% while `naive_rag` went from 75% to 35%, with
+  contexts of about the same size (320 and 473 tokens). `naive_rag` gave a retired value
+  twice at scale 10; the structured arm gave none. This is the comparison the corpus was
+  built for, and it is twenty questions on one corpus.
+* **The whole transcript still wins on accuracy**: 100% and 95%. At scale 10 it costs about
+  23,000 tokens a question against 320 for the structured arm, which is 72 times fewer.
+  The slope argument from the earlier run is now measured at two points.
+* **The one structured trap came from the worker, not from the desk's facts.** On
+  `q_contact_current` at scale 10 the arm answered "phone call or text message". The desk's
+  `contact_preference` history was correct, with phone and text ended on 22 June. The worker
+  had also extracted "contact me by phone call or text message, never by email" as a
+  `user.prefers` claim, and `prefers` holds many values, so that claim was still live beside
+  the later email preference. The hosted arm reads both.
+* **`memvara_structured` scored 0 of 3 on `correction` questions at both sizes, and some of
+  that is the judge.** On `q_mobile_correction` it answered that the number was recorded
+  wrongly and gave the wrong and the right number, which is what the gold says apart from
+  the dates; the judge marked it wrong. On `q_serial_correction` and
+  `q_which_were_corrections` the answers really did miss part of the gold. The verdicts are
+  published as the judge gave them.
+
+What they do not show: anything about the plain `memvara` arm, anything about a reader
+other than this one model, and anything beyond twenty questions on a corpus this project
+wrote.
+
+### The earlier agent run
+
+The first recorded run, `runs/2026-08-13-agent-reader`, used an agent as the reader through
+the blinded file round trip, and was audited by hand. It scored `full_transcript` 100%,
+`naive_rag` 80% and both memvara arms 95%, with no genuine traps. It cannot be repeated,
+because there is no model id, seed or temperature to put beside it, and the `memvara` arm
+reached its 95% with an empty claim tier. [`runs/README.md`](runs/README.md) has the
+details. The model runs above replace it as the numbers to quote.
 
 ---
 

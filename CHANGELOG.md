@@ -24,6 +24,12 @@ Upgrading notes are in `docs/UPGRADING.md`.
   run with the same `--hosted-run-id` reads them. The hosted service extracts claims in the
   background and does not say when it has finished, and a run that read its scopes
   straight away on 2026-09-23 found no claims in them.
+- **The answer-quality demo has recorded runs with a model as the reader.** Three runs
+  from 2026-09-28 are in `demo/runs/`, with Qwen3.8-27B as reader and judge, at both corpus
+  sizes, against the hosted service. `memvara_structured` scored 80% at scale 1 and 75% at
+  scale 10, where `naive_rag` fell from 75% to 35%. The plain `memvara` arm's rows are not
+  a result, because its hosted scopes held almost no extracted claims when they were read.
+  `demo/README.md` and `docs/BENCHMARKS.md` have the tables and what they do not show.
 - **`bench/mutation.py` measures how many deliberate bugs in a module the tests catch.**
   It runs mutmut 3.8.0 in a throwaway clone of the checkout, selects the tests that import
   the module or a public name it defines, and reports a score per module with the diff of

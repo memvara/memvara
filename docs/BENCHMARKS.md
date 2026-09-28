@@ -1313,7 +1313,7 @@ predicates ship pre-seeded in the registry with the right cardinality, so the be
 never exercises the path where an unknown predicate defaults to multi-valued and
 accumulates. The LOCOMO and LongMemEval numbers above do not close that gap either: they
 measure retrieval, not answers. The apparatus for scoring answers end to end is
-[below](#answer-quality-end-to-end-an-authored-corpus-an-agent-as-the-reader); it exists
+[below](#answer-quality-end-to-end-an-authored-corpus-a-model-as-the-reader); it exists
 now, it has been run once, and the run is a sanity check rather than a benchmark.
 
 ### Throughput
@@ -1504,7 +1504,7 @@ under 2 ms either way.
 
 ---
 
-## Answer quality, end to end (an authored corpus, an agent as the reader)
+## Answer quality, end to end (an authored corpus, a model as the reader)
 
 Every number above measures **retrieval** — did the right claim come back, ranked where it
 should be. None of them measures **answers**: whether an agent reading memvara's output
@@ -1579,8 +1579,8 @@ to it as the judge. The model id, effort, output budget and thinking setting are
 under the report's title exactly as sent, the cost is priced from the usage the provider
 reported, and answers that never finished are counted apart from wrong ones.
 `--checkpoint` makes the run resumable and `--concurrency` shortens it;
-[`demo/README.md`](../demo/README.md) has every flag. No run with it has been recorded
-yet: the scores below are the agent run.
+[`demo/README.md`](../demo/README.md) has every flag. Three runs with it are recorded;
+their scores are under [The model runs](#the-model-runs-2026-09-28) below.
 
 ### The second corpus size
 
@@ -1601,8 +1601,8 @@ grows. At that scale, deterministically:
 ```
 
 The transcript arm grows 9.4× while the three retrieval arms stay under their cap.
-Whether they still surface the evidence among ten times more turns is the hosted run's
-question at this scale, and that run has not been made yet.
+Whether they still surface the evidence among ten times more turns is what the model run
+at this scale measured; see [The model runs](#the-model-runs-2026-09-28).
 [`demo/README.md`](../demo/README.md#two-corpus-sizes) has the constraints the generated
 turns are tested against.
 
@@ -1661,10 +1661,59 @@ search path and refuses without them rather than guessing, and it refuses withou
 explicit container tag so that a run cannot land in whatever space an account defaults to.
 **No Supermemory number is published in this repository**, because nobody here has run it.
 
-### The scores, and everything that makes them less than they look
+### The model runs, 2026-09-28
 
-One run has been done. **The reader was an agent, not a model behind an API** — there is
-no key in this repository — and the answers were then audited by hand, correcting for the
+Three runs with a model as reader and judge, all reading the hosted scopes of run
+`2026-09-25w`. The scopes were written on 2026-09-25 with `--write-only` and read about 63
+hours later. The reader and the judge were `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_S` on
+llama.cpp, at temperature 0, seed 7, 512 output tokens, thinking off.
+[`demo/runs/README.md`](../demo/runs/README.md) has every setting and the files, and
+[`demo/README.md`](../demo/README.md#what-the-recorded-runs-produced) has the full
+discussion.
+
+**The plain `memvara` rows are not a result.** The hosted service extracts claims in a
+background worker that most likely uses the same Qwen server, which was offline for much of
+the wait. At read time those scopes held 2 to 3 live claims at scale 1 and 5 to 10 at scale
+10, none of them filed under a fact a question asks about, so that arm answered from
+retrieved turns alone.
+
+Scale 1 (60.8 turns visible per question):
+
+| arm | context | correct | trapped, `ended` | trapped, `retired` | trapped, all |
+|---|---:|---:|---:|---:|---:|
+| `none` (floor) | 0 tok | 10% | 0 / 9 | 0 / 5 | 0 / 15 |
+| `full_transcript` (ceiling) | 2,451 tok | 100% | 0 / 9 | 0 / 5 | 0 / 15 |
+| `naive_rag` | 582 tok | 75% | 0 / 9 | 0 / 5 | 0 / 15 |
+| `memvara` (not measured) | 259 tok | 50% | 2 / 9 | 2 / 5 | 4 / 15 |
+| `memvara_structured` | 334 tok | 80% | 0 / 9 | 0 / 5 | 0 / 15 |
+
+Scale 10 (607.5 turns visible):
+
+| arm | context | correct | trapped, `ended` | trapped, `retired` | trapped, all |
+|---|---:|---:|---:|---:|---:|
+| `none` (floor) | 0 tok | 10% | 0 / 9 | 0 / 5 | 0 / 15 |
+| `full_transcript` (ceiling) | 23,013 tok | 95% | 0 / 9 | 0 / 5 | 0 / 15 |
+| `naive_rag` | 473 tok | 35% | 0 / 9 | 2 / 5 | 2 / 15 |
+| `memvara` (not measured) | 418 tok | 35% | 3 / 9 | 1 / 5 | 4 / 15 |
+| `memvara_structured` | 320 tok | 75% | 1 / 9 | 0 / 5 | 1 / 15 |
+
+The scale-1 run was repeated over the same scopes, and all 100 answers and verdicts were
+identical, so the reader's noise floor at these settings is zero on the same contexts.
+
+- **With ten times more history, `memvara_structured` held its accuracy and `naive_rag`
+  lost most of its own:** 80% to 75% against 75% to 35%, at similar context sizes.
+- **The whole transcript is still the most accurate, at 72 times the tokens** of the
+  structured arm at scale 10 (23,013 against 320).
+- **The structured arm's one trap came from the service's worker**, which had extracted
+  the old "phone or text, never email" preference as a many-valued `prefers` claim that
+  stayed live beside the new one. The desk's own `contact_preference` history was right.
+- **Twenty questions, one corpus, one reader.** The judge is the same model, and it marked
+  at least one correct `correction` answer wrong; its verdicts are published as given.
+
+### The earlier agent run, and everything that makes it less than it looks
+
+The first run, before any model run. **The reader was an agent, not a model behind an
+API**, and the answers were then audited by hand, correcting for the
 containment judge's known false positives (it marks a correct answer trapped for reciting
 the history it corrects) and false negatives (it marks a correct paraphrase wrong).
 

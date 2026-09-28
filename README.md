@@ -789,7 +789,7 @@ not win every category, and the table reports the ones it loses.
 | The two clocks, six question families | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#the-two-clocks-measured-synthetic-self-authored) |
 | LOCOMO and LongMemEval, retrieval | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md) |
 | LongMemEval, judged answer accuracy (0.11.0's ranked recall) | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness) |
-| Answer quality, end to end | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#answer-quality-end-to-end-an-authored-corpus-an-agent-as-the-reader) |
+| Answer quality, end to end | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#answer-quality-end-to-end-an-authored-corpus-a-model-as-the-reader) |
 
 The harnesses are in [`bench/`](https://github.com/memvara/memvara/tree/main/bench) and [`demo/`](https://github.com/memvara/memvara/blob/main/demo/README.md), and every number is
 reproducible from this repository. Where a result is synthetic or self-authored, its own
