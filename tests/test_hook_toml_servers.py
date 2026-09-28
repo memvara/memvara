@@ -13,6 +13,7 @@ import pathlib
 import sys
 
 import pytest
+from harness.skips import needs_toml
 
 HOOKS = pathlib.Path(__file__).resolve().parent.parent / "plugin" / "hooks"
 if str(HOOKS) not in sys.path:
@@ -73,9 +74,11 @@ def _server(document: dict | None) -> dict:
     return {key: servers[name].get(key) for key in ("command", "args", "env")}
 
 
+@needs_toml
 @pytest.mark.parametrize("case", DOCUMENTS)
 def test_the_subset_agrees_with_tomllib(case: str) -> None:
-    tomllib = pytest.importorskip("tomllib")
+    import tomllib  # noqa: PLC0415 -- 3.11 and later, which needs_toml checks
+
     text, _ = DOCUMENTS[case]
     assert _server(toml_servers._subset(text)) == _server(tomllib.loads(text))
 
@@ -89,8 +92,8 @@ def test_the_subset_reads_the_command_and_its_arguments() -> None:
                                                     ["-m", "memvara.server"])
 
 
+@needs_toml
 def test_a_file_that_is_not_toml_reads_as_none_where_tomllib_reads_it() -> None:
-    pytest.importorskip("tomllib")
     assert toml_servers.read("[mcp_servers.memvara\nenv = {") is None
 
 
