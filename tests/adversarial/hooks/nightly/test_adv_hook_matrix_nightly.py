@@ -3,8 +3,7 @@
 The fast tier sends its hostile payloads to three hosts (test_adv_hook_hostile.py). This
 sends them, and three more JSON values that are not objects, to every hook on all five.
 It also checks the reading hooks' outcomes on all five (test_adv_hook_outcomes.py checks
-two), and pins on all five the known bugs those two modules pin on two: B55, B56 and
-B57.
+two), and on all five it runs the checks those two modules run on two.
 
 Each test body here is one call to a check or pin function in support.py, which the two
 fast modules call too, so the tiers check the same things and differ only in the hosts
@@ -14,8 +13,6 @@ and payloads they are parametrised with.
 from __future__ import annotations
 
 import pytest
-
-from harness import known_bugs
 
 from .. import support
 
@@ -71,7 +68,7 @@ def test_recall_that_could_not_ask_the_store_says_so_in_its_log(
     support.check_recall_says_it_could_not_ask(outcomes, host)
 
 
-# -- known bugs, on all five hosts -------------------------------------------------------
+# -- the outcome pairs the fast tier found, on all five hosts ------------------------------
 
 @pytest.mark.parametrize("host, hook", [
     (host, hook) for host, hook, _ in support.outcome_cases(support.HOSTS,
@@ -82,10 +79,9 @@ def test_a_local_store_that_cannot_open_is_not_reported_as_not_configured(
 
 
 @pytest.mark.parametrize("host", support.silent_hosts(support.recall_hosts(support.HOSTS)))
-@known_bugs.xfail("B56")
 def test_nothing_matching_is_told_apart_from_nothing_configured_without_a_status_line(
         outcomes: support.Runs, host: str) -> None:
-    support.pin_nothing_matches(outcomes, host)
+    support.check_nothing_matches_is_logged(outcomes, host)
 
 
 @pytest.mark.parametrize("host", support.HOSTS)

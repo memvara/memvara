@@ -3,9 +3,10 @@ issue.
 
 Each test states what the fix must produce. It raises `known_bugs.Reproduced` only after it
 has seen its own bug's exact symptom, and the bug's marker accepts nothing else, so a
-different failure in the same test fails the run. The step-by-step comparisons in
-`test_adv_parity_library.py` and `test_adv_parity_mcp.py` pin #334 again where their
-programs meet it; the tests here show each symptom on its own, in as few calls as it takes.
+different failure in the same test fails the run. A fixed bug's test stays here as an
+ordinary test that shows the fix, in as few calls as it takes: #334's two, which the
+step-by-step comparisons in `test_adv_parity_library.py` and `test_adv_parity_mcp.py`
+also cover where their programs meet it.
 """
 
 from __future__ import annotations
@@ -24,17 +25,17 @@ from memvara import Memvara, MemoryType
 from memvara.core import ScopedMemvara
 from memvara.remote import hydrate
 from memvara.remote.api import RemoteMemvara, ScopedRemoteMemvara
-from memvara.types import WriteReceipt
+from memvara.types import Accumulation, Collapse, Dispute, RefusedProposal, Retype, WriteReceipt
 
 from .compare import assert_same, labels, normalise, normalise_text, text_labels, timed
 from .test_adv_parity_library import RECEIPT_GAP
-from .test_adv_parity_mcp import reply_is_known_334, serving
+from .test_adv_parity_mcp import serving
 
 #: The instant both values of the collapsing pair begin at.
 SAME_START = datetime(2025, 6, 1, tzinfo=timezone.utc)
 
 
-# -- B52, memvara/memvara#334: a hosted receipt drops four lists ------------------------
+# -- B52, fixed, memvara/memvara#334: a hosted receipt drops four lists ------------------------
 
 def _four_writes(mem: Any) -> tuple[list[Any], dict[str, Any]]:
     """Four pairs of writes. Returns every receipt, and the receipt of each pair's second
@@ -81,14 +82,41 @@ def receipts() -> dict[str, tuple[Any, Any]]:
 
 
 @pytest.mark.parametrize("kind", RECEIPT_GAP)
-@known_bugs.xfail("B52")
 def test_a_hosted_receipt_says_what_the_write_did(
         receipts: dict[str, tuple[Any, Any]], kind: str) -> None:
     local, hosted = receipts[kind]
     assert local, f"the local receipt no longer fills {kind}"
-    if hosted == []:
-        raise known_bugs.Reproduced(f"B52: the hosted receipt's {kind} is empty")
     assert_same(local, hosted, f"the hosted receipt's {kind}")
+
+
+def test_every_receipt_list_survives_render_then_hydrate() -> None:
+    """Each of the six lists and outcomes `_receipt_summary` writes a note from, rendered
+    in the shape the fake sends and memvara-cloud's renderer is to send, comes back as it
+    was; a deployment that sends none of them still hydrates, with each one empty."""
+    at = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    original = WriteReceipt(
+        accumulated=[Accumulation(subject="user", predicate="tagged_with", existing=1)],
+        disputed=[Dispute(claim_id="cl_1", subject="user", predicate="timezone",
+                          incumbent="Europe/Lisbon", incumbent_confidence=1.0,
+                          candidate="Europe/Berlin", candidate_confidence=0.1)],
+        collapsed=[Collapse(claim_id="cl_2", subject="user", predicate="job_title",
+                            object="engineer", at=at)],
+        retyped=[Retype(claim_id="cl_3", subject="user", predicate="likes",
+                        was=MemoryType.SEMANTIC, now=MemoryType.EPISODIC)],
+        agentic_fallback="timeout",
+        proposals_refused=[RefusedProposal(tool="end_claim", target="cl_4",
+                                           reason="not_read")])
+    sent = _receipt(original, "anthropic")
+    read = hydrate.receipt(sent)
+    for field in ("accumulated", "disputed", "collapsed", "retyped", "agentic_fallback",
+                  "proposals_refused"):
+        assert getattr(read, field) == getattr(original, field), field
+    older = {key: value for key, value in sent.items()
+             if key not in ("accumulated", "disputed", "collapsed", "retyped",
+                            "agentic_fallback", "proposals_refused")}
+    empty = hydrate.receipt(older)
+    assert (empty.accumulated, empty.disputed, empty.collapsed, empty.retyped,
+            empty.agentic_fallback, empty.proposals_refused) == ([], [], [], [], None, [])
 
 
 #: The words each note starts with, by the receipt list it is written from.
@@ -142,20 +170,16 @@ def notes(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[list[str]
 
 
 @pytest.mark.parametrize("kind", sorted(NOTES))
-@known_bugs.xfail("B52")
 def test_cloud_mode_writes_the_note_a_local_server_writes(
         notes: dict[str, tuple[list[str], list[str]]], kind: str) -> None:
     local, cloud = notes[kind]
     assert any(row.startswith(NOTES[kind]) for row in local), (
         f"the local server no longer writes the {kind} note")
-    if reply_is_known_334(local, cloud):
-        raise known_bugs.Reproduced(f"B52: cloud mode leaves out the {kind} note")
     assert_same(local, cloud, f"the reply that fills {kind}")
 
 
-# -- B53, memvara/memvara#335: a hosted receipt says 0 ungrounded and 0 polluted -----------
+# -- B53, memvara/memvara#335, fixed: a hosted receipt said 0 ungrounded and 0 polluted ----
 
-@known_bugs.xfail("B53")
 def test_a_hosted_receipt_carries_the_ungrounded_and_polluted_counts() -> None:
     """A write that refused claims an extraction model proposed says how many: in
     `ungrounded`, those with no support in the turn they cite, and in `polluted`, a real
@@ -165,9 +189,11 @@ def test_a_hosted_receipt_carries_the_ungrounded_and_polluted_counts() -> None:
     sent = _receipt(WriteReceipt(ungrounded=2, polluted=1), "fast-path-only")
     assert (sent["ungrounded"], sent["polluted"]) == (2, 1), "the fake no longer sends them"
     read = hydrate.receipt(sent)
-    if (read.ungrounded, read.polluted) == (0, 0):
-        raise known_bugs.Reproduced("B53: the hosted receipt says 0 ungrounded, 0 polluted")
     assert (read.ungrounded, read.polluted) == (2, 1)
+    older = hydrate.receipt({key: value for key, value in sent.items()
+                             if key not in ("ungrounded", "polluted")})
+    assert (older.ungrounded, older.polluted) == (0, 0), (
+        "a deployment that sends neither count must still hydrate")
 
 
 # -- B54, memvara/memvara#336: methods only one client has must be documented -----------

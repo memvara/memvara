@@ -29,15 +29,13 @@ difference is real:
   not close a value stored to begin later (`memvara/server/tools.py`,
   `for_a_hosted_deployment`).
 
-**One difference is a known bug, and it is pinned where the session meets it.** A write
-receipt read through the hosted client drops four lists the local receipt reports, so in
-cloud mode `memory_remember` leaves out the notes about a value added beside live ones, a
-weaker value kept beside a stronger one, a value closed at the instant it began, a fact
-re-filed under a memory type the caller asserted, and `procedural` refused for a subject
-other than the user (memvara/memvara#334, registered as B52). The session makes the
-writes that produce those notes, and their comparison in cloud mode is a strict expected
-failure that raises `known_bugs.Reproduced` only when the missing notes are the whole
-difference; any other line that differs still fails the run.
+**The notes written from the receipt's lists are compared like everything else.** A write
+receipt read through the hosted client used to drop four lists the local receipt
+reports, so in cloud mode `memory_remember` left out the notes about a value added beside
+live ones, a weaker value kept beside a stronger one, a value closed at the instant it
+began, a fact re-filed under a memory type the caller asserted, and `procedural` refused
+for a subject other than the user (memvara/memvara#334). The session makes the writes
+that produce those notes, and their comparison in cloud mode is an ordinary one now.
 """
 
 from __future__ import annotations
@@ -52,7 +50,6 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import pytest
 
-from harness import known_bugs
 from harness.env import child_env
 from harness.fakes.fake_v1 import FakeV1
 from harness.stdio import McpProcess, ToolResult, kill_all
@@ -180,7 +177,7 @@ SESSION: tuple[Call, ...] = (
     # Four pairs of writes whose second write gets a note of its own: a value added beside
     # a live one in a slot with no cardinality, a weaker value stored beside a stronger
     # one, a value closed at the instant it began, and a fact re-filed under another
-    # memory type. See `MISSING_NOTES`.
+    # memory type, each a note written from one of the receipt's lists (#334).
     Call("remember.tagged", "memory_remember", _fact("tagged_with", "gardening")),
     Call("remember.beside", "memory_remember", _fact("tagged_with", "chess")),
     Call("remember.timezone", "memory_remember",
@@ -413,48 +410,12 @@ def listed_for_a_hosted_deployment(listing: list[Any]) -> list[Any]:
             else tool for tool in listing]
 
 
-# -- the known difference: memvara/memvara#334 --------------------------------------------
-
-#: The notes `memory_remember` writes from the four receipt lists a hosted receipt leaves
-#: empty (memvara/memvara#334, registered as B52), so cloud mode leaves them out.
-MISSING_NOTES = re.compile(
-    r"^note: \d+ (?:value\(s\) landed in a slot that already had live values"
-    r"|value\(s\) were stored without replacing what was already there"
-    r"|value\(s\) were closed at the instant they began"
-    r"|already-known fact\(s\) were re-filed|fact\(s\) arrived as procedural)")
-
-#: The steps whose local reply carries one of those notes.
-NOTE_STEPS = frozenset({"remember.beside", "remember.disputed", "remember.same_start",
-                        "remember.refiled", "remember.not_procedural"})
-
-
-def reply_is_known_334(local: list[str], cloud: list[str]) -> bool:
-    """Whether cloud mode's reply differs from the local one only by #334: one or more
-    lines `MISSING_NOTES` matches are missing, and every other line is the same."""
-    kept = [row for row in local if not MISSING_NOTES.match(row)]
-    return len(kept) < len(local) and cloud == kept
-
-
-def test_the_pin_for_334_absorbs_only_its_own_symptom() -> None:
-    """A strict expected failure absorbs whatever its test reports as the known bug. So a
-    reply that differs in anything besides the missing notes must fail as a new bug."""
-    note = "note: 1 value(s) were closed at the instant they began, so they are now ..."
-    local = ["added 1, ended 1, retired 0", "+ [<id>] user job title manager", note]
-    assert reply_is_known_334(local, local[:2])
-    assert not reply_is_known_334(local, local)
-    assert not reply_is_known_334(local, local[:1])
-    assert not reply_is_known_334(local, [*local[:2], "note: something else"])
-    assert not reply_is_known_334(local[:2], local[:2])
-
-
 def _compared() -> Iterator[Any]:
     for call in SESSION:
         for surface in SURFACES[1:]:
             if surface == "stdio cloud" and call.name in CLOUD_BY_OWN_TEST:
                 continue
-            known = surface == "stdio cloud" and call.name in NOTE_STEPS
-            yield pytest.param(call.name, surface, id=f"{call.name}-{surface}",
-                               marks=[known_bugs.xfail("B52")] if known else [])
+            yield pytest.param(call.name, surface, id=f"{call.name}-{surface}")
 
 
 # Every tool the session calls, whose reply this test compares on all three surfaces, and
@@ -476,10 +437,6 @@ def test_every_surface_writes_what_the_in_process_server_writes(
         text = without_local_lines(step, text)
     actual_error, actual_text = played.replies[surface][step]
     local, cloud = text.split("\n"), actual_text.split("\n")
-    if (surface == "stdio cloud" and step in NOTE_STEPS and error == actual_error
-            and reply_is_known_334(local, cloud)):
-        missing = [row[:60] for row in local if MISSING_NOTES.match(row)]
-        raise known_bugs.Reproduced(f"B52: cloud mode's {step} leaves out {missing}")
     assert_same({"error": error, "lines": local}, {"error": actual_error, "lines": cloud},
                 f"{step} through {surface}")
 
