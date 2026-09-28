@@ -1200,7 +1200,26 @@ def _receipt(value: WriteReceipt, extractor: str) -> dict[str, Any]:
             "ungrounded": value.ungrounded, "polluted": value.polluted,
             "unregistered": value.unregistered, "llm_calls": value.llm_calls,
             "latency_ms": value.latency_ms, "deferred": value.deferred, "note": note,
-            "may_replace": [_memory(c) for c in value.may_replace]}
+            "may_replace": [_memory(c) for c in value.may_replace],
+            # The shape memvara-cloud's renderer is to send for #334: each entry's fields,
+            # an enum as its value and an instant in the wire's own format.
+            "accumulated": [{"subject": a.subject, "predicate": a.predicate,
+                             "existing": a.existing} for a in value.accumulated],
+            "disputed": [{"claim_id": d.claim_id, "subject": d.subject,
+                          "predicate": d.predicate, "incumbent": d.incumbent,
+                          "incumbent_confidence": d.incumbent_confidence,
+                          "candidate": d.candidate,
+                          "candidate_confidence": d.candidate_confidence}
+                         for d in value.disputed],
+            "collapsed": [{"claim_id": c.claim_id, "subject": c.subject,
+                           "predicate": c.predicate, "object": c.object,
+                           "at": _instant(c.at)} for c in value.collapsed],
+            "retyped": [{"claim_id": r.claim_id, "subject": r.subject,
+                         "predicate": r.predicate, "was": r.was.value, "now": r.now.value,
+                         "reason": r.reason} for r in value.retyped],
+            "agentic_fallback": value.agentic_fallback,
+            "proposals_refused": [{"tool": p.tool, "target": p.target, "reason": p.reason}
+                                  for p in value.proposals_refused]}
 
 
 def _link(value: Link) -> dict[str, Any]:

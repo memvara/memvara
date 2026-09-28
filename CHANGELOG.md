@@ -30,6 +30,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     `config_dict` and still refuses. #360 (B81).
   - `search()` and `get_all()` defaulted to `top_k` 10 and 100, where mem0 defaults to 20
     for both. Both now default to 20. #361 (B82).
+- **The hosted client reads the lists a write receipt fills to say what the write did.**
+  `accumulated`, `disputed`, `collapsed`, `retyped`, `agentic_fallback` and
+  `proposals_refused` were never read from a hosted receipt, so a write through
+  `RemoteMemvara` reported them empty, and a server in cloud mode left out the notes
+  `memory_remember` writes from them: a value added beside live ones, a weaker value
+  stored beside a stronger one, a value closed at the instant it began, and a fact
+  re-filed under another memory type. `hydrate.receipt` now reads each one, and a
+  deployment that does not send one still hydrates, with it empty. The hosted service
+  itself does not send them yet; until memvara-cloud's renderer does, a hosted receipt
+  still reports them empty. #334 (B52), this repository's half.
 - **A write receipt read through the hosted client reports `ungrounded` and `polluted`.**
   The deployment sends both counts, and `RemoteMemvara` never read them, so a hosted
   receipt always said 0: a caller could not tell that the write refused claims an
