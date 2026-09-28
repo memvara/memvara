@@ -1230,6 +1230,33 @@ def test_search_respects_limit_and_the_min_score_floor(storage):
     assert storage.search(query, limit=5, min_score=0.99) == []
 
 
+def test_an_exact_duplicate_scores_as_the_same_text_and_comes_first(storage):
+    """CrewAI compares the first result's score with its consolidation threshold, 0.85,
+    so the score is the similarity its contract names. Memvara's fused ranking score put
+    an exact duplicate at 0.50 (#364)."""
+    saved(storage, record("Alice prefers tea in the morning"),
+          record("Bob deploys on Fridays"))
+    [(first, score), *_] = storage.search(crew_embed(storage, "Alice prefers tea in the morning"))
+    assert first.content == "Alice prefers tea in the morning"
+    assert score == pytest.approx(1.0)
+
+
+def test_a_store_that_cannot_return_a_vector_is_scored_by_encoding_the_text(mem, monkeypatch):
+    """A cloud deployment's RemoteStore raises NotImplementedError for get_embedding: no
+    endpoint returns a stored vector. The score then comes from encoding the record's text
+    with the same embedder, rather than from a crash on the first search."""
+    storage = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES)
+    saved(storage, record("Alice prefers tea in the morning"))
+
+    def no_endpoint(claim_id):
+        raise NotImplementedError("No endpoint reads a stored vector back")
+
+    monkeypatch.setattr(mem.store, "get_embedding", no_endpoint)
+    [(first, score)] = storage.search(crew_embed(storage, "Alice prefers tea in the morning"))
+    assert first.content == "Alice prefers tea in the morning"
+    assert score == pytest.approx(1.0)
+
+
 def test_a_metadata_filter_is_refused_because_post_filtering_would_lie_about_recall(
         storage):
     """Applied after ranking, it silently returns fewer results than asked for — and the

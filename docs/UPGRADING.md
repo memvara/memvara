@@ -25,7 +25,7 @@ consolidates a repeated memory, as it does with its own storage.
 
 **If you call `MemvaraStorage.search()` yourself with a `min_score`**, the number is now a
 similarity, not a ranking score. A threshold tuned for the old score filters differently;
-find your calls with `grep -rn "min_score" | grep -i crewai`.
+find your calls with `grep -rn --include="*.py" "min_score" . | grep -i crewai`.
 
 ---
 

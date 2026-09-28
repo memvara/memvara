@@ -440,10 +440,15 @@ class MemvaraStorage:
         """Cosine similarity of `query_embedding` to `claim`'s vector, clipped to [0, 1].
 
         The vector is the one the store keeps for the claim, which memvara's embedder
-        built from its text, the record's content. A hosted deployment gives this adapter
-        no store, and there the text is encoded again with the same embedder."""
+        built from its text, the record's content. Where there is none to read, the text
+        is encoded again with the same embedder: a hosted client has no store, a cloud
+        deployment's `RemoteStore` raises `NotImplementedError` because no endpoint
+        returns a stored vector, and a claim whose text could not be embedded has none."""
         store = getattr(self.memory, "store", None)
-        vector = store.get_embedding(claim.id) if store is not None else None
+        try:
+            vector = store.get_embedding(claim.id) if store is not None else None
+        except NotImplementedError:
+            vector = None
         if vector is None:
             vector = self.memory.embedder.encode([claim.text])[0]
         query = np.asarray(query_embedding, dtype=np.float64)
