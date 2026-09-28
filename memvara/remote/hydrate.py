@@ -45,6 +45,7 @@ from ..types import (
     Derivation, Document, DocumentState, DocumentStatus, Episode, Explanation,
     ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Reading,
     Result, Row, Scope, WriteReceipt, closure, link_relation, stored_scope,
+    Accumulation, Collapse, Dispute, RefusedProposal, Retype,
 )
 
 __all__ = ["claim", "episode", "result", "explanation", "receipt", "provenance",
@@ -231,6 +232,30 @@ def receipt(body: dict[str, Any]) -> WriteReceipt:
         # `.get` for the same reason: a deployment older than memvara 0.14.0 sends no
         # such key, and 0 is what an absent count means.
         unregistered=int(body.get("unregistered", 0)),
+        # The lists the MCP server writes its notes from, and the agentic outcomes
+        # (#334). `.get` for each: a deployment that does not send one yet means what an
+        # empty one means, that nothing of that kind happened on this write.
+        accumulated=[Accumulation(subject=a["subject"], predicate=a["predicate"],
+                                  existing=int(a["existing"]))
+                     for a in body.get("accumulated", ())],
+        disputed=[Dispute(claim_id=d["claim_id"], subject=d["subject"],
+                          predicate=d["predicate"], incumbent=d["incumbent"],
+                          incumbent_confidence=float(d["incumbent_confidence"]),
+                          candidate=d["candidate"],
+                          candidate_confidence=float(d["candidate_confidence"]))
+                  for d in body.get("disputed", ())],
+        collapsed=[Collapse(claim_id=c["claim_id"], subject=c["subject"],
+                            predicate=c["predicate"], object=c["object"],
+                            at=_required_dt("collapsed.at", c["at"]))
+                   for c in body.get("collapsed", ())],
+        retyped=[Retype(claim_id=r["claim_id"], subject=r["subject"],
+                        predicate=r["predicate"], was=MemoryType(r["was"]),
+                        now=MemoryType(r["now"]), reason=r.get("reason", "asserted"))
+                 for r in body.get("retyped", ())],
+        agentic_fallback=body.get("agentic_fallback"),
+        proposals_refused=[RefusedProposal(tool=p["tool"], target=p["target"],
+                                           reason=p["reason"])
+                           for p in body.get("proposals_refused", ())],
     )
 
 

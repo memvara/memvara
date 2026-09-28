@@ -34,16 +34,13 @@ The hosted clients also have `end()`, which sends `POST /v1/end`. The library ha
 of its own checks that `end()` leaves a hosted store holding what those two leave a
 local one holding.
 
-**One difference is a known bug, and it is pinned where the program meets it.** A write
-receipt read through a hosted client leaves `accumulated`, `disputed`, `collapsed` and
-`retyped` empty where the local receipt reports what the write did (memvara/memvara#334,
-registered as B52). The program makes the writes that fill those lists, and their
-step-by-step comparison on the hosted clients is a strict expected failure that raises
-`known_bugs.Reproduced` only when those emptied lists are the whole difference; anything
-else in the same receipt still fails the run. `test_adv_parity_known_bugs.py` pins #334
-on its own, and the two other bugs these tests found: #335, a hosted receipt that always
-reports 0 for `ungrounded` and `polluted`, and #336, documentation that does not list
-every method only one client has, `end()` among them.
+**The receipt lists are compared like everything else.** A write receipt read through a
+hosted client used to leave `accumulated`, `disputed`, `collapsed` and `retyped` empty
+where the local receipt reports what the write did (memvara/memvara#334). The program
+makes the writes that fill those lists, and their comparison on the hosted clients is an
+ordinary one now. `test_adv_parity_known_bugs.py` shows each bug these tests found on its
+own: #334, #335, a hosted receipt that reported 0 for `ungrounded` and `polluted`, and
+#336, documentation that did not list every method only one client has.
 """
 
 from __future__ import annotations
@@ -56,7 +53,7 @@ from typing import Any, Callable, Iterator
 
 import pytest
 
-from harness import known_bugs, stores
+from harness import stores
 from harness.fakes import fake_v1
 from harness.fakes.fake_v1 import FakeV1
 from memvara import AsyncMemvara, MemoryType
@@ -327,42 +324,12 @@ def as_hosted(value: Any) -> Any:
     return value
 
 
-# -- the known difference: memvara/memvara#334 --------------------------------------------
+# -- the receipt lists: memvara/memvara#334 -----------------------------------------------
 
-#: The lists a write receipt fills to say what the write did, and a hosted receipt leaves
-#: empty (memvara/memvara#334, registered as B52).
+#: The lists a write receipt fills to say what the write did, from which the MCP server
+#: writes four of its notes. A hosted receipt used to leave them empty
+#: (memvara/memvara#334); the steps that fill them are compared like every other step.
 RECEIPT_GAP = ("accumulated", "disputed", "collapsed", "retyped")
-
-#: The steps whose local receipt fills one of those lists.
-RECEIPT_GAP_STEPS = frozenset({"remember.beside", "remember.disputed",
-                               "remember.same_start", "remember.refiled",
-                               "remember.not_procedural"})
-
-
-def receipt_is_known_334(expected: Any, actual: Any) -> bool:
-    """Whether a hosted write receipt differs from the local one only by #334: one or
-    more lists in `RECEIPT_GAP` that the local receipt fills and the hosted one leaves
-    empty, and nothing else."""
-    if not (isinstance(expected, dict) and isinstance(actual, dict)
-            and expected.get("__type__") == actual.get("__type__") == "WriteReceipt"):
-        return False
-    emptied = {name for name in RECEIPT_GAP if expected.get(name) and actual.get(name) == []}
-    rest = differences({key: item for key, item in expected.items() if key not in emptied},
-                       {key: item for key, item in actual.items() if key not in emptied})
-    return bool(emptied) and rest == []
-
-
-def test_the_pin_for_334_absorbs_only_its_own_symptom() -> None:
-    """A strict expected failure absorbs whatever its test reports as the known bug. So a
-    receipt that differs in anything besides lists left empty must fail as a new bug."""
-    local = {"__type__": "WriteReceipt", "added": ["<claim>"], "accumulated": ["<one>"],
-             "disputed": [], "collapsed": [], "retyped": []}
-    assert receipt_is_known_334(local, {**local, "accumulated": []})
-    assert not receipt_is_known_334(local, local)
-    assert not receipt_is_known_334(local, {**local, "accumulated": [], "added": []})
-    assert not receipt_is_known_334(local, {**local, "accumulated": ["<another>"]})
-    assert not receipt_is_known_334({**local, "__type__": "ForgetResult"},
-                            {**local, "__type__": "ForgetResult", "accumulated": []})
 
 
 def _compared() -> Iterator[Any]:
@@ -371,9 +338,7 @@ def _compared() -> Iterator[Any]:
             hosted = client in HOSTED
             if hosted and step.name in HOSTED_BY_OWN_TEST:
                 continue
-            known = hosted and step.name in RECEIPT_GAP_STEPS
-            yield pytest.param(step.name, client, id=f"{step.name}-{client}",
-                               marks=[known_bugs.xfail("B52")] if known else [])
+            yield pytest.param(step.name, client, id=f"{step.name}-{client}")
 
 
 @pytest.mark.parametrize(("step", "client"), list(_compared()))
@@ -382,9 +347,6 @@ def test_every_client_answers_as_the_synchronous_library_does(
     local = played["Memvara"][step]
     expected = as_hosted(local) if client in HOSTED else local
     actual = played[client][step]
-    if client in HOSTED and step in RECEIPT_GAP_STEPS and receipt_is_known_334(expected, actual):
-        emptied = [name for name in RECEIPT_GAP if expected[name] and actual[name] == []]
-        raise known_bugs.Reproduced(f"B52: the hosted receipt of {step} left {emptied} empty")
     assert_same(expected, actual, f"{step} through {client}")
 
 

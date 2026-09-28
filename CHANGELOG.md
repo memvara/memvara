@@ -11,6 +11,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The hosted client reads the lists a write receipt fills to say what the write did.**
+  `accumulated`, `disputed`, `collapsed`, `retyped`, `agentic_fallback` and
+  `proposals_refused` were never read from a hosted receipt, so a write through
+  `RemoteMemvara` reported them empty, and a server in cloud mode left out the notes
+  `memory_remember` writes from them: a value added beside live ones, a weaker value
+  stored beside a stronger one, a value closed at the instant it began, and a fact
+  re-filed under another memory type. `hydrate.receipt` now reads each one, and a
+  deployment that does not send one still hydrates, with it empty. The hosted service
+  itself does not send them yet; until memvara-cloud's renderer does, a hosted receipt
+  still reports them empty. #334 (B52), this repository's half.
 - **The plugin's hooks find a local store configured in Codex's, Cursor's or OpenCode's
   own MCP config.** The hooks read the store's variables from the client's config, and
   they read only JSON with the servers under `mcpServers` and the variables under `env`.
