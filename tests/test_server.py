@@ -1198,6 +1198,33 @@ def test_memory_recall_takes_ranked_and_memory_search_does_not():
     assert "ranked" not in BY_NAME["memory_search"].properties
 
 
+@pytest.mark.parametrize("include_episodes", [None, False, True])
+@pytest.mark.parametrize("memory_types", [None, [], ["semantic"]])
+def test_the_tool_refuses_a_ranked_recall_exactly_when_the_library_does(
+        include_episodes, memory_types):
+    """`_recall` checks ranked's requirement itself, so a model reads an argument error
+    rather than the library's ValueError through the catch-all (#316). The rule then lives
+    in two places, `tools._recall` and `HybridRetriever`'s check, and this keeps them in
+    step: every combination the library refuses, the tool refuses, and no other."""
+    given = {key: value for key, value in (("include_episodes", include_episodes),
+                                           ("memory_types", memory_types))
+             if value is not None}
+    memory = make_memory(user="alice")
+    try:
+        memory.scope(user="alice").recall("tea", ranked=True, **given)
+        library_refuses = False
+    except ValueError as exc:
+        assert "needs turns to rank" in str(exc), exc
+        library_refuses = True
+    srv = MemvaraMCPServer(memory, user="alice")
+    try:
+        body, _ = call(srv, "memory_recall", {"query": "tea", "ranked": True, **given})
+    finally:
+        srv.close()
+    assert body.startswith("memory_recall ranked=true needs turns to rank") is library_refuses, (
+        body[:200])
+
+
 def test_the_ranked_description_names_every_outcome():
     """The precedent is `budget` (`tools.py:1527-1536`): the trailing signal a block can
     carry is explained in the argument that produces it."""
