@@ -1412,19 +1412,15 @@ class WritePipeline:
             # the acquisition entirely and re-paying for it every restart.
             put_spec(spec)
 
+    # Both read the item's source turn directly: acquisition runs only on items that
+    # passed `_admissible`, whose `source_index` names one of `episodes`.
     @staticmethod
     def _tenant_of(item: Mapping[str, Any], episodes: Sequence[Episode]) -> str:
-        idx = item.get("source_index")
-        if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(episodes):
-            return episodes[idx].scope.tenant
-        return episodes[0].scope.tenant
+        return episodes[item["source_index"]].scope.tenant
 
     @staticmethod
     def _example(item: Mapping[str, Any], episodes: Sequence[Episode]) -> str:
-        idx = item.get("source_index")
-        if isinstance(idx, int) and 0 <= idx < len(episodes):
-            return episodes[idx].content[:_EXAMPLE_CHARS]
-        return str(item.get("object", ""))[:_EXAMPLE_CHARS]
+        return episodes[item["source_index"]].content[:_EXAMPLE_CHARS]
 
     def _grounding_rescued(self, obj: str, source: str) -> bool:
         """The embedder's veto over the lexical trigger, under `"auto"`.
