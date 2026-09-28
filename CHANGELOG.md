@@ -11,6 +11,49 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The mem0 shim takes the calls mem0 2.x takes.** `memvara.compat.mem0.Memory` was
+  written on the assumption that mem0 2.x moved every entity id into `filters=`. Compared
+  with the real `mem0ai` package at 2.0.0 and 2.2.1, it was wrong in four ways, and each is
+  fixed:
+  - `add()` and `delete_all()` refused `user_id`, `agent_id` and `run_id` with `TypeError`,
+    though mem0's own `add()` requires one of them. Both now take them and scope the call
+    by them; `filters=` still works, and an id given both ways must agree. #359 (B80).
+  - `search()` and `get_all()` refused a top-level entity id with `TypeError`, where mem0
+    raises `ValueError`. They now raise `ValueError`, naming `filters=`. #359 (B80).
+  - The shim lacked `close()` and the with statement, `get()`'s `score` key, and several
+    arguments mem0's methods take. `close()` closes the wrapped `Memvara`, and `with
+    Memory(...) as m:` calls it. `update()` takes mem0's `metadata=` and
+    `expiration_date=`, and still refuses with `Mem0CompatError`. `add(timestamp=,
+    expiration_date=)`, `search(reference_date=, show_expired=True)` and
+    `get_all(show_expired=True)` are refused with `Mem0CompatError` naming the argument,
+    because none has an honest memvara reading. `from_config()` takes mem0's
+    `config_dict` and still refuses. #360 (B81).
+  - `search()` and `get_all()` defaulted to `top_k` 10 and 100, where mem0 defaults to 20
+    for both. Both now default to 20. #361 (B82).
+- **CrewAI can save through `MemvaraStorage` at crewai 1.10.1, the declared floor.**
+  CrewAI 1.10.1 takes `storage.write_lock` around its writes, though the `StorageBackend`
+  protocol does not declare it, so every save raised `AttributeError`. `MemvaraStorage`
+  now provides a reentrant lock under that name. The adapter's own floor, which said
+  `crewai>=1.0`, now says `crewai>=1.10.1` like the extra. #363 (B84).
+- **`MemvaraStorage.search` returns the similarity CrewAI expects, so CrewAI consolidates
+  a repeated memory.** It returned memvara's fused ranking score, on which an exact
+  duplicate scored 0.50, below CrewAI's consolidation threshold of 0.85, so remembering
+  the same sentence twice left two live copies. Each result is now scored by the cosine
+  similarity of CrewAI's query vector to the record's stored vector, in [0, 1], which is
+  what CrewAI's `StorageBackend` contract says the score is. The candidates still come
+  from memvara's hybrid retrieval; they are now returned in order of that similarity, and
+  `min_score` is compared with it. `docs/UPGRADING.md` covers a direct caller of
+  `search()`. #364 (B85).
+- **The hosted client reads the lists a write receipt fills to say what the write did.**
+  `accumulated`, `disputed`, `collapsed`, `retyped`, `agentic_fallback` and
+  `proposals_refused` were never read from a hosted receipt, so a write through
+  `RemoteMemvara` reported them empty, and a server in cloud mode left out the notes
+  `memory_remember` writes from them: a value added beside live ones, a weaker value
+  stored beside a stronger one, a value closed at the instant it began, and a fact
+  re-filed under another memory type. `hydrate.receipt` now reads each one, and a
+  deployment that does not send one still hydrates, with it empty. The hosted service
+  itself does not send them yet; until memvara-cloud's renderer does, a hosted receipt
+  still reports them empty. #334 (B52), this repository's half.
 - **A write receipt read through the hosted client reports `ungrounded` and `polluted`.**
   The deployment sends both counts, and `RemoteMemvara` never read them, so a hosted
   receipt always said 0: a caller could not tell that the write refused claims an

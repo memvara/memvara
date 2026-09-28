@@ -131,7 +131,11 @@ def check_search_and_get_all_refuse_entity_ids_as_mem0_does(ctx: Context) -> Non
 
 def check_defaults_match_mem0s_except_the_documented_threshold(ctx: Context) -> None:
     """An argument both methods name has the same default in both, so an unmodified call
-    site gets as many results. The one documented exception is search's threshold."""
+    site gets as many results. The one documented exception is search's threshold.
+
+    A mem0 default that is a bare `object()` is a private sentinel meaning "not given"
+    (mem0 2.2.1's `update(expiration_date=)`), which no other package can name, so it has
+    no value to match and is left out."""
     real = _real()
     differences = []
     for name in _surface(real):
@@ -143,6 +147,8 @@ def check_defaults_match_mem0s_except_the_documented_threshold(ctx: Context) -> 
             if argument not in theirs or (name, argument) in DOCUMENTED_DEFAULTS:
                 continue
             expected = theirs[argument].default
+            if type(expected) is object:
+                continue
             if expected is not inspect.Parameter.empty and parameter.default != expected:
                 differences.append(f"{name}({argument}={parameter.default!r}, mem0 "
                                    f"{expected!r})")

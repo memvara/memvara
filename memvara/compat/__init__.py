@@ -23,6 +23,7 @@ What differs, in the order it will bite:
 | a memory id is stable       | it is a *version* id; a supersession mints a new one     |
 | `update()` edits in place   | refused; assert the new value instead                    |
 | `search(threshold=0.1)`     | no default floor — measure with `calibrate_min_score`    |
+| `expiration_date=`, `show_expired=`, `reference_date=`, `timestamp=` | refused with `Mem0CompatError` |
 | `history()` per memory row  | per fact slot, and synthesized back into mem0's shape    |
 | one UPDATE event            | an ADD and a DELETE, because that is what happened       |
 """

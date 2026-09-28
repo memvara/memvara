@@ -63,11 +63,14 @@ Three more things differ and are handled rather than hidden:
 from __future__ import annotations
 
 import asyncio
+import threading
 import warnings
 from collections import OrderedDict
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping, Sequence, cast
+
+import numpy as np
 
 from ..compat import NOTE_PREDICATE, note_subject
 from ..compat import ensure_note_predicate
@@ -75,7 +78,9 @@ from ..types import Claim, Result, as_utc
 from ._common import IntegrationError, bind, require, scope_kw
 
 _PKG = "crewai.memory.types"
-_NEEDS = "crewai>=1.0"
+#: The same floor as the `crewai` extra in pyproject.toml: 1.10.1 is the first release
+#: with the `StorageBackend` protocol this adapter binds to (#363).
+_NEEDS = "crewai>=1.10.1"
 
 #: Prefix on the synthetic subject that owns one CrewAI record's slot. Distinct from the
 #: mem0 importer's `mem0:`, so the two can share one store and one `note` predicate
@@ -199,6 +204,18 @@ class MemvaraStorage:
         # Declares the note slot single-valued and persists that, which is what turns
         # `update()` into a supersession instead of a second live value.
         ensure_note_predicate(self.memory, NOTE_PREDICATE, self.scope.tenant)
+        self._write_lock = threading.RLock()
+
+    @property
+    def write_lock(self) -> threading.RLock:
+        """The lock CrewAI holds around a batch of writes.
+
+        crewai 1.10.1, the floor this adapter supports, takes `storage.write_lock` in its
+        encoding flow, though the `StorageBackend` protocol does not declare it; without
+        it nothing could be saved there (#363). From 1.11.0 on CrewAI no longer asks. The
+        store serialises its own writes, so the lock only has to exist and be reentrant,
+        as the one CrewAI's own LanceDB storage hands out is."""
+        return self._write_lock
 
     # -- the embedder seam ---------------------------------------------------
 
@@ -380,12 +397,18 @@ class MemvaraStorage:
                categories: Sequence[str] | None = None,
                metadata_filter: Mapping[str, Any] | None = None, limit: int = 10,
                min_score: float = 0.0) -> list[tuple[Any, float]]:
-        """Hybrid retrieval, from the query text behind `query_embedding`.
+        """Hybrid retrieval, from the query text behind `query_embedding`, scored as
+        CrewAI reads a score.
 
-        Not a cosine top-k: the vector is used only to recover what was asked, and the
-        answer comes from BM25 fused with vector search and rescored by recency,
-        confidence and salience. `min_score` is memvara's, on the same normalized [0, 1]
-        scale CrewAI expects.
+        The candidates are memvara's: the vector is used to recover what was asked, and
+        they come from BM25 fused with vector search and rescored by recency, confidence
+        and salience. The score beside each is what CrewAI's `StorageBackend` contract
+        says it is, the cosine similarity of `query_embedding` to the record, in [0, 1]:
+        CrewAI compares it with its consolidation threshold (0.85) and weighs it in its
+        own composite score. Memvara's fused score is a ranking, not a similarity, and an
+        exact duplicate scored 0.50 on it, so CrewAI never consolidated one (#364). The
+        results are ordered by that similarity, because CrewAI reads the first one as the
+        most similar, and `min_score` is compared with it.
         """
         if metadata_filter:
             raise CrewAICompatError(_NO_METADATA_FILTER)
@@ -396,11 +419,9 @@ class MemvaraStorage:
         # statement no input can reach and no test can honestly cover.
         results = cast("list[Result]", self.memory.search(
             self._query_for(query_embedding), k=max(limit, 1) * self.oversample,
-            min_score=min_score, **self._kw))
+            **self._kw))
         out: list[tuple[Any, float]] = []
         for result in results:
-            if len(out) >= limit:
-                break
             if not self._is_record(result.claim):
                 continue
             record = self._to_record(result.claim)
@@ -408,8 +429,34 @@ class MemvaraStorage:
                 continue
             if wanted and not wanted.intersection(record.categories):
                 continue
-            out.append((record, result.score))
-        return out
+            similarity = self._similarity(query_embedding, result.claim)
+            if similarity >= min_score:
+                out.append((record, similarity))
+        # Stable, so records equally similar keep memvara's order.
+        out.sort(key=lambda pair: pair[1], reverse=True)
+        return out[:limit]
+
+    def _similarity(self, query_embedding: Sequence[float], claim: Claim) -> float:
+        """Cosine similarity of `query_embedding` to `claim`'s vector, clipped to [0, 1].
+
+        The vector is the one the store keeps for the claim, which memvara's embedder
+        built from its text, the record's content. Where there is none to read, the text
+        is encoded again with the same embedder: a hosted client has no store, a cloud
+        deployment's `RemoteStore` raises `NotImplementedError` because no endpoint
+        returns a stored vector, and a claim whose text could not be embedded has none."""
+        store = getattr(self.memory, "store", None)
+        try:
+            vector = store.get_embedding(claim.id) if store is not None else None
+        except NotImplementedError:
+            vector = None
+        if vector is None:
+            vector = self.memory.embedder.encode([claim.text])[0]
+        query = np.asarray(query_embedding, dtype=np.float64)
+        stored = np.asarray(vector, dtype=np.float64)
+        norm = float(np.linalg.norm(query) * np.linalg.norm(stored))
+        if norm == 0.0:
+            return 0.0
+        return max(0.0, min(1.0, float(query @ stored) / norm))
 
     def get_record(self, record_id: str) -> Any | None:
         """One live record by id, or `None`. A retired one is gone from here on purpose.
