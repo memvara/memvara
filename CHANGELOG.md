@@ -11,6 +11,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **The plugin's hooks find a local store configured in Codex's, Cursor's or OpenCode's
+  own MCP config.** The hooks read the store's variables from the client's config, and
+  they read only JSON with the servers under `mcpServers` and the variables under `env`.
+  Codex keeps its servers in `~/.codex/config.toml` under `[mcp_servers.<name>]`, Cursor
+  in `~/.cursor/mcp.json`, which the hooks did not read, and OpenCode under `mcp` with the
+  variables under `environment`. On those three hosts session start and recall behaved as
+  if nothing were configured, and said nothing, so memory was absent from every session.
+  The hooks now read all three shapes, and Cursor's record lists `~/.cursor/mcp.json`. On
+  Python 3.10, which has no `tomllib`, a small reader in `plugin/hooks/lib/toml_servers.py`
+  reads the tables and the string values the hooks need from Codex's file. Agentic
+  capture had its own copy of the old reader, so on Codex and OpenCode it started the
+  memvara server with the hook's own interpreter and without the store the client names;
+  it now reads the same blocks. A hosted install was not affected. #341 (B59).
 - **A reply that quotes a caller's argument quotes at most 80 characters of it.** A
   refusal quoted the whole value it refused, and the reply to a read that found nothing
   quoted the whole query, so a long argument was copied into the model's context a second
