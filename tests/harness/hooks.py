@@ -77,26 +77,44 @@ CLIENT_CONFIGS: dict[str, tuple[str, str]] = {
 #: The environment variable that names the file a daemon records its pid in.
 _DAEMONS_VAR = "HOOK_TEST_DAEMONS"
 
-#: The `sitecustomize` module that a runner allowing the daemon puts first on the hook's
-#: PYTHONPATH. Python imports `sitecustomize` when it starts, in every process that
-#: inherits that path, so each recall daemon the hooks start records its pid. `close()`
-#: can then stop every one, including a daemon that no socket path leads to any more.
+#: The environment variable that carries `HookRunner.patches` to the launcher below.
+_PATCHES_VAR = "HOOK_TEST_PATCHES"
+
+#: The `sitecustomize` module that a runner puts first on the hook's PYTHONPATH when it
+#: allows the daemon or patches the hooks. Python imports `sitecustomize` when it starts,
+#: in every process that inherits that path, and this one does two things there.
+#:
+#: * Each recall daemon the hooks start records its pid, so `close()` can stop every one,
+#:   including a daemon that no socket path leads to any more.
+#: * The capture child that run.py detaches (`MEMVARA_HOOK_DETACHED`) gets the runner's
+#:   patches. run.py starts that child afresh, so the launcher below never runs in it, and
+#:   capture does its work there on every shell host. The host is bound first, as the
+#:   launcher does. The launcher has already refused a patch that names nothing, in the
+#:   hook process that started this child.
+#:
 #: A `sitecustomize` it shadows, such as a Linux distribution's, still runs after it.
-_DAEMON_SPY = f"""\
-import importlib.machinery, importlib.util, os, sys
+_SITE = f"""\
+import importlib, importlib.machinery, importlib.util, json, os, sys
 _log = os.environ.get("{_DAEMONS_VAR}")
 if _log and sys.orig_argv[1:2] and sys.orig_argv[1].endswith("daemon.py"):
     with open(_log, "a", encoding="utf-8") as _fh:
         _fh.write(str(os.getpid()) + "\\n")
+_patches = os.environ.get("{_PATCHES_VAR}")
+if (_patches and os.environ.get("MEMVARA_HOOK_DETACHED") and sys.orig_argv[1:2]
+        and sys.orig_argv[1].endswith("run.py")):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(sys.orig_argv[1])))
+    _argv = sys.orig_argv[2:]
+    from core import host as _host
+    _host.use(importlib.import_module("hosts." + _argv[_argv.index("--host") + 1]).HOST)
+    for _dotted, _value in json.loads(_patches).items():
+        _module_name, _, _name = _dotted.rpartition(".")
+        setattr(importlib.import_module(_module_name), _name, _value)
 _here = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.machinery.PathFinder.find_spec(
     "sitecustomize", [p for p in sys.path if os.path.abspath(p or os.curdir) != _here])
 if _spec is not None and _spec.loader is not None:
     _spec.loader.exec_module(importlib.util.module_from_spec(_spec))
 """
-
-#: The environment variable that carries `HookRunner.patches` to the launcher below.
-_PATCHES_VAR = "HOOK_TEST_PATCHES"
 
 #: The launcher's exit status when a patch names an attribute the hooks do not have.
 _BAD_PATCH = 97
@@ -105,6 +123,7 @@ _BAD_PATCH = 97
 #: first, as run.py does, because some hook modules read the host when they are imported,
 #: then sets each patched module attribute, then calls run.py's own `main`. It is passed
 #: with `python -c`, so it is never a file that pytest's doctest collection would import.
+#: It leaves the patches in the environment, where `_SITE` finds them in a capture child.
 #:
 #: A patch replaces the attribute on the one module it names, so it reaches only code that
 #: reads that attribute when it runs. A module that imported the value by name keeps its
@@ -119,7 +138,7 @@ sys.path.insert(0, sys.argv[1])
 argv = sys.argv[2:]
 from core import host as _host
 _host.use(importlib.import_module("hosts." + argv[argv.index("--host") + 1]).HOST)
-for dotted, value in json.loads(os.environ.pop("{_PATCHES_VAR}")).items():
+for dotted, value in json.loads(os.environ["{_PATCHES_VAR}"]).items():
     module_name, _, name = dotted.rpartition(".")
     module = importlib.import_module(module_name)
     if not hasattr(module, name):
@@ -532,7 +551,8 @@ class HookRunner:
     refuses a unix socket path of 104 bytes or more, so such a home needs a short path,
     which `short_dir` makes.
 
-    `patches` sets module attributes in the hook process before the hook runs, such as
+    `patches` sets module attributes in the hook process before the hook runs, and in the
+    capture child that run.py detaches, such as
     `{"lib.hosted.TIMEOUT_SEC": 0.25}`, so a test can shrink one of a hook's time limits
     instead of waiting it out. A patch that names an attribute the hooks do not have is
     refused with `ValueError`, because a limit that was renamed would otherwise leave the
@@ -558,13 +578,14 @@ class HookRunner:
         #: Where each daemon the hooks start records its pid, or None when the daemon is
         #: not allowed.
         self._daemon_log: pathlib.Path | None = None
-        if daemon:
-            environment.pop("MEMVARA_DAEMON", None)
+        if daemon or self.patches:
             spy = self.home / ".hookrunner"
             spy.mkdir(parents=True, exist_ok=True)
-            (spy / "sitecustomize.py").write_text(_DAEMON_SPY, encoding="utf-8")
+            (spy / "sitecustomize.py").write_text(_SITE, encoding="utf-8")
             environment["PYTHONPATH"] = os.pathsep.join(
                 part for part in (str(spy), environment.get("PYTHONPATH", "")) if part)
+        if daemon:
+            environment.pop("MEMVARA_DAEMON", None)
             self._daemon_log = spy / "daemons"
             environment[_DAEMONS_VAR] = str(self._daemon_log)
         self._env = environment
@@ -651,9 +672,6 @@ class HookRunner:
                 "capture starts an agent CLI to mine the turn; give HookRunner stub CLIs "
                 "(stubs=FakeClis(...)) so that a real one is never reached")
         detaches = hook == "capture" and bool(self.host.detach_capture)
-        if detaches and self.patches:
-            raise ValueError(f"patches reach the hook process only, and on {self.host.id} "
-                             f"capture runs in a child that run.py starts afresh")
         text = json.dumps(self.payload(hook, **fields)) if stdin is None else stdin
         data = text.encode("utf-8") if isinstance(text, str) else text
         limit = float(self.host.timeouts[hook]) if timeout is None else timeout
