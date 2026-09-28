@@ -11,6 +11,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **Capture logs a line on every path where it decides to do nothing.** It returned
+  without a line when a hook had triggered the Stop, when the payload named no
+  transcript, when the transcript path named no file, when the transcript's size could
+  not be read, and when the transcript had not grown since the last capture. Capture's
+  output never reaches the person, so `~/.memvara/.hooks/capture.log` is its only
+  account, and on those paths there was no trace that it had run. Each now logs a
+  `skipped=` line saying why. #342 (B60).
 - **The plugin captures what is said in a headless Claude Code session.** Capture was
   registered on Claude Code as an async Stop hook, so that a 12 to 14 second extraction
   never held a turn open. `claude -p` cancels an async hook when the process exits, so a
