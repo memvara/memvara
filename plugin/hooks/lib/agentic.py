@@ -337,21 +337,13 @@ def _client_block() -> "dict | None":
 
     `lib.ipc.server_env` reads only the block's `env`. The command matters here too: the
     run should start the memvara server the client already configures, with the same
-    interpreter, not a guess at one.
+    interpreter, not a guess at one. Read through `lib.ipc.server_blocks`, which knows
+    every shape a client keeps its servers in; this used to read only `mcpServers` in
+    JSON, and missed Codex's and OpenCode's (#341).
     """
-    for path in ipc._CLIENT_CONFIGS:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            continue
-        servers = data.get("mcpServers") if isinstance(data, dict) else None
-        if not isinstance(servers, dict):
-            continue
-        for name, block in servers.items():
-            if "memvara" in name.lower() and isinstance(block, dict) \
-                    and isinstance(block.get("command"), str):
-                return block
+    for block in ipc.server_blocks():
+        if block["command"] is not None:
+            return block
     return None
 
 
@@ -481,7 +473,9 @@ class _Watch:
         try:
             # A line that starts with "{" and parses is an object, so no type check.
             event = json.loads(line)
-        except ValueError:
+        # RecursionError: nesting deeper than the recursion limit, which is not a
+        # ValueError and is just as unreadable (#346).
+        except (ValueError, RecursionError):
             return False
         kind = event.get("type")
         if kind == "system" and event.get("subtype") == "init":
@@ -660,7 +654,7 @@ def _proposals(reply: str) -> "list | None":
         return None
     try:
         body = json.loads(raw[start:end + 1])
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     found = body.get("proposals") if isinstance(body, dict) else None
     return found if isinstance(found, list) else None

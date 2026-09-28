@@ -443,7 +443,9 @@ def _served(answer: "str | None") -> "str | None":
         return None
     try:
         reply = json.loads(answer)
-    except ValueError:
+    # RecursionError: nesting deeper than the recursion limit, which is not a ValueError
+    # and is just as unreadable (#346).
+    except (ValueError, RecursionError):
         return None
     if not isinstance(reply, dict) or not reply.get("ok"):
         return None

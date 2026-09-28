@@ -24,8 +24,8 @@ import approve  # noqa: E402 - plugin/hooks is not a package; the path is set ju
 
 LEVELS = ("session", "agent")
 
-#: The two read-only tools that #267 is about.
-B3_MISSING = {"memory_get_document", "memory_list_documents"}
+#: The two read-only tools that #267 was about.
+DOCUMENT_READERS = ("memory_get_document", "memory_list_documents")
 
 
 def _live(scoped: object) -> list[str]:
@@ -98,31 +98,19 @@ def test_a_bound_scope_reads_its_own_value_in_place_of_the_user_wide_one(level: 
     assert _live(mem.scope(user="u", **{level: "one"})) == ["Paris"]
 
 
-# -- B3: auto-approve misses two read-only tools --------------------------------------
+# -- B3, fixed: auto-approve missed two read-only tools --------------------------------
 
-def test_the_approve_hook_differs_from_the_server_only_by_the_known_bug() -> None:
-    """Passes today and after the fix for #267. Any other difference between the hook's
-    list and the server's read-only tools fails here at once."""
-    allowed, read_only = set(approve.READ_ONLY), _read_only_tools()
-    assert allowed <= read_only, allowed - read_only
-    assert read_only - allowed <= B3_MISSING, read_only - allowed
-
-
-@known_bugs.xfail("B3")
 def test_the_approve_hook_allows_exactly_the_servers_read_only_tools() -> None:
-    if _read_only_tools() - set(approve.READ_ONLY) == B3_MISSING:
-        raise known_bugs.Reproduced("B3: the approve list misses the two document tools")
+    """The approve list missed `memory_get_document` and `memory_list_documents` (#267)."""
     assert set(approve.READ_ONLY) == _read_only_tools()
 
 
-@pytest.mark.parametrize("tool", sorted(B3_MISSING))
-@known_bugs.xfail("B3")
+@pytest.mark.parametrize("tool", DOCUMENT_READERS)
 def test_the_approve_hook_allows_the_read_only_document_tools(
         hook_runner: Callable[..., HookRunner], tool: str) -> None:
     result = hook_runner("claude").run("approve", tool_name=f"mcp__memvara__{tool}")
     assert result.exit_code == 0
-    if result.reply is None:
-        raise known_bugs.Reproduced(f"B3: the approve hook printed no decision for {tool}")
+    assert result.reply is not None
     assert result.reply["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 

@@ -17,6 +17,72 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   extraction model proposed, and a server in cloud mode never wrote the note about
   ungrounded claims. Both are read now, and a deployment that does not send them still
   hydrates, with 0. #335 (B53).
+- **A model reply with thousands of invented predicates no longer stalls a write.** Past
+  the cap of 200 learned predicates, each new spelling is folded onto the nearest known
+  predicate as an alias. Each alias rebuilt the registry's whole index, and each search
+  for the nearest predicate read every alias again, so one `add()` took time that grew
+  with the square of the number of invented spellings: 100 to 130 seconds for 5,000 on a
+  laptop. An alias is now added to the index in place, and each predicate's words are kept
+  once, so the same write takes about 6 seconds. The model is still called 201 times,
+  and every predicate resolves as before. #309.
+
+- **A hook answers a payload nested too deeply to decode as it answers an empty one.**
+  `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
+  Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
+  such as `{"prompt": [[[...]]]}` 100,000 levels deep crashed the body of every hook.
+  The exit code stayed 0, but the hook printed nothing: session start gave the model no
+  memories and showed no status line. The only trace was a `failed hook=... RecursionError`
+  line in `~/.memvara/.hooks/hooks.log`. `payload()` in `plugin/hooks/lib/ipc.py` and
+  `read_event()` in `plugin/hooks/core/envelope.py` now read such a payload as an empty
+  one. #346 (B64).
+- **`memory_recall` refuses `ranked` without conversation turns as an argument error.**
+  `ranked=true` needs turns to rank, so it takes `include_episodes=true` and no
+  `memory_types`. The library refused the other combinations with a `ValueError`, which
+  reached the model through the server's catch-all as `memory_recall failed: ValueError:
+  ...`, a Python exception rather than a mistake in its arguments. The tool now refuses
+  them itself, before the store is asked, with a message that says which argument to
+  change. #316 (B39).
+- **`memory_add` no longer says a stored turn was not stored.** When extraction
+  recognised no fact in a turn, the note said the turn "carried something extraction did
+  not recognise and [was] not stored", right after the reply gave the turn's id.
+  `memory_recall` with `include_episodes` returns that turn word for word: only the fact
+  was not stored. A model that believed the note could send the turn again, which stores
+  it twice, or tell the user nothing was saved. The note now says the turn was stored,
+  that no fact was extracted from it, and that a recall with `include_episodes=true`
+  finds it; the advice that follows it is unchanged. The packaged skill said the same
+  thing in `references/write-and-correct.md`, and says what happens now. #353 (B73).
+- **`memory_recall`'s description names only the arguments the server serves.** It
+  said that the tool rewrites the query "(query_rewrite)" and that "ranked and synthesize
+  each add one more call". A server started with `MEMVARA_FEATURE_QUERY_REWRITE=0` or
+  `MEMVARA_FEATURE_SYNTHESIS=0` removes that argument from the schema, so a model that
+  followed the description was refused with `unknown argument(s)`. The description now
+  drops each argument its switch removes, and with query rewrite off it no longer says
+  the query is rewritten. With every feature on, it reads exactly as before. #295 (B19).
+- **Two defaults stated in tool descriptions are declared in the schema.**
+  `memory_recall.include_episodes` ("Default false") and `memory_remember.extractor`
+  ("Defaults to 'api'") had no `default` in their input schemas; each handler supplied
+  the value itself. Both schemas now declare it, so `tools/list` shows it to a client and
+  the validator fills it, and the handlers read the filled value. Behaviour is unchanged:
+  an empty `extractor` is still read as `api`. #296 (B20).
+- **The plugin's approve hook lets the two document readers run without a prompt.**
+  `memory_get_document` and `memory_list_documents` only read, and the server marks both
+  `readOnlyHint`, but they were missing from the hook's list of read-only tools
+  (`READ_ONLY` in `plugin/hooks/approve.py`). So the host asked the person every time an
+  agent read a stored document. The list now matches the server's read-only tools
+  exactly, and a test fails if the two ever differ. #267 (B3).
+- **The plugin's hooks find a local store configured in Codex's, Cursor's or OpenCode's
+  own MCP config.** The hooks read the store's variables from the client's config, and
+  they read only JSON with the servers under `mcpServers` and the variables under `env`.
+  Codex keeps its servers in `~/.codex/config.toml` under `[mcp_servers.<name>]`, Cursor
+  in `~/.cursor/mcp.json`, which the hooks did not read, and OpenCode under `mcp` with the
+  variables under `environment`. On those three hosts session start and recall behaved as
+  if nothing were configured, and said nothing, so memory was absent from every session.
+  The hooks now read all three shapes, and Cursor's record lists `~/.cursor/mcp.json`. On
+  Python 3.10, which has no `tomllib`, a small reader in `plugin/hooks/lib/toml_servers.py`
+  reads the tables and the string values the hooks need from Codex's file. Agentic
+  capture had its own copy of the old reader, so on Codex and OpenCode it started the
+  memvara server with the hook's own interpreter and without the store the client names;
+  it now reads the same blocks. A hosted install was not affected. #341 (B59).
 - **A reply that quotes a caller's argument quotes at most 80 characters of it.** A
   refusal quoted the whole value it refused, and the reply to a read that found nothing
   quoted the whole query, so a long argument was copied into the model's context a second
