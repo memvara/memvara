@@ -43,12 +43,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
 
 
 
-    KnownBug("B26", 303, "malformed model output makes add() raise instead of dropping the "
-             "item"),
-    KnownBug("B28", 305, "a claim the trust boundary drops still costs a model call and "
-             "leaves a learned predicate"),
-    KnownBug("B29", 306, "a claim with no subject is filed under the user, and a list "
-             "object is stored as Python text"),
     KnownBug("B30", 307, "a model retraction at low confidence ends a fact the user "
              "asserted"),
     KnownBug("B45", 317, "a backdated retraction's tombstone is live in reads of the past"),

@@ -295,24 +295,27 @@ def test_a_novel_predicate_is_classified_exactly_once_across_many_claims():
          "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
     ]
     llm = CountingLLM(payload)
+    # Each turn names both objects, so neither claim is dropped as ungrounded before its
+    # predicate is acquired (#305).
     with Memvara(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
-        mem.add("Some sentence the rules will not touch, spoken at length here.")
-        mem.add("A different sentence the rules will also not touch, at length.")
+        mem.add("Some sentence about a penny black and a blue mauritius, spoken at length.")
+        mem.add("A different sentence about a penny black and a blue mauritius, at length.")
         assert llm.classify_calls == 1, "schema acquisition is paid for once, ever"
 
 
-def test_classification_example_falls_back_to_the_object_when_the_index_is_unusable():
+def test_an_item_with_no_usable_source_is_dropped_before_its_predicate_is_classified():
     """`source_index` is the model's own pointer back into the batch. When it is out of
-    range there is no source turn to quote, so the example must degrade rather than
-    index out of bounds."""
+    range the claim has no source turn, so it is dropped before acquisition: it costs no
+    classification call, and the example a classification quotes is always a real turn
+    (#305)."""
     payload = [{"subject": "user", "predicate": "collects_stamps",
                 "object": "penny black", "polarity": 1, "memory_type": "semantic",
                 "confidence": 0.9, "source_index": 999}]
     llm = CountingLLM(payload)
     with Memvara(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
-        mem.add("Some sentence the rules will not touch, spoken at length here.")
-    if llm.classify_args:
-        assert llm.classify_args[0][1] == "penny black"
+        receipt = mem.add("Some sentence about a penny black, spoken at length here.")
+        assert receipt.added == []
+    assert llm.classify_args == []
 
 
 # =============================================================================
