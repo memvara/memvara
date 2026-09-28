@@ -9,7 +9,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
-Upgrading notes are in `docs/UPGRADING.md`.
+## [0.17.0] — 2026-09-28
+
+This is a security release: it fixes twenty advisories, listed under "Security" below.
+Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store moves to schema 17 on
+its first open, which runs every migration step again once; a build older than this one
+refuses a store this one has opened.
 
 ### Added
 
