@@ -58,6 +58,31 @@ The files named `test_adv_*_tier_guard.py` fail if their folder is ever collecte
 
 `scripts/test_changed.py`, the check to run before you push, runs fast-tier tests only, and it uses `tests/harness/tiers.py` to tell. When you change a test in another tier, it names that test with the command that runs it instead of running it. `docs/claude/working-here.md` describes that command and the five testing tiers it belongs to, which are a different thing from the test tiers on this page.
 
+## Running in parallel
+
+CI runs the fast tier with pytest-xdist, `python -m pytest -q -n auto`, and so does `scripts/test_changed.py` when pytest-xdist is installed. Each worker is a separate process with its own base temporary directory (`popen-gw0`, `popen-gw1` and so on), and a worker runs whichever tests it is handed, in no fixed order. So a test must not depend on another test having run first, in the same process or at all. Session-scoped fixtures run once per worker, not once per run.
+
+A test with a wall-clock deadline has to state its margin, because a machine running four workers is busier than one running a single test. Four tests have a deadline that is close to what a busy machine needs:
+
+- the hang tests in `tests/adversarial/frameworks/test_adv_framework_probe.py`, which give each step of the probe a time limit;
+- `tests/adversarial/test_adv_stdio.py::test_a_server_that_stops_reading_fails_the_write_instead_of_hanging`;
+- `tests/test_pipeline.py::test_a_reader_is_not_blocked_by_a_slow_extraction`;
+- `tests/adversarial/test_adv_hooks.py::test_close_stops_a_daemon_that_no_socket_path_leads_to`.
+
+Each of them failed at least once on a shared Mac with a load average between 30 and 150, and each passes in CI. The probe's limit per step is 3 seconds, set by `STEP_SECONDS` in `test_adv_framework_probe.py`. It was 0.5 seconds until 2026-09-27, when three of the hang tests failed in CI's coverage job: coverage now measures the probe's own process, and its first step, importing memvara and listing the installed packages, took longer than 0.5 seconds. The planted hangs last 30 seconds, so a 3-second limit still proves that a hang is stopped.
+
+If one of these tests fails under xdist, loosen its deadline to a bound that still proves what the test is for, or keep it on one worker with `@pytest.mark.xdist_group` and `--dist loadgroup`. Never add a retry.
+
+The coverage job runs the same way. `pyproject.toml` has coverage.py measure every process the tests start (`patch = ["subprocess"]`), so each worker and each child process writes its own data file, and `coverage combine` joins them before `coverage report` checks the 100%. Run `coverage erase` first, as CI does:
+
+```bash
+python3 -m coverage erase
+python3 -m coverage run -m pytest -q -n auto
+python3 -m coverage combine && python3 -m coverage report
+```
+
+`coverage combine` merges every data file it finds, including those left by an earlier run, so without the erase a line that the current code no longer covers can still count as covered and the 100% check can pass wrongly.
+
 ## Skips
 
 **A skip needs a rule.** This applies to every test in the repository, not only the adversarial suite, because `tests/conftest.py` registers the ledger for every run that collects tests under `tests/`. A run given only `memvara/` has no ledger, which is harmless while no doctest skips. Every skip reason must match a rule in `tests/harness/skips.py`, and each rule says why that skip hides no failure. A skip with no matching rule fails the whole run, and the run lists the test and its reason.

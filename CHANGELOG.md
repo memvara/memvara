@@ -55,13 +55,16 @@ refuses a store this one has opened.
   repositories gets a pull request with the change at its next sync, and the change
   reaches that repository when the pull request is merged. #171.
 - **`scripts/test_changed.py` runs the tests a change can affect, before you push.** It
-  runs the changed test files, the tests that import or name a changed file, and the tests
-  that failed last time, and it runs the full suite when a change touches something it
-  cannot follow, such as a `conftest.py` or `pyproject.toml`. It replaces running the full
-  suite with coverage and mypy locally before every push; CI still runs all of that on every
-  pull request, and again on `main` after each merge, where a failure now opens an issue in
-  the private repository memvara/build-health. `docs/claude/working-here.md` describes the
-  five testing tiers. None of it changes the library.
+  runs the changed test files, the tests that import a changed file (directly or through a
+  `conftest.py` above them), the tests that name it in a string or match it with a pattern
+  such as `*.md`, and the tests that failed last time, and it runs the full suite when a
+  change touches something it cannot follow, such as a `conftest.py` or `pyproject.toml`.
+  It runs them in parallel with pytest-xdist, which the `dev` extra now installs, and gives
+  each run a base temporary directory of its own. It replaces running the full suite with coverage and mypy locally before every push; CI
+  still runs all of that on every pull request, and again on `main` after each merge, where
+  a failure now opens an issue in the private repository memvara/build-health.
+  `docs/claude/working-here.md` describes the five testing tiers. None of it changes the
+  library.
 - **An adversarial test suite that tries to break memvara the way agents use it.** It
   lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
   scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
