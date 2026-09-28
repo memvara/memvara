@@ -1256,7 +1256,10 @@ suggestion must not turn it into an exception the caller retries.
   start is stored as a claim for the earlier period, or repeats one, and that claim is
   over and answers only about that period. Its ref names the live claim on record instead
   (`ReconcileResult.restated`), the claim a plain repeat's ref names, so the link is on
-  the claim `recall()` returns and `why()` shows it there. The
+  the claim `recall()` returns and `why()` shows it there. A proposal stored in pieces,
+  or repeating several stored claims, because stored claims hold its period in part
+  (#435), names the one of those claims that is in force at the time of the write, and
+  the first piece when none is (`WritePipeline._linked`). The
   batch falls back to the single call, and says why on `receipt.agentic_fallback`, when
   the backend is not a `ToolChat` (`unsupported`), the run times out (`timeout`), an answer
   cannot be used twice in a row (`malformed`), the model is still calling tools after 12

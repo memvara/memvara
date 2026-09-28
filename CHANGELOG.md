@@ -163,7 +163,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   that end instead of dropping it, and the same write dated in the future, made twice, is
   now a repeat. A caller's write that names an expiry and finds its value live in its own
   scope is still a repeat of that claim. `ReconcileResult` has a new field, `also`, that
-  carries the further pieces and the reinforced claims. #435.
+  carries the further pieces and the reinforced claims. Two callers that keep one claim
+  per write choose among them: under agentic extraction, a link proposed for a write
+  stored in pieces lands on the claim in force at the time of the write, and the mem0
+  importer keeps the last piece, the one still open, so a later UPDATE or DELETE closes
+  it. #435.
 - **The rule for a backdated write that closes other claims is now stated.** A retraction
   or a new value written with a `recorded_at` in the past closes what it displaces at the
   moment of the call on the belief clock: with `close="retired"`, the displaced claims are

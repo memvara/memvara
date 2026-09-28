@@ -105,7 +105,9 @@ offered no expiry, has any it returns dropped. The proposals write nothing. A pr
 then `Reconciler.apply()`; a proposed end becomes a retraction with `close="ended"`; a
 proposed link becomes a `claim_links` row. A link from a proposal that restated a live
 value with an earlier start lands on the live claim on record, not on the claim for the
-earlier period (`ReconcileResult.restated`). A proposal naming a memory the model did not
+earlier period (`ReconcileResult.restated`). A link from a proposal stored in pieces
+(#435) lands on the piece or stored claim in force at the time of the write, or on the
+first piece when none is. A proposal naming a memory the model did not
 read in the run, or asking to end or replace one in a broader scope than the write, is
 refused, and every refusal is on
 `receipt.proposals_refused`. A backend without tools, a timeout, an answer that cannot be
