@@ -9,6 +9,26 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A hook answers a payload nested too deeply to decode as it answers an empty one.**
+  `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
+  Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
+  such as `{"prompt": [[[...]]]}` 100,000 levels deep crashed the body of every hook.
+  The exit code stayed 0, but the hook printed nothing: session start gave the model no
+  memories and showed no status line. The only trace was a `failed hook=... RecursionError`
+  line in `~/.memvara/.hooks/hooks.log`. `payload()` in `plugin/hooks/lib/ipc.py` and
+  `read_event()` in `plugin/hooks/core/envelope.py` now read such a payload as an empty
+  one. #346 (B64).
+
+  The same gap stood at every other JSON decoder the hooks run, and each now reads
+  nesting that deep as text that is not JSON: the agent CLI's event stream and its
+  proposal reply in `lib/agentic.py`, the extractor's envelope, event stream and facts in
+  `lib/extract.py`, the hosted server's reply in `lib/hosted.py`, the daemon's reply in
+  `lib/fast.py`, and the daemon's request in `daemon.py`. On those paths the text comes
+  from a model, a server or a local socket rather than the client, and a capture or a
+  daemon connection crashed rather than falling back.
+
 ## [0.17.0] — 2026-09-28
 
 This is a security release: it fixes twenty advisories, listed under "Security" below.
@@ -217,15 +237,6 @@ refuses a store this one has opened.
 
 ### Fixed
 
-- **A hook answers a payload nested too deeply to decode as it answers an empty one.**
-  `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
-  Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
-  such as `{"prompt": [[[...]]]}` 100,000 levels deep crashed the body of every hook.
-  The exit code stayed 0, but the hook printed nothing: session start gave the model no
-  memories and showed no status line. The only trace was a `failed hook=... RecursionError`
-  line in `~/.memvara/.hooks/hooks.log`. `payload()` in `plugin/hooks/lib/ipc.py` and
-  `read_event()` in `plugin/hooks/core/envelope.py` now read such a payload as an empty
-  one. #346 (B64).
 - **`docs/API.md` names every method that only one client has.** Its section on a hosted
   deployment did not mention `end()`, `health()` or `whoami()`, which only the hosted client
   has, or `bind()` and `merge_predicate()`, which only the local client has. A caller who
