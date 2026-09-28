@@ -3293,3 +3293,12 @@ def test_concurrency_is_refused_beside_the_file_reader(tmp_path):
     with pytest.raises(SystemExit, match="--concurrency"):
         locomo.main(["--dry-run", "--reader", "file", "--dump", str(tmp_path / "d.jsonl"),
                      "--concurrency", "2"], out=lambda _m: None)
+
+
+@pytest.mark.parametrize("timeout", [0.0, -5.0, float("nan"), float("inf")])
+def test_a_timeout_that_is_not_a_positive_number_of_seconds_is_refused(timeout):
+    """A NaN passed `timeout <= 0`, because every comparison with NaN is false, and
+    reached the reader's client as its timeout (#431). Infinity is refused too: it is no
+    bound at all, and leaving out --timeout is how to ask for the library's default."""
+    with pytest.raises(SystemExit, match="--timeout must be a number of seconds above zero"):
+        ek.build_reader(_Args(reader="openai", model="qwen", timeout=timeout))
