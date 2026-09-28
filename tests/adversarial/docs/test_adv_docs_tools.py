@@ -12,7 +12,6 @@ import functools
 
 import pytest
 
-from harness import known_bugs
 from memvara.server.config import FEATURE_DEFAULTS
 from memvara.server.mcp import INSTRUCTIONS
 from memvara.server.tools import FEATURE_ARGUMENTS, TOOLS
@@ -242,34 +241,19 @@ def test_a_tool_named_with_an_argument_takes_it() -> None:
     assert any(ties(text) for _, _, text in _every_text()), "no tie was read"
 
 
-#: The drift #295 pins: in these configurations memory_recall's own description still
-#: names an argument that the configuration's switch removed from its schema.
-REMOVED_BUT_NAMED = {"query_rewrite off": {("memory_recall", "query_rewrite")},
-                     "synthesis off": {("memory_recall", "synthesize")}}
-
-
-def _each_configuration() -> list[object]:
-    return [pytest.param(configuration, id=configuration.label,
-                         marks=[known_bugs.xfail("B19")]
-                         if configuration.label in REMOVED_BUT_NAMED else [])
-            for configuration in configurations()]
-
-
-@pytest.mark.parametrize("configuration", _each_configuration())
+@pytest.mark.parametrize("configuration", [
+    pytest.param(configuration, id=configuration.label) for configuration in configurations()])
 def test_a_tools_own_argument_named_in_its_text_is_served(configuration) -> None:
     """A switch that removes an argument removes it from the schema. A description that
-    still names it tells the model to pass something the server refuses."""
-    found: set[tuple[str, str]] = set()
+    still names it tells the model to pass something the server refuses. memory_recall's
+    description named query_rewrite and synthesize with their switches off (#295)."""
     problems = []
     for tool in served(configuration):
         own = table()[tool["name"]]
         here = set(tool["inputSchema"]["properties"])
         for where, text in texts(tool):
             for word in unserved_arguments(text, own, here):
-                found.add((tool["name"], word))
                 problems.append(f"{where} names {word!r}, which this server removed")
-    if found and found == REMOVED_BUT_NAMED.get(configuration.label):
-        raise known_bugs.Reproduced("\n".join(problems))
     assert not problems, "\n".join(problems)
 
 

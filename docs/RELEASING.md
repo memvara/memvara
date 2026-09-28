@@ -318,8 +318,9 @@ unpushed tree — so prefer it to a raw `twine upload`.
 ### Green on every interpreter the package claims
 
 ```bash
-python3 -m pytest -q
-python3 -m coverage run -m pytest && python3 -m coverage report      # gated at 100%
+python3 -m pytest -q -n auto
+python3 -m coverage erase && python3 -m coverage run -m pytest -n auto \
+  && python3 -m coverage combine && python3 -m coverage report         # gated at 100%
 ```
 
 Locally that is one interpreter. `requires-python = ">=3.10"` is a promise about four, so

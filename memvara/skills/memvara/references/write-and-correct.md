@@ -43,7 +43,8 @@ Worked turns: `examples.md`.
 
 `memory_stats` reports the extractor. `fast-path-only` means
 `MEMVARA_LLM=none`: prose is matched against a fixed set of English sentence
-forms, and a turn that fits none of them is accepted and quietly not stored.
+forms. A turn that fits none of them is kept as a turn, and no fact comes
+out of it, so it answers only a recall with `include_episodes`.
 The write receipt mentions it after the fact, one write at a time.
 
 Check once at the start. On that server, write anything you actually want
