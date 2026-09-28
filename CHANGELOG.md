@@ -13,7 +13,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 - **The benchmark refuses a `--timeout` of NaN or infinity.** `bench/evalkit.py` checked
   `timeout <= 0`, which a NaN passes, so `--timeout nan` reached the reader's client as its
-  timeout. It now asks for a finite number of seconds above zero. #431.
+  timeout. It now asks for a finite number of seconds above zero, and so does
+  `bench/extract_cost.py`'s `--timeout`, which had no check at all. #431.
 - **A model reply with thousands of invented predicates no longer stalls a write.** Past
   the cap of 200 learned predicates, each new spelling is folded onto the nearest known
   predicate as an alias. Each alias rebuilt the registry's whole index, and each search

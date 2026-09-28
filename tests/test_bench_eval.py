@@ -3302,3 +3302,16 @@ def test_a_timeout_that_is_not_a_positive_number_of_seconds_is_refused(timeout):
     bound at all, and leaving out --timeout is how to ask for the library's default."""
     with pytest.raises(SystemExit, match="--timeout must be a number of seconds above zero"):
         ek.build_reader(_Args(reader="openai", model="qwen", timeout=timeout))
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "nan", "inf"])
+def test_extract_cost_refuses_a_timeout_that_is_not_a_positive_number_of_seconds(
+        value, capsys):
+    """`bench/extract_cost.py`'s `--timeout` reached the OpenAI client with no check at
+    all, so 0, a negative number, NaN or infinity was passed on as the timeout. It is
+    refused by argparse now, before anything is built (the same rule as #431)."""
+    import extract_cost
+    with pytest.raises(SystemExit) as refused:
+        extract_cost.main(["--timeout", value, "--episodes", "no-such-file.json"])
+    assert refused.value.code == 2
+    assert "--timeout: must be a number of seconds above zero" in capsys.readouterr().err
