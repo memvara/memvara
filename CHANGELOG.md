@@ -18,6 +18,54 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   repeats=N` to `~/.memvara/.hooks/recall.log`, the same shape as the line a recall that
   injected something writes. When nothing new matched but the standing preferences
   changed, the line adds what was injected: `injected=<N>c standing=updated`. #338 (B56).
+- **A retraction far less confident than the value it names no longer ends it.** A new
+  value closes the value on record only when it is worth at least half as much
+  (`AUTHORITY_SHARE`); below that both stay and the write reports a dispute. A retraction
+  skipped that rule, so a model's retraction at confidence 0.05, read from a turn, ended a
+  fact the user had stated at 1.0. A retraction now faces the same rule. Below half, the
+  value stays live, the retraction is kept only as its tombstone, and `receipt.disputed`
+  reports a `Dispute` whose new field `retraction` is true. `memory_add` says so in a
+  note that names `memory_end` and `memory_forget` as the tools that close the value. `remember(polarity=-1)` at its default confidence of 1.0
+  and the fast path's retractions at 0.95 are not affected. #307 (B30).
+- **A backdated retraction's tombstone is no longer returned by reads of the past.** A
+  retraction written with a `recorded_at` in the past stored a tombstone closed on both
+  clocks at the moment of the call rather than at its own `recorded_at`, so
+  `get_all(as_of=...)` and `search(..., as_of=...)` at an instant between the two
+  returned it as a live negative claim. The tombstone now closes both clocks at the
+  instant its write is recorded, so no read at any instant returns it. #317 (B45).
+- **Sending the same retraction dated in the future again is a repeat.** The retracted
+  value stays live until the retraction's date, so every repeat still found it, ended it
+  again at the same instant, wrote one more tombstone and reported the value ended in
+  its receipt. A repeat now reinforces the tombstone on record and reports nothing ended,
+  as a repeat of a retraction dated now already did. A retraction dated sooner still ends
+  the value sooner. #349 (B69).
+- **Writing the same value twice for a period that is already over stores it once.**
+  With Paris live from March, `remember("user", "lives_in", "Rome", valid_from=January)`
+  stores Rome from January to March. Writing it again stored a second, identical Rome
+  claim, and a read of February returned Rome twice. The second write now reinforces the
+  claim on record, reports it under `reinforced` and stores nothing. The same holds for a
+  value written twice with the same `valid_to`. #351 (B70).
+- **The benchmark refuses a `--timeout` of NaN or infinity.** `bench/evalkit.py` checked
+  `timeout <= 0`, which a NaN passes, so `--timeout nan` reached the reader's client as its
+  timeout. It now asks for a finite number of seconds above zero, and so does
+  `bench/extract_cost.py`'s `--timeout`, which had no check at all. #431.
+- **Malformed output from an extraction model is dropped, not raised on.** A backend that
+  does no validation of its own could return an item that is not an object, a
+  `source_index` that is a list, an infinite polarity, a confidence of `10**400`, or a
+  reply that is not a list at all. `add()` raised on each, and the fast path's facts from
+  the same call were lost with it. The write path now drops such an item, or the whole
+  reply when it is not a list, before anything else reads it, and returns a receipt. This
+  holds when `extraction_chunks` cuts a long turn into pieces, too. #303.
+- **A claim with no subject, or with an object that is not text, is dropped.** One with no
+  subject used to be filed under `user`, where it could end the user's own value, and an
+  object that was a list was stored as its Python text, such as `['Porto']`. A subject
+  or an object that is a finite number is still stored as its text. #306.
+- **A claim dropped as ungrounded costs no model call and teaches no predicate.** The
+  grounding check now runs before a new predicate is acquired, so a dropped claim no
+  longer spends an acquisition call or takes one of the 200 learned-predicate slots.
+  #305.
+- **A confidence that is not a finite number is read as the default, 0.7.** NaN used to be
+  read as 0.0, a guess that could displace nothing, and infinity as 1.0.
 - **An open that refuses a store's embedder leaves an older store file as it was.**
   `SQLiteStore` upgrades a file an older version wrote as it opens it, and commits the
   upgrade; `Memvara` then checked its embedder and refused one of another width. So the

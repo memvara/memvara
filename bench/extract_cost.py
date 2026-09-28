@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 import time
@@ -224,6 +225,16 @@ def live(batches: Sequence[Sequence[Episode]], gold: Sequence[str],
         print(f"\n  claims written to {out}")
 
 
+def _seconds(text: str) -> float:
+    """A `--timeout`: a finite number of seconds above zero. `float()` alone accepts
+    "nan" and "inf", and a NaN passes `<= 0` (#431)."""
+    value = float(text)
+    if not 0 < value < math.inf:
+        raise argparse.ArgumentTypeError(
+            f"must be a number of seconds above zero; got {text}")
+    return value
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -242,7 +253,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                              "instructions; match your deployment's "
                                              "MEMVARA_LLM_EXTRACT_SYSTEM")
     ap.add_argument("--out", help="write the claims from each arm to this JSON file")
-    ap.add_argument("--timeout", type=float,
+    ap.add_argument("--timeout", type=_seconds,
                     help="client timeout in seconds. The SDK default is 600, which the "
                          "uncapped arm can exceed; raise it to see what the runaway "
                          "actually costs, or leave it to reproduce production's failure.")

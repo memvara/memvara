@@ -141,6 +141,8 @@ def test_fields_the_backends_validation_repairs_are_stored_repaired(scripted: Ma
     pytest.param("memory_type", "bogus", ("memory_type", MemoryType.SEMANTIC),
                  id="memory-type-unknown"),
     pytest.param("amount", float("nan"), ("amount", None), id="amount-nan"),
+    pytest.param("confidence", float("nan"), ("confidence", 0.7), id="confidence-nan"),
+    pytest.param("polarity", float("inf"), ("polarity", 1), id="polarity-infinite"),
 ])
 def test_a_garbled_field_from_a_backend_with_no_validation_is_repaired(
         scripted: Make, field: str, value: object, stored_as: tuple[str, object]) -> None:
@@ -153,6 +155,51 @@ def test_a_garbled_field_from_a_backend_with_no_validation_is_repaired(
     assert stored.object == "Porto" and getattr(stored, attribute) == expected
     assert receipt.llm_calls == model.count() == 1
     assert set(fates(before, mem).values()) == {"unchanged"}
+
+
+@pytest.mark.parametrize("value", [
+    pytest.param(True, id="a-boolean"),
+    pytest.param(float("inf"), id="infinite"),
+    pytest.param(float("nan"), id="not-a-number"),
+    pytest.param({"city": "Porto"}, id="an-object"),
+    pytest.param("   ", id="blank-text"),
+])
+def test_an_object_that_is_not_text_or_a_finite_number_is_dropped(
+        scripted: Make, value: object) -> None:
+    """#306. The trust boundary stores an object that is text or a finite number, and
+    drops anything else before the pollution guard or acquisition reads it."""
+    model = scripted(extract=[[porto(object=value)]])
+    mem, before, receipt = write(model)
+    assert model_claims(mem) == []
+    assert receipt.llm_calls == model.count() == 1
+    assert set(fates(before, mem).values()) == {"unchanged"}
+
+
+def test_an_object_that_is_a_number_is_stored_as_its_text(scripted: Make) -> None:
+    model = scripted(extract=[[claim("team", "zqx_headcount", 42, confidence=0.9)]],
+                     resolve=[Forever(NEW_MANY)])
+    mem = with_model(model)
+    mem.add("The team is 42 people now.")
+    assert model_claims(mem) == ["42"]
+
+
+def test_a_subject_that_is_a_number_is_stored_as_its_text(scripted: Make) -> None:
+    """A subject is kept when it is text or a finite number, as an object is, and stored
+    as its text. The old path stringified it, and dropping it would lose a claim that is
+    not malformed, only untyped."""
+    model = scripted(extract=[[claim(42, "zqx_room_label", "Porto", confidence=0.9)]],
+                     resolve=[Forever(NEW_MANY)])
+    mem = with_model(model)
+    mem.add("Room 42 is the Porto room.")
+    assert [(c.subject, c.object) for c in mem.get_all()
+            if c.predicate == "zqx_room_label"] == [("42", "Porto")]
+
+
+def test_a_predicate_that_normalizes_to_nothing_is_dropped(scripted: Make) -> None:
+    model = scripted(extract=[[porto(predicate="!!!")]])
+    mem, before, receipt = write(model)
+    assert model_claims(mem) == []
+    assert receipt.llm_calls == model.count() == 1
 
 
 def test_a_time_that_is_not_text_leaves_the_claim_starting_at_its_turn(
@@ -333,7 +380,6 @@ MALFORMED_ITEMS = [
 
 
 @pytest.mark.parametrize("reply, kind, where, words", MALFORMED_ITEMS)
-@known_bugs.xfail("B26")
 def test_a_malformed_item_is_dropped_and_the_write_returns_a_receipt(
         scripted: Make, reply: object, kind: type[Exception], where: tuple[Any, str],
         words: str) -> None:
@@ -387,7 +433,6 @@ def test_an_overflowing_confidence_costs_only_its_own_claim(scripted: Make) -> N
     pytest.param(claim("team", "zqx_office_hub", "Reykjavik harbour"), id="ungrounded"),
     pytest.param(claim("team", "zqx_office_hub", ""), id="empty-object"),
 ])
-@known_bugs.xfail("B28")
 def test_a_dropped_claim_costs_no_acquisition_and_teaches_nothing(
         scripted: Make, tmp_path: pathlib.Path, item: dict[str, Any]) -> None:
     """#305. The pollution guard and the closed vocabulary run before acquisition, so that
@@ -414,7 +459,6 @@ def test_a_dropped_claim_costs_no_acquisition_and_teaches_nothing(
     assert not kept
 
 
-@known_bugs.xfail("B29")
 def test_a_claim_with_no_subject_is_dropped_not_filed_under_the_user(scripted: Make) -> None:
     """#306. The backends' shaping drops a claim with no subject. The pipeline files one
     from a backend with no validation under the user, where it ends the user's own value."""
@@ -435,7 +479,6 @@ def test_a_claim_with_no_subject_is_dropped_not_filed_under_the_user(scripted: M
     assert ("user", "Lisbon") not in filed
 
 
-@known_bugs.xfail("B29")
 def test_an_object_that_is_not_text_is_dropped_not_stored_as_python_text(
         scripted: Make) -> None:
     """#306. An object that is a list is stored as the text of the list."""

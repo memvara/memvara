@@ -103,9 +103,12 @@ HOST = Host(
     approve=ApproveSpec(
         matcher="memvara",
         #: Only the Claude Code spelling, which is the one form this hook approved here
-        #: before approval was pinned to a prefix. How this host spells an MCP tool's name
-        #: in this event has not been measured, so a tool arriving in any other form is
-        #: asked about rather than approved on a guess.
+        #: before approval was pinned to a prefix. Measured on cursor-agent 2026.09.15
+        #: (#340): preToolUse sends `MCP:memory_search`, which does not name the server, so
+        #: approving it would approve any server's tool of that name. beforeMCPExecution
+        #: names the server, but a headless run ignored an `allow` from it and honoured
+        #: only a `deny`. So a memvara read still prompts here, until the approval path is
+        #: measured in an interactive session.
         prefixes=("mcp__memvara__",),
         decision_key="permission",
         reason_key="reason",
