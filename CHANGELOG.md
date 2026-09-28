@@ -11,6 +11,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`memory_recall`'s description names only the arguments the server serves.** It
+  said that the tool rewrites the query "(query_rewrite)" and that "ranked and synthesize
+  each add one more call". A server started with `MEMVARA_FEATURE_QUERY_REWRITE=0` or
+  `MEMVARA_FEATURE_SYNTHESIS=0` removes that argument from the schema, so a model that
+  followed the description was refused with `unknown argument(s)`. The description now
+  drops each argument its switch removes, and with query rewrite off it no longer says
+  the query is rewritten. With every feature on, it reads exactly as before. #295 (B19).
+- **Two defaults stated in tool descriptions are declared in the schema.**
+  `memory_recall.include_episodes` ("Default false") and `memory_remember.extractor`
+  ("Defaults to 'api'") had no `default` in their input schemas; each handler supplied
+  the value itself. Both schemas now declare it, so `tools/list` shows it to a client and
+  the validator fills it, and the handlers read the filled value. Behaviour is unchanged:
+  an empty `extractor` is still read as `api`. #296 (B20).
 - **Capture logs a line on every path where it decides to do nothing.** It returned
   without a line when a hook had triggered the Stop, when the payload named no
   transcript, when the transcript path named no file, when the transcript's size could

@@ -179,6 +179,18 @@ def _argument(tool: Tool, name: str, schema: Mapping[str, Any],
     return schema
 
 
+def _description(tool: Tool, served: Mapping[str, Any]) -> str:
+    """One tool's description on a server that serves `served` of its arguments.
+
+    A tool whose description names arguments a switch can remove is described for the
+    ones it keeps (`DESCRIBED_BY_ARGUMENTS` in memvara/server/tools.py, #295); every other
+    tool keeps its description whatever is removed."""
+    describe = server_tools.DESCRIBED_BY_ARGUMENTS.get(tool.name)
+    if describe is None or set(served) == set(tool.properties):
+        return tool.description
+    return describe(set(served))
+
+
 @dataclass(frozen=True)
 class Expected:
     """What the oracle predicts for a server started with one combination. It is worked
@@ -216,7 +228,7 @@ class Expected:
                           if name not in self.removed}
             answer.append({
                 "name": tool.name,
-                "description": tool.description,
+                "description": _description(tool, properties),
                 "inputSchema": {"type": "object", "properties": properties,
                                 "required": [r for r in tool.required if r in properties],
                                 "additionalProperties": False},
