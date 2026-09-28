@@ -82,8 +82,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
     KnownBug("B50", 332, "add() drops a turn repeated word for word after the value it "
              "stated has changed"),
-    KnownBug("B73", 353, "memory_add says a turn was not stored when only no fact was "
-             "extracted from it"),
     # Found by the framework tests against the real packages.
     KnownBug("B80", 359, "the mem0 shim's add() and delete_all() refuse the entity ids "
              "mem0 2.x takes there, and search() and get_all() refuse them with TypeError "

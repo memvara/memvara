@@ -9,6 +9,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`memory_add` no longer says a stored turn was not stored.** When extraction
+  recognised no fact in a turn, the note said the turn "carried something extraction did
+  not recognise and [was] not stored", right after the reply gave the turn's id.
+  `memory_recall` with `include_episodes` returns that turn word for word: only the fact
+  was not stored. A model that believed the note could send the turn again, which stores
+  it twice, or tell the user nothing was saved. The note now says the turn was stored,
+  that no fact was extracted from it, and that a recall with `include_episodes=true`
+  finds it; the advice that follows it is unchanged. The packaged skill said the same
+  thing in `references/write-and-correct.md`, and says what happens now. #353 (B73).
+
 ## [0.17.0] — 2026-09-28
 
 This is a security release: it fixes twenty advisories, listed under "Security" below.
