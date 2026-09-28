@@ -9,6 +9,7 @@ width of the stored vectors before anything is written, and `Memvara` refuses fr
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sqlite3
 
@@ -118,3 +119,33 @@ def test_reembed_still_upgrades_and_migrates_an_older_store(tmp_path):
                  reembed=True) as mem:
         assert [r.claim.object for r in mem.search("where do I live", k=1)] == ["Lisbon"]
     assert version_of(db) == SCHEMA_VERSION
+
+
+def test_an_older_store_with_no_vectors_opens_with_the_default_embedder(tmp_path,
+                                                                     monkeypatch):
+    """A store with no vectors has nothing to be incompatible with, so the check passes
+    and chooses nothing: the default is chosen after the open, as before."""
+    db = tmp_path / "empty.db"
+    SQLiteStore(str(db)).close()
+    stamp(db, SCHEMA_VERSION - 1)
+    made: list[HashingEmbedder] = []
+    monkeypatch.setattr("memvara.core.default_embedder",
+                        lambda model=None: made.append(HashingEmbedder(dim=32)) or made[-1])
+    with Memvara(str(db), llm=NullLLM()) as mem:
+        assert mem.embedder is made[-1] and len(made) == 1
+    assert version_of(db) == SCHEMA_VERSION
+
+
+def test_a_record_of_another_width_is_ignored_in_the_message(tmp_path):
+    """A record that names another width than the vectors have is wrong about them, so
+    the refusal before the upgrade does not name it, as `_check_embedder` does not."""
+    db = older_store(tmp_path, dim=64)
+    record = pathlib.Path(str(db) + ".embedder.json")
+    body = json.loads(record.read_text())
+    body["dim"] = 999
+    record.write_text(json.dumps(body))
+    with pytest.raises(EmbedderMismatchError) as refused:
+        Memvara(str(db), embedder=HashingEmbedder(dim=128), llm=NullLLM())
+    assert "64-dimensional vectors, but" in str(refused.value)
+    assert "written by" not in str(refused.value).split("\n")[0]
+    assert version_of(db) == SCHEMA_VERSION - 1

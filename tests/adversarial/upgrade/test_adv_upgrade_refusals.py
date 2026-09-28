@@ -64,17 +64,16 @@ def test_a_store_from_a_newer_version_is_refused_and_left_as_it_was(
         tmp_path: pathlib.Path) -> None:
     db = newer_store(tmp_path)
     before = golden.snapshot(db)
-    with warnings.catch_warnings():
-        # A refused open leaves its connection open until garbage collection, which
-        # Python 3.13 reports as a ResourceWarning. That is B24, pinned in
-        # test_adv_upgrade_known_bugs.py. The connection holds the write-ahead log and
-        # the shared-memory file, so it is collected before the file is looked at.
-        warnings.simplefilter("ignore", ResourceWarning)
+    with warnings.catch_warnings(record=True) as seen:
+        # A refused open closes its connection (#301), so collecting garbage finds no
+        # unclosed database, which Python 3.13 would report as a ResourceWarning.
+        warnings.simplefilter("always", ResourceWarning)
         for attempt in ("first", "second"):
             message = refusal(db)
             assert f"schema version {NEWER} was written by a newer Memvara" in message, attempt
             assert f"this build understands {SCHEMA_VERSION}" in message, attempt
         gc.collect()
+    assert [str(w.message) for w in seen if issubclass(w.category, ResourceWarning)] == []
     assert golden.changes(before, golden.snapshot(db)) == []
 
 

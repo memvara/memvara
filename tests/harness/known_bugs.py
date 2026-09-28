@@ -46,7 +46,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B20", 296, "two tool descriptions state a default that the schema does not "
              "declare"),
 
-
     KnownBug("B36", 313, "a refusal or a no-match reply quotes the whole argument"),
     KnownBug("B39", 316, "memory_recall reports ranked without include_episodes as a "
              "ValueError"),
