@@ -825,9 +825,10 @@ class RemoteMemvara:
             ts: datetime | None = None) -> WriteReceipt:
         """Ingest conversation turns and extract whatever in them is durable.
 
-        **Read the receipt. A 200 is not a promise that anything was remembered.** A
+        **Read the receipt. A 200 is not a promise that any fact was remembered.** A
         non-zero `unextracted` beside an empty `added` is a successful-looking write that
-        stored nothing, and the usual cause is a deployment with no extraction model —
+        kept the turns and extracted no fact from them, so a recall finds them only with
+        `include_episodes=True`. The usual cause is a deployment with no extraction model —
         `stats()` reports `extractor` as `fast-path-only` there. `remember()` is the
         route to use when your application already knows the answer.
         """

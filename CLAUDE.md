@@ -55,7 +55,8 @@ the reader. Read it back and rewrite anything a colleague would need to hear twi
 clipped style of the older files here is not the target.
 
 A change that touches only prose runs only the checks it can affect. `scripts/test_changed.py`
-finds them: for a document, it runs only the tests that name that document or its folder. Run
+finds them: for a document, it runs only the tests that name that document or its folder, or
+read it through a pattern such as `*.md`. Run
 the type check as well if a typed file changed, and quote the "N passed" lines in the pull
 request body. A code change runs the same command, and CI runs the full suite on its pull
 request.

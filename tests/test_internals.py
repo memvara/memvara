@@ -295,9 +295,11 @@ def test_a_novel_predicate_is_classified_exactly_once_across_many_claims():
          "polarity": 1, "memory_type": "semantic", "confidence": 0.9, "source_index": 0},
     ]
     llm = CountingLLM(payload)
+    # Each turn names both objects, so neither claim is dropped as ungrounded before its
+    # predicate is acquired (#305).
     with Memvara(embedder=HashingEmbedder(dim=32), llm=llm, user="alice") as mem:
-        mem.add("Some sentence the rules will not touch, spoken at length here.")
-        mem.add("A different sentence the rules will also not touch, at length.")
+        mem.add("Some sentence about a penny black and a blue mauritius, spoken at length.")
+        mem.add("A different sentence about a penny black and a blue mauritius, at length.")
         assert llm.classify_calls == 1, "schema acquisition is paid for once, ever"
 
 
