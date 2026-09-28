@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import doctest
+import importlib.util
 import pathlib
 import subprocess
 import sys
@@ -181,3 +183,36 @@ def test_a_run_with_another_config_file_still_loads_the_root_conftest(
     config.write_text("[pytest]\n", encoding="utf-8")
     run = _collect(tmp_path, "-c", str(config), "tests/adversarial/test_adv_tiers.py")
     assert run.returncode == pytest.ExitCode.OK, run.stdout + run.stderr
+
+
+def test_a_file_in_the_adversarial_folder_keeps_its_conftest_after_a_path_outside_it(
+        tmp_path: pathlib.Path) -> None:
+    """Given a path in a subfolder of tests/adversarial, then a path outside that folder,
+    then a file directly in it, pytest used to collect the last file without the fixtures
+    tests/adversarial/conftest.py defines, and its tests errored with "fixture
+    'hook_runner' not found" (#328, #358). The root conftest now puts the paths of each
+    folder together before collection, which is the order in which pytest keeps them."""
+    home = tmp_path / "home"
+    home.mkdir()
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "tests/adversarial/soak/test_adv_soak_workload.py::"
+         "test_the_same_seed_gives_the_same_turns_and_another_seed_does_not",
+         # A whole file: a node id there does not show the fault.
+         "tests/test_types.py",
+         "tests/adversarial/test_adv_known_bugs.py::"
+         "test_the_approve_hook_allows_the_read_only_document_tools"],
+        cwd=REPO, env=child_env(home), capture_output=True, text=True, timeout=300)
+    assert "not found" not in run.stdout, run.stdout[-2000:]
+    assert run.returncode == pytest.ExitCode.OK, run.stdout[-2000:] + run.stderr[-2000:]
+
+
+def test_the_root_conftests_examples_still_run() -> None:
+    """pytest's doctest collection covers `tests` and `memvara`, not the root conftest."""
+    spec = importlib.util.spec_from_file_location("_root_conftest_examples",
+                                                  REPO / "conftest.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    failures, attempted = doctest.testmod(module, verbose=False)
+    assert (failures, attempted > 0) == (0, True)
