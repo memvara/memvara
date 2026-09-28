@@ -17,6 +17,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   extraction model proposed, and a server in cloud mode never wrote the note about
   ungrounded claims. Both are read now, and a deployment that does not send them still
   hydrates, with 0. #335 (B53).
+- **Recall logs a line when nothing is configured and when nothing matches.** Both
+  outcomes were reported only on the status line, and Codex, Copilot and OpenCode show
+  none, so on those hosts a missing store and an empty answer left the same trace: no
+  reply and no log line. Recall now writes `skipped=not configured` or `recalled=0
+  repeats=N` to `~/.memvara/.hooks/recall.log`, the same shape as the line a recall that
+  injected something writes. When nothing new matched but the standing preferences
+  changed, the line adds what was injected: `injected=<N>c standing=updated`. #338 (B56).
 - **A retraction far less confident than the value it names no longer ends it.** A new
   value closes the value on record only when it is worth at least half as much
   (`AUTHORITY_SHARE`); below that both stay and the write reports a dispute. A retraction

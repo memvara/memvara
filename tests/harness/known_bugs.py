@@ -45,8 +45,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
 
     KnownBug("B46", 318, "tier 0 of add() reinforces a restatement dated before the claim, "
              "and the earlier period is lost"),
-    KnownBug("B56", 338, 'on Codex, Copilot and OpenCode, "not configured" and "no matching '
-             'memories" look identical'),
     KnownBug("B58", 340, "on Cursor and OpenCode a read-only memvara tool is never approved: "
              "the names measured there do not name the server safely, and an approval path "
              "that does waits for an interactive measurement"),
