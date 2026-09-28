@@ -57,13 +57,18 @@ def _detach(hook: str, host_id: str) -> int:
     and its hook then does not run at all -- measured on codex-cli 0.151.0, an async Stop
     wrote no receipt though writing one is the script's first statement. Declared
     synchronous it fires, and a child started with `start_new_session=True` outlives the
-    `codex exec` process and finishes twelve seconds after the turn ended.
+    `codex exec` process and finishes twelve seconds after the turn ended. Claude Code
+    runs an async Stop hook, but `claude -p` cancels it when the process exits (#398), so
+    it detaches too.
 
     So the fork happens here rather than in the body: `capture` stays one straight-line
     program that mines a turn, and the question of who waits for it stays a property of
     the host. stdin is read here and handed on, because it is the payload and a child that
     inherited the parent's stdin would find it already consumed -- or worse, still open,
-    holding the turn on a pipe the client is waiting to close.
+    holding the turn on a pipe the client is waiting to close. It is read and handed on as
+    bytes, so the child decodes it exactly as this process would have: decoding here and
+    encoding again lost a payload that was not valid UTF-8 whole, where the hook reading it
+    itself would have read what it could.
 
     Every failure returns 0. A capture that could not be started is a lost turn; a hook
     that raises is a broken one.
@@ -72,9 +77,9 @@ def _detach(hook: str, host_id: str) -> int:
     import tempfile  # noqa: PLC0415
 
     try:
-        payload = sys.stdin.read()
-    except (OSError, ValueError):
-        payload = ""
+        payload = sys.stdin.buffer.read()
+    except (AttributeError, OSError, ValueError):
+        payload = b""
 
     # A FILE rather than a pipe, and that is the whole point of these six lines. Writing
     # the payload into `stdin=PIPE` blocks once the 64KB buffer fills, and the child does
@@ -88,7 +93,7 @@ def _detach(hook: str, host_id: str) -> int:
     # to clean up on a path where the parent is already gone.
     try:
         handle = tempfile.TemporaryFile()
-        handle.write(payload.encode("utf-8"))
+        handle.write(payload)
         handle.seek(0)
     except (OSError, ValueError) as exc:
         _note(f"failed hook={hook} host={host_id} detach-payload: {type(exc).__name__}")
