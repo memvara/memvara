@@ -115,10 +115,13 @@ LIMITS: Mapping[str, Mapping[str, int]] = {
 #: The names each host gives a tool of the memvara server when it reaches the approve
 #: hook. Claude Code and Codex prefix `mcp__<server>__` (hosts/claude.py, hosts/codex.py),
 #: and a server a plugin installed is named `plugin_memvara_memvara` (approve.py).
-#: Copilot joins with a hyphen, which was measured (hosts/copilot.py). Nobody has
-#: measured Cursor's or OpenCode's names. Their records approve only the Claude Code
-#: spelling, and leave a name in any other form to the host's prompt, so these use that
-#: spelling. Each form is one of its record's approve prefixes followed by the tool.
+#: Copilot joins with a hyphen, which was measured (hosts/copilot.py). Cursor and OpenCode
+#: send other names, measured on 2026-09-28: `MCP:memory_search` and
+#: `memvara_memory_search`. Their records approve neither, which B58 pins
+#: (test_adv_hook_approve.py), and approve only the Claude Code spelling. So on those two
+#: hosts these names check the record's rule, not what the host sends: a real memvara read
+#: there still prompts. Each form is one of its record's approve prefixes followed by the
+#: tool.
 TOOL_NAMES: Mapping[str, tuple[str, ...]] = {
     "claude": ("mcp__memvara__{tool}", "mcp__plugin_memvara_memvara__{tool}"),
     "codex": ("mcp__memvara__{tool}",),
