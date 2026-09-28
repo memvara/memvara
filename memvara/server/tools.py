@@ -1560,28 +1560,55 @@ def _disputed_note(items: Sequence[Dispute]) -> str:
     fix is usually to restate the value with one that says how sure the model actually
     is — a fact it has just confirmed with the user is not a 0.2.
 
+    A retraction faces the same rule (`Dispute.retraction`). It stores no value beside
+    the one it named, so it gets its own sentence, which says that value still answers
+    and names the tools that close it.
+
     >>> note = _disputed_note([Dispute("cl_1a", "user", "lives_in",
     ...                                "London", 1.0, "Paris", 0.1)])
     >>> "kept 'London' (confidence 1.00" in note
     True
     >>> "stored 'Paris' (confidence 0.10)" in note
     True
+    >>> note = _disputed_note([Dispute("cl_1a", "user", "lives_in",
+    ...                                "London", 1.0, "London", 0.05, True)])
+    >>> "(confidence 1.00, claim_id cl_1a) against a retraction at confidence 0.05" in note
+    True
+    >>> "stored" in note
+    False
     """
-    pairs = "; ".join(
-        f"{safe_line(d.subject)} {safe_line(d.predicate)}: kept "
-        f"'{safe_line(d.incumbent)}' (confidence {d.incumbent_confidence:.2f}, "
-        f"claim_id {d.claim_id}), stored '{safe_line(d.candidate)}' "
-        f"(confidence {d.candidate_confidence:.2f}) beside it" for d in items)
-    return (
-        f"note: {len(items)} value(s) were stored without replacing what was already "
-        f"there, because the value already there is more than twice as confident: "
-        f"{pairs}. Both now answer memory_recall, more confident first. Nothing was "
-        "ended, and that is deliberate — ending a value says the world changed, and what "
-        "happened here is that two sources disagree. If the value you just wrote is the "
-        "true one, say so: write it again with a confidence that reflects how sure you "
-        "actually are, and it will replace the other. If the old value is simply wrong, "
-        "memory_forget is the tool that says the record was wrong."
-    )
+    values = [d for d in items if not d.retraction]
+    retractions = [d for d in items if d.retraction]
+    notes: list[str] = []
+    if values:
+        pairs = "; ".join(
+            f"{safe_line(d.subject)} {safe_line(d.predicate)}: kept "
+            f"'{safe_line(d.incumbent)}' (confidence {d.incumbent_confidence:.2f}, "
+            f"claim_id {d.claim_id}), stored '{safe_line(d.candidate)}' "
+            f"(confidence {d.candidate_confidence:.2f}) beside it" for d in values)
+        notes.append(
+            f"note: {len(values)} value(s) were stored without replacing what was already "
+            f"there, because the value already there is more than twice as confident: "
+            f"{pairs}. Both now answer memory_recall, more confident first. Nothing was "
+            "ended, and that is deliberate — ending a value says the world changed, and "
+            "what happened here is that two sources disagree. If the value you just wrote "
+            "is the true one, say so: write it again with a confidence that reflects how "
+            "sure you actually are, and it will replace the other. If the old value is "
+            "simply wrong, memory_forget is the tool that says the record was wrong.")
+    if retractions:
+        pairs = "; ".join(
+            f"{safe_line(d.subject)} {safe_line(d.predicate)}: kept "
+            f"'{safe_line(d.incumbent)}' (confidence {d.incumbent_confidence:.2f}, "
+            f"claim_id {d.claim_id}) against a retraction at confidence "
+            f"{d.candidate_confidence:.2f}" for d in retractions)
+        notes.append(
+            f"note: {len(retractions)} value(s) named by a retraction were not ended, "
+            f"because each is more than twice as confident as the retraction: {pairs}. "
+            "Each still answers memory_recall. The retraction is kept in the record, and "
+            "no read returns it. If a value has stopped being true, memory_end with its "
+            "claim_id ends it. If it was never true, memory_forget is the tool that says "
+            "the record was wrong.")
+    return " ".join(notes)
 
 
 def _collapsed_note(items: Sequence[Collapse]) -> str:
