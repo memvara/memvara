@@ -187,9 +187,8 @@ def test_a_future_retraction_leaves_a_tombstone_that_does_not_end_before_it_begi
     assert tombstone.valid_to == tombstone.valid_from
 
 
-# -- B45: a backdated retraction's tombstone is live in reads of the past ----------------
+# -- B45, fixed: no read returns a backdated retraction's tombstone ---------------------
 
-@known_bugs.xfail("B45")
 def test_a_backdated_retraction_leaves_a_tombstone_that_no_read_returns() -> None:
     """A tombstone is closed on both clocks at the instant its write is recorded, so it
     can never be live (docs/INTERNALS.md). A retraction backdated with `recorded_at` must
@@ -201,14 +200,11 @@ def test_a_backdated_retraction_leaves_a_tombstone_that_no_read_returns() -> Non
     user.remember("user", "likes", "tea", valid_from=jan, recorded_at=jan)
     user.remember("user", "likes", "tea", polarity=-1, valid_from=feb, recorded_at=feb)
     seen = [(c.object, c.polarity) for c in user.get_all(as_of=mar)]
-    if seen == [("tea", -1)]:
-        raise known_bugs.Reproduced(f"a read at March returned the tombstone: {seen}")
     assert seen == [], seen
 
 
-# -- B69: a repeated future-dated retraction writes a new tombstone each time ------------
+# -- B69, fixed: a repeated future-dated retraction reinforces its one tombstone ---------
 
-@known_bugs.xfail("B69")
 def test_a_future_dated_retraction_sent_again_is_a_repeat() -> None:
     """A repeat of a retraction dated now reinforces its tombstone and reports nothing.
     A repeat of one dated in the future must do the same (#349)."""
@@ -221,8 +217,6 @@ def test_a_future_dated_retraction_sent_again_is_a_repeat() -> None:
                 for _ in range(3)]
     tombstones = [c for c in mem.store.iter_claims(None, True) if c.polarity < 0]
     reported = [len(r.invalidated) for r in receipts]
-    if len(tombstones) == 3 and reported == [1, 1, 1]:
-        raise known_bugs.Reproduced(f"{len(tombstones)} tombstones; ended reported {reported}")
     assert len(tombstones) == 1 and reported == [1, 0, 0], (len(tombstones), reported)
 
 
@@ -354,9 +348,8 @@ def test_search_returns_its_results_best_first() -> None:
     assert {"C", "C#", "C++"} <= set(session[:3]), session
 
 
-# -- B70: a different value written twice for an earlier period is stored twice ---------
+# -- B70, fixed: a different value written twice for an earlier period is stored once ---
 
-@known_bugs.xfail("B70")
 def test_a_value_written_twice_for_an_earlier_period_is_stored_once() -> None:
     """A different value dated before the live one is written already ended, at the live
     value's start. Writing it again is a repeat: it must reinforce the claim on record, not
@@ -369,6 +362,5 @@ def test_a_value_written_twice_for_an_earlier_period_is_stored_once() -> None:
     user.remember("user", "lives_in", "Rome", valid_from=jan)
     again = user.remember("user", "lives_in", "Rome", valid_from=jan)
     seen = [c.object for c in user.get_all(valid_at=feb)]
-    if seen == ["Rome", "Rome"] and again.added and not again.reinforced:
-        raise known_bugs.Reproduced(f"the repeat stored a copy; February reads {seen}")
     assert seen == ["Rome"] and not again.added, (seen, [c.id for c in again.added])
+    assert [c.object for c in again.reinforced] == ["Rome"]

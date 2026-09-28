@@ -86,17 +86,24 @@ def test_support_tool_names_are_the_names_the_host_record_describes(host: str) -
         f"approves {sorted(approve.prefixes)}")
 
 
-@pytest.mark.parametrize("host", ("cursor", "opencode"))
-@pytest.mark.parametrize("name", ("memvara_memory_search", "memory_search"))
+#: How each host spells a memvara tool's name in the event its approve hook answers,
+#: measured on 2026-09-28 with the real clients (#340).
+MEASURED_NAMES = (("cursor", "MCP:memory_search"), ("opencode", "memvara_memory_search"))
+
+
+@pytest.mark.parametrize(("host", "name"), MEASURED_NAMES)
 @known_bugs.xfail("B58")
-def test_a_read_only_tool_named_with_a_single_underscore_is_approved(
+def test_a_read_only_tool_is_approved_under_the_name_its_host_sends(
         hooks: Callable[..., HookRunner], host: str, name: str) -> None:
-    """Nobody has measured how Cursor and OpenCode spell a memvara tool's name when they
-    ask the approve hook. Their records approve only the Claude Code spelling,
-    `mcp__memvara__`, so a name joined with one underscore, or the bare tool name, is left
-    to the host's prompt, and a read that prompts is one the model learns to avoid.
-    Approving either form on a guess would approve a tool of any server that spells its
-    name that way, so this stays open until the spelling is measured."""
+    """Measured on 2026-09-28. Cursor 2026.09.15 sends `MCP:memory_search` to preToolUse,
+    which does not name the server, so approving it there would approve any server's
+    `memory_search`. Its beforeMCPExecution names the server (`mcp_server_name`), but
+    headless Cursor ignored an `allow` from that hook: the call ran only with `--force`,
+    while a `deny` was honoured. OpenCode 1.18.20 sends `memvara_memory_search`, and
+    approving by that prefix would approve a tool of any server whose name starts with
+    `memvara_`; its permission.ask never fired in a headless run. Both records therefore
+    still approve only `mcp__memvara__`, and a memvara read prompts on both hosts. This
+    stays open until each host's approval path is measured in an interactive session."""
     result = hooks(host).run("approve", tool_name=name)
     if (result.exit_code, result.reply, support.crashes(result)) == (0, None, []):
         raise known_bugs.Reproduced(f"B58: approve on {host} says nothing about {name!r}")

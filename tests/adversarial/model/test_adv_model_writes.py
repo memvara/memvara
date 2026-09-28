@@ -134,13 +134,53 @@ def test_a_retraction_dated_in_the_future_can_retire_the_value_it_names(
     assert tombstone.valid_from == tombstone.valid_to == FAR_FUTURE
 
 
-def test_a_retraction_dated_in_the_future_sent_twice_agrees_with_the_model(
-        pair: Pair) -> None:
-    """The store and the model must agree on a repeat of a future-dated retraction. What
-    that repeat should do is #349; this checks only that the two do the same thing."""
+def test_a_retraction_dated_in_the_future_sent_twice_is_a_repeat(pair: Pair) -> None:
+    """The value stays live until the retraction's date, so the repeat still finds it,
+    but ending it there again changes nothing. The repeat reinforces the tombstone and
+    reports nothing, as a repeat of a retraction dated now does (#349)."""
     pair.apply(Remember("u1", "likes", "tea"))
     pair.apply(Remember("u1", "likes", "tea", polarity=-1, valid_from=FAR_FUTURE))
-    pair.apply(Remember("u1", "likes", "tea", polarity=-1, valid_from=FAR_FUTURE))
+    e = pair.apply(Remember("u1", "likes", "tea", polarity=-1, valid_from=FAR_FUTURE))
+    assert e.new is None and e.closed == []
+    assert e.reinforced == ["r2"] and not e.reinforced_reported
+
+
+def test_a_retraction_far_less_confident_than_the_value_is_a_dispute(pair: Pair) -> None:
+    """The authority rule a new value faces (#307): the value stays live, the tombstone
+    is stored, and a repeat reinforces the tombstone and reports the dispute again."""
+    pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I0))
+    e = pair.apply(Remember("u1", "lives_in", "Berlin", polarity=-1, confidence=0.4))
+    assert e.new == "r2" and e.closed == [] and e.disputed == ["r1"]
+    assert pair.model.rows["r1"].state == "live"
+    e = pair.apply(Remember("u1", "lives_in", "Berlin", polarity=-1, confidence=0.4))
+    assert e.new is None and e.reinforced == ["r2"] and e.disputed == ["r1"]
+
+
+def test_a_backdated_retraction_leaves_a_tombstone_believed_at_no_instant(
+        pair: Pair) -> None:
+    """Both of the tombstone's clocks close at its own `recorded_at` (#317)."""
+    pair.apply(Remember("u1", "likes", "tea", valid_from=I0, recorded_at=I0))
+    pair.apply(Remember("u1", "likes", "tea", polarity=-1, valid_from=I1, recorded_at=I2))
+    tombstone = pair.model.rows["r2"]
+    assert tombstone.invalidated_at == tombstone.recorded_at == tombstone.valid_to == I2
+
+
+def test_a_value_written_twice_for_a_period_before_the_live_one_is_a_repeat(
+        pair: Pair) -> None:
+    """The first write is stored already ended where the live value begins. The second
+    reinforces it and stores nothing (#351)."""
+    pair.apply(Remember("u1", "lives_in", "Paris", valid_from=I3))
+    pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I1))
+    e = pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I1))
+    assert e.new is None and e.reinforced == ["r2"]
+
+
+def test_a_value_written_twice_with_the_same_end_is_a_repeat(pair: Pair) -> None:
+    pair.apply(Remember("u1", "likes", "tea", valid_from=I0, valid_to=I2))
+    e = pair.apply(Remember("u1", "likes", "tea", valid_from=I1, valid_to=I2,
+                            expires_at=FAR_FUTURE))
+    assert e.new is None and e.reinforced == ["r1"]
+    assert pair.model.rows["r1"].expires_at == FAR_FUTURE
 
 
 def test_a_repeated_retraction_reinforces_its_tombstone_and_reports_nothing(

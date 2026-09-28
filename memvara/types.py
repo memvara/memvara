@@ -2091,8 +2091,15 @@ class Dispute:
     it has one decision to make about one pair of claims, and "which value stayed" is the
     whole of what they need to make it.
 
+    A retraction faces the same rule, and `retraction` is then true: the value it named
+    stays live, and the retraction is kept only as its tombstone, which no read returns.
+    `candidate` is the value the retraction named, which is empty for one that named
+    the whole slot.
+
     >>> Dispute("cl_1a2b", "user", "lives_in", "London", 1.0, "Paris", 0.1)
     <Dispute user lives_in: 'London' 1.00 kept, 'Paris' 0.10 stored beside it>
+    >>> Dispute("cl_1a2b", "user", "lives_in", "London", 1.0, "London", 0.05, True)
+    <Dispute user lives_in: 'London' 1.00 kept, retraction 0.05 did not end it>
     """
 
     #: The incumbent that stayed live. Addressable, because acting on this means
@@ -2104,11 +2111,15 @@ class Dispute:
     incumbent_confidence: float
     candidate: str
     candidate_confidence: float
+    #: Whether the candidate was a retraction rather than a new value.
+    retraction: bool = False
 
     def __repr__(self) -> str:
+        lost = (f"retraction {self.candidate_confidence:.2f} did not end it"
+                if self.retraction else
+                f"{self.candidate!r} {self.candidate_confidence:.2f} stored beside it")
         return (f"<Dispute {self.subject} {self.predicate}: "
-                f"{self.incumbent!r} {self.incumbent_confidence:.2f} kept, "
-                f"{self.candidate!r} {self.candidate_confidence:.2f} stored beside it>")
+                f"{self.incumbent!r} {self.incumbent_confidence:.2f} kept, {lost}>")
 
 
 @dataclass(slots=True)

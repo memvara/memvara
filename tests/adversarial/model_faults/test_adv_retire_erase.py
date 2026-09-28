@@ -17,7 +17,6 @@ from typing import Any, Callable
 
 import pytest
 
-from harness import known_bugs
 from memvara.store import SQLiteStore
 from memvara.types import ForgetPreview, RefusedProposal, closure_reasons
 
@@ -263,26 +262,23 @@ def test_a_forget_preview_asks_no_model_so_a_model_cannot_widen_what_is_retired(
     assert model.count() == 0
 
 
-# -- a bug these tests found, pinned until its fix lands -------------------------------------
+# -- a bug these tests found, now fixed -----------------------------------------------------
 
 
-@known_bugs.xfail("B30")
 def test_a_model_retraction_below_half_the_incumbents_confidence_ends_nothing(
         scripted: Make) -> None:
-    """#307. The reconciler closes an incumbent only for a candidate worth at least half of
-    it (`reconcile.AUTHORITY_SHARE`), so a model's new value at 0.05 is stored beside the
-    user's Berlin, asserted at 1.0. `Reconciler._retract` skips that rule, reasoning that
-    every negative comes from the fast path or from `remember()`. The model tier produces
-    negatives too, so a retraction at 0.05 ends Berlin."""
+    """#307, fixed. The reconciler closes an incumbent only for a candidate worth at least
+    half of it (`reconcile.AUTHORITY_SHARE`), so a model's new value at 0.05 is stored
+    beside the user's Berlin, asserted at 1.0. `Reconciler._retract` used to skip that
+    rule, reasoning that every negative comes from the fast path or from `remember()`.
+    The model tier produces negatives too, and a retraction at 0.05 ended Berlin. Now it
+    ends nothing and the receipt reports the dispute."""
     model = scripted(extract=[[claim("user", "lives_in", "Berlin", polarity=-1,
                                      confidence=0.05)]])
     mem = with_model(model)
     ids = seed(mem)
     before = ledger(mem)
     receipt = mem.add(LEAVING_BERLIN)
-    berlin = fates(before, mem)[ids["berlin"]]
-    if berlin == "ended" and [c.id for c in receipt.ended] == [ids["berlin"]]:
-        raise known_bugs.Reproduced(
-            "B30: a model retraction at confidence 0.05 ended the Berlin the user asserted "
-            "at 1.0")
-    assert berlin == "unchanged"
+    assert fates(before, mem)[ids["berlin"]] == "unchanged"
+    assert receipt.ended == []
+    assert [(d.claim_id, d.retraction) for d in receipt.disputed] == [(ids["berlin"], True)]

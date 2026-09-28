@@ -507,6 +507,47 @@ def test_an_earlier_period_held_in_another_project_does_not_make_a_restatement_a
     assert store.get_claim(elsewhere.id).observation_count == 1
 
 
+def test_a_value_written_twice_for_a_period_before_the_live_one_is_a_repeat(rec, store):
+    """#351. A different value dated before the live one is stored already ended, where
+    the live one begins. That claim is not live, so the duplicate check never found it,
+    and the same write made twice stored the period twice. The second write reinforces
+    the claim on record and stores nothing."""
+    march = utcnow() - timedelta(days=60)
+    january = march - timedelta(days=60)
+    rec.apply(claim("lives_in", "Paris", valid_from=march, recorded_at=march), now=march)
+    rome = rec.apply(claim("lives_in", "Rome", valid_from=january, sources=["ep_2"])).claim
+    assert rome.valid_to == march, "the premise: Rome is stored as history"
+
+    res = rec.apply(claim("lives_in", "Rome", valid_from=january, sources=["ep_3"]))
+
+    assert res.action == "reinforce" and res.claim.id == rome.id
+    assert res.claim.observation_count == 2 and res.claim.sources == ["ep_2", "ep_3"]
+    assert len(store.find_by_value("acme", rome.value_key)) == 1
+
+
+@pytest.mark.parametrize("expires, repeat", [(False, True), (True, False)],
+                         ids=["no expiry: a repeat", "an expiry: a claim of its own"])
+def test_a_value_written_twice_with_its_end_is_a_repeat_only_where_it_may_reinforce(
+        rec, store, expires, repeat):
+    """The same rule for a value the caller wrote with its end. A project reads the
+    user-wide scope above it, so a user-wide claim for the period is the one on record. A
+    repeat that names an expiry reinforces only a claim in exactly its own scope, as in
+    step 1, so it is stored as the project's own claim and the user-wide one keeps no
+    expiry."""
+    june = utcnow() - timedelta(days=90)
+    january = june - timedelta(days=150)
+    wide = rec.apply(database(SCOPE, valid_from=january, valid_to=june,
+                              recorded_at=january), now=january).claim
+    expiry = utcnow() + timedelta(days=30) if expires else None
+
+    res = rec.apply(database(PROJECT_B, valid_from=january, valid_to=june,
+                             expires_at=expiry, sources=["ep_2"]))
+
+    assert (res.action == "reinforce" and res.claim.id == wide.id) is repeat
+    assert (res.action == "add" and res.claim.scope == PROJECT_B) is not repeat
+    assert store.get_claim(wide.id).expires_at is None
+
+
 def test_a_supersession_in_one_project_is_not_cut_off_by_another_projects_claim(store):
     """`supersede()` writes its new claim through the same reconciler, so the same rule
     holds there: the new value's claim ends where a claim of that value the writer can
@@ -781,18 +822,61 @@ def test_the_authority_rule_does_not_reach_a_caller_who_named_the_victim(rec, st
     assert store.get_claim(london.id).state == "ended"
 
 
-def test_a_low_confidence_retraction_still_retracts(rec, store):
-    """`AUTHORITY_SHARE` is deliberately not consulted on the retraction path, and this
-    pins the decision so it does not read later as a place the rule was forgotten. A
-    retraction writes a tombstone that is born invalidated — "we stopped believing X" —
-    and leaving the target live beside it would put both sentences in the store at once,
-    which is a worse record than either."""
+def test_a_retraction_far_less_confident_than_the_value_it_names_ends_nothing(rec, store):
+    """#307. A retraction faces the rule a new value faces. This used to be pinned the
+    other way, on the ground that every negative came from the fast path at 0.95 or from
+    `remember()`; the model tier produces negatives too, at whatever confidence it gives,
+    and one at 0.10 ended a fact stated at 1.00. The value stays live, the retraction is
+    kept as its tombstone, and the write reports a dispute marked as a retraction's."""
     berlin = rec.apply(claim("lives_in", "Berlin", confidence=1.00)).claim
     res = rec.apply(claim("lives_in", "Berlin", polarity=-1, confidence=0.10))
 
-    assert res.action == "retract"
-    assert [c.id for c in res.invalidated] == [berlin.id]
-    assert store.get_claim(berlin.id).state == "ended"
+    assert res.action == "retract" and res.invalidated == []
+    assert store.get_claim(berlin.id).state == "live"
+    assert res.claim.state == "retired", "the tombstone is stored, and no read returns it"
+    (dispute,) = res.disputed
+    assert dispute.retraction and dispute.claim_id == berlin.id
+    assert (dispute.incumbent_confidence, dispute.candidate_confidence) == (1.00, 0.10)
+    assert repr(dispute) == ("<Dispute user lives_in: 'Berlin' 1.00 kept, "
+                             "retraction 0.10 did not end it>")
+
+
+def test_a_disputed_retraction_sent_again_reinforces_its_tombstone(rec, store):
+    """A repeat stores no second tombstone, and still reports the dispute: the value is
+    still live, and a receipt that reported nothing would read as a retraction that named
+    nothing on record."""
+    berlin = rec.apply(claim("lives_in", "Berlin", confidence=1.00)).claim
+    first = rec.apply(claim("lives_in", "Berlin", polarity=-1, confidence=0.10)).claim
+
+    res = rec.apply(claim("lives_in", "Berlin", polarity=-1, confidence=0.10,
+                          sources=["ep_2"]))
+
+    assert res.action == "noop" and res.claim.id == first.id
+    assert res.claim.observation_count == 2 and res.claim.sources == ["ep_1", "ep_2"]
+    assert [d.claim_id for d in res.disputed] == [berlin.id]
+    assert len(store.find_by_value("acme", first.value_key)) == 1
+
+
+@pytest.mark.parametrize("confidence, ends", [(0.50, True), (0.49, False)])
+def test_the_share_a_retraction_needs_is_the_same_floor(rec, store, confidence, ends):
+    berlin = rec.apply(claim("lives_in", "Berlin", confidence=1.00)).claim
+    res = rec.apply(claim("lives_in", "Berlin", polarity=-1, confidence=confidence))
+
+    assert store.get_claim(berlin.id).state == ("ended" if ends else "live")
+    assert bool(res.disputed) is not ends
+
+
+def test_a_retraction_of_a_whole_slot_ends_only_what_it_outranks(rec, store):
+    """A retraction that names no value closes every value in the slot, one by one
+    against the rule: it ends the guess and leaves the stated value live."""
+    tea = rec.apply(claim("likes", "tea", confidence=1.00)).claim
+    coffee = rec.apply(claim("likes", "coffee", confidence=0.10)).claim
+
+    res = rec.apply(claim("likes", "", polarity=-1, confidence=0.30))
+
+    assert [c.id for c in res.invalidated] == [coffee.id]
+    assert [(d.claim_id, d.candidate) for d in res.disputed] == [(tea.id, "")]
+    assert live_objects(store, tea) == ["tea"]
 
 
 # --- the interval a supersession can empty -----------------------------------
@@ -954,6 +1038,81 @@ def test_a_retraction_given_a_naive_instant_treats_it_as_utc(rec, store):
     tombstone = store.get_claim(res.claim.id)
     assert tombstone.invalidated_at == aware
     assert tombstone.valid_to == aware
+
+
+def test_a_backdated_retraction_closes_its_tombstone_where_it_is_recorded(rec, store):
+    """#317. A tombstone closes both clocks at the instant its write is recorded, so it is
+    believed at no instant. A retraction backdated with `recorded_at` closed them at the
+    moment of the call instead, and between the two the tombstone was a live negative
+    claim that reads of that past returned."""
+    now = utcnow()
+    january, february = now - timedelta(days=60), now - timedelta(days=30)
+    tea = rec.apply(claim("likes", "tea", valid_from=january, recorded_at=january),
+                    now=now).claim
+    res = rec.apply(claim("likes", "tea", polarity=-1, valid_from=february,
+                          recorded_at=february, sources=["ep_2"]), now=now)
+
+    tombstone = store.get_claim(res.claim.id)
+    assert tombstone.recorded_at == tombstone.invalidated_at == tombstone.valid_to == february
+    between = february + timedelta(days=10)
+    assert not tombstone.is_live(as_of=between)
+    assert store.get_claim(tea.id).valid_to == february
+
+
+def test_a_retraction_dated_in_the_future_sent_again_is_a_repeat(rec, store):
+    """#349. The value stays live until the retraction's date, so a repeat still finds it,
+    and used to end it again at the same instant, point it at a second tombstone and
+    report it ended. Ending it there changes nothing, so the repeat reinforces the
+    tombstone on record and reports nothing, as a repeat dated now does. A retraction
+    dated sooner does change the value, so it is not a repeat."""
+    now = utcnow()
+    later, sooner = now + timedelta(days=365), now + timedelta(days=30)
+    tea = rec.apply(claim("likes", "tea", valid_from=now), now=now).claim
+    first = rec.apply(claim("likes", "tea", polarity=-1, valid_from=later),
+                      now=now).claim
+
+    res = rec.apply(claim("likes", "tea", polarity=-1, valid_from=later,
+                          sources=["ep_2"]), now=now)
+
+    assert res.action == "noop" and res.claim.id == first.id and res.invalidated == []
+    assert store.get_claim(tea.id).invalidated_by == first.id
+    assert [c.id for c in store.iter_claims(None, True) if c.polarity < 0] == [first.id]
+
+    res = rec.apply(claim("likes", "tea", polarity=-1, valid_from=sooner), now=now)
+
+    assert res.action == "retract" and [c.id for c in res.invalidated] == [tea.id]
+    assert store.get_claim(tea.id).valid_to == sooner
+
+
+def test_a_future_dated_retraction_repeated_as_a_correction_retires_the_value(rec, store):
+    """Retiring the value changes it even where its world clock already stops, so a
+    retraction with `close="retired"` is not taken for a repeat of an ending."""
+    now = utcnow()
+    later = now + timedelta(days=365)
+    tea = rec.apply(claim("likes", "tea", valid_from=now), now=now).claim
+    rec.apply(claim("likes", "tea", polarity=-1, valid_from=later), now=now)
+
+    res = rec.apply(claim("likes", "tea", polarity=-1, valid_from=later), now=now,
+                    close="retired")
+
+    assert res.action == "retract" and [c.id for c in res.invalidated] == [tea.id]
+    assert store.get_claim(tea.id).state == "retired"
+
+
+def test_a_retraction_where_the_value_already_ends_is_recorded_and_ends_nothing(
+        rec, store):
+    """The value already stops being true where the retraction says, so ending it would
+    change nothing and it is not reported. The retraction still named a value on record,
+    so its tombstone is kept."""
+    now = utcnow()
+    end = now + timedelta(days=30)
+    tea = rec.apply(claim("likes", "tea", valid_from=now, valid_to=end), now=now).claim
+
+    res = rec.apply(claim("likes", "tea", polarity=-1, valid_from=end), now=now)
+
+    assert res.action == "retract" and res.invalidated == [] and res.disputed == []
+    assert res.claim.state == "retired"
+    assert store.get_claim(tea.id).invalidated_by is None
 
 
 def test_retraction_only_retires_the_value_it_names(rec, store):
@@ -1363,6 +1522,28 @@ def test_two_coarse_boundaries_that_do_not_overlap_still_order(rec, store):
     # London is confidently *earlier*, so it is history and does not displace Lisbon,
     # even though it was said later.
     assert live_objects(store, claim("lives_in", "x")) == ["Lisbon"]
+
+
+@pytest.mark.parametrize("start, precision", [
+    (at(2025, 6, 1), "month"),     # "in June 2025"
+    (at(2025, 1, 1), "year"),      # "in 2025"
+])
+def test_a_repeat_dated_by_a_month_or_a_year_covers_a_period_that_begins_inside_it(
+        rec, store, start, precision):
+    """Rome is stored from 15 June 2025 until Paris begins in March 2026. A repeat dated
+    "June 2025" or "2025" names a period that contains 15 June, so the stored claim cannot
+    be said to begin after it (`_bounds`), and the repeat reinforces it (#351). Compared
+    as instants, the stored claim begins later, and the repeat would store the period a
+    second time."""
+    rec.apply(claim("lives_in", "Paris", valid_from=at(2026, 3, 1)), now=at(2026, 3, 1))
+    rome = rec.apply(claim("lives_in", "Rome", valid_from=at(2025, 6, 15)),
+                     now=at(2026, 4, 1)).claim
+    assert rome.valid_to == at(2026, 3, 1)
+
+    res = rec.apply(claim("lives_in", "Rome", valid_from=start,
+                          temporal_precision=precision), now=at(2026, 5, 1))
+
+    assert res.action == "reinforce" and res.claim.id == rome.id
 
 
 def test_eligibility_is_untouched_by_temporal_ordering(rec, store):
