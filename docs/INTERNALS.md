@@ -965,7 +965,7 @@ suggestion must not turn it into an exception the caller retries.
   whose cosines run higher; that module carries the distributions), refused and
   counted on `receipt.ungrounded` otherwise. `True` is the lexical check alone; `False` is off.
   Only model-proposed claims are ever checked — `remember()` and the fast path do not
-  pass through `_claim_from_dict` — and the reason the default is on rather than off is
+  pass through `WritePipeline._grounded` — and the reason the default is on rather than off is
   that the destructive direction is storing: a fabricated value in a ONE-cardinality
   slot supersedes and ends the true fact that was there. It remains a precision filter
   for wholesale fabrication only — a claim that reuses real vocabulary with an inverted
@@ -973,6 +973,20 @@ suggestion must not turn it into an exception the caller retries.
   fails open, keeping the claim and warning once. Under the default `HashingEmbedder`
   nothing is ever rescued (n-gram cosines on zero-overlap pairs measure 0.0–0.11,
   far under the floor), so `"auto"` degrades to the strict check there.
+- **The order the model's items are checked in.** `_admissible` runs first, on the raw
+  reply: it drops a reply that is not a list, an item that is not an object, an item with
+  no `source_index` naming one of the batch's turns, an item whose predicate is not text,
+  and an item whose subject or object is not text or a finite number. With
+  `extraction_chunks`, `_mapped` maps each piece's reply back to the batch first, and it
+  drops a reply that is not a list and an item that is not an object itself. A backend that
+  validates its own output never sends these, but one that does not may, and everything
+  after this reads the items as well formed (#303, #306). Then the pollution guard, the
+  closed vocabulary, `_grounded` (the check above), predicate acquisition, and last
+  `_claim_from_dict`, which builds each claim and repairs a polarity, confidence or memory
+  type it cannot read to its default. Grounding is checked before acquisition, so a claim
+  dropped as ungrounded costs no acquisition call and teaches the registry no predicate
+  (#305), and after the pollution guard, so a claim the guard refuses is counted on
+  `receipt.polluted`, not on `receipt.ungrounded`.
 - **`reject_polluted`** (default `True`) is the other guard, and it catches what
   `reject_ungrounded` says it cannot: a real value under a slot it does not belong to.
   `write/pollution.py` carries the rules and the measurement. Within one turn, one
@@ -3096,7 +3110,9 @@ Hard API requirements — these are current and getting them wrong is a 400:
   through to `"result"`, which the API accepts, so there is nothing to notice.
 - Validate and coerce the model's output before returning: drop claims with a missing or
   out-of-range `source_index`, clamp `confidence` to `[0, 1]`, and normalize predicates to
-  snake_case. The engine trusts these dicts, so this is the trust boundary.
+  snake_case. The engine drops what is malformed too (`WritePipeline._admissible`), but a
+  backend that validates keeps its own rules, such as the confidence it gives a value it
+  cannot read, instead of the engine's defaults.
 
 ### The `Multimodal` protocol
 
