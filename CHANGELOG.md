@@ -30,6 +30,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     `config_dict` and still refuses. #360 (B81).
   - `search()` and `get_all()` defaulted to `top_k` 10 and 100, where mem0 defaults to 20
     for both. Both now default to 20. #361 (B82).
+- **The benchmark refuses a `--timeout` of NaN or infinity.** `bench/evalkit.py` checked
+  `timeout <= 0`, which a NaN passes, so `--timeout nan` reached the reader's client as its
+  timeout. It now asks for a finite number of seconds above zero, and so does
+  `bench/extract_cost.py`'s `--timeout`, which had no check at all. #431.
 - **Malformed output from an extraction model is dropped, not raised on.** A backend that
   does no validation of its own could return an item that is not an object, a
   `source_index` that is a list, an infinite polarity, a confidence of `10**400`, or a
