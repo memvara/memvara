@@ -73,6 +73,9 @@ RULES: tuple[SkipRule, ...] = (
              "An optional extra that this environment did not install."),
     SkipRule(r"^no POSIX permission bits to check$",
              "Windows has no POSIX file modes.", platforms=("win32",)),
+    SkipRule(r"^file modes are POSIX$",
+             "The hooks' and the OpenCode plugin's private files are checked by their "
+             "POSIX modes, which Windows does not have.", platforms=("win32",)),
     SkipRule(r"^Windows file modes do not express this$",
              "Windows has no POSIX file modes.", platforms=("win32",)),
     SkipRule(r"^this user may write a read-only file$",
