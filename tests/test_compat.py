@@ -552,20 +552,30 @@ def test_reject_legacy_kwargs_is_a_no_op_when_there_is_nothing_to_reject():
     assert _reject_legacy_kwargs({}, "add") is None
 
 
-@pytest.mark.parametrize("call", [
-    lambda m: m.add("hi", timestamp=1700000000),
-    lambda m: m.add("hi", expiration_date="2030-01-01"),
-    lambda m: m.search("hi", reference_date="2024-01-01"),
-    lambda m: m.search("hi", show_expired=True),
-    lambda m: m.get_all(show_expired=True),
-    lambda m: m.update("cl_x", text="x", metadata={"a": 1}, expiration_date="2030-01-01"),
+@pytest.mark.parametrize("call, says", [
+    (lambda m: m.add("hi", timestamp=1700000000), "does not support timestamp="),
+    (lambda m: m.add("hi", expiration_date="2030-01-01"),
+     "does not support expiration_date="),
+    (lambda m: m.search("hi", reference_date="2024-01-01"),
+     "does not support reference_date="),
+    (lambda m: m.search("hi", show_expired=True), "does not support show_expired="),
+    (lambda m: m.get_all(show_expired=True), "does not support show_expired="),
+    (lambda m: m.update("cl_x", text="x", metadata={"a": 1}, expiration_date="2030-01-01"),
+     "immutable"),
 ], ids=["add timestamp", "add expiration_date", "search reference_date",
         "search show_expired", "get_all show_expired", "update with every argument"])
-def test_a_mem0_argument_the_shim_cannot_honour_is_refused_by_name(api, call):
+def test_a_mem0_argument_the_shim_cannot_honour_is_refused_by_name(api, call, says):
     """The shim takes every argument mem0 2.x takes, so each one it cannot honour is
-    refused with Mem0CompatError rather than a TypeError (#360)."""
-    with pytest.raises(Mem0CompatError):
+    refused with Mem0CompatError rather than a TypeError (#360), naming it."""
+    with pytest.raises(Mem0CompatError, match=says):
         call(api)
+
+
+def test_a_refusal_gives_only_the_reasons_for_what_was_passed(api):
+    with pytest.raises(Mem0CompatError) as refused:
+        api.get_all(show_expired=True)
+    assert "show_expired=True to show" in str(refused.value)
+    assert "timestamp" not in str(refused.value) and "reference_date" not in str(refused.value)
 
 
 def test_the_defaults_are_mem0s(api):

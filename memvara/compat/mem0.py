@@ -24,10 +24,12 @@ months later.
     constructor arguments on `Memvara`, not entries in a provider registry, so there is
     nothing to translate them into.
 
-Four arguments are refused too, when they are given a value. mem0's `expiration_date=`
-hides a memory until `show_expired=True`, where memvara's closest thing, `expires_at`,
-erases it; `timestamp=` is documented by mem0 itself as unsupported outside its hosted
-platform; and `reference_date=` has no memvara reading that means the same thing.
+Four arguments are refused too, when they are given a value; `UNSUPPORTED` gives each
+one's reason. mem0's `expiration_date=` hides a memory until `show_expired=True`, where
+memvara's closest thing, `expires_at`, erases it; so nothing here is ever hidden as
+expired, and `show_expired=True` would ask for memories that cannot exist. `timestamp=`
+is documented by mem0 itself as unsupported outside its hosted platform, and
+`reference_date=` has no memvara reading that means the same thing.
 
 Two behavioural differences are worth knowing before the first surprise:
 
@@ -158,16 +160,17 @@ def _reject_legacy_kwargs(kwargs: Mapping[str, Any], method: str) -> None:
     raise TypeError(" ".join(parts))
 
 
-def _with_entities(filters: Mapping[str, Any] | None, *, user_id: str | None,
-                   agent_id: str | None, run_id: str | None) -> Mapping[str, Any] | None:
+def _with_entities(filters: Mapping[str, Any] | None,
+                   ids: Mapping[str, str | None]) -> Mapping[str, Any] | None:
     """`filters` with the entity ids `add()` and `delete_all()` take as keywords added.
 
     mem0 2.x's `add()` requires one of them and its `delete_all()` takes them, so a mem0
-    call site passes them there (#359). The shim's own `filters=` still works; an id given
-    both ways must agree.
+    call site passes them there (#359). `ids` maps each of `ENTITY_FILTERS`' names to
+    what the caller passed. The shim's own `filters=` still works; an id given both ways
+    must agree.
     """
-    given = {key: value for key, value in (("user_id", user_id), ("agent_id", agent_id),
-                                           ("run_id", run_id)) if value is not None}
+    assert set(ids) == set(ENTITY_FILTERS), ids
+    given = {key: value for key, value in ids.items() if value is not None}
     if not given:
         return filters
     merged = dict(filters or {})
@@ -179,20 +182,29 @@ def _with_entities(filters: Mapping[str, Any] | None, *, user_id: str | None,
     return merged
 
 
+#: The mem0 arguments this shim takes and refuses when given a value, each with why.
+UNSUPPORTED = {
+    "expiration_date": "mem0's expiration_date= hides a memory until show_expired=True, "
+                       "where memvara's closest thing erases it outright "
+                       "(Memvara.remember(expires_at=...)).",
+    "show_expired": "nothing here is ever hidden as expired, because memvara erases an "
+                    "expiring fact rather than hiding it, so there is nothing for "
+                    "show_expired=True to show.",
+    "timestamp": "mem0 documents timestamp= as unsupported outside its hosted platform.",
+    "reference_date": "reference_date= has no memvara reading that means the same "
+                      "thing; Memvara.search(valid_at=...) reads the world as of a date.",
+}
+
+
 def _refuse_unsupported(method: str, **given: Any) -> None:
     """Refuse, with `Mem0CompatError`, each mem0 argument this shim cannot honour that
-    was given a value. See the module docstring for why each one is refused."""
+    was given a value, with the reason `UNSUPPORTED` gives for it (#360)."""
     named = sorted(name for name, value in given.items()
                    if value is not None and value is not False)
     if named:
         raise Mem0CompatError(
             f"{method}() does not support {', '.join(f'{n}=' for n in named)}. "
-            "mem0's expiration_date= hides a memory until show_expired=True, where "
-            "memvara's expires_at erases it outright (Memvara.remember(expires_at=...)); "
-            "mem0 documents timestamp= as unsupported outside its hosted platform; and "
-            "reference_date= has no memvara reading that means the same thing — "
-            "Memvara.search(valid_at=...) reads the world as of a date."
-        )
+            + " ".join(UNSUPPORTED[name] for name in named))
 
 
 def _memory_type(raw: str | MemoryType) -> MemoryType:
@@ -310,7 +322,8 @@ class Memory:
         """
         _reject_legacy_kwargs(legacy, "add")
         _refuse_unsupported("add", timestamp=timestamp, expiration_date=expiration_date)
-        filters = _with_entities(filters, user_id=user_id, agent_id=agent_id, run_id=run_id)
+        filters = _with_entities(filters, {"user_id": user_id, "agent_id": agent_id,
+                                           "run_id": run_id})
         if prompt is not None:
             raise Mem0CompatError(
                 "prompt= overrides mem0's extraction prompt. Memvara's prompt belongs to "
@@ -513,8 +526,9 @@ class Memory:
         `filters=` is this shim's own spelling of the same thing.
         """
         _reject_legacy_kwargs(legacy, "delete_all")
-        kw = self._scope_kw(_with_entities(filters, user_id=user_id, agent_id=agent_id,
-                                           run_id=run_id))
+        kw = self._scope_kw(_with_entities(filters, {"user_id": user_id,
+                                                     "agent_id": agent_id,
+                                                     "run_id": run_id}))
         if not kw:
             raise ValueError(
                 "delete_all() with no filters would erase the entire tenant. Name the "
@@ -603,8 +617,10 @@ class Memory:
         claim = self.memvara.get(memory_id)
         if claim is None or not claim.is_live():
             return None
+        row = self._row(claim)
         # mem0's get() row carries `score`, empty because nothing was searched (#360).
-        return {**self._row(claim), "score": None}
+        row["score"] = None
+        return row
 
     def get_all(self, *, filters: Mapping[str, Any] | None = None, top_k: int = 20,
                 show_expired: bool = False,
