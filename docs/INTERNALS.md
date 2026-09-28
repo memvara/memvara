@@ -2715,6 +2715,19 @@ beside the width `stored_dim` reads from the vectors themselves. An opener of an
 is refused with `EmbedderMismatchError`. A record that names another embedder of the same
 width makes the open warn with `EmbedderChangedWarning`.
 
+**A refused open leaves an older file as it was.** `SQLiteStore` upgrades a file an older
+version wrote as it opens it, and after that the older version cannot open the file. So
+the width check also runs before the upgrade: `Memvara` passes `SQLiteStore` a
+`before_upgrade` check, which the store calls with the width of the stored vectors, read
+from the `dim` column that every schema version keeps, before it writes anything. An
+embedder of another width is refused there, with the same message, and the file keeps its
+old version (#300). With no embedder given, the check chooses the default the way
+`_default_embedder` does and keeps it, so the default is chosen once. `reembed=True` skips
+the check, because it asks to change the embedder. The same-width checks need the open
+store and run after it, as before; they only warn or refuse, and a refusal of a local
+model there still comes after the upgrade. A store whose open fails for any reason closes
+its database connection before the error reaches the caller (#301).
+
 **A missing or damaged record.** When the store holds vectors and its record is missing or
 unreadable, or names another width than the vectors have, the open cannot tell whether its
 embedder wrote them. It warns with `EmbedderChangedWarning` first, and then, if the open
