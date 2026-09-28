@@ -848,7 +848,7 @@ class WritePipeline:
         believed = [c for c in claims
                     if c.invalidated_at is None or c.invalidated_at > now]
         return bool(believed) and all(
-            not c.is_unended(valid_at=at, known_at=now) for c in believed)
+            c.valid_to is not None and c.valid_to <= at for c in believed)
 
     @staticmethod
     def own_claims(ep: Episode, claims: Iterable[Claim]) -> list[Claim]:
