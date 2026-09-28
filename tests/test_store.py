@@ -2047,20 +2047,50 @@ def test_an_open_waiting_for_the_creation_lock_stops_soon_after_ctrl_c(tmp_path,
     Ctrl-C only between calls into SQLite, so one long wait inside SQLite held an interrupt
     back until the wait ended. The lock is taken in short tries instead. Here the wait is
     five seconds and the interrupt comes after 0.3, so the open must end long before the
-    wait would."""
+    wait would.
+
+    The interrupt is sent again every try until the open ends. `interrupt_main` raises
+    `KeyboardInterrupt` wherever the main thread next runs Python code, and when that is a
+    finalizer, such as a `__del__` or a weakref callback, Python prints "Exception
+    ignored" and the interrupt is lost. A long run of the whole suite collects plenty of
+    such objects, so a single interrupt failed the test there now and then, with the store
+    behaving correctly (#440). A person whose Ctrl-C is lost presses it again, and this
+    test does the same."""
     monkeypatch.setattr(sqlite_store, "_SCHEMA_STEP_WAIT", 5.0)
     path = tmp_path / "c.db"
     other = _creating_elsewhere(path)
-    interrupt = threading.Timer(0.3, _thread.interrupt_main)
+    stop = threading.Event()
+
+    def interrupt() -> None:
+        if stop.wait(0.3):
+            return
+        while True:
+            _thread.interrupt_main()
+            if stop.wait(sqlite_store._LOCK_TRY):
+                return
+
+    sender = threading.Thread(target=interrupt)
+    took = None
     started = time.monotonic()
     try:
-        with pytest.raises(KeyboardInterrupt):
-            interrupt.start()
-            SQLiteStore(str(path))
+        sender.start()
+        SQLiteStore(str(path)).close()
+        pytest.fail("the open finished while another store held the creation lock")
+    except KeyboardInterrupt:
         took = time.monotonic() - started
     finally:
-        interrupt.cancel()
-        interrupt.join()
+        # One more interrupt can land anywhere until the sender has seen `stop`, including
+        # in here. Each one is taken and this is done again, and `sleep(0)` takes one that
+        # is still pending, so none reaches the next test.
+        while True:
+            try:
+                stop.set()
+                sender.join()
+                time.sleep(0)
+                break
+            except KeyboardInterrupt:
+                if took is None:
+                    took = time.monotonic() - started
         other.close()
     assert took < 2.0, f"the open went on for {took:.1f} s after an interrupt at 0.3 s"
 
