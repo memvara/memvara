@@ -687,7 +687,9 @@ def _decode(raw: bytes) -> "dict | None":
     if body.startswith("{"):
         try:
             return json.loads(body)
-        except ValueError:
+        # RecursionError: nesting deeper than the recursion limit, which is not a
+        # ValueError and is just as unreadable (#346).
+        except (ValueError, RecursionError):
             return None
     # text/event-stream: the payload is on `data:` lines.
     for line in body.splitlines():
@@ -695,7 +697,7 @@ def _decode(raw: bytes) -> "dict | None":
         if line.startswith("data:"):
             try:
                 parsed = json.loads(line[5:].strip())
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
             if isinstance(parsed, dict):
                 return parsed

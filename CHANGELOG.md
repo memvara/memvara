@@ -38,6 +38,24 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   claim, and a read of February returned Rome twice. The second write now reinforces the
   claim on record, reports it under `reinforced` and stores nothing. The same holds for a
   value written twice with the same `valid_to`. #351 (B70).
+- **A model reply with thousands of invented predicates no longer stalls a write.** Past
+  the cap of 200 learned predicates, each new spelling is folded onto the nearest known
+  predicate as an alias. Each alias rebuilt the registry's whole index, and each search
+  for the nearest predicate read every alias again, so one `add()` took time that grew
+  with the square of the number of invented spellings: 100 to 130 seconds for 5,000 on a
+  laptop. An alias is now added to the index in place, and each predicate's words are kept
+  once, so the same write takes about 6 seconds. The model is still called 201 times,
+  and every predicate resolves as before. #309.
+
+- **A hook answers a payload nested too deeply to decode as it answers an empty one.**
+  `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
+  Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
+  such as `{"prompt": [[[...]]]}` 100,000 levels deep crashed the body of every hook.
+  The exit code stayed 0, but the hook printed nothing: session start gave the model no
+  memories and showed no status line. The only trace was a `failed hook=... RecursionError`
+  line in `~/.memvara/.hooks/hooks.log`. `payload()` in `plugin/hooks/lib/ipc.py` and
+  `read_event()` in `plugin/hooks/core/envelope.py` now read such a payload as an empty
+  one. #346 (B64).
 - **`memory_recall` refuses `ranked` without conversation turns as an argument error.**
   `ranked=true` needs turns to rank, so it takes `include_episodes=true` and no
   `memory_types`. The library refused the other combinations with a `ValueError`, which
