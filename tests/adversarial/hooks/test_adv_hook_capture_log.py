@@ -96,6 +96,8 @@ def test_capture_says_so_when_it_decides_to_do_nothing(
     result = runner.run("capture", stdin=stop)
     assert result.exit_code == 0
     assert support.crashes(result) == []
-    if (result.log("capture"), result.log("hooks")) == ((), ()):
+    # run.py's line naming the child it detached says nothing of what capture decided.
+    said = [line for line in result.log("hooks") if "detached hook=capture" not in line]
+    if (result.log("capture"), said) == ((), []):
         raise known_bugs.Reproduced(f"B60: capture logged nothing for {case}")
     assert result.log("capture"), result.logs

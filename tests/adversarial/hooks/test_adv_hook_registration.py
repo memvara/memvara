@@ -20,7 +20,6 @@ from types import ModuleType
 
 import pytest
 
-from harness import known_bugs
 from harness.env import child_env
 from harness.hooks import HOOKS_DIR, host_record
 
@@ -30,14 +29,14 @@ from . import support
 SHELL_HOSTS = ("claude", "codex", "copilot", "cursor")
 
 #: What each shell host's registration declares, from the measurements in its record:
-#: the plugin-root expression each command starts from, whether capture is registered
-#: to run in the background (only Claude Code honours that), and the context limit that
-#: Codex needs declared on every hook that can carry context.
+#: the plugin-root expression each command starts from, and the context limit that Codex
+#: needs declared on every hook that can carry context. No command is registered to run
+#: in the background; the test below says why.
 DECLARED = {
-    "claude": ("${CLAUDE_PLUGIN_ROOT}", True, None),
-    "codex": ("${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}", False, 32000),
-    "copilot": ("${PLUGIN_ROOT:-${COPILOT_PLUGIN_ROOT}}", False, None),
-    "cursor": ("${CURSOR_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}", False, None),
+    "claude": ("${CLAUDE_PLUGIN_ROOT}", None),
+    "codex": ("${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}", 32000),
+    "copilot": ("${PLUGIN_ROOT:-${COPILOT_PLUGIN_ROOT}}", None),
+    "cursor": ("${CURSOR_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}", None),
 }
 
 
@@ -71,7 +70,7 @@ def test_the_registration_declares_what_the_host_record_measured(
         generator: ModuleType, host: str) -> None:
     record = host_record(host)
     body = json.loads(generator.registration(record))
-    root, background_capture, context_limit = DECLARED[host]
+    root, context_limit = DECLARED[host]
     assert body["description"] == record.description
     assert set(body["hooks"]) == set(support.EVENTS[host].values())
     for hook, event in support.EVENTS[host].items():
@@ -82,8 +81,6 @@ def test_the_registration_declares_what_the_host_record_measured(
             "command": f'python3 "{root}/hooks/run.py" {hook} --host {host}',
             "timeout": support.LIMITS[host][hook],
         }
-        if hook == "capture" and background_capture:
-            expected["async"] = True
         if hook != "capture" and context_limit is not None:
             expected["additionalContextLimit"] = context_limit
         assert command == expected, (hook, command)
@@ -93,7 +90,6 @@ def test_the_registration_declares_what_the_host_record_measured(
             assert "matcher" not in entry
 
 
-@known_bugs.xfail("B87")
 def test_capture_returns_at_once_and_hands_its_work_to_a_detached_child(
         generator: ModuleType) -> None:
     """No shell host may register capture as a background hook, and every one must detach it.
@@ -104,17 +100,13 @@ def test_capture_returns_at_once_and_hands_its_work_to_a_detached_child(
     detaches returns in milliseconds, and its child runs in a session of its own, so the
     client's exit cannot reach it.
     """
-    background = []
     for host in SHELL_HOSTS:
         record = host_record(host)
         body = json.loads(generator.registration(record))
         (entry,) = body["hooks"][support.EVENTS[host]["capture"]]
         (command,) = entry["hooks"]
-        if command.get("async") or not record.detach_capture:
-            background.append(host)
-    if background == ["claude"]:
-        raise known_bugs.Reproduced("B87: Claude Code's capture is async and not detached")
-    assert background == []
+        assert "async" not in command, host
+        assert record.detach_capture, host
 
 
 @pytest.mark.parametrize("host", SHELL_HOSTS)

@@ -57,7 +57,9 @@ def _detach(hook: str, host_id: str) -> int:
     and its hook then does not run at all -- measured on codex-cli 0.151.0, an async Stop
     wrote no receipt though writing one is the script's first statement. Declared
     synchronous it fires, and a child started with `start_new_session=True` outlives the
-    `codex exec` process and finishes twelve seconds after the turn ended.
+    `codex exec` process and finishes twelve seconds after the turn ended. Claude Code
+    runs an async Stop hook, but `claude -p` cancels it when the process exits (#398), so
+    it detaches too.
 
     So the fork happens here rather than in the body: `capture` stays one straight-line
     program that mines a turn, and the question of who waits for it stays a property of

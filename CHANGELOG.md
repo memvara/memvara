@@ -212,6 +212,17 @@ Upgrading notes are in `docs/UPGRADING.md`.
 
 ### Fixed
 
+- **The plugin captures what is said in a headless Claude Code session.** Capture was
+  registered on Claude Code as an async Stop hook, so that a 12 to 14 second extraction
+  never held a turn open. `claude -p` cancels an async hook when the process exits, so a
+  script, a CI job or a scheduled task that ran Claude Code headless stored nothing, and
+  nothing said so. Measured on Claude Code 2.1.281, the Stop hook reported the outcome
+  "cancelled". Capture on Claude Code is now registered as an ordinary hook that hands its
+  work to a process in a session of its own and returns at once, as it already did on
+  Codex, Copilot and Cursor. Measured the same way, the hook reported "success" and the
+  capture finished after `claude -p` had exited. A plugin repository picks this up when it
+  generates `hooks.json` again, which drops `"async": true` from the capture command.
+  #398 (B87).
 - **`docs/API.md` names every method that only one client has.** Its section on a hosted
   deployment did not mention `end()`, `health()` or `whoami()`, which only the hosted client
   has, or `bind()` and `merge_predicate()`, which only the local client has. A caller who
