@@ -171,9 +171,19 @@ def write_note(mem: Memvara, claim: Claim, episode: Episode, *,
     about neither, and this used to return one reporting that it had stored no turns and
     closed nothing while both sat committed on disk. An importer reconciling what it
     wrote against what it was told it wrote reconciled against zeroes.
+
+    `retire` is read again inside the transaction, under the write lock on a store whose
+    `batch()` takes it, as `SQLiteStore`'s does (see `Store.batch`), and closed as the
+    store holds it. The importer passes the claim a memory's previous event wrote, and
+    another writer can end, retire or erase that claim before the next event. A claim
+    that is gone or no longer live is not retired at all: writing back the caller's copy
+    would undo the other writer's closure, or bring an erased claim back.
     """
     with mem.store.batch():
         mem.store.add_episode(episode)
+        if retire is not None:
+            current = mem.store.get_claim(retire.id)
+            retire = current if current is not None and current.is_live() else None
         if retire is not None:
             # `retire` and `at` arrive as independent optionals, so `retire=old` with no
             # `at` is a legal call — and passing that `None` straight through is not a

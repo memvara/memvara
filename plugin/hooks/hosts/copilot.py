@@ -140,15 +140,15 @@ HOST = Host(
     #: **`<server>-<tool>`, with a hyphen** -- measured against a local stdio MCP server:
     #: `memory_recall` from a server configured as `memvara` reached the hook as
     #: `memvara-memory_recall`. Neither Claude's `mcp__server__tool` nor Cursor's bare
-    #: name, so both the matcher and the separator are this host's own.
+    #: name, so both the matcher and the prefix are this host's own.
     #:
     #: The matcher is anchored by the client -- it compiles the pattern as `^(?:...)$` --
-    #: so a bare `memvara` would match nothing at all. `.*memvara.*` rather than
-    #: `memvara-.*` because the server name is the user's config key and they may rename
-    #: it; what is stable is that the word appears.
+    #: so a bare `memvara` would match nothing at all. It only decides when the hook runs.
+    #: Approval needs the exact `memvara-` prefix, so a tool of a server renamed from
+    #: `memvara`, or of any other server whose name contains the word, is asked about.
     approve=ApproveSpec(
         matcher=".*memvara.*",
-        separators=("-",),
+        prefixes=("memvara-",),
         decision_key="permissionDecision",
         reason_key="permissionDecisionReason",
         allow="allow",

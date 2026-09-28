@@ -1817,7 +1817,8 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
             f"Nothing written: memory_remember.replaces={args.get('replaces')!r} names no "
             "fact visible here. Run memory_search to get a current id.") from None
     except ValueError as exc:
-        # A `replaces` claim that is no longer live, or a reason over its limit. The
+        # A `replaces` claim that is no longer live, a reason over its limit, or an
+        # expiry that passed while the write waited for another writer's lock. The
         # library's message says which and what to send instead.
         raise ToolError(f"Nothing written: {exc}") from None
     # One instant for both interval helpers, so they agree about which claims are over.
@@ -1932,9 +1933,24 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
     reason = _reason(args, "reason", "memory_forget")
 
     if claim_id is not None:
+        # `delete` returns True for a claim that was already retired and writes nothing,
+        # reason included, and the reply has to say which of the two happened: "Retired
+        # claim ..." for a claim retired earlier tells the caller its reason is on record
+        # when it is not. Read first, for a claim retired before this call.
+        already = ctx.memory.get(claim_id)
+        if already is not None and already.state == "retired":
+            return _already_retired(claim_id, already, reason)
         if not ctx.memory.delete(claim_id, reason=reason):
             return (f"Nothing retired: no claim {claim_id!r} is visible here. Run "
                     "memory_search to get a current id.")
+        # And read again after the write, as `memory_end` does, because another writer
+        # can retire the claim between the read above and this call's write, which then
+        # writes nothing. The retirement on record is this call's only if it carries this
+        # call's reason. When the other writer's carries the same reason, or neither has
+        # one, the two cannot be told apart, and the claim is retired as this call asked.
+        after = ctx.memory.get(claim_id)
+        if after is not None and _retirement_reason(after) != reason:
+            return _already_retired(claim_id, after, reason)
         return (f"Retired claim {claim_id}. It no longer answers questions; "
                 "memory_history still shows it.")
 
@@ -1953,6 +1969,19 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
              "longer answer questions; memory_history still shows them."]
     return "\n".join(filter(None, lines + _claim_lines("-", retired)
                             + [_fold_note(predicate, retired)]))  # type: ignore[arg-type]
+
+
+def _retirement_reason(claim: Claim) -> str | None:
+    """The reason recorded with `claim`'s retirement, or `None` when it carries none."""
+    return next((why for close, why in closure_reasons(claim) if close == "retired"), None)
+
+
+def _already_retired(claim_id: str, claim: Claim, reason: str | None) -> str:
+    """`memory_forget`'s reply for a claim that this call found retired already."""
+    dropped = " The reason given now was not recorded." if reason else ""
+    return (f"Claim {claim_id} is already {_state(claim)} and stays that way. "
+            f"Nothing changed here.{dropped} memory_history shows the retirement "
+            "as it was made.")
 
 
 def _pending(claims: Sequence[Claim]) -> str:
@@ -3305,7 +3334,8 @@ TOOLS: tuple[Tool, ...] = (
                     "them and the claim is stored with nothing behind it, which is the "
                     "difference between a provenance store and a dictionary. Ids only — "
                     "sending the text again stores a second copy of a turn this store "
-                    "already has."
+                    "already has. An id of a turn this server cannot read, or of no turn "
+                    "at all, is left out without an error."
                 ),
             },
             "memory_type": {
@@ -3484,7 +3514,9 @@ TOOLS: tuple[Tool, ...] = (
             "derived from, whether a rule or a model extracted it, which earlier value it "
             "replaced, the facts it is linked to by memory_link ('extends' or "
             "'derives', in either direction), and, if it was ended or "
-            "retired with a reason, that reason. Call it whenever the user challenges a "
+            "retired with a reason, that reason. Turns and earlier values from a scope "
+            "this server cannot read, such as another project or session, are left out. "
+            "Call it whenever the user challenges a "
             "memory — 'why do "
             "you think that', 'I never said that', 'where did you get that' — and quote "
             "the source turn back to them instead of defending the claim. Needs a "

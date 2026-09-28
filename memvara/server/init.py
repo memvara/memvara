@@ -36,6 +36,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import stat
 import sys
 from dataclasses import dataclass
 from importlib.resources import files
@@ -375,6 +376,38 @@ def _notes(root: Path, agent: str) -> list[_Step]:
     return [_append_note(root, name, skill_rel) for name in names]
 
 
+def private_directory(path: Path) -> None:
+    """Make sure `path` is a directory, private to this account when it is memvara's own.
+
+    Every directory from `~/.memvara` down to `path` is created 0700 when it is missing,
+    and one that already exists loses any permission for group and others, as the plugin
+    hooks' `lib/private.py` does. An earlier version created `~/.memvara` with the default
+    mode, 0755 under the usual umask, and `mkdir(mode=0o700, exist_ok=True)` sets the mode
+    only on a directory it creates, so it left such a directory as open as it found it. A
+    `path` outside `~/.memvara` is created 0700 when it is missing and otherwise left
+    alone, because it is somebody else's choice of place, and the home directory above
+    `~/.memvara` is never changed. `init` and `login` both write here, and unlike a hook,
+    which must never fail a turn, each raises the `OSError` of a directory whose mode it
+    may not change.
+    """
+    path = Path(os.path.abspath(path))
+    root = Path(os.path.abspath(os.path.expanduser("~"))) / ".memvara"
+    if path != root and root not in path.parents:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return
+    levels = [root]
+    for part in path.relative_to(root).parts:
+        levels.append(levels[-1] / part)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    for level in levels:
+        try:
+            level.mkdir(mode=0o700)
+        except FileExistsError:
+            mode = stat.S_IMODE(level.stat().st_mode)
+            if mode & 0o077:
+                level.chmod(mode & 0o700)
+
+
 def _store_directory(db: Path) -> _Step:
     """Create the store's *directory*, and deliberately not the store.
 
@@ -383,8 +416,12 @@ def _store_directory(db: Path) -> _Step:
     the user is not watching. The file itself stays the server's to create on first use,
     so an `init` that is never followed by a launch leaves an empty directory rather than
     an empty database that the embedder fingerprint would then be written into.
+
+    The directory is private to this account, because it holds a person's memory; by
+    default it is `~/.memvara` itself. See `private_directory`, which also takes the
+    permissions for group and others off a `~/.memvara` an earlier version left 0755.
     """
-    db.parent.mkdir(parents=True, exist_ok=True)
+    private_directory(db.parent)
     return _Step("ready", db.parent, "the store file is created on the server's first use")
 
 
@@ -469,6 +506,7 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
             raise _Usage(f"MEMVARA_MODE=cloud cannot start a server here. "
                          f"{install_hint()} Or use --mode local with --db.")
         raw_db = ""
+        user: str | None = None
         if mode == "local" and not skill_only:
             raw_db = options.get("--db") or _default_db(env)
             if raw_db == ":memory:":
@@ -476,6 +514,15 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
                     "the store is ':memory:', which is the throwaway one that dies with "
                     "the process — a settings file pointing at it would remember nothing "
                     "between launches. Pass --db with a path to a file.")
+            user = options.get("--user") or _first(env, "MEMVARA_USER", "USER", "USERNAME")
+            # Refused here, before anything is written, rather than by the server when the
+            # client launches it, where the refusal reaches a client log and not a person.
+            from ..types import check_scope_value
+            try:
+                check_scope_value("user", user)
+            except ValueError as exc:
+                raise _Usage(f"{exc} Pass --user with the name of the person this server "
+                             "remembers for.") from None
     except _Usage as exc:
         print(f"memvara-mcp init: {exc}\n\n{INIT_USAGE}", file=err)
         return 2
@@ -511,7 +558,6 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         return 0
 
     db = _absolute(raw_db)
-    user = options.get("--user") or _first(env, "MEMVARA_USER", "USER", "USERNAME")
     entry = client_entry(db=str(db), user=user, command=_interpreter())
 
     settings = _mcp_json(root, entry)

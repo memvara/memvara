@@ -35,7 +35,7 @@ from memvara.entities import (
 from memvara.schema import Cardinality, PredicateRegistry, PredicateSpec
 from memvara.store import SQLiteStore
 from memvara.types import ENTITY_REKEY, Claim, Scope, owner_key
-from memvara.write import Reconciler
+from memvara.write import Reconciler, reconcile
 from memvara.write.reconcile import backfill_entities, split_entity
 
 OWNER = "acme\x1falice"
@@ -1480,3 +1480,71 @@ def test_a_store_written_with_the_old_fold_is_rekeyed_when_opened(tmp_path):
         assert (stored["object_key"], stored["value_key"]) == ("c++", written.value_key)
         assert [c.id for c in mem.remember("user", "uses", "C++").reinforced] == [written.id]
         assert [c.object for c in mem.remember("user", "uses", "C").added] == ["C"]
+
+
+# --- another writer between the scan and the write ----------------------------------
+#
+# `backfill_entities` and `split_entity` read the claims they may change, decide, and
+# write back later. Another handle on the same file erases a claim in between, from inside
+# a patched helper the pass calls after its scan, while the pass holds no lock. The pass
+# must leave the erased claim erased.
+
+
+def _hr_on(path: str) -> Memvara:
+    return Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="t",
+                   user="hr")
+
+
+@pytest.mark.covers("inv:WP14")
+def test_a_backfill_does_not_bring_back_a_claim_erased_while_it_ran(tmp_path,
+                                                                   monkeypatch):
+    """The backfill rewrites every claim it scanned, and writing back the copy it read
+    brought an erased claim back, text and all, beside its own erasure record."""
+    path = str(tmp_path / "s.db")
+    backfilling, other = _hr_on(path), _hr_on(path)
+    try:
+        acme = other.remember("John Smith", "works_at", "Acme").added[0].id
+        real_replay = reconcile._replay
+
+        def replay(*args, **kwargs):
+            assert other.erase(acme)
+            return real_replay(*args, **kwargs)
+
+        monkeypatch.setattr(reconcile, "_replay", replay)
+        report = backfill_entities(backfilling.writer.reconciler, "t", dry_run=False)
+        assert other.store.get_claim(acme) is None, "the erased claim is back"
+        assert other.store.erasure_record(acme) is not None
+        assert report.written == report.scanned - 1
+    finally:
+        backfilling.close()
+        other.close()
+
+
+def test_a_split_does_not_bring_back_a_claim_erased_while_it_ran(tmp_path, monkeypatch):
+    """The split moves the earlier claims to their own identity and writes them back, and
+    writing back the copy it read brought an erased one back beside its erasure record."""
+    path = str(tmp_path / "s.db")
+    splitting, other = _hr_on(path), _hr_on(path)
+    try:
+        acme = other.remember("John Smith", "works_at", "Acme", valid_from=J18,
+                              recorded_at=J18).added[0].id
+        other.remember("John Smith", "works_at", "Globex", valid_from=J26, recorded_at=J26)
+        real_note = reconcile._note
+        erased: list[str] = []
+
+        def note(*args, **kwargs):
+            if not erased:
+                assert other.erase(acme)
+                erased.append(acme)
+            return real_note(*args, **kwargs)
+
+        monkeypatch.setattr(reconcile, "_note", note)
+        report = split_entity(splitting.writer.reconciler, SCOPE_HR, "John Smith", J20,
+                              dry_run=False)
+        assert other.store.get_claim(acme) is None, "the erased claim is back"
+        assert other.store.erasure_record(acme) is not None
+        assert [c.object for c in other.get_all()] == ["Globex"]
+        assert (report.moved, report.written) == (1, 0)
+    finally:
+        splitting.close()
+        other.close()

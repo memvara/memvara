@@ -17,7 +17,7 @@ from memvara.embed import HashingEmbedder
 from memvara.schema import Cardinality, PredicateRegistry
 from memvara.store import SQLiteStore
 from memvara.types import PREDICATE_REKEY, Claim, Scope, utcnow
-from memvara.write import Reconciler
+from memvara.write import Reconciler, reconcile
 
 SCOPE = Scope("acme", "alice")
 
@@ -312,3 +312,63 @@ def test_the_scoped_views_merge_within_their_tenant(mem):
     assert mem.scope(user="alice").merge_predicate("hired_by", "works_at").moved == 1
     aview = AsyncMemvara(mem).scope(tenant="other")
     assert asyncio.run(aview.merge_predicate("hired_by", "works_at")).moved == 0
+
+
+# --- another writer between the scan and the write ----------------------------------
+#
+# The pass reads every claim of the tenant, decides, and writes back later. Another handle
+# on the same file changes a claim in between, from inside a patched `_replay`, while the
+# merging handle holds no lock. The pass must leave that claim as the other writer left it.
+
+
+def two_handles(tmp_path) -> tuple[Memvara, Memvara]:
+    path = str(tmp_path / "s.db")
+    return (Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice"),
+            Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="alice"))
+
+
+@pytest.mark.covers("inv:WP14")
+def test_a_merge_does_not_bring_back_a_claim_erased_while_it_ran(tmp_path, monkeypatch):
+    """Writing back the copy the scan read brought the erased claim back, text and all,
+    filed under the canonical predicate beside its own erasure record."""
+    merging, other = two_handles(tmp_path)
+    try:
+        home = other.remember("user", "home_city", "Berlin").added[0].id
+        real_replay = reconcile._replay
+
+        def replay(*args, **kwargs):
+            assert other.erase(home)
+            return real_replay(*args, **kwargs)
+
+        monkeypatch.setattr(reconcile, "_replay", replay)
+        report = merging.merge_predicate("home_city", "lives_in", dry_run=False)
+        assert other.store.get_claim(home) is None, "the erased claim is back"
+        assert other.store.erasure_record(home) is not None
+        assert report.written == 0
+    finally:
+        merging.close()
+        other.close()
+
+
+def test_a_merge_does_not_undo_a_retirement_made_while_it_ran(tmp_path, monkeypatch):
+    """A claim another writer retired in the meantime has changed since the scan, so the
+    merge leaves it retired, under its old predicate, for the next run to move."""
+    merging, other = two_handles(tmp_path)
+    try:
+        home = other.remember("user", "home_city", "Berlin").added[0].id
+        real_replay = reconcile._replay
+
+        def replay(*args, **kwargs):
+            assert other.delete(home)
+            return real_replay(*args, **kwargs)
+
+        monkeypatch.setattr(reconcile, "_replay", replay)
+        merging.merge_predicate("home_city", "lives_in", dry_run=False)
+        kept = other.store.get_claim(home)
+        assert kept is not None and kept.state == "retired", "the retirement was undone"
+        monkeypatch.setattr(reconcile, "_replay", real_replay)
+        assert other.merge_predicate("home_city", "lives_in", dry_run=False).written == 1
+        assert other.store.get_claim(home).predicate == "lives_in"
+    finally:
+        merging.close()
+        other.close()

@@ -63,11 +63,11 @@ from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 from ..entities import EntityRegistry, entity_key
 from ..schema import PredicateRegistry
-from ..store.base import Store
+from ..store.base import Store, bulk_claims, claim_digest
 from ..types import (
     NOTE_PREDICATE, PROJECT_SUBJECT_TYPE, SELF_SUBJECT, expired,
     ObjectKind,
@@ -80,6 +80,7 @@ from ..types import (
     Claim,
     Closure,
     Collapse,
+    Derivation,
     Dispute,
     MemoryType,
     Retype,
@@ -252,6 +253,31 @@ def _is_after(candidate: "Claim", incoming: "Claim") -> bool:
     return c_lo >= i_hi and c_lo > i_lo
 
 
+def _overlaps(a: "Claim", b: "Claim") -> bool:
+    """Whether two claims are true at some instant in common, in valid time.
+
+    Intervals are half-open, `[valid_from, valid_to)`, so one that ends where the other
+    begins does not overlap it, and an interval of no length is true at no instant and
+    overlaps nothing. The last half matters for a value a later write collapsed onto its
+    own start: it stays believed with its end in the future, and without the rule it
+    would still end the next value written before it.
+
+    >>> from datetime import datetime, timezone
+    >>> jan, jun = (datetime(2100, m, 1, tzinfo=timezone.utc) for m in (1, 6))
+    >>> def c(start, end=None):
+    ...     return Claim(subject="user", predicate="lives_in", object="x",
+    ...                  valid_from=start, valid_to=end)
+    >>> _overlaps(c(jan), c(jun)), _overlaps(c(jan, jun), c(jun)), _overlaps(c(jun, jun), c(jan))
+    (True, False, False)
+    """
+    a_from, b_from = as_utc(a.valid_from), as_utc(b.valid_from)
+    a_to = as_utc(a.valid_to) if a.valid_to is not None else None
+    b_to = as_utc(b.valid_to) if b.valid_to is not None else None
+    if (a_to is not None and a_to <= a_from) or (b_to is not None and b_to <= b_from):
+        return False
+    return (a_to is None or a_to > b_from) and (b_to is None or b_to > a_from)
+
+
 class Reconciler:
     """Decides what a candidate claim does to the claims already on record."""
 
@@ -331,15 +357,27 @@ class Reconciler:
             found = self.store.find_by_value(tenant, claim.value_key)
             # Reinforcing an expired claim would hand this new statement to the sweep.
             live_same = self._unexpired(self._live(found, t, owner), t)
+            on_record = bool(live_same)
+            # A repeat reinforces only a claim its writer can see. `value_key` covers the
+            # owner and not the project, agent or session, so the lookup also finds the
+            # same value in a sibling project or session, or beneath the writer.
+            # Reinforcing that claim would change a record outside the writer's scope,
+            # and the writer would then read nothing back. The repeat is written as its
+            # own claim in its own scope instead.
+            live_same = claim.scope.visible(live_same)
             if claim.expires_at is not None and live_same:
                 # A repeat that names an expiry reinforces only a claim in exactly its own
-                # scope. `value_key` covers the owner, not the project, agent or session,
-                # so the claim on record may belong to another project, and putting this
-                # expiry on it would have the sweep erase a fact that project relies on.
-                # With no claim in this scope, the repeat is written as its own claim
-                # below, so the expiry is kept and the other claim is left as it was.
+                # scope. The claim on record may sit at a broader scope that the writer
+                # can see, such as the user's own level, which other projects and
+                # sessions read too. Putting this expiry on it would have the sweep erase
+                # a fact they rely on. With no claim in this scope, the repeat is written
+                # as its own claim below, so the expiry is kept and the other claim is
+                # left as it was.
                 live_same = [c for c in live_same if c.scope == claim.scope]
-                separate = not live_same
+            # The same value is on record, but not where this repeat may reinforce it.
+            # The claim written below is not a second answer beside it, so it is not
+            # reported as an accumulation.
+            separate = on_record and not live_same
             # Where the value began is compared only with the claims the writer can see:
             # its own scope and the broader ones it reads (`Scope.sees`). `value_key` also
             # finds the value in a sibling project, agent or session, and a claim the
@@ -347,7 +385,8 @@ class Reconciler:
             seen = [c for c in live_same if claim.scope.sees(c.scope)]
             keep: Claim | None = None
             restated: Claim | None = None
-            if (seen and claim.expires_at is None
+            if (seen and (claim.expires_at is None
+                          or claim.derivation is not Derivation.USER)
                     and all(_is_after(c, claim) for c in seen)):
                 # The same value, stated as true from before any claim on record for it
                 # begins. That earlier start is new, and reinforcing would drop it. Moving
@@ -357,9 +396,12 @@ class Reconciler:
                 # does the same below with a different value that began before the live
                 # one (`newer`). The claims on record are not touched. When a believed
                 # claim already holds that whole period, the candidate is a repeat of it
-                # and reinforces it below. A repeat that names an expiry stays a repeat of
-                # the live claim, so the expiry still lands on the claim on record, which
-                # is the fact the caller asked to have erased.
+                # and reinforces it below. A caller's repeat that names an expiry stays a
+                # repeat of the live claim, so the expiry still lands on the claim on
+                # record, which is the fact the caller asked to have erased. A model's
+                # expiry never reaches a claim it did not create (see the transfer
+                # below), so a model's restatement is stored for its earlier period like
+                # any other, and the claim it creates keeps the model's expiry.
                 end, keep = self._earlier_period(claim, found, seen, t, owner)
                 # The claim a plain repeat reinforces, among those the writer can see.
                 restated = self._canonical_of(seen)
@@ -380,13 +422,18 @@ class Reconciler:
                     # the type asserted for the claim on record.
                     asserted_type = MemoryType.SEMANTIC
                 retyped = self._retype(keep, asserted_type) or self.file_by_subject(keep)
-                if claim.expires_at is not None:
+                if claim.expires_at is not None and claim.derivation is Derivation.USER:
                     # A repeat that names an expiry puts it on the claim on record, which
                     # is in this repeat's own scope (see above) and which `reinforce`
                     # then writes. Otherwise the expiry would be dropped with the
                     # candidate, and a fact the caller asked to have erased would stay
                     # forever. A repeat that names none leaves an existing expiry alone,
                     # as an omitted `memory_type` does.
+                    #
+                    # Only a caller's repeat does this. A model's expiry is kept only on
+                    # a claim its proposal creates: a model repeating a claim on record
+                    # reinforces it and leaves its expiry as it was, because an expiry
+                    # erases, and a model may neither retire nor erase anything.
                     keep.expires_at = claim.expires_at
                     keep.expire_reason = claim.expire_reason
                 return ReconcileResult(
@@ -699,6 +746,28 @@ class Reconciler:
         return [c for c in claims if owner_key(c.scope) == owner and c.is_live(t)]
 
     @staticmethod
+    def _in_reach(scope: Scope, claims: Iterable[Claim]) -> list[Claim]:
+        """The claims a write at `scope` may close: in its own scope, in a broader scope it
+        reads, or in a narrower scope beneath it. Never a sibling's.
+
+        A slot spans every session and agent of its project (`owner_key`), so the claims
+        competing for it include values that sibling sessions and agents hold. Closing
+        one of those changed a record the writer cannot read, and handed it back in the
+        writer's receipt, which is how session s2 could learn what session s1 had
+        stored. Reaching down stays, as it does for `forget()` and `history()`: a
+        user-level write still ends a value a session holds.
+        """
+        reach: dict[Scope, bool] = {}
+        out: list[Claim] = []
+        for c in claims:
+            ok = reach.get(c.scope)
+            if ok is None:
+                ok = reach[c.scope] = scope.contains(c.scope) or scope.sees(c.scope)
+            if ok:
+                out.append(c)
+        return out
+
+    @staticmethod
     def _canonical_of(claims: Sequence[Claim]) -> Claim:
         # Earliest recording wins, id breaks ties: the choice must not depend on row
         # order coming back from the store.
@@ -750,15 +819,47 @@ class Reconciler:
                     and not _is_after(c, claim)]
         return end, (self._canonical_of(covering) if covering else None)
 
+    def _occupants(self, tenant: str, fact_key: str, t: datetime,
+                   owner: str) -> list[Claim]:
+        """Every value in one slot recorded by `t` that is neither retired nor ended then.
+
+        That is the values in force at `t` and every value written to begin later, which
+        is believed from the moment it is recorded though not yet in force. Looking only
+        at the values in force left a second value scheduled for a single-valued slot
+        beside the first, and both were live once their start came. A value that has
+        already ended is history and is not an occupant, and neither is one whose expiry
+        has passed, which no read returns.
+
+        A retired value is not an occupant either, even one whose retirement is recorded
+        but takes effect after `t`, which the store still believes at `t`. It is retired
+        all the same, and `close_out` leaves a retired claim as it is, so it competes with
+        nothing: counted here, it would be listed in `receipt.closed` without having been
+        closed.
+
+        `slot_history` returns every row of the slot, and a slot holds few rows, so the
+        test runs here. Every store has `slot_history`, because the store protocol
+        requires it and `Memvara.history()` calls it, so nothing here asks for less.
+        """
+        rows = [c for c in self.store.slot_history(tenant, fact_key)
+                if as_utc(c.recorded_at) <= t and c.invalidated_at is None
+                and (c.valid_to is None or as_utc(c.valid_to) > t)]
+        hide = getattr(self.store, "hide_expired", True)
+        return [c for c in rows
+                if owner_key(c.scope) == owner and not (hide and expired(c, t))]
+
     def _victims(self, claim: Claim, t: datetime,
                  owner: str) -> tuple[list[Claim], list[Claim]]:
         spec = self.registry.spec(claim.predicate)
         victims: dict[str, Claim] = {}
 
+        # Only a value true at some instant this claim is true competes with it. Closing
+        # one that ends before this claim begins, or begins after this claim ends,
+        # changed nothing on either clock, and still named this claim as its successor
+        # and listed it in `receipt.closed`.
         if spec.functional:
-            for c in self.store.competing_claims(claim.scope.tenant, claim.fact_key,
-                                                 valid_at=t, known_at=t):
-                if owner_key(c.scope) == owner and c.value_key != claim.value_key:
+            for c in self._in_reach(claim.scope, self._occupants(
+                    claim.scope.tenant, claim.fact_key, t, owner)):
+                if c.value_key != claim.value_key and _overlaps(c, claim):
                     victims[c.id] = c
         # else: Cardinality.MANY, including every predicate we have no spec for. Values
         # accumulate and nothing is retired.
@@ -771,9 +872,9 @@ class Reconciler:
             # matching nothing.
             fk = fact_key_for(claim.scope, claim.subject_key,
                               self.registry.normalize(other))
-            for c in self.store.competing_claims(claim.scope.tenant, fk,
-                                                 valid_at=t, known_at=t):
-                if owner_key(c.scope) == owner:
+            for c in self._in_reach(claim.scope, self._occupants(
+                    claim.scope.tenant, fk, t, owner)):
+                if _overlaps(c, claim):
                     victims[c.id] = c
 
         # Supersession runs along *valid* time, not arrival order. A fact backfilled
@@ -951,9 +1052,11 @@ class Reconciler:
     def _retract(self, claim: Claim, t: datetime, owner: str,
                  close: Closure = "ended", reason: str | None = None) -> ReconcileResult:
         tenant = claim.scope.tenant
-        slot = [c for c in self.store.competing_claims(tenant, claim.fact_key,
-                                                       valid_at=t, known_at=t)
-                if owner_key(c.scope) == owner]
+        # Without a claim whose retirement takes effect later, for the reason `_victims`
+        # gives: a retraction cannot end it, so it must not be reported as ended.
+        slot = [c for c in self._in_reach(claim.scope, self.store.competing_claims(
+                    tenant, claim.fact_key, valid_at=t, known_at=t))
+                if owner_key(c.scope) == owner and c.invalidated_at is None]
 
         # Entity identity, the same notion `value_key` uses. It used to be a plain
         # casefold here and a case-*sensitive* hash there, so retraction matched
@@ -971,10 +1074,12 @@ class Reconciler:
 
         if not matches:
             # Folding this retraction into an expired tombstone would have the sweep
-            # erase this one too.
-            prior = self._unexpired(
-                [c for c in self.store.find_by_value(tenant, claim.value_key)
-                 if owner_key(c.scope) == owner], t)
+            # erase this one too. And only a tombstone the writer can see counts as this
+            # retraction already processed, by the rule the re-observation branch above
+            # follows.
+            prior = self._unexpired(claim.scope.visible(
+                c for c in self.store.find_by_value(tenant, claim.value_key)
+                if owner_key(c.scope) == owner), t)
             if prior:
                 # We have already processed this exact retraction; re-running it must not
                 # accumulate tombstones. Provenance still merges.
@@ -1048,12 +1153,45 @@ class Reconciler:
 # --- late-alias backfill --------------------------------------------------------
 
 
+def _write_back(store: Store, claims: Iterable[Claim], read: Mapping[str, bytes]) -> int:
+    """Write `claims` in one transaction, one slot at a time, leaving alone every slot in
+    which another writer changed a row since the scan. Returns the rows written.
+
+    The three passes below read every claim they may change, decide, and write back
+    later, and another handle or process can end, retire or erase one of those claims in
+    between. So the rows are read again inside the transaction, which on `SQLiteStore`
+    holds the write lock, and the claims of one slot (one `fact_key` after the pass) are
+    written only if every one of them is still present and matches the digest in `read`,
+    taken when the scan read it. A slot is written whole or not at all because the passes
+    rebuild its chain as a whole: half of one could retire a duplicate into a claim that
+    never received its evidence. A slot that fails is left as it stands, and running the
+    pass again applies it. Writing back the scan's copy used to undo the other writer's
+    change, or bring an erased claim back, text and all.
+    """
+    slots: dict[str, list[Claim]] = {}
+    for claim in claims:
+        slots.setdefault(claim.fact_key, []).append(claim)
+    batch = getattr(store, "batch", None)
+    written = 0
+    with (batch() if batch is not None else nullcontext()):
+        stored = bulk_claims(store, [c.id for group in slots.values() for c in group])
+        for group in slots.values():
+            if all((row := stored.get(c.id)) is not None and claim_digest(row) == read[c.id]
+                   for c in group):
+                for claim in group:
+                    store.put_claim(claim)
+                written += len(group)
+    return written
+
+
 @dataclass(slots=True)
 class RekeyReport:
     """What a `backfill_entities` pass did, or would do."""
 
     scanned: int = 0
-    written: int = 0     # claims whose stored key columns were rewritten
+    #: Rows rewritten on a real run: every claim scanned, less those in a slot where
+    #: another writer changed a row while the pass ran (see `_write_back`).
+    written: int = 0
     merged: int = 0      # claims folded into an earlier claim of the same value
     retired: int = 0     # claims superseded by the rebuilt chain
     dry_run: bool = True
@@ -1097,6 +1235,11 @@ def backfill_entities(reconciler: Reconciler, tenant: str, *, dry_run: bool = Tr
     Claim ids are preserved throughout. Replaying through `Reconciler.apply` would have
     been less code and would have minted new ids for claims that receipts, logs and
     `invalidated_by` pointers already reference.
+
+    The pass writes back only onto rows nobody changed while it ran. A slot in which
+    another writer ended, retired, erased or reinforced a claim after the scan is left as
+    that writer left it, and `written` falls short of `scanned` by its rows; running the
+    pass again applies it.
     """
     t = now or utcnow()
     report = RekeyReport(dry_run=dry_run)
@@ -1104,6 +1247,8 @@ def backfill_entities(reconciler: Reconciler, tenant: str, *, dry_run: bool = Tr
         reconciler.store.iter_claims(tenant, include_invalidated=True),
         key=lambda c: (as_utc(c.recorded_at), c.id),
     )
+    # Every claim is written back, so every row is compared, as the scan read it.
+    read = {c.id: claim_digest(c) for c in claims}
 
     slots: dict[str, list[Claim]] = {}
     for claim in claims:
@@ -1118,11 +1263,7 @@ def backfill_entities(reconciler: Reconciler, tenant: str, *, dry_run: bool = Tr
     _replay(slots, reconciler.registry, t, report, ENTITY_REKEY)
 
     if not dry_run:
-        batch = getattr(reconciler.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
-            for claim in claims:
-                reconciler.store.put_claim(claim)
-                report.written += 1
+        report.written = _write_back(reconciler.store, claims, read)
     return report
 
 
@@ -1133,8 +1274,9 @@ class MergeReport:
     scanned: int = 0
     moved: int = 0       # claims whose predicate was rewritten onto its canonical name
     #: Rows rewritten on a real run: the movers and the live claims in the slots they
-    #: landed in. Unlike `RekeyReport.written`, which is every claim scanned, this is
-    #: the part of the store the pass touched, not the part it read.
+    #: landed in, less those in a slot where another writer changed a row while the
+    #: pass ran. Unlike `RekeyReport.written`, which is every claim scanned, this is the
+    #: part of the store the pass touched, not the part it read.
     written: int = 0
     merged: int = 0      # claims folded into an earlier claim of the same value
     retired: int = 0     # claims superseded by the rebuilt chain
@@ -1191,7 +1333,9 @@ def backfill_predicates(reconciler: Reconciler, tenant: str, *,
        predicates, and each claim the replay displaced with the usual note, so `why()` can
        say why history changed.
 
-    Claim ids are preserved throughout, for `backfill_entities`' reason.
+    Claim ids are preserved throughout, for `backfill_entities`' reason, and a slot
+    another writer changed while the pass ran is left as that writer left it, also for
+    `backfill_entities`' reason. Running the pass again moves what it left.
     """
     t = now or utcnow()
     report = MergeReport(dry_run=dry_run)
@@ -1213,10 +1357,14 @@ def backfill_predicates(reconciler: Reconciler, tenant: str, *,
     moved: list[Claim] = []
     touched_slots: set[str] = set()
     live: dict[str, list[Claim]] = {}
+    # Each row the pass may write, as the scan read it: a mover before the move changes
+    # it, and the rest of its slot before the replay does.
+    read: dict[str, bytes] = {}
     for claim in claims:
         report.scanned += 1
         canonical = target_of(claim.predicate)
         if canonical and canonical != claim.predicate:
+            read[claim.id] = claim_digest(claim)
             rendered = claim.text.strip() == claim.render().strip()
             claim.meta.setdefault(PREDICATE_REKEY, []).append(
                 {"at": t.timestamp(), "from": claim.predicate, "to": canonical})
@@ -1230,6 +1378,10 @@ def backfill_predicates(reconciler: Reconciler, tenant: str, *,
             live.setdefault(claim.fact_key, []).append(claim)
 
     slots = {key: group for key, group in live.items() if key in touched_slots}
+    for group in slots.values():
+        for claim in group:
+            if claim.id not in read:
+                read[claim.id] = claim_digest(claim)
     _replay(slots, registry, t, report, PREDICATE_REKEY)
 
     if not dry_run:
@@ -1239,11 +1391,7 @@ def backfill_predicates(reconciler: Reconciler, tenant: str, *,
         # touch in step with `_replay` itself.
         to_write = {c.id: c for c in moved}
         to_write.update((c.id, c) for group in slots.values() for c in group)
-        batch = getattr(reconciler.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
-            for claim in to_write.values():
-                reconciler.store.put_claim(claim)
-                report.written += 1
+        report.written = _write_back(reconciler.store, to_write.values(), read)
     return report
 
 
@@ -1330,11 +1478,15 @@ class SplitReport:
     moved: int = 0       # claims re-stamped onto the earlier identity
     reopened: int = 0    # closures undone because they crossed the boundary
     retired_left: int = 0  # closures left alone because they were retirements
+    #: Rows rewritten on a real run: the moved claims, less those in a slot where another
+    #: writer changed a row while the pass ran (see `_write_back`).
+    written: int = 0
     dry_run: bool = True
 
     def __str__(self) -> str:
         return (f"<SplitReport scanned={self.scanned} moved={self.moved} "
-                f"reopened={self.reopened} retired_left={self.retired_left}"
+                f"reopened={self.reopened} retired_left={self.retired_left} "
+                f"written={self.written}"
                 f"{' (dry run)' if self.dry_run else ''}>")
 
     __repr__ = __str__
@@ -1440,7 +1592,9 @@ def split_entity(reconciler: Reconciler, scope: Scope, surface: str, at: datetim
 
     `dry_run=True` by default, for `backfill_entities`' reason: this rewrites history, and
     history is rewritten when an operator asks and never as a side effect. Run it dry, read
-    the report, then run it for real.
+    the report, then run it for real. A slot in which another writer changed a claim while
+    the split ran is left as that writer left it, also for `backfill_entities`' reason;
+    `written` then falls short of `moved`, and running the split again moves the rest.
     """
     t = now or utcnow()
     boundary = as_utc(at)
@@ -1473,6 +1627,7 @@ def split_entity(reconciler: Reconciler, scope: Scope, surface: str, at: datetim
     folded = entity_key(surface)
     marker = entity_key(SPLIT_MARKER.format(base=folded or content_hash(surface),
                                             stamp=boundary.strftime("%Y%m%d%H%M%S")))
+    read = {c.id: claim_digest(c) for c in earlier}
     for claim in earlier:
         claim.meta[SUBJECT_ENTITY] = marker
         _note(claim, t, "split", marker)
@@ -1492,8 +1647,5 @@ def split_entity(reconciler: Reconciler, scope: Scope, surface: str, at: datetim
         report.reopened += 1
 
     if not dry_run:
-        batch = getattr(reconciler.store, "batch", None)
-        with (batch() if batch is not None else nullcontext()):
-            for claim in earlier:
-                reconciler.store.put_claim(claim)
+        report.written = _write_back(reconciler.store, earlier, read)
     return report

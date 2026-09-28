@@ -123,6 +123,97 @@ def test_a_repeat_with_an_expiry_and_an_earlier_start_still_puts_the_expiry_on_r
     assert m.get(first.id).expires_at == when
 
 
+# --- a model's expiry never reaches a claim it did not create -----------------------------
+
+MOVE = "The team relocated the whole office to Porto over the summer."
+
+
+def porto(expires_at: datetime) -> Any:
+    """A model that reads the office's city out of the turn, with an expiry."""
+    from test_pipeline import CountingLLM
+    return CountingLLM(responder=lambda episodes: [
+        {"subject": "team", "predicate": "office_city", "object": "Porto",
+         "polarity": 1, "memory_type": "semantic", "confidence": 0.9,
+         "source_index": i, "expires_at": expires_at}
+        for i, _ in enumerate(episodes)])
+
+
+def with_model(llm: Any, **kw: Any) -> Memvara:
+    return Memvara(llm=llm, embedder=HashingEmbedder(dim=64), user="alice", **kw)
+
+
+def test_single_call_extraction_cannot_put_an_expiry_on_a_claim_the_caller_asserted():
+    """Single-call extraction is offered no expiry, yet a datetime in the model's output
+    was accepted, and a repeat put it on the claim on record. One in the past hid the
+    caller's claim at once, and the next sweep erased it with a record of the erasure."""
+    m = with_model(porto(utcnow() - DAY))
+    try:
+        asserted = m.remember("team", "office_city", "Porto").added[0]
+        m.add(MOVE)
+        assert m.get(asserted.id) is not None, "the model's expiry hid the caller's claim"
+        assert m.get(asserted.id).expires_at is None
+        assert m.erase_expired() == []
+    finally:
+        m.close()
+
+
+def test_single_call_extraction_writes_no_expiry_on_a_new_claim_either():
+    """Its output has no expiry field to fill, so an expiry in it is dropped wherever it
+    would land."""
+    m = with_model(porto(utcnow() + DAY))
+    try:
+        (added,) = m.add(MOVE).added
+        assert added.expires_at is None
+    finally:
+        m.close()
+
+
+def test_an_agentic_repeat_reinforces_the_callers_claim_without_touching_its_expiry():
+    """An agentic proposal may carry an expiry the turn names, and it is kept on a claim
+    the proposal creates. A proposal that repeats a claim on record reinforced it and put
+    the model's expiry on it, so a sweep after that instant erased what the caller had
+    asserted."""
+    from test_agentic_extraction import ScriptedChat, fact
+    soon = (utcnow() + timedelta(minutes=5)).isoformat()
+    llm = ScriptedChat([("propose_claim", fact("team", "office_city", "Porto",
+                                               expires_at=soon))])
+    m = with_model(llm, write_agentic_extraction=True)
+    try:
+        asserted = m.remember("team", "office_city", "Porto").added[0]
+        receipt = m.add(MOVE)
+        assert [c.id for c in receipt.reinforced] == [asserted.id]
+        assert m.get(asserted.id).expires_at is None, "the model's expiry reached it"
+        assert m.erase_expired(now=utcnow() + timedelta(minutes=10)) == []
+    finally:
+        m.close()
+
+
+def test_an_agentic_restatement_with_an_expiry_keeps_its_earlier_period_as_its_own_claim():
+    """A value restated with an earlier start is stored as a claim for that earlier
+    period, except when the restatement names an expiry, which keeps it a repeat so that
+    the caller's expiry reaches the claim on record. A model's expiry never reaches a
+    claim it did not create, so that exception is the caller's alone. A model's
+    restatement keeps its earlier period as a claim of its own, which carries the model's
+    expiry, and the caller's claim is left as it was."""
+    from test_agentic_extraction import ScriptedChat, fact
+    april = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    turn_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    soon = (utcnow() + timedelta(minutes=5)).isoformat()
+    llm = ScriptedChat([("propose_claim", fact("team", "office_city", "Porto",
+                                               expires_at=soon))])
+    m = with_model(llm, write_agentic_extraction=True)
+    try:
+        asserted = m.remember("team", "office_city", "Porto", valid_from=april).added[0]
+        receipt = m.add(MOVE, ts=turn_at)
+        (earlier,) = receipt.added
+        assert (earlier.valid_from, earlier.valid_to) == (turn_at, april)
+        assert earlier.expires_at is not None, "the model's expiry was dropped"
+        assert receipt.reinforced == []
+        assert m.get(asserted.id).expires_at is None, "the model's expiry reached it"
+    finally:
+        m.close()
+
+
 # --- the sweep ----------------------------------------------------------------
 
 @pytest.mark.covers("inv:I3")
@@ -326,7 +417,7 @@ def test_a_version_14_file_gains_the_expiry_columns_and_keeps_its_claims(tmp_pat
 
     with mem(path) as upgraded:
         db = upgraded.store._db
-        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION == 16
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION == 17
         columns = {r["name"] for r in db.execute("PRAGMA table_info(claims)")}
         assert {"expires_at", "expire_reason"} <= columns
         indexes = {r[0] for r in db.execute(

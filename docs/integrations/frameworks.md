@@ -74,7 +74,10 @@ actually lives. An application already using langgraph satisfies the floor witho
 second resolve.
 
 `on_delete="erase"` is worth knowing about: the default deletion is a retirement, which is
-the wrong answer to a data-deletion request.
+the wrong answer to a data-deletion request. With `on_delete="erase"`, deleting an item
+erases every value its fields have held, not only the current ones. That includes a value
+a later `put` replaced and a field a later `put` dropped, because both are still stored.
+It never reaches the same item in another user's store or in a sibling session.
 
 ## LangChain chat history is lossy, deliberately not disguised
 
@@ -123,6 +126,12 @@ the interface never provides (impossible).
 
 `crewai>=1.10.1` is a load-bearing floor. Releases 1.0.0 through 1.9.3 ship the previous
 memory system with no `StorageBackend` protocol at all.
+
+Deleting a record retires it by default, as in the LangGraph store. With
+`MemvaraStorage(mem, on_delete="erase")`, deleting a record erases it together with every
+text an earlier `update()` replaced, because each earlier text is still stored as a claim
+of its own. `reset()` with a `scope_prefix` erases each record under that path the same
+way, and `reset()` with no prefix purges the storage's whole scope.
 
 ## Not a framework: the hosted store
 

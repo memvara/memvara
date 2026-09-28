@@ -24,14 +24,23 @@ here, and the sweep walks that fixed list. An earlier version of this paragraph 
 the snapshot to `iter_claims` materializing its own rows; it no longer does — it pages —
 so the guarantee now rests where it always should have, on the `list()` below rather than
 on a callee's implementation detail.
+
+**A row is written back only if nobody changed it since the snapshot.** Another handle or
+process can end, retire or erase a claim while the pass is deciding about it. `flush`
+reads every row again inside the transaction that writes it, which on `SQLiteStore` holds
+the write lock, and compares it with a digest the snapshot took. A row that changed or
+disappeared is left as the other writer left it, together with every row changed by the
+same merge, and the next pass decides about it again. Writing back the snapshot's copy
+used to undo the other writer's ending, or bring an erased claim back, text and all.
 """
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
+from typing import Callable
 
-from ..store.base import Store
+from ..store.base import Store, bulk_claims, claim_digest
 from ..telemetry import (
     CONSOLIDATE_CLAIMS_PER_SLOT,
     CONSOLIDATE_CROWDED_SLOTS,
@@ -86,10 +95,18 @@ class Sweep:
         self.claims: list[Claim] = [
             c for c in store.iter_claims(tenant, include_invalidated=False)
             if c.is_live(self.now)]
+        # Each row as the snapshot read it, before any stage changes the objects, so that
+        # `flush` can tell whether another writer changed the row in the meantime.
+        self._read: dict[str, bytes] = {c.id: claim_digest(c) for c in self.claims}
         # Keyed by id, so a claim decay and merge both touched is written once. Insertion
         # order is preserved, which keeps the write order a function of the data rather
         # than of dict iteration.
         self._dirty: dict[str, Claim] = {}
+        # The unit each touched claim is written with, when it is not written alone.
+        self._unit: dict[str, str] = {}
+        #: Touched rows `flush` left unwritten because another writer changed or erased
+        #: one of their unit's rows after the snapshot.
+        self.skipped = 0
         if telemetry is not None:
             # Handed the recorder rather than reading it back off `self`: the guard is
             # right here, and passing what it just proved non-`None` is what lets the
@@ -121,21 +138,64 @@ class Sweep:
         rec.gauge(CONSOLIDATE_CROWDED_SLOTS,
                   float(sum(1 for n in per_slot.values() if n > CROWDED_SLOT)))
 
-    def touch(self, claim: Claim) -> None:
-        """Mark a claim as needing to be written back at the end of the pass."""
+    def touch(self, claim: Claim, *, unit: str | None = None) -> None:
+        """Mark a claim as needing to be written back at the end of the pass.
+
+        Claims touched with the same `unit` are written together or not at all. A merge
+        uses its slot's `fact_key`, because the survivor holds the duplicate's evidence
+        only if the duplicate is retired in the same write.
+        """
         self._dirty[claim.id] = claim
+        if unit is not None:
+            self._unit[claim.id] = unit
 
     def flush(self) -> int:
-        """Write every touched claim, committing once per window. Returns rows written."""
+        """Write every touched claim still as the snapshot read it, one transaction per
+        window. Returns the rows written.
+
+        Each window reads its rows again inside its transaction, under the write lock on
+        `SQLiteStore`, and writes a unit (one claim, or every claim one slot's merges
+        changed) only when each of its rows is still exactly as the snapshot read it. A
+        unit with a row that another writer changed or erased is left as it stands and
+        counted on `skipped`, and the next pass decides about it again. A unit is never
+        split across two windows.
+        """
         queued = list(self._dirty.values())
         self._dirty.clear()
-        if self.telemetry is not None:
-            self.telemetry.counter(CONSOLIDATE_ROWS_WRITTEN, len(queued))
+        units: dict[str, list[Claim]] = {}
+        for claim in queued:
+            units.setdefault(self._unit.get(claim.id, claim.id), []).append(claim)
         # `getattr` so a third-party Store that never heard of batching still works; it
         # just commits per statement, as it did before windowing existed.
         batch = getattr(self.store, "batch", None)
-        for start in range(0, len(queued), self.window):
-            with (batch() if batch is not None else nullcontext()):
-                for claim in queued[start:start + self.window]:
-                    self.store.put_claim(claim)
-        return len(queued)
+        written = 0
+        window: list[list[Claim]] = []
+        rows = 0
+        for members in units.values():
+            window.append(members)
+            rows += len(members)
+            if rows >= self.window:
+                written += self._write(window, batch)
+                window, rows = [], 0
+        if window:
+            written += self._write(window, batch)
+        self.skipped += len(queued) - written
+        if self.telemetry is not None:
+            self.telemetry.counter(CONSOLIDATE_ROWS_WRITTEN, written)
+        return written
+
+    def _write(self, units: list[list[Claim]],
+               batch: Callable[[], AbstractContextManager[object]] | None) -> int:
+        """Write one window of units in one transaction. Returns the rows written."""
+        written = 0
+        with (batch() if batch is not None else nullcontext()):
+            # Inside the transaction, so no writer can change a row between this read
+            # and the write below.
+            stored = bulk_claims(self.store, [c.id for members in units for c in members])
+            for members in units:
+                if all((row := stored.get(c.id)) is not None
+                       and claim_digest(row) == self._read[c.id] for c in members):
+                    for claim in members:
+                        self.store.put_claim(claim)
+                    written += len(members)
+        return written

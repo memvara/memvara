@@ -113,9 +113,10 @@ def test_two_servers_writing_at_once_keep_every_acknowledged_write(
 def test_a_writer_that_holds_the_lock_makes_others_fail_after_the_busy_timeout(
         tmp_path: pathlib.Path) -> None:
     """One writer at a time is documented behaviour. The held child keeps the write lock:
-    it stops inside `remember()` for a name it has not seen, after the entity write. A
-    write through another handle raises after SQLite's five-second busy timeout, and a
-    server's write returns an error result in about the same time and stays up."""
+    it stops inside `remember()`, before its claim write, and its batch has held the lock
+    since its first statement. A write through another handle raises after SQLite's
+    five-second busy timeout, and a server's write returns an error result in about the
+    same time and stays up."""
     db = tmp_path / "s.db"
     home = tmp_path / "home"
     home.mkdir()

@@ -18,6 +18,7 @@ about one of them:
   formatting.
 """
 
+import copy
 import io
 import json
 import pathlib
@@ -60,6 +61,7 @@ from memvara.server import cli as cli_module
 from memvara.server.config import ConfigError, _llm
 from memvara.server.mcp import PROTOCOL_VERSION, SUPPORTED_PROTOCOLS
 from memvara.server.protocol import (
+    INTERNAL_ERROR,
     INVALID_PARAMS,
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
@@ -652,6 +654,102 @@ def test_a_request_nested_too_deeply_gets_a_parse_error_and_the_server_carries_o
     assert "nested too deeply" in reply["error"]["message"]
     after = json.loads(server.handle_line('{"jsonrpc":"2.0","id":8,"method":"ping"}'))
     assert after == {"jsonrpc": "2.0", "id": 8, "result": {}}
+
+
+def strict(line: str) -> dict:
+    """`json.loads` as a strict parser reads a line, such as JavaScript's `JSON.parse`:
+    the tokens `NaN`, `Infinity` and `-Infinity` are not JSON."""
+    def refuse(token: str) -> float:
+        raise ValueError(f"{token} is not JSON")
+    return json.loads(line, parse_constant=refuse)
+
+
+NON_FINITE_IDS = ["NaN", "Infinity", "-Infinity", "1e400"]
+
+
+@pytest.mark.parametrize("raw_id", NON_FINITE_IDS)
+def test_an_id_no_json_number_can_carry_gets_a_parse_error_on_a_line_that_is_json(
+        server, raw_id):
+    """Python's decoder accepts `NaN`, `Infinity` and `-Infinity`, which are not JSON, and
+    reads `1e400`, which is, as infinity. The reply then echoed the id as a bare `NaN` or
+    `Infinity`, a line a strict parser cannot read, which loses the reply or ends the
+    client's session. All four are now a parse error, answered with a null id."""
+    reply = strict(server.handle_line('{"jsonrpc":"2.0","id":' + raw_id + ',"method":"ping"}'))
+    assert reply["id"] is None and reply["error"]["code"] == PARSE_ERROR
+    assert reply["error"]["message"].startswith("invalid JSON")
+
+
+@pytest.mark.covers("inv:MS6")
+def test_every_reply_line_the_stdio_loop_writes_parses_under_a_strict_parser(server):
+    lines = ['{"jsonrpc":"2.0","id":' + raw + ',"method":"ping"}' for raw in NON_FINITE_IDS]
+    lines.append('{"jsonrpc":"2.0","id":1,"method":"ping"}')
+    stdout = io.StringIO()
+    assert serve_stdio(server.handle_line, io.StringIO("\n".join(lines) + "\n"),
+                       stdout) == 5
+    replies = [strict(line) for line in stdout.getvalue().splitlines()]
+    assert [r.get("error", {}).get("code") for r in replies] == [PARSE_ERROR] * 4 + [None]
+    assert replies[-1] == {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+
+def test_encode_refuses_a_number_json_cannot_carry():
+    """So that no reply can carry one, whatever reaches the encoder."""
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            encode({"jsonrpc": "2.0", "id": value, "result": {}})
+
+
+@pytest.mark.parametrize("raw_id", ['[NaN]', '{"a":[1,Infinity]}', '[[[-Infinity]]]',
+                                    '{"n":1e400}'])
+def test_an_id_that_holds_a_number_json_cannot_carry_gets_a_parse_error(server, raw_id):
+    """The server echoes an id of any JSON type, an object or an array included, so a
+    number no JSON can carry is refused wherever it sits inside the id. Echoed, it would
+    make the encoder refuse the reply, and the stdio loop would end with it."""
+    stdout = io.StringIO()
+    lines = ['{"jsonrpc":"2.0","id":' + raw_id + ',"method":"ping"}',
+             '{"jsonrpc":"2.0","id":2,"method":"ping"}']
+    assert serve_stdio(server.handle_line, io.StringIO("\n".join(lines) + "\n"),
+                       stdout) == 2
+    refused, answered = [strict(line) for line in stdout.getvalue().splitlines()]
+    assert refused["id"] is None and refused["error"]["code"] == PARSE_ERROR
+    assert answered == {"jsonrpc": "2.0", "id": 2, "result": {}}
+
+
+@pytest.mark.covers("inv:MS6")
+def test_a_reply_that_cannot_be_written_as_json_is_an_internal_error_and_serving_goes_on(
+        server, capsys):
+    """`encode` refuses a number JSON cannot carry anywhere in a reply, not only in its
+    id, and nothing caught the refusal: a tool whose result held a NaN ended the stdio
+    loop, and the client's session with it. That request is now answered with a
+    JSON-RPC internal error (-32603) that carries its id, the reason is written to
+    standard error, and the next request on the stream is answered."""
+    from memvara.server.tools import Tool
+
+    server._tools["broken"] = Tool(name="broken", description="Returns a NaN.",
+                                   properties={}, required=(),
+                                   handler=lambda ctx, args: float("nan"))
+    lines = ['{"jsonrpc":"2.0","id":7,"method":"tools/call",'
+             '"params":{"name":"broken","arguments":{}}}',
+             '{"jsonrpc":"2.0","id":8,"method":"ping"}']
+    stdout = io.StringIO()
+    assert serve_stdio(server.handle_line, io.StringIO("\n".join(lines) + "\n"),
+                       stdout) == 2
+    refused, answered = [strict(line) for line in stdout.getvalue().splitlines()]
+    assert refused["id"] == 7 and refused["error"]["code"] == INTERNAL_ERROR, refused
+    assert answered == {"jsonrpc": "2.0", "id": 8, "result": {}}
+    err = capsys.readouterr().err
+    assert "request 7" in err and "not JSON compliant" in err, err
+
+
+@pytest.mark.parametrize("raw", NON_FINITE_IDS)
+def test_a_number_json_cannot_carry_in_the_arguments_reaches_the_tool(server, raw):
+    """Only the id is echoed into a reply, so only the id is refused at the wire. A value
+    anywhere else is read, and the tool's own argument check answers it, as a tool error
+    that carries the request's id so the client can match it."""
+    line = ('{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":'
+            '"memory_recall","arguments":{"query":"tea","k":' + raw + '}}}')
+    reply = strict(server.handle_line(line))
+    assert reply["id"] == 9 and reply["result"]["isError"] is True, reply
+    assert "k" in reply["result"]["content"][0]["text"]
 
 
 @pytest.mark.parametrize("line", [
@@ -2087,6 +2185,66 @@ def test_ending_an_already_retired_claim_does_not_report_it_as_ended(server):
 
     # And the state it reports is the state on disk.
     assert server._ctx.memory.get(claim_id).state == "retired"
+
+
+def test_ending_a_retired_claim_through_the_tool_changes_nothing_as_its_reply_says(server):
+    """The reply above said nothing changed, and the store changed the claim anyway:
+    `memory_end` set `valid_to` on the claim `memory_forget` had retired and added a
+    second closure record. `memory_history` then showed a claim we had stopped believing
+    as one that ended "because: no longer applies". Now neither clock moves and no record
+    is added, so the reply is true."""
+    text(server, "memory_remember", {"subject": "Mei", "predicate": "allergic_to",
+                                     "object": "pollen"})
+    claim_id = text(server, "memory_search", {"query": "pollen"}).split("[id=")[1].split()[0]
+    text(server, "memory_forget", {"claim_id": claim_id,
+                                   "reason": "Mei's allergy is walnuts"})
+    retired = copy.deepcopy(server._ctx.memory.get(claim_id))
+
+    body = text(server, "memory_end", {"claim_id": claim_id, "reason": "no longer applies"})
+    after = server._ctx.memory.get(claim_id)
+    assert "Nothing changed here" in body
+    assert after.valid_to is None, "the retired claim was ended after all"
+    assert after.meta["closure"] == retired.meta["closure"], "a closure record was added"
+    assert after.invalidated_at == retired.invalidated_at
+
+
+def test_retiring_a_retired_claim_through_the_tool_says_that_nothing_changed(server):
+    """A second `memory_forget` writes nothing, and its reply used to say "Retired claim
+    ..." as if it had retired it then, with the reason it was given."""
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Berlin"})
+    claim_id = text(server, "memory_search", {"query": "Berlin"}).split("[id=")[1].split()[0]
+    text(server, "memory_forget", {"claim_id": claim_id, "reason": "never lived there"})
+    retired = copy.deepcopy(server._ctx.memory.get(claim_id))
+
+    body = text(server, "memory_forget", {"claim_id": claim_id, "reason": "again"})
+    assert body.startswith(f"Claim {claim_id} is already retired"), body
+    assert "Nothing changed" in body and "not recorded" in body
+    assert server._ctx.memory.get(claim_id).meta == retired.meta
+
+
+@pytest.mark.parametrize("reason", ["misheard", None])
+def test_forget_says_so_when_another_writer_retired_the_claim_while_it_ran(server, reason):
+    """`memory_forget` read the claim, found it live, and then retired it. Another writer
+    that retired it in between, after that read and before this call's write, made the
+    write change nothing, and the reply still said "Retired claim ...", as if this call's
+    retirement, and its reason, were on record. The claim is read after the write, as
+    `memory_end` reads it, and the reply says it was already retired."""
+    text(server, "memory_remember", {"predicate": "lives_in", "object": "Berlin"})
+    claim_id = text(server, "memory_search", {"query": "Berlin"}).split("[id=")[1].split()[0]
+    engine = server._ctx.memory._mem
+    real = engine.delete
+
+    def delete(target: str, **kw):
+        assert real(target, **{**kw, "reason": "the other writer's reason"})
+        return real(target, **kw)
+
+    engine.delete = delete
+    arguments = {"claim_id": claim_id} if reason is None else {"claim_id": claim_id,
+                                                               "reason": reason}
+    body = text(server, "memory_forget", arguments)
+    assert body.startswith(f"Claim {claim_id} is already retired"), body
+    assert "Nothing changed" in body
+    assert ("not recorded" in body) is (reason is not None)
 
 
 def test_memory_since_says_so_when_the_instant_has_not_arrived(server):

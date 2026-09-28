@@ -32,8 +32,11 @@ Two behavioural differences are worth knowing before the first surprise:
   request the default is the worst outcome, a caller who believes the data is gone. It
   is still the default because it is memvara's semantics and the divergence should be
   noticed, not absorbed; the warning fires once and names the fix. `on_delete="erase"`
-  matches mem0, erasing the memory and the source turn outright, and `"retire"` keeps
-  retirement and silences the warning once you have decided.
+  matches mem0: it erases the memory outright, and every earlier version of it, each
+  with its source turn. An earlier version is a claim of its own, because a changed
+  value is ended rather than overwritten, so erasing only the current claim would leave
+  the old text readable. `"retire"` keeps retirement and silences the warning once you
+  have decided.
 * **`add()` reports a supersession as two rows** — an ADD for the new value and a DELETE
   for the one it retired — because that is what happened. mem0 emits a single UPDATE.
 """
@@ -95,8 +98,9 @@ _RETIRED_NOT_ERASED = (
     "answering search(), get() and get_all(), and its text, its source episode and its "
     "embedding remain on disk — still returned by history() and by search(as_of=...).\n\n"
     "If this call is a GDPR/CCPA erasure, retirement does not satisfy it. Pass "
-    "Memory(on_delete='erase') to erase the memory and its source turn outright, or "
-    "'retire' to keep this behaviour and silence this warning once you have decided."
+    "Memory(on_delete='erase') to erase the memory, every earlier version of it and "
+    "their source turns outright, or 'retire' to keep this behaviour and silence this "
+    "warning once you have decided."
 )
 
 _NO_UPDATE = (
@@ -323,32 +327,114 @@ class Memory:
         """Always raises. See `_NO_UPDATE` — a claim is immutable by construction."""
         raise Mem0CompatError(_NO_UPDATE)
 
-    def delete(self, memory_id: str) -> dict[str, str]:
+    def delete(self, memory_id: str) -> dict[str, Any]:
         """Retire one memory, or erase it under `on_delete="erase"`.
 
         The default retires and warns once, because retirement is *not* what mem0's
         `delete()` does and silently doing the weaker thing is how a GDPR request gets
-        quietly under-served. `on_delete="erase"` matches mem0.
+        quietly under-served. `on_delete="erase"` matches mem0: it erases every version of
+        the memory `memory_id` names, as `_versions` defines them, each with its source
+        turns. The reply lists the ids of the versions it erased under `erased`, oldest
+        first, so its length is how many claims went. `memory_id` may name an earlier
+        version, and the whole memory is erased then too, up to its current value.
 
         Raises `KeyError` for an id this scope cannot see, rather than reporting a
         success that deleted nothing.
         """
-        if self.memvara.get(memory_id) is None:
+        named = self.memvara.get(memory_id)
+        if named is None:
             raise KeyError(
                 f"no memory {memory_id!r} in scope {self.memvara.default_scope.key()}"
             )
         if self.on_delete == "erase":
-            # Now a real erasure rather than a refusal. `sources=True` is right here and
-            # would be wrong for an extracted fact: a note *is* its source turn, holding
-            # the same text and nothing else, so leaving the episode behind would erase
-            # the memory and keep the sentence.
-            self.memvara.erase(memory_id, sources=True)
-            return {"message": "Memory erased"}
+            # `sources=True` erases each version's source turn once no remaining claim
+            # cites it. A note *is* its source turn, holding the same text and nothing
+            # else, so leaving the turn behind would erase the memory and keep the
+            # sentence. A turn that a claim outside this memory still cites is kept.
+            erased = [version.id for version in self._versions(named)
+                      if self.memvara.erase(version.id, sources=True)]
+            return {"message": "Memory erased", "erased": erased}
         self.memvara.delete(memory_id)
         if self.on_delete == "warn" and not self._warned_delete:
             self._warned_delete = True
             warnings.warn(_RETIRED_NOT_ERASED, Mem0DeletionWarning, stacklevel=2)
         return {"message": "Memory retired (not erased); see Mem0DeletionWarning"}
+
+    def _versions(self, named: Claim) -> list[Claim]:
+        """Every version of the memory that `named` is one version of, oldest first.
+
+        A memory here is what mem0 calls one memory: a value, and the values its updates
+        replaced. When a value changes, memvara keeps the old value as a claim of its own
+        and points that claim's `invalidated_by` at the claim that replaced it, and a
+        retraction does the same with the claim that records it. So the versions are
+        `named` itself, the claims that replaced it, forward to the current value, and the
+        claims it replaced, directly or through an earlier version, back to the first
+        one. They are looked for in `named`'s own slot and nowhere else.
+
+        That is deliberately not every claim in the slot. A predicate that holds many
+        values keeps each of them live in one slot as a memory with its own id: `likes`
+        can hold "pizza" and "sushi" at once, and erasing one must not erase the other.
+        For the same reason a claim linked to `named` only through a shared successor is
+        not a version of it, such as another value that one retraction ended at the same
+        time. A claim stored with no link to this chain is a memory of its own, which
+        `add()` reported with its own ADD row: a restatement dated before the value on
+        record, for example, is stored beside it rather than linked to it, and stays.
+
+        A version can sit in another scope of the same user, because a write can end a
+        value held in a broader scope it reads or in a narrower scope beneath it. A value
+        written for the user ends the value a session holds for the same fact, which links
+        the session's claim into the user-level chain. The chain is followed through such
+        a claim, but `erase()` refuses a claim in a scope this `Memory` cannot read, so
+        `delete()` leaves it as it is and does not list it. A version in a broader scope
+        that this `Memory` reads, such as the user level for a `Memory` bound to a
+        session, is erased.
+
+        A local `Memvara` holds the store, and the slot is read from it whole. A hosted
+        deployment gives this shim no store, and its `history()` reads the slot only at
+        this `Memory`'s scope and the scopes beneath it. So there the walk also asks
+        `get()` for a claim that replaced a version and `why()` for the claims a version
+        replaced, because both of those read the broader scopes this `Memory` reads as
+        well. One chain is still out of reach there: a version in a broader scope that the
+        chain reaches only through a claim this `Memory` cannot read, because `why()`
+        answers nothing about such a claim.
+        """
+        store = getattr(self.memvara, "store", None)
+        if store is not None:
+            slot = store.slot_history(named.scope.tenant, named.fact_key)
+        else:
+            timeline = self.memvara.history(named.subject, named.predicate)
+            slot = [claim for claim in timeline if claim.fact_key == named.fact_key]
+        stored = {claim.id: claim for claim in slot}
+        stored[named.id] = named
+        replaced: dict[str, list[Claim]] = {}
+        for claim in stored.values():
+            if claim.invalidated_by is not None:
+                replaced.setdefault(claim.invalidated_by, []).append(claim)
+        found = {named.id: named}
+        # Forward, through the claims that replaced it, to the current value.
+        successor = named.invalidated_by
+        while successor is not None and successor not in found:
+            later = stored.get(successor)
+            if later is None and store is None:
+                later = self.memvara.get(successor)
+            if later is None or later.fact_key != named.fact_key:
+                break
+            found[successor] = later
+            successor = later.invalidated_by
+        # Back, through the claims it replaced, to the first value.
+        pending = [named.id]
+        while pending:
+            current = pending.pop()
+            earlier = list(replaced.get(current, ()))
+            if store is None:
+                provenance = self.memvara.why(current)
+                if provenance is not None:
+                    earlier += provenance.superseded
+            for claim in earlier:
+                if claim.id not in found:
+                    found[claim.id] = claim
+                    pending.append(claim.id)
+        return sorted(found.values(), key=lambda c: (c.recorded_at, c.id))
 
     def delete_all(self, *, filters: Mapping[str, Any] | None = None,
                    **legacy: Any) -> dict[str, Any]:

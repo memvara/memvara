@@ -56,7 +56,16 @@ TranscriptSpec = namedtuple("TranscriptSpec", "format role_key", defaults=("type
 #: read-only tool list: which memory_* tools are safe to run unprompted is a fact about
 #: our own MCP server, identical everywhere, and duplicating it per host would let one
 #: copy start approving a forget.
-ApproveSpec = namedtuple("ApproveSpec", "matcher separators decision_key reason_key allow")
+#:
+#: `prefixes` are the exact prefixes this host puts on the tools of the server keyed
+#: `memvara`, which is the key every installer writes: `mcp__memvara__` on Claude Code.
+#: A tool is approved only when its whole name is one of them followed by a read-only
+#: tool's name. The prefix is the only part of the name that says which server a tool
+#: belongs to, so anything looser -- the word `memvara` anywhere in the name, or only the
+#: name's last segment -- approves a tool from any server whose name contains it. The
+#: `matcher` stays wide on purpose: it only decides when the host runs the hook, and on
+#: OpenCode nothing reads it, because the shim asks the hook about every tool.
+ApproveSpec = namedtuple("ApproveSpec", "matcher prefixes decision_key reason_key allow")
 
 #: The headless CLI `capture` shells out to in order to mine a turn: the command without
 #: the prompt, which is appended, plus where to read the answer out of the envelope it

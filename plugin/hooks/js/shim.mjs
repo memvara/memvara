@@ -21,11 +21,57 @@
  */
 
 import { spawn } from "node:child_process"
+import { randomBytes } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
 const LOG_DIR = path.join(os.homedir(), ".memvara", ".hooks")
+
+/**
+ * Take every permission for group and others off `target`, as the Python hooks do
+ * (`lib/private.py`). A file or directory an earlier version created with the default
+ * modes, readable by every account on the machine, is repaired this way.
+ */
+function restrict(target) {
+  const mode = fs.statSync(target).mode & 0o777
+  if (mode & 0o077) fs.chmodSync(target, mode & 0o700)
+}
+
+/**
+ * Create `dir` 0700, and take group and other permissions off it and every directory
+ * above it up to `~/.memvara`, as `lib/private.py` does. Throws as `fs.mkdirSync` would.
+ */
+export function privateDir(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const root = path.join(os.homedir(), ".memvara")
+  for (let level = dir; level === root || level.startsWith(root + path.sep);
+       level = path.dirname(level)) {
+    restrict(level)
+    if (level === root) break
+  }
+}
+
+/**
+ * Create `file` holding `text`, or replace it, readable by this account only.
+ *
+ * The text is written to a new file beside `file`, created 0600 and exclusively, so no
+ * other process has it open, and that file is then renamed over `file`. A process that
+ * already has `file` open keeps reading the whole of what it opened. Writing `file` in
+ * place truncated it under such a reader: a capture still reading one transcript read a
+ * newer one that was written over it. The renamed file keeps its 0600 mode.
+ */
+export function writePrivate(file, text) {
+  const temporary = path.join(path.dirname(file),
+    `.${path.basename(file)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`)
+  fs.writeFileSync(temporary, text, { mode: 0o600, flag: "wx" })
+  try {
+    fs.renameSync(temporary, file)
+  } catch (err) {
+    try { fs.unlinkSync(temporary) } catch { /* already gone */ }
+    throw err
+  }
+}
 
 /**
  * One line in the hook log, and never a throw.
@@ -34,12 +80,15 @@ const LOG_DIR = path.join(os.homedir(), ".memvara", ".hooks")
  * empty in the OpenCode record precisely because nothing this plugin says reaches the
  * screen, which makes this file the only account of itself it has. Wrapped because a
  * home directory that cannot be written to must not become a broken turn.
+ *
+ * The directories are 0700 and the file 0600, as every file the Python hooks write is.
  */
 export function note(name, text) {
   try {
-    fs.mkdirSync(LOG_DIR, { recursive: true })
-    fs.appendFileSync(path.join(LOG_DIR, `${name}.log`),
-      `${new Date().toISOString()} ${text}\n`)
+    privateDir(LOG_DIR)
+    const file = path.join(LOG_DIR, `${name}.log`)
+    fs.appendFileSync(file, `${new Date().toISOString()} ${text}\n`, { mode: 0o600 })
+    restrict(file)
   } catch {
     /* a hook must never fail a turn */
   }
@@ -155,6 +204,7 @@ export async function runHook({ hooksDir, hook, host, payload, timeoutMs = 10000
  * it is the only shape in which capture can exist here at all.
  */
 export function runHookDetached(opts) {
-  runHook(opts).catch((err) =>
+  // Returned, though never awaited by a turn, so a caller can act when the hook is done.
+  return runHook(opts).catch((err) =>
     note("hooks", `failed hook=${opts.hook} detached ${String(err)}`))
 }

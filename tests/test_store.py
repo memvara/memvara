@@ -3506,6 +3506,30 @@ def test_a_thread_inside_a_batch_reads_its_own_uncommitted_writes(tmp_path, emb)
     store.close()
 
 
+@pytest.mark.covers("inv:MM9")
+def test_a_batch_holds_the_write_lock_before_its_first_read(tmp_path, emb):
+    """Two writers on one file must not both look up a slot before either writes, or both
+    find it empty and both values end up live. So a batch takes the database's write lock
+    when it begins, before anything inside it reads. Another connection cannot start a
+    write while the batch is open, even before the batch has written anything, and once
+    the batch commits, that connection reads what the batch wrote."""
+    path = str(tmp_path / "c.db")
+    store = SQLiteStore(path)
+    other = sqlite3.connect(path, timeout=0)    # refused at once rather than after a wait
+    try:
+        with store.batch():
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                other.execute("BEGIN IMMEDIATE")
+            c = put(store, emb, object="Berlin")
+        other.execute("BEGIN IMMEDIATE")
+        row = other.execute("SELECT object FROM claims WHERE id=?", (c.id,)).fetchone()
+        other.rollback()
+        assert row == ("Berlin",)
+    finally:
+        other.close()
+        store.close()
+
+
 def test_an_in_memory_store_shares_its_one_connection(store, emb):
     """`:memory:` is scoped to its connection: a second one would be a second, empty
     database rather than a second view of this one."""

@@ -1058,6 +1058,68 @@ def test_a_put_that_drops_a_field_retires_it_even_in_erase_mode(mem, monkeypatch
     assert len(hard.history(NS, "m1", "food")) == 1
 
 
+EVERY_STATE = ("live", "ended", "retired")
+
+
+def test_erase_mode_erases_every_version_of_the_item(mem, monkeypatch, clock):
+    """When a field's value changes, the earlier value stays stored as its own claim,
+    ended rather than retired, and a field that a later `put` drops is retired. Both are
+    versions of the item. Erasing only the live fields left `history()` and a search of
+    every state returning text the caller had asked to erase, so every version goes now.
+    A neighbouring item is not a version of this one, and neither is the same item in
+    another user's store, so both are left exactly as they were."""
+    install(monkeypatch)
+    hard = lg.MemvaraStore(mem, user="alice", clock=clock, on_delete="erase")
+    theirs = lg.MemvaraStore(mem, user="bob", clock=clock)
+    hard.put(NS, "profile", {"city": "Berlin", "food": "pizza"})
+    hard.put(NS, "profile", {"city": "Lisbon"})
+    hard.put(NS, "neighbour", {"city": "Porto"})
+    theirs.put(NS, "profile", {"city": "Berlin"})
+    versions = hard.history(NS, "profile", "city") + hard.history(NS, "profile", "food")
+    assert [(c.object, c.state) for c in versions] == [
+        ("Berlin", "ended"), ("Lisbon", "live"), ("pizza", "retired")]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        hard.delete(NS, "profile")
+
+    assert hard.get(NS, "profile") is None
+    assert hard.history(NS, "profile", "city") == []
+    assert hard.history(NS, "profile", "food") == []
+    found = [r.text for r in mem.search("Berlin Lisbon pizza", states=EVERY_STATE)]
+    assert [text for text in found
+            if any(word in text for word in ("Berlin", "Lisbon", "pizza"))] == []
+    assert [mem.why(c.id) for c in versions] == [None, None, None]
+    assert all(mem.prove_erased(c.id).proven for c in versions)
+    # The tenant now holds the neighbour's field and bob's, one claim and one vector each.
+    assert mem.stats() == {"episodes": 0, "claims": 2, "live_claims": 2,
+                           "ended_claims": 0, "invalidated": 0, "embeddings": 2}
+    assert hard.get(NS, "neighbour").value == {"city": "Porto"}
+    assert theirs.get(NS, "profile").value == {"city": "Berlin"}
+
+
+def test_erase_mode_leaves_the_same_item_in_a_sibling_session(mem, monkeypatch, clock):
+    """Two sessions of one user share an item's slots, because a slot's key leaves the
+    session out. Each session's store reads only its own item, and erasing that item must
+    not reach the other session's values, the current one or an earlier one."""
+    install(monkeypatch)
+    mine = lg.MemvaraStore(mem, user="alice", session="s1", clock=clock,
+                           on_delete="erase")
+    sibling = lg.MemvaraStore(mem, user="alice", session="s2", clock=clock)
+    mine.put(NS, "profile", {"city": "Berlin"})
+    sibling.put(NS, "profile", {"city": "Rome"})
+    sibling.put(NS, "profile", {"city": "Oslo"})
+    mine.put(NS, "profile", {"city": "Lisbon"})
+
+    mine.delete(NS, "profile")
+
+    assert mine.get(NS, "profile") is None
+    assert mine.history(NS, "profile", "city") == []
+    assert [(c.object, c.state) for c in sibling.history(NS, "profile", "city")] == [
+        ("Rome", "ended"), ("Oslo", "live")]
+    assert sibling.get(NS, "profile").value == {"city": "Oslo"}
+
+
 def test_an_unknown_on_delete_is_rejected_at_construction(mem, monkeypatch):
     install(monkeypatch)
     with pytest.raises(ValueError, match="on_delete='wipe'"):

@@ -171,8 +171,8 @@ class Pair:
         self.handles[real_id] = expect.new
 
     def _stamp(self, expect: Expect, before: datetime, after: datetime) -> None:
-        # Stamps taken from the clock first; then those equal to another row's start,
-        # which may itself have come from the clock.
+        # Stamps taken from the clock first; then those equal to another row's start or
+        # recording instant, which may itself have come from the clock.
         for stamp in sorted(expect.stamps, key=lambda s: s.source != "wall"):
             row = self.model.rows[stamp.handle]
             claim = self.mem.store.get_claim(self.real(stamp.handle))
@@ -183,9 +183,12 @@ class Pair:
                     f"{stamp.handle}.{stamp.name} is {got}, outside the operation's "
                     f"window {before} .. {after}")
             else:
-                want = self.model.rows[stamp.other].valid_from
+                other = self.model.rows[stamp.other]
+                field = "valid_from" if stamp.source == "valid_from_of" else "recorded_at"
+                want = getattr(other, field)
                 assert got == want, (
-                    f"{stamp.handle}.{stamp.name} is {got}, not {stamp.other}'s start {want}")
+                    f"{stamp.handle}.{stamp.name} is {got}, not {stamp.other}'s "
+                    f"{field} {want}")
             setattr(row, stamp.name, got)
         new = expect.new
         if new is not None and self.model.rows[new].polarity < 0:

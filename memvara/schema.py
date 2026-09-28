@@ -48,7 +48,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .types import MemoryType, Scope
+from .types import MemoryType, Scope, stored_scope
 
 
 class Cardinality(str, Enum):
@@ -590,7 +590,9 @@ class PredicateRegistry:
         """
         if self.spec(predicate).project_scoped or scope.project is None:
             return scope
-        return replace(scope, project=None)
+        # `stored_scope`, because the scope may be one read back from a store with '*' or
+        # '' at some level, such as the turn of a re-extraction; see `Scope.ancestors`.
+        return stored_scope(scope.tenant, scope.user, scope.agent, scope.session)
 
     def known(self, predicate: str) -> bool:
         return self.normalize(predicate) in self._specs

@@ -35,6 +35,7 @@ import os
 import os.path
 import socket
 
+from .private import private_dir, private_open
 from .project import ENV as PROJECT_ENV
 from .state_file import read_json, write_json
 
@@ -50,7 +51,7 @@ RUNTIME_DIR = os.path.join(_HOME, ".memvara", ".hooks", "run")
 
 #: Files whose contents decide what a daemon actually does. A change to any of them must
 #: strand the old daemon rather than let it keep serving.
-CODE_FILES = ("daemon.py", "lib/ipc.py", "lib/open.py", "recall.py",
+CODE_FILES = ("daemon.py", "lib/ipc.py", "lib/open.py", "lib/private.py", "recall.py",
               "run.py", "core/host.py", "core/envelope.py", "hosts/claude.py")
 
 #: Set in the environment of the `claude -p` child that `capture.py` spawns to mine a turn.
@@ -373,7 +374,9 @@ def status(text: str) -> str:
 
 
 def runtime_dir() -> str:
-    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    # `private_dir` makes `~/.memvara` and `.hooks` private as well, and the chmod below
+    # still runs on every call, as it always has, for a daemon that outlives its first.
+    private_dir(RUNTIME_DIR)
     try:
         os.chmod(RUNTIME_DIR, 0o700)
     except OSError:
@@ -626,18 +629,20 @@ def log_line(name: str, text: str) -> None:
     has had none -- so the hook that spends context on every single prompt was the one
     nobody could measure, which is exactly how it came to spend four times what it needed
     to without anyone noticing.
+
+    The directory is 0700 and the file 0600 (`lib.private`): `recall-sample.log` holds the
+    start of each prompt.
     """
     import time
 
     directory = os.path.join(_HOME, ".memvara", ".hooks")
     path = os.path.join(directory, f"{name}.log")
     try:
-        os.makedirs(directory, exist_ok=True)
+        private_dir(directory)
         if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
-            with open(path, "w", encoding="utf-8"):
-                pass
+            private_open(path, "w").close()
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "+00:00"
-        with open(path, "a", encoding="utf-8") as fh:
+        with private_open(path, "a") as fh:
             fh.write(f"{stamp} {text}\n")
     except OSError:
         pass
