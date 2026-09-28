@@ -1,6 +1,6 @@
 """The fast tier's hook matrices, on all five hosts and with more payloads.
 
-The fast tier sends its hostile payloads to two hosts (test_adv_hook_hostile.py). This
+The fast tier sends its hostile payloads to three hosts (test_adv_hook_hostile.py). This
 sends them, and three more JSON values that are not objects, to every hook on all five.
 It also checks the reading hooks' outcomes on all five (test_adv_hook_outcomes.py checks
 two), and pins on all five the known bugs those two modules pin on two: B55, B56, B57

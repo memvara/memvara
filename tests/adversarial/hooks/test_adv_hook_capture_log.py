@@ -96,6 +96,24 @@ def test_capture_says_so_when_it_decides_to_do_nothing(
     result = runner.run("capture", stdin=stop)
     assert result.exit_code == 0
     assert support.crashes(result) == []
-    if (result.log("capture"), result.log("hooks")) == ((), ()):
+    # run.py's line naming the child it detached says nothing of what capture decided.
+    said = [line for line in result.log("hooks") if "detached hook=capture" not in line]
+    if (result.log("capture"), said) == ((), []):
         raise known_bugs.Reproduced(f"B60: capture logged nothing for {case}")
     assert result.log("capture"), result.logs
+
+
+def test_a_payload_that_is_not_valid_utf8_still_reaches_the_detached_capture(
+        hooks: Make, clis: FakeClis, tmp_path: pathlib.Path) -> None:
+    """run.py hands the payload to the capture child as the bytes it read. It used to
+    decode them and encode them again, and a byte that is not UTF-8, read with
+    surrogateescape as Python's UTF-8 mode and the C locale read it, made the encoding
+    fail, so the child was never started and the turn was lost."""
+    transcript = support.write_transcript("claude", tmp_path / "t.jsonl", [("ok", "Done.")])
+    stop = json.dumps({"session_id": "s", "transcript_path": str(transcript),
+                       "cwd": "@"}).encode().replace(b'"@"', b'"\xff"')
+    runner = hooks("claude", env={"PYTHONIOENCODING": "utf-8:surrogateescape"}, stubs=clis)
+    result = runner.run("capture", stdin=stop)
+    assert result.detached_pid is not None, result.logs
+    assert any(re.search(r"skipped=continuation$", line)
+               for line in result.log("capture")), result.logs

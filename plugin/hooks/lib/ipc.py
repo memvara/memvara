@@ -153,7 +153,7 @@ def _write_alert(data: dict) -> None:
     `clear_capture_alert` is the OTHER thing that touches this file, and does not call
     this function -- it does a plain `os.unlink`, which needs no atomicity dance because
     an unlink has no partial-write state to leave behind. The two are still genuinely
-    concurrent with each other: `raise_capture_alert` (the async extraction child) and
+    concurrent with each other: `raise_capture_alert` (the detached extraction child) and
     `clear_capture_alert` (the same child, the next time it succeeds) can each run while
     the other is mid-call, with no lock between them -- `capture.py` says extraction takes
     12-14s and hands the turn back immediately, so an extraction still finishing while
@@ -267,7 +267,7 @@ def _write_notified_alert(data: dict) -> None:
 
     Two things write here, from two different, genuinely concurrent processes: `recall.py`
     calls `due_alert_for_model()` synchronously on every prompt, and `clear_capture_alert()`
-    -- called from the async extraction child, the same one `raise_capture_alert` runs from
+    -- called from the detached extraction child, the same one `raise_capture_alert` runs from
     -- resets this file the moment capture recovers. Those two can race exactly the way
     `raise_capture_alert`/`clear_capture_alert` already race on `capture-alert.json`: each
     does its own read-then-conditional-write with no lock between them, so a recovery's
@@ -320,8 +320,8 @@ def due_alert_for_model() -> str:
 def with_alert(text: str, alert: str) -> str:
     """A status line, with word of a failing extractor riding along on it.
 
-    `capture.py` runs `async` and cannot print anything of its own -- the client discards
-    an async hook's output entirely, which is why its whole account moved to `capture.log`
+    `capture.py` runs detached and cannot print anything of its own -- nothing its child
+    process prints reaches the client, which is why its whole account moved to `capture.log`
     in the first place. Nobody reads that on a schedule, so a `claude -p` that has been
     failing for hours says nothing anyone sees until a hook that speaks -- `recall.py` on
     every prompt, `session_start.py` once per session -- relays it.

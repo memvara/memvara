@@ -9,6 +9,27 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The plugin captures what is said in a headless Claude Code session.** Capture was
+  registered on Claude Code as an async Stop hook, so that a 12 to 14 second extraction
+  never held a turn open. `claude -p` cancels an async hook when the process exits, so a
+  script, a CI job or a scheduled task that ran Claude Code headless stored nothing, and
+  nothing said so. Measured on Claude Code 2.1.281, the Stop hook reported the outcome
+  "cancelled". Capture on Claude Code is now registered as an ordinary hook that hands its
+  work to a process in a session of its own and returns at once, as it already did on
+  Codex, Copilot and Cursor. Measured the same way, the hook reported "success" and the
+  capture finished after `claude -p` had exited. A plugin repository picks this up when it
+  generates `hooks.json` again, which drops `"async": true` from the capture command.
+  #398 (B87).
+- **A capture payload that is not valid UTF-8 is no longer lost when capture detaches.**
+  `run.py` decoded the payload before handing it to the capture child and encoded it
+  again, and a byte that is not UTF-8, read the way Python's UTF-8 mode and the C locale
+  read it, made the encoding fail. The child was never started, and the turn was lost with
+  only a `detach-payload: UnicodeEncodeError` line in `hooks.log`. This affected Codex,
+  Copilot and Cursor, and would have affected Claude Code with the fix above. The payload
+  is now handed on as the bytes that were read.
+
 ## [0.17.0] — 2026-09-28
 
 This is a security release: it fixes twenty advisories, listed under "Security" below.

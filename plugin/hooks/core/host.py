@@ -274,6 +274,13 @@ Host = namedtuple(
 #: twelve seconds after the turn ended. So Codex is `supports_async=False` -- asking for
 #: async would silently disable capture -- and `detach_capture=True`.
 #:
+#: Claude Code is the same for a different reason. Its async Stop hook runs in the
+#: background in a session a person is typing into, but `claude -p` cancels it when the
+#: process exits: measured on Claude Code 2.1.281, the hook reported the outcome
+#: "cancelled" and capture wrote nothing (#398). Declared synchronous and detached, the
+#: hook returned at once and its child finished the capture after `claude -p` had exited.
+#: No shell host sets `supports_async` now; OpenCode's JavaScript plugin does.
+#:
 #: A host may have neither (capture blocks, and must be short), one, or in principle both.
 #: Nothing infers one from the other, because "the client honours the flag" and "we fork"
 #: fail in opposite directions: guessing the first wrong loses the hook, guessing the
