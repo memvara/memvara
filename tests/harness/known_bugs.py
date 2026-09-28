@@ -70,8 +70,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "and the earlier period is lost"),
     KnownBug("B70", 351, "a different value written twice for a period before the "
              "current one is stored twice"),
-    KnownBug("B56", 338, 'on Codex, Copilot and OpenCode, "not configured" and "no matching '
-             'memories" look identical'),
     KnownBug("B58", 340, 'the "_" approve separator never recovers a tool name on Cursor and '
              "OpenCode"),
     KnownBug("B59", 341, "the hooks never find a store configured in Codex's, Cursor's or "

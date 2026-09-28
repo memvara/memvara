@@ -9,6 +9,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recall logs a line when nothing is configured and when nothing matches.** Both
+  outcomes were reported only on the status line, and Codex, Copilot and OpenCode show
+  none, so on those hosts a missing store and an empty answer left the same trace: no
+  reply and no log line. Recall now writes `skipped=not configured` or `recalled=0
+  repeats=N` to `~/.memvara/.hooks/recall.log`, the same shape as the line a recall that
+  injected something writes. #338 (B56).
+
 ## [0.17.0] — 2026-09-28
 
 This is a security release: it fixes twenty advisories, listed under "Security" below.
