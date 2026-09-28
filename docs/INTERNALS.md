@@ -985,9 +985,13 @@ suggestion must not turn it into an exception the caller retries.
   repeat and its text is not extracted again. A turn nothing was extracted from also
   stays a repeat. A claim that begins after the turn has not ended, so a retry of a turn
   about a future date converges. And a batch cannot know what its own earlier turns will
-  produce, so a copy repeated later in the same batch is a repeat. A `Store` whose
-  `find_episode_by_hash` predates the `at` argument is called without it, and a copy it
-  returns that is dated after the turn is ignored.
+  produce, so a copy repeated later in the same batch is a repeat. Of two copies with
+  the same time, the one written last is compared, as `SQLiteStore` breaks the tie on
+  rowid. The pipeline reads once, from the signature of `find_episode_by_hash`, whether
+  it takes `at`: a parameter of that name or `**kwargs`. A `Store` predating `at` is
+  called without it. A copy returned that is dated after the turn is ignored either way,
+  because a store that accepts `at` through `**kwargs` may not apply it. A `TypeError`
+  raised inside the lookup reaches the caller.
 
   For surviving episodes, embed and find the nearest live claim. A cosine at or above
   `near_dup_threshold` reinforces that claim instead of extracting from the turn, unless

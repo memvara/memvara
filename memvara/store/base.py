@@ -520,8 +520,9 @@ class Store(Protocol):
         several turns with one hash: `add()` stores a turn again when it is said after the
         value it stated has ended, and when it is dated before every stored copy. The
         write path asks with `at` for the copy a retry or a replay of a turn repeats.
-        A store predating `at` is still called without it, and the write path then
-        ignores a turn it returns that is dated after the one being written.
+        It passes `at` when this method has a parameter of that name or takes
+        `**kwargs`, and calls a store predating `at` without it. Either way it ignores a
+        turn returned that is dated after the one being written.
         """
         ...
 

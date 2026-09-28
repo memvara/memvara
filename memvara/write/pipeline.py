@@ -52,6 +52,7 @@ ordering loses raw text to a provider timeout, and nothing can reconstruct that.
 
 from __future__ import annotations
 
+import inspect
 import math
 import re
 import warnings
@@ -378,6 +379,13 @@ class WritePipeline:
         # is kept), so the only lasting harm of a broken embedder here is silence about
         # the mode quietly running lexical-only.
         self._warned_grounding = False
+        # Whether `find_episode_by_hash` takes `at`, read once from its signature: a
+        # parameter of that name, or `**kwargs`. A `Store` written before `at` existed is
+        # called without it. Deciding from the signature rather than by catching
+        # `TypeError` keeps a `TypeError` raised inside the lookup a visible fault.
+        self._lookup_takes_at = any(
+            p.name == "at" or p.kind is inspect.Parameter.VAR_KEYWORD
+            for p in inspect.signature(store.find_episode_by_hash).parameters.values())
 
     # -- public ---------------------------------------------------------------
 
@@ -431,8 +439,9 @@ class WritePipeline:
         # resolves the same way every run.
         candidates: list[Claim] = []
         for ep in fresh:
-            if ep.id in earlier:
-                candidates.append(earlier[ep.id])
+            restated = earlier.get(ep.id)
+            if restated is not None:
+                candidates.append(restated)
             candidates.extend(fast_claims.get(ep.id, ()))
             candidates.extend(llm_claims.get(ep.id, ()))
         if self.redactor is not None:
@@ -813,23 +822,28 @@ class WritePipeline:
         must be compared with the first, and a turn dated before every copy repeats none
         of them.
         """
-        found = [o for o in batch if o.ts <= ep.ts]
         tenant = ep.scope.tenant
-        try:
+        if self._lookup_takes_at:
             stored = self.store.find_episode_by_hash(tenant, ep.hash, at=ep.ts)
-        except TypeError:
-            # A `Store` predating `at`, which returns any turn with the hash. One dated
-            # after `ep` is not a turn `ep` repeats.
+        else:
             stored = self.store.find_episode_by_hash(tenant, ep.hash)
-            if stored is not None and stored.ts > ep.ts:
-                stored = None
-        # A turn stored under '*' or '' before those scope values were refused was
-        # hashed with the key of the scope above it, so it can share this turn's hash
-        # without being in this turn's scope. It is not a repeat of this turn, and its
-        # claims are not this caller's to reinforce.
-        if stored is not None and stored.scope == ep.scope:
-            found.append(stored)
-        return max(found, key=lambda o: o.ts, default=None)
+        # The stored copy first and then the batch's in order, which is the order they
+        # are written in. So of two copies with one time, the one written last is taken,
+        # as `SQLiteStore` breaks the tie on rowid.
+        #
+        # Only a copy in this turn's scope. The hash covers the scope, but a turn stored
+        # under '*' or '' before those scope values were refused was hashed with the key
+        # of the scope above it, so it can share this turn's hash without being in this
+        # turn's scope. It is not a repeat of this turn, and its claims are not this
+        # caller's to reinforce. And only a copy dated at or before the turn: a store
+        # predating `at` returns any copy, and one that accepts `at` through `**kwargs`
+        # may ignore it.
+        found: Episode | None = None
+        for copy in ([stored] if stored is not None else []) + list(batch):
+            if (copy.scope == ep.scope and copy.ts <= ep.ts
+                    and (found is None or copy.ts >= found.ts)):
+                found = copy
+        return found
 
     @staticmethod
     def _ended_by(claims: Sequence[Claim], at: datetime, now: datetime) -> bool:
@@ -845,8 +859,8 @@ class WritePipeline:
         A claim that begins after `at` has not ended, so a retry of a turn about a future
         date converges too.
         """
-        believed = [c for c in claims
-                    if c.invalidated_at is None or c.invalidated_at > now]
+        believed = [c for c in claims if c.recorded_at <= now
+                    and (c.invalidated_at is None or c.invalidated_at > now)]
         return bool(believed) and all(
             c.valid_to is not None and c.valid_to <= at for c in believed)
 

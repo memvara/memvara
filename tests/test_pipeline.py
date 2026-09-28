@@ -644,7 +644,8 @@ def test_a_batch_holding_a_turn_and_an_earlier_copy_stores_both():
     """The batch remembers every copy it kept, and a copy dated after a turn is not one
     that turn repeats. A third copy dated between them repeats the earlier one."""
     pipe, store, _ = build()
-    later, earlier = ep("I live in Berlin.", ts=T0 + 2 * DAY), ep("I live in Berlin.", ts=T0)
+    later = ep("I live in Berlin.", ts=T0 + 2 * DAY)
+    earlier = ep("I live in Berlin.", ts=T0)
     between = ep("I live in Berlin.", ts=T0 + DAY)
 
     receipt = pipe.add([later, earlier, between])
@@ -685,6 +686,69 @@ def test_a_store_without_the_time_argument_still_finds_repeats():
     inner.close()
 
 
+class StoreIgnoringTime(StoreBeforeHashTime):
+    """A `Store` whose `find_episode_by_hash` accepts `at` through `**kwargs` and ignores
+    it, so it can return a turn dated after the one being written."""
+
+    def find_episode_by_hash(self, tenant: str, ep_hash: str, **kwargs: Any):
+        return self._inner.find_episode_by_hash(tenant, ep_hash)
+
+
+def test_a_copy_dated_after_the_turn_is_ignored_when_the_store_ignores_the_time():
+    """The write path passes `at` to a lookup that takes `**kwargs`, and still discards a
+    copy dated after the turn, because such a store may not apply `at`."""
+    inner = SQLiteStore(":memory:")
+    pipe = WritePipeline(StoreIgnoringTime(inner), HashingEmbedder(), PredicateRegistry(),
+                         CountingLLM())
+    first = pipe.add([ep("I live in Berlin.", ts=T0 + 30 * DAY)])
+
+    earlier = pipe.add([ep("I live in Berlin.", ts=T0)])
+
+    assert earlier.episode_ids != first.episode_ids and earlier.skipped == 0
+    assert inner.stats()["episodes"] == 2
+    inner.close()
+
+
+class StoreWithBrokenLookup(StoreBeforeHashTime):
+    """A `Store` that takes `at` and whose lookup fails with a `TypeError` of its own
+    when it is given one."""
+
+    def find_episode_by_hash(self, tenant: str, ep_hash: str, *, at=None):
+        if at is not None:
+            raise TypeError("the lookup itself is broken")
+        return self._inner.find_episode_by_hash(tenant, ep_hash)
+
+
+def test_a_type_error_inside_the_lookup_reaches_the_caller():
+    """Whether the lookup takes `at` is read from its signature, once. A `TypeError`
+    the lookup raises is a fault in the store, and is not taken for a missing argument
+    and retried without the time."""
+    inner = SQLiteStore(":memory:")
+    pipe = WritePipeline(StoreWithBrokenLookup(inner), HashingEmbedder(),
+                         PredicateRegistry(), CountingLLM())
+
+    with pytest.raises(TypeError, match="the lookup itself is broken"):
+        pipe.add([ep("I live in Berlin.", ts=T0)])
+    inner.close()
+
+
+def test_the_earlier_copy_is_the_latest_in_the_turns_scope_with_ties_to_the_last_stored():
+    """Among the copies dated at or before the turn: only those in the turn's scope, and
+    of two with one time, the one stored last. The batch's copies are stored after the
+    store's, in batch order, which is what SQLite's `ORDER BY ts DESC, rowid DESC` would
+    pick once they were written."""
+    pipe, store, _ = build()
+    stored = ep("I live in Berlin.", ts=T0)
+    store.add_episode(stored)
+    first, second = ep("I live in Berlin.", ts=T0), ep("I live in Berlin.", ts=T0)
+    elsewhere = ep("I live in Berlin.", ts=T0 + DAY, scope=Scope("acme", "bob"))
+    turn = ep("I live in Berlin.", ts=T0 + 2 * DAY)
+
+    assert pipe._earlier_occurrence(turn, [first, second, elsewhere]) is second
+    assert pipe._earlier_occurrence(turn, []).id == stored.id
+    store.close()
+
+
 def test_whether_a_repeat_restates_an_ended_value():
     """`_ended_by` decides it from the claims the earlier turn produced."""
     at = T0 + 10 * DAY
@@ -703,6 +767,8 @@ def test_whether_a_repeat_restates_an_ended_value():
     assert not ended_by([later], at, now), "a claim that begins later has not ended"
     assert not ended_by([retired], at, now), "nothing believed: a repeat, as before"
     assert not ended_by([], at, now), "a turn nothing was extracted from is a repeat"
+    unrecorded = replace(ended, recorded_at=now + DAY)
+    assert not ended_by([unrecorded], at, now), "a claim recorded after now is not believed"
 
 
 def test_a_near_duplicate_dated_before_the_claim_is_kept_for_the_earlier_period():
