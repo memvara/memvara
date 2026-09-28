@@ -18,6 +18,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   repeats=N` to `~/.memvara/.hooks/recall.log`, the same shape as the line a recall that
   injected something writes. When nothing new matched but the standing preferences
   changed, the line adds what was injected: `injected=<N>c standing=updated`. #338 (B56).
+- **A hook answers a payload nested too deeply to decode as it answers an empty one.**
+  `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
+  Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
+  such as `{"prompt": [[[...]]]}` 100,000 levels deep crashed the body of every hook.
+  The exit code stayed 0, but the hook printed nothing: session start gave the model no
+  memories and showed no status line. The only trace was a `failed hook=... RecursionError`
+  line in `~/.memvara/.hooks/hooks.log`. `payload()` in `plugin/hooks/lib/ipc.py` and
+  `read_event()` in `plugin/hooks/core/envelope.py` now read such a payload as an empty
+  one. #346 (B64).
+- **`memory_recall` refuses `ranked` without conversation turns as an argument error.**
+  `ranked=true` needs turns to rank, so it takes `include_episodes=true` and no
+  `memory_types`. The library refused the other combinations with a `ValueError`, which
+  reached the model through the server's catch-all as `memory_recall failed: ValueError:
+  ...`, a Python exception rather than a mistake in its arguments. The tool now refuses
+  them itself, before the store is asked, with a message that says which argument to
+  change. #316 (B39).
 - **`memory_add` no longer says a stored turn was not stored.** When extraction
   recognised no fact in a turn, the note said the turn "carried something extraction did
   not recognise and [was] not stored", right after the reply gave the turn's id.

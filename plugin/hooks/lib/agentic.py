@@ -473,7 +473,9 @@ class _Watch:
         try:
             # A line that starts with "{" and parses is an object, so no type check.
             event = json.loads(line)
-        except ValueError:
+        # RecursionError: nesting deeper than the recursion limit, which is not a
+        # ValueError and is just as unreadable (#346).
+        except (ValueError, RecursionError):
             return False
         kind = event.get("type")
         if kind == "system" and event.get("subtype") == "init":
@@ -652,7 +654,7 @@ def _proposals(reply: str) -> "list | None":
         return None
     try:
         body = json.loads(raw[start:end + 1])
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     found = body.get("proposals") if isinstance(body, dict) else None
     return found if isinstance(found, list) else None

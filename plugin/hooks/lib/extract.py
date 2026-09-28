@@ -324,7 +324,9 @@ def _decode(stdout: str) -> "dict | None":
     """
     try:
         body = json.loads(stdout)
-    except (ValueError, TypeError):
+    # RecursionError: nesting deeper than the recursion limit, which is not a ValueError
+    # and is just as unreadable (#346).
+    except (ValueError, TypeError, RecursionError):
         return None
     return body if isinstance(body, dict) else None
 
@@ -455,7 +457,7 @@ def _stream(proc: "subprocess.CompletedProcess", spec: "ExtractorSpec",
             continue
         try:
             event = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if not isinstance(event, dict):
             continue
@@ -605,7 +607,7 @@ def _facts(result: str) -> "list[dict]":
         return []
     try:
         body = json.loads(raw[start:end + 1])
-    except ValueError:
+    except (ValueError, RecursionError):
         return []
     facts = body.get("facts")
     return facts if isinstance(facts, list) else []

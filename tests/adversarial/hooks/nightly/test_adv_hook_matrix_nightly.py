@@ -3,7 +3,7 @@
 The fast tier sends its hostile payloads to three hosts (test_adv_hook_hostile.py). This
 sends them, and three more JSON values that are not objects, to every hook on all five.
 It also checks the reading hooks' outcomes on all five (test_adv_hook_outcomes.py checks
-two), and on all five it pins each known bug that those two modules pin on two.
+two), and on all five it runs the checks those two modules run on two.
 
 Each test body here is one call to a check or pin function in support.py, which the two
 fast modules call too, so the tiers check the same things and differ only in the hosts
@@ -13,8 +13,6 @@ and payloads they are parametrised with.
 from __future__ import annotations
 
 import pytest
-
-from harness import known_bugs
 
 from .. import support
 
@@ -70,15 +68,7 @@ def test_recall_that_could_not_ask_the_store_says_so_in_its_log(
     support.check_recall_says_it_could_not_ask(outcomes, host)
 
 
-# -- known bugs, on all five hosts -------------------------------------------------------
-
-@pytest.mark.parametrize("host, hook", [
-    (host, hook) for host, hook, _ in support.hostile_cases(support.HOSTS, [support.DEEP])])
-@known_bugs.xfail("B64")
-def test_a_deeply_nested_payload_is_answered_as_an_empty_one_is(
-        hostile: support.Hostile, host: str, hook: str) -> None:
-    support.pin_deep_nesting(hostile, host, hook)
-
+# -- the outcome pairs the fast tier found, on all five hosts ------------------------------
 
 @pytest.mark.parametrize("host, hook", [
     (host, hook) for host, hook, _ in support.outcome_cases(support.HOSTS,
