@@ -52,7 +52,8 @@ RUNTIME_DIR = os.path.join(_HOME, ".memvara", ".hooks", "run")
 #: Files whose contents decide what a daemon actually does. A change to any of them must
 #: strand the old daemon rather than let it keep serving.
 CODE_FILES = ("daemon.py", "lib/ipc.py", "lib/open.py", "lib/private.py", "recall.py",
-              "run.py", "core/host.py", "core/envelope.py", "hosts/claude.py")
+              "run.py", "core/host.py", "core/envelope.py", "hosts/claude.py",
+              "lib/toml_servers.py")
 
 #: Set in the environment of the `claude -p` child that `capture.py` spawns to mine a turn.
 #: A hook that finds it is running underneath an extraction rather than in front of a
@@ -463,23 +464,48 @@ def server_env() -> "dict[str, str]":
 _SERVER_ENV: "tuple[tuple[str, ...], dict[str, str]] | None" = None
 
 
+#: Where each client keeps its MCP servers inside its config, and what it calls the
+#: variables a server starts with: `mcpServers`/`env` for Claude Code, Copilot and Cursor,
+#: `mcp_servers`/`env` in Codex's TOML, and `mcp`/`environment` for OpenCode (#341).
+_SERVER_SHAPES = (("mcpServers", "env"), ("mcp_servers", "env"), ("mcp", "environment"))
+
+
+def _read_config(path: str) -> "dict | None":
+    """One client config file as a dict: TOML for a `.toml` file, which is Codex's, and
+    JSON for the rest. None when it cannot be read."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, ValueError):
+        return None
+    if path.endswith(".toml"):
+        from . import toml_servers  # noqa: PLC0415 -- only Codex's hooks reach it
+
+        data = toml_servers.read(text)
+    else:
+        try:
+            data = json.loads(text)
+        except (ValueError, RecursionError):
+            return None
+    return data if isinstance(data, dict) else None
+
+
 def _read_server_env() -> "dict[str, str]":
     """The client config files' memvara env block, read from disk. See `server_env`."""
     for path in _CLIENT_CONFIGS:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
+        data = _read_config(path)
+        if data is None:
             continue
-        servers = data.get("mcpServers")
-        if not isinstance(servers, dict):
-            continue
-        for name, block in servers.items():
-            if "memvara" not in name.lower() or not isinstance(block, dict):
+        for servers_key, env_key in _SERVER_SHAPES:
+            servers = data.get(servers_key)
+            if not isinstance(servers, dict):
                 continue
-            env = block.get("env")
-            if isinstance(env, dict):
-                return {str(k): str(v) for k, v in env.items()}
+            for name, block in servers.items():
+                if "memvara" not in name.lower() or not isinstance(block, dict):
+                    continue
+                env = block.get(env_key)
+                if isinstance(env, dict):
+                    return {str(k): str(v) for k, v in env.items()}
     return {}
 
 
