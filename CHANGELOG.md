@@ -18,6 +18,23 @@ refuses a store this one has opened.
 
 ### Added
 
+- **The benchmark readers take `--timeout SECONDS`.** It sets how long the Anthropic or
+  OpenAI client waits for one request; without it the client library's default applies.
+  The report header prints it. It is not part of the checkpoint key, so a rerun with a
+  longer timeout replays the answers it already has. It is shared by `demo/harness.py` and
+  the `bench/` runners.
+- **A hosted demo run can write its scopes now and read them a day later.**
+  `demo/harness.py --memory hosted --write-only` writes every scope the two memvara arms
+  read, records each in the run's manifest, and exits without building a reader. A later
+  run with the same `--hosted-run-id` reads them. The hosted service extracts claims in the
+  background and does not say when it has finished, and a run that read its scopes
+  straight away on 2026-09-23 found no claims in them.
+- **The answer-quality demo has recorded runs with a model as the reader.** Three runs
+  from 2026-09-28 are in `demo/runs/`, with Qwen3.8-27B as reader and judge, at both corpus
+  sizes, against the hosted service. `memvara_structured` scored 80% at scale 1 and 75% at
+  scale 10, where `naive_rag` fell from 75% to 35%. The plain `memvara` arm's rows are not
+  a result, because its hosted scopes held almost no extracted claims when they were read.
+  `demo/README.md` and `docs/BENCHMARKS.md` have the tables and what they do not show.
 - **`bench/mutation.py` measures how many deliberate bugs in a module the tests catch.**
   It runs mutmut 3.8.0 in a throwaway clone of the checkout, selects the tests that import
   the module or a public name it defines, and reports a score per module with the diff of
@@ -214,6 +231,19 @@ refuses a store this one has opened.
   see, deciding `Scope.sees` once per distinct scope. `why()` uses it on a claim's source
   turns, which keeps `why()` on a claim citing 365 turns at 1.7 ms instead of the 6.1 ms a
   per-turn check cost.
+
+### Changed
+
+- **A hosted demo read refuses scopes younger than `--min-scope-age` hours, 24 by
+  default.** It also refuses a scope the write step never finished, instead of writing it
+  and reading it at once. The report prints each scope's age and claim count at read time,
+  and says the wait is a fixed delay, not a confirmation that extraction finished. Pass
+  `--min-scope-age 0` for the old one-step run. The write step records the minimum age it
+  used, and a read asking for less is refused unless it passes `--override-min-scope-age`.
+- **A hosted demo report flags a plain `memvara` scope the service barely extracted
+  from.** When such a scope holds fewer claims than half the facts its structured sibling
+  was given, the report names it in a warning and marks the `memvara` arm's rows
+  `[NOT A RESULT]` in every results table.
 
 ### Fixed
 

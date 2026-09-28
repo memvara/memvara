@@ -1,11 +1,59 @@
 # Recorded runs
 
-One run, kept so the numbers quoted elsewhere can be **audited** rather than believed.
+The runs whose numbers are quoted in `demo/README.md` and `docs/BENCHMARKS.md`, kept so
+those numbers can be **audited** rather than believed.
 
-It cannot be reproduced — see below — so the artefacts are the only evidence there is.
-That is a reason to keep them, not a reason to trust the run more than it deserves.
+## `2026-09-25w`: a model as the reader, at both corpus sizes
+
+Three runs over hosted run `2026-09-25w`. Its scopes were written on 2026-09-25 by
+`--write-only` and read on 2026-09-28, 62.7 to 62.9 hours later.
+
+| file | what |
+|---|---|
+| `2026-09-25w.hosted.jsonl` | the manifest: every scope, its turn and fact counts, and when its write started and finished |
+| `2026-09-25w-qwen3.8-x1.scored.jsonl` | scale 1: 100 rows, one per question and arm, with `answer`, `correct`, `trapped`, `closure` and `stop_reason` |
+| `2026-09-25w-qwen3.8-x1.checkpoint.jsonl` | scale 1: every reader and judge call, 207 rows |
+| `2026-09-25w-qwen3.8-x1-repeat.*` | the same run again over the same scopes, with its own checkpoint, for the noise floor |
+| `2026-09-25w-qwen3.8-x10.scored.jsonl` | scale 10 (`--corpus-scale 10`): 100 rows |
+| `2026-09-25w-qwen3.8-x10.checkpoint.jsonl` | scale 10: every call, 199 rows |
+
+Every pinned setting, as the report header printed it, for the reader and the judge alike:
+
+* model `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_S`, served by llama.cpp on a private machine
+  (`--base-url` pointed at it; the address is not recorded here)
+* `--max-tokens 512`, `--temperature 0`, `--sampling-seed 7`
+* `--extra-body '{"chat_template_kwargs": {"enable_thinking": false}}'`
+* `--timeout 1800`, `--concurrency 1`, `--judge llm` (the reader's twin, same model)
+* `--memory hosted --hosted-run-id 2026-09-25w`, `--min-scope-age` left at 24 hours
+* scale 1 and scale 10 with `--corpus-scale`; the questions, golds and traps are the same
+
+The command, less the paths:
+
+```bash
+PYTHONPATH=. python3 demo/harness.py --reader openai \
+    --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_S --max-tokens 512 --temperature 0 \
+    --sampling-seed 7 --base-url http://HOST:8888/v1 --api-key-file KEYFILE \
+    --extra-body '{"chat_template_kwargs": {"enable_thinking": false}}' \
+    --timeout 1800 --concurrency 1 --judge llm --corpus-scale 1 \
+    --memory hosted --hosted-credentials CREDS --hosted-run-id 2026-09-25w \
+    --checkpoint demo/runs/2026-09-25w-qwen3.8-x1.checkpoint.jsonl \
+    --out demo/runs/2026-09-25w-qwen3.8-x1.scored.jsonl
+```
+
+**The plain `memvara` arm's rows are not a result.** Its scopes held 2 to 10 live claims
+when they were read, and none was about a fact a question asks. `demo/README.md` says why.
+
+**The runs can be repeated only while the hosted scopes exist, and only as they are
+then.** Rerunning a command above with its checkpoint replays every call whose prompt is
+unchanged. The two memvara arms read their scopes again, though, so if the service's
+background worker has added claims since 2026-09-28, those prompts change and are sent to
+the reader again. A run over new scopes will differ for the same reason.
 
 ## `2026-08-13-agent-reader`
+
+The first run. It cannot be reproduced, as explained below, so these files are the only
+evidence there is. That is a reason to keep them, not a reason to trust the run more than
+it deserves.
 
 | file | what |
 |---|---|
