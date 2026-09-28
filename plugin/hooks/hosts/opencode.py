@@ -130,9 +130,11 @@ HOST = Host(
     approve=ApproveSpec(
         matcher="memvara",
         #: Only the Claude Code spelling, which is the one form this hook approved here
-        #: before approval was pinned to a prefix. How this host spells an MCP tool's name
-        #: in this event has not been measured, so a tool arriving in any other form is
-        #: asked about rather than approved on a guess.
+        #: before approval was pinned to a prefix. Measured on opencode 1.18.20 (#340): a
+        #: tool arrives as `memvara_memory_search`, and a `memvara_` prefix would approve a
+        #: tool of any server whose name starts with it. permission.ask never fired in a
+        #: headless run, so its input is still unmeasured. A memvara read still prompts
+        #: here, until that is measured in an interactive session.
         prefixes=("mcp__memvara__",),
         decision_key="status",
         reason_key="reason",
