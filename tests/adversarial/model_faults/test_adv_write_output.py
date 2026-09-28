@@ -183,6 +183,18 @@ def test_an_object_that_is_a_number_is_stored_as_its_text(scripted: Make) -> Non
     assert model_claims(mem) == ["42"]
 
 
+def test_a_subject_that_is_a_number_is_stored_as_its_text(scripted: Make) -> None:
+    """A subject is kept when it is text or a finite number, as an object is, and stored
+    as its text. The old path stringified it, and dropping it would lose a claim that is
+    not malformed, only untyped."""
+    model = scripted(extract=[[claim(42, "zqx_room_label", "Porto", confidence=0.9)]],
+                     resolve=[Forever(NEW_MANY)])
+    mem = with_model(model)
+    mem.add("Room 42 is the Porto room.")
+    assert [(c.subject, c.object) for c in mem.get_all()
+            if c.predicate == "zqx_room_label"] == [("42", "Porto")]
+
+
 def test_a_predicate_that_normalizes_to_nothing_is_dropped(scripted: Make) -> None:
     model = scripted(extract=[[porto(predicate="!!!")]])
     mem, before, receipt = write(model)

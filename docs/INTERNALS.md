@@ -975,8 +975,10 @@ suggestion must not turn it into an exception the caller retries.
   far under the floor), so `"auto"` degrades to the strict check there.
 - **The order the model's items are checked in.** `_admissible` runs first, on the raw
   reply: it drops a reply that is not a list, an item that is not an object, an item with
-  no `source_index` naming one of the batch's turns, and an item whose subject or
-  predicate is not text or whose object is not text or a finite number. A backend that
+  no `source_index` naming one of the batch's turns, an item whose predicate is not text,
+  and an item whose subject or object is not text or a finite number. With
+  `extraction_chunks`, `_mapped` maps each piece's reply back to the batch first, and it
+  drops a reply that is not a list and an item that is not an object itself. A backend that
   validates its own output never sends these, but one that does not may, and everything
   after this reads the items as well formed (#303, #306). Then the pollution guard, the
   closed vocabulary, `_grounded` (the check above), predicate acquisition, and last

@@ -132,6 +132,14 @@ def _content_words(text: str) -> list[str]:
             if w not in _GROUNDING_STOPWORDS and len(w) > 1]
 
 
+def _text_or_number(value: Any) -> bool:
+    """Whether `value` is non-empty text or a finite number, not a boolean."""
+    if isinstance(value, str):
+        return bool(value.strip())
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and _finite(value) is not None)
+
+
 def _finite(value: Any) -> float | None:
     """`value` as a finite float, or None when it is not a number or is not finite."""
     try:
@@ -1196,9 +1204,10 @@ class WritePipeline:
         - an item that is not an object;
         - an item with no `source_index` naming one of `episodes`, because a claim with
           no source turn has no provenance;
-        - an item whose subject or predicate is not non-empty text, or whose object is
-          not non-empty text or a finite number. A claim with no subject is not filed
-          under the user, and an object that is a list is not stored as its Python text;
+        - an item whose predicate is not non-empty text, or whose subject or object is
+          not non-empty text or a finite number, which is stored as its text. A claim
+          with no subject is not filed under the user, and an object that is a list is
+          not stored as its Python text;
         A polarity or a confidence that cannot be read is not a reason to drop:
         `_claim_from_dict` reads a polarity that is not a number, or not finite, as an
         assertion, and such a confidence as the default.
@@ -1213,13 +1222,11 @@ class WritePipeline:
             if not isinstance(idx, int) or isinstance(idx, bool) \
                     or not 0 <= idx < len(episodes):
                 continue
-            subject, predicate, obj = (item.get(k) for k in ("subject", "predicate", "object"))
-            if not (isinstance(subject, str) and subject.strip()
-                    and isinstance(predicate, str) and predicate.strip()):
+            predicate = item.get("predicate")
+            if not (isinstance(predicate, str) and predicate.strip()):
                 continue
-            if isinstance(obj, bool) or not (
-                    (isinstance(obj, str) and obj.strip())
-                    or (isinstance(obj, (int, float)) and _finite(obj) is not None)):
+            if not (_text_or_number(item.get("subject"))
+                    and _text_or_number(item.get("object"))):
                 continue
             kept.append(item)
         return kept
@@ -1666,17 +1673,23 @@ class WritePipeline:
                     )
 
 
-def _mapped(raw: Sequence[dict[str, Any]],
-            positions: Sequence[int]) -> list[dict[str, Any]]:
+def _mapped(raw: Any, positions: Sequence[int]) -> list[dict[str, Any]]:
     """Copies of one call's claim dicts, with `source_index` pointing into the batch.
 
     A call is shown only some of the batch's turns, so the model's `source_index` counts
     within the call. `positions` maps it back. An index that names no turn in the call is
-    replaced by `None`, which `_claim_from_dict` drops as having no source, rather than
-    left as a number that would now name a different turn of the batch.
+    replaced by `None`, which `_admissible` drops as having no source, rather than left
+    as a number that would now name a different turn of the batch.
+
+    This reads each item before `_admissible` does, so it drops what `_admissible` would:
+    a reply that is not a list, and an item that is not an object (#303).
     """
+    if not isinstance(raw, list):
+        return []
     out = []
     for item in raw:
+        if not isinstance(item, dict):
+            continue
         idx = item.get("source_index")
         mapped = None
         if (isinstance(idx, int) and not isinstance(idx, bool)
