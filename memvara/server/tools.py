@@ -1384,14 +1384,20 @@ def _may_replace_note(claims: Sequence[Claim]) -> str:
 
 
 def _unextracted_note(ctx: ToolContext, count: int) -> str:
-    """Say when content was accepted and then quietly not stored.
+    """Say when a turn was stored and no fact was extracted from it.
 
     This is the failure the library warns about at construction, arriving through a
-    transport where nobody reads the process's stderr. Without it a write that stored
-    nothing reports a clean success, and the agent goes on believing it remembered.
+    transport where nobody reads the process's stderr. Without it a write that stored no
+    fact reports a clean success, and the agent goes on believing it remembered the fact.
+
+    The turn itself is stored: turns commit before extraction runs (`WritePipeline`), and
+    `memory_recall` with `include_episodes` finds it. The note used to say the turn was
+    not stored, which could lead an agent to send it again or to tell the user nothing
+    was saved (#353).
     """
-    note = (f"note: {count} turn(s) carried something extraction did not recognise and "
-            f"were not stored (extractor: {ctx.extractor}).")
+    note = (f"note: {count} turn(s) were stored, but extraction recognised no fact in "
+            f"them, so no fact was stored (extractor: {ctx.extractor}). memory_recall "
+            f"with include_episodes=true still finds the turn.")
     if ctx.extractor == "fast-path-only":
         note += (
             " This server has no extraction model, so only a fixed set of sentence forms "
@@ -1433,7 +1439,7 @@ def _accumulated_note(items: Sequence[Accumulation]) -> str:
     """Say when a write added a value beside one that is still answering.
 
     The sibling of `_unextracted_note`, and the same failure shape one step further in:
-    there, content was accepted and quietly not stored; here, a value was stored and the
+    there, a turn was stored and quietly yielded no fact; here, a value was stored and the
     value it was probably meant to replace quietly stayed live. Both report a clean
     success on this transport — `added 1, ended 0` is exactly what a correct replacement
     returns — and neither has any other symptom until a later `memory_recall` answers the
