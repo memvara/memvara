@@ -25,6 +25,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   from memvara's hybrid retrieval; they are now returned in order of that similarity, and
   `min_score` is compared with it. `docs/UPGRADING.md` covers a direct caller of
   `search()`. #364 (B85).
+- **The hosted client reads the lists a write receipt fills to say what the write did.**
+  `accumulated`, `disputed`, `collapsed`, `retyped`, `agentic_fallback` and
+  `proposals_refused` were never read from a hosted receipt, so a write through
+  `RemoteMemvara` reported them empty, and a server in cloud mode left out the notes
+  `memory_remember` writes from them: a value added beside live ones, a weaker value
+  stored beside a stronger one, a value closed at the instant it began, and a fact
+  re-filed under another memory type. `hydrate.receipt` now reads each one, and a
+  deployment that does not send one still hydrates, with it empty. The hosted service
+  itself does not send them yet; until memvara-cloud's renderer does, a hosted receipt
+  still reports them empty. #334 (B52), this repository's half.
 - **A write receipt read through the hosted client reports `ungrounded` and `polluted`.**
   The deployment sends both counts, and `RemoteMemvara` never read them, so a hosted
   receipt always said 0: a caller could not tell that the write refused claims an
