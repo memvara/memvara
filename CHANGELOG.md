@@ -17,6 +17,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   extraction model proposed, and a server in cloud mode never wrote the note about
   ungrounded claims. Both are read now, and a deployment that does not send them still
   hydrates, with 0. #335 (B53).
+- **Malformed output from an extraction model is dropped, not raised on.** A backend that
+  does no validation of its own could return an item that is not an object, a
+  `source_index` that is a list, an infinite polarity, a confidence of `10**400`, or a
+  reply that is not a list at all. `add()` raised on each, and the fast path's facts from
+  the same call were lost with it. The write path now drops such an item, or the whole
+  reply when it is not a list, before anything else reads it, and returns a receipt. This
+  holds when `extraction_chunks` cuts a long turn into pieces, too. #303.
+- **A claim with no subject, or with an object that is not text, is dropped.** One with no
+  subject used to be filed under `user`, where it could end the user's own value, and an
+  object that was a list was stored as its Python text, such as `['Porto']`. A subject
+  or an object that is a finite number is still stored as its text. #306.
+- **A claim dropped as ungrounded costs no model call and teaches no predicate.** The
+  grounding check now runs before a new predicate is acquired, so a dropped claim no
+  longer spends an acquisition call or takes one of the 200 learned-predicate slots.
+  #305.
+- **A confidence that is not a finite number is read as the default, 0.7.** NaN used to be
+  read as 0.0, a guess that could displace nothing, and infinity as 1.0.
 - **An open that refuses a store's embedder leaves an older store file as it was.**
   `SQLiteStore` upgrades a file an older version wrote as it opens it, and commits the
   upgrade; `Memvara` then checked its embedder and refused one of another width. So the

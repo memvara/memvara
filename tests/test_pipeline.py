@@ -688,9 +688,11 @@ def test_novel_predicate_is_classified_exactly_once():
     llm = CountingLLM(responder=responder)
     pipe, store, registry = build(llm)
 
+    # Each turn names its object, so neither claim is dropped as ungrounded before its
+    # predicate is acquired (#305).
     receipt = pipe.add([
-        ep("Been hunting down rare pressings at the market again."),
-        ep("Picked up a whole album of pre-war postage at the fair."),
+        ep("Been hunting down vinyl records at the market again."),
+        ep("Picked up a whole album of vintage stamps at the fair."),
     ])
 
     # Two claims, one novel predicate, one classification. The Nth occurrence is free
@@ -711,9 +713,9 @@ def test_a_learned_predicate_is_never_classified_again():
     llm = CountingLLM(responder=responder)
     pipe, store, _ = build(llm)
 
-    for text in ["Been hunting rare pressings again.",
-                 "Found another crate at the flea market.",
-                 "Picked up two more at the fair today."]:
+    for text in ["Been hunting rare vinyl pressings again.",
+                 "Found another crate of vinyl at the flea market.",
+                 "Picked up two more vinyl records at the fair today."]:
         pipe.add([ep(text)])
 
     assert llm.extract_calls == 3          # extraction still runs per batch
@@ -1148,9 +1150,9 @@ def test_the_learned_cap_folds_instead_of_growing_the_schema():
     store = SQLiteStore(":memory:")
     registry = PredicateRegistry(max_learned=1)
     pipe = WritePipeline(store, HashingEmbedder(), registry, llm)
-    for text in ["Payroll switched over to the new provider this quarter.",
-                 "Payroll moved again after the acquisition closed.",
-                 "Payroll changed hands a third time in the autumn."]:
+    for text in ["Payroll switched over from Acme to the new provider this quarter.",
+                 "Payroll moved again after Acme's acquisition closed.",
+                 "Payroll changed hands a third time since Acme, in the autumn."]:
         pipe.add([ep(text)])
 
     assert len([s for s in registry.all_specs() if s.learned]) == 1
@@ -1985,7 +1987,7 @@ def test_novel_predicate_registrations_are_counted():
          "source_index": 0},
     ], canonical=None)
     pipe, store, _ = build(llm, telemetry=rec)
-    pipe.add([ep("I get around town somehow or other.")])
+    pipe.add([ep("I get around town by bicycle somehow or other.")])
     assert rec.total(PREDICATE_LEARNED) == 1
     assert rec.total(PREDICATE_ALIAS) == 0
     store.close()
@@ -2003,7 +2005,7 @@ def test_a_folded_surface_form_is_counted_as_an_alias_not_a_registration():
          "source_index": 0},
     ], canonical="works_at")
     pipe, store, _ = build(llm, telemetry=rec)
-    pipe.add([ep("Payroll switched over to the new provider this quarter.")])
+    pipe.add([ep("Payroll switched over from Acme to the new provider this quarter.")])
     assert rec.total(PREDICATE_ALIAS) == 1
     assert rec.total(PREDICATE_LEARNED) == 0
     store.close()
@@ -2025,8 +2027,8 @@ def test_the_registry_cap_firing_is_counted_and_says_whether_it_folded():
     registry = PredicateRegistry(max_learned=0)
     pipe = WritePipeline(store, HashingEmbedder(), registry,
                          ResolvingLLM(responder=responder), telemetry=rec)
-    pipe.add([ep("Payroll switched over to the new provider this quarter.")])
-    pipe.add([ep("Payroll moved again after the acquisition closed.")])
+    pipe.add([ep("Payroll switched over from Acme to the new provider this quarter.")])
+    pipe.add([ep("Payroll moved again after Acme's acquisition closed.")])
     assert rec.total(PREDICATE_CAPPED, folded="yes") == 1
     assert rec.total(PREDICATE_CAPPED, folded="no") == 1
     store.close()

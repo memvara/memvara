@@ -151,7 +151,7 @@ def guard(raw: Sequence[dict[str, Any]], registry: PredicateRegistry,
             if novel or risky_slot:
                 try:
                     confidence = float(item.get("confidence", 0.7))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     confidence = 0.7
                 if confidence > DISCOUNTED_CONFIDENCE:
                     item = {**item, "confidence": DISCOUNTED_CONFIDENCE}
