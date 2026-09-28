@@ -231,6 +231,10 @@ def receipt(body: dict[str, Any]) -> WriteReceipt:
         # `.get` for the same reason: a deployment older than memvara 0.14.0 sends no
         # such key, and 0 is what an absent count means.
         unregistered=int(body.get("unregistered", 0)),
+        # The deployment sends both, and they were never read, so a hosted receipt said
+        # 0 whatever it counted (#335). `.get` for a deployment that does not send them.
+        ungrounded=int(body.get("ungrounded", 0)),
+        polluted=int(body.get("polluted", 0)),
     )
 
 
