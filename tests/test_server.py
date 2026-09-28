@@ -1763,8 +1763,8 @@ def test_stats_on_an_empty_store_says_so_instead_of_dividing_by_zero(server):
 def test_add_reports_what_the_write_actually_did(server):
     text(server, "memory_add", {"text": "I live in Berlin"})
     body = text(server, "memory_add", {"text": "I live in Lisbon"})
-    assert body.startswith("added 1, ended 1, retired 0, already-known 0, no-fact 0 "
-                           "(0 model call(s))")
+    assert body.startswith("added 1, ended 1, retired 0, already-known 0, repeated 0, "
+                           "no-fact 0 (0 model call(s))")
     assert "+ [cl_" in body and "- [cl_" in body
 
 
@@ -1814,6 +1814,23 @@ def test_a_retirement_is_still_reported_as_one(server):
 
     assert lines[0].startswith("added 0, ended 0, retired 1, ")
     assert lines[1].startswith(f"- [{misheard.id} retired ")
+
+
+def test_the_summary_counts_repeated_turns_apart_from_turns_with_no_fact(server):
+    """#439. The line said `no-fact N` for every turn tier 0 recognised as a repeat, so a
+    turn that restated a stored fact read as a turn that carried none. The two counts are
+    shown side by side, always, for the reason `_receipt_summary` gives for `ended` and
+    `retired`."""
+    from memvara.server.tools import _receipt_summary
+    from memvara.types import WriteReceipt
+
+    text(server, "memory_add", {"text": "I live in Berlin"})
+    body = text(server, "memory_add", {"text": "I live in Berlin"})
+    assert body.startswith("added 0, ended 0, retired 0, already-known 1, repeated 1, "
+                           "no-fact 0 (0 model call(s))")
+
+    lines = _receipt_summary(server._ctx, WriteReceipt(skipped=1, repeated=2))
+    assert lines[0].endswith("repeated 2, no-fact 1 (0 model call(s))")
 
 
 def test_add_accepts_an_assistant_turn(server):

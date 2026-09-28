@@ -3869,7 +3869,7 @@ class TestProceduralIsForTheUserOnly:
 
             again = mem.add(turn)
 
-            assert again.skipped == 1 and not again.added, "the repeat was recognised"
+            assert again.repeated == 1 and not again.added, "the repeat was recognised"
             assert [c.id for c in again.reinforced] == [legacy.id]
             assert [(r.claim_id, r.reason) for r in again.retyped] == [
                 (legacy.id, "subject")]

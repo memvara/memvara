@@ -29,7 +29,7 @@ def test_moving_back_in_the_same_words_makes_the_old_city_current_again() -> Non
     mem.add("I moved to Paris.", ts=T0 + DAY)
     again = mem.add("I live in Berlin.", ts=T0 + 2 * DAY)
     live = [claim.object for claim in mem.get_all() if claim.predicate == "lives_in"]
-    if (live == ["Paris"] and again.skipped == 1 and not again.added
+    if (live == ["Paris"] and again.repeated == 1 and not again.added
             and again.episode_ids == first.episode_ids):
         raise known_bugs.Reproduced("B50: the repeated turn was skipped and Paris stayed "
                                     "current")
@@ -43,7 +43,7 @@ def test_liking_again_in_the_same_words_after_taking_it_back_is_kept() -> None:
     mem.add("I no longer like vasnu.", ts=T0 + DAY)
     again = mem.add("I like vasnu.", ts=T0 + 2 * DAY)
     live = [claim.object for claim in mem.get_all() if claim.predicate == "likes"]
-    if (live == [] and again.skipped == 1 and not again.added
+    if (live == [] and again.repeated == 1 and not again.added
             and again.episode_ids == first.episode_ids):
         raise known_bugs.Reproduced("B50: the repeated like was skipped and nothing is live")
     assert live == ["vasnu"]

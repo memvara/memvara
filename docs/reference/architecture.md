@@ -46,7 +46,7 @@ flowchart TD
     T2["<b>Tier 2</b> — the only model call<br/>llm.extract(...), batched<br/>across the surviving turns"]
     REC["<b>Reconciler</b> — memvara/write/reconcile.py<br/><i>normalise predicate · fold entity ·<br/>look up (subject, predicate) · apply cardinality</i>"]
     ST[("Store")]
-    SKIP["counted on the receipt<br/><i>skipped · reinforced · unextracted</i>"]
+    SKIP["counted on the receipt<br/><i>repeated · skipped · reinforced · unextracted</i>"]
 
     E --> T0
     T0 -- "duplicate" --> SKIP

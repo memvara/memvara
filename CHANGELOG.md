@@ -29,6 +29,21 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   ended before this release stay ended; restate the value to restore it
   (`docs/UPGRADING.md`). `Store.occupied_slots` takes a keyword-only `scopes` argument, and
   a store that implements it must accept it. #266 (B2).
+- **The write receipt counts a repeated turn apart from a turn with no fact.**
+  `WriteReceipt.skipped` is documented as the turns that carried no durable fact, and the
+  MCP write summary showed it as `no-fact N`. But tier 0 also added to it for every turn
+  it recognised as a repeat: an exact repeat of a stored turn, and a turn worded like a
+  stored claim and dated at or after it begins. Those turns carry a fact that is already
+  stored, and the claims they restate are in `reinforced`, so a caller who wrote five
+  restatements read `no-fact 5`. A new field, `WriteReceipt.repeated`, counts those
+  turns, and `skipped` now counts only the turns the salience gate dropped. So
+  `skipped` is lower on any write that held a repeat, and `skipped + repeated` is the old
+  number. The summary line of `memory_add` and `memory_remember` reads
+  `..., already-known N, repeated N, no-fact N (N model call(s))`, and `str(receipt)`
+  adds `repeated=N` when it is not zero. The hosted client reads `repeated` from the
+  receipt a deployment sends, and reads 0 from a deployment that does not send it yet;
+  such a deployment still counts its repeats in `skipped` (`docs/UPGRADING.md`).
+  `bench/evalkit.py` reports the repeated turns on a row of their own. #439.
 
 ### Fixed
 

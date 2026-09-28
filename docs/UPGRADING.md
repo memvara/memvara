@@ -7,6 +7,40 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `receipt.skipped` no longer counts repeated turns
+
+### What changed
+
+`WriteReceipt.skipped` counted two kinds of turn together: turns the salience gate
+dropped because they carried no durable fact, and turns tier 0 recognised as a repeat of
+what is already stored. A repeat is an exact repeat of a stored turn, or a turn worded
+like a stored claim and dated at or after that claim begins. A repeat carries a fact, and
+the claims it restates are in `receipt.reinforced`.
+
+Repeats are now counted in a new field, `receipt.repeated`, and `skipped` counts only the
+turns with no fact (#439). On a write that held a repeat, `skipped` is lower than it was,
+and `skipped + repeated` is the number `skipped` used to report.
+
+The summary line that `memory_add` and `memory_remember` return shows both counts. It
+used to read `already-known N, no-fact N`, and it now reads
+`already-known N, repeated N, no-fact N`.
+
+### Who this changes
+
+**If you read `receipt.skipped` to count turns that were not extracted from**, add
+`receipt.repeated`. If you read it to count turns that carried nothing worth storing,
+it now means that, and you can drop any correction you made for repeats.
+
+**If you parse the MCP write summary**, the line has one more count, `repeated N`, between
+`already-known N` and `no-fact N`.
+
+**If you use the hosted client (`memvara.remote`)**, `repeated` comes from the receipt the
+deployment sends. A deployment that does not send it yet reports `repeated` as 0 and
+still counts its repeats in `skipped`, as before, because the client cannot split the
+number after the fact.
+
+Find your uses with `grep -rn "\.skipped\|no-fact" your_package/`.
+
 ## A turn said again after its value ended is stored and extracted again
 
 ### What changed
