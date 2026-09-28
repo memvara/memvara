@@ -92,7 +92,7 @@ from ..types import (CUSTOM_ID_CHARS, DOCUMENT_STATES, LINK_RELATIONS, REASON_CH
                      ForgetPreview, MemoryType, RecallResult, RefusedProposal, Retype, Row,
                      SearchResults, WriteReceipt, closure_reason, closure_reasons, utcnow)
 from .memory_api import MemoryAPI
-from .validate import ToolError, validate
+from .validate import ToolError, shown, validate
 
 __all__ = ["FEATURE_ARGUMENTS", "TOOLS", "Tool", "ToolContext", "ToolError",
            "anchoring_by_default", "for_a_hosted_deployment", "safe_detail", "safe_line",
@@ -192,9 +192,12 @@ def _timestamp(raw: str, label: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError as exc:
+        # The parser's own message quotes the whole value again ("Invalid isoformat
+        # string: '...'"), so that copy is replaced before the reason is quoted (#313).
+        reason = _clip(str(exc).replace(repr(text), "the value"), 120)
         raise ToolError(
             f"{label} must be an ISO-8601 timestamp such as '2024-06-01T10:00:00Z' or "
-            f"'2024-06-01', got {raw!r} ({exc})") from exc
+            f"'2024-06-01', got {shown(raw)} ({reason})") from exc
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
@@ -781,16 +784,20 @@ def _filter_refusal(tool: str, exc: FilterError) -> ToolError:
 # -- handlers ----------------------------------------------------------------
 
 def _no_match(query: str, day: str | None = None) -> str:
+    # The query is the caller's own text, so quoting it leaks nothing, but a query of any
+    # length would be copied whole into the model's context a second time (#313), so a
+    # long one is shortened the way a refusal shortens a value (`validate.shown`).
+    quoted = shown(safe_line(query))
     if day is not None:
         # A dated miss is not the same fact as a present one: something may well be
         # recorded about it now, and the block is empty because nothing held that day.
         return (
-            f"No stored memory matched {safe_line(query)!r} as things were on "
+            f"No stored memory matched {quoted} as things were on "
             f"{safe_line(day)}. Nothing recorded held on that day, so answer from the "
             "conversation instead of retrying with a reworded query."
         )
     return (
-        f"No stored memory matched {safe_line(query)!r}. Nothing is recorded about that, "
+        f"No stored memory matched {quoted}. Nothing is recorded about that, "
         "so answer from the conversation instead of retrying with a reworded query."
     )
 
@@ -1103,10 +1110,10 @@ def _profile(ctx: ToolContext, args: dict[str, Any]) -> str:
     lines.append(f"Arrived since {_stamp(when)} ({len(profile.recent)}):")
     lines += _profile_rows(profile.recent)
     if query:
-        lines.append(f"Relevant to {safe_line(query)!r} ({len(profile.relevant)}):")
+        lines.append(f"Relevant to {shown(safe_line(query))} ({len(profile.relevant)}):")
         lines += _profile_rows(profile.relevant)
     for name, rows in profile.buckets.items():
-        lines.append(f"Bucket {safe_line(name)!r} ({len(rows)}):")
+        lines.append(f"Bucket {shown(safe_line(name))} ({len(rows)}):")
         lines += _profile_rows(rows)
     if profile.warnings:
         lines.append("Ignored:")
@@ -1814,7 +1821,8 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
         # Only `replaces` raises this, and the message names no scope on purpose: the
         # same answer for a missing id and one in another scope.
         raise ToolError(
-            f"Nothing written: memory_remember.replaces={args.get('replaces')!r} names no "
+            "Nothing written: memory_remember.replaces="
+            f"{shown(args.get('replaces'))} names no "
             "fact visible here. Run memory_search to get a current id.") from None
     except ValueError as exc:
         # A `replaces` claim that is no longer live, a reason over its limit, or an
@@ -1941,7 +1949,7 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
         if already is not None and already.state == "retired":
             return _already_retired(claim_id, already, reason)
         if not ctx.memory.delete(claim_id, reason=reason):
-            return (f"Nothing retired: no claim {claim_id!r} is visible here. Run "
+            return (f"Nothing retired: no claim {shown(claim_id)} is visible here. Run "
                     "memory_search to get a current id.")
         # And read again after the write, as `memory_end` does, because another writer
         # can retire the claim between the read above and this call's write, which then
@@ -2077,7 +2085,7 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
 
     if claim_id is not None:
         if not ctx.memory.delete(claim_id, at=at, close="ended", reason=reason):
-            return (f"Nothing ended: no claim {claim_id!r} is visible here. Run "
+            return (f"Nothing ended: no claim {shown(claim_id)} is visible here. Run "
                     "memory_search to get a current id.")
         # `delete` returned True, so this id is in scope and was just written back; the
         # re-read is for the instant that *landed*, which `close_out` may have clamped
@@ -2262,7 +2270,7 @@ def _matching(close: Closure) -> Handler:
             raise ToolError(str(exc)) from None
         if isinstance(out, ForgetPreview):
             if not out.matches:
-                return (f"Nothing matched {safe_line(query)!r}, so there is nothing to "
+                return (f"Nothing matched {shown(safe_line(query))}, so there is nothing to "
                         f"{verb}. Nothing was changed.")
             lines = [
                 f"Preview: {len(out.matches)} live match(es). Nothing has changed "
@@ -2277,7 +2285,7 @@ def _matching(close: Closure) -> Handler:
         if not out.closed:
             return f"The preview listed nothing, so nothing was {done}."
         lines = [f"{done.capitalize()} {len(out.closed)} value(s)"
-                 + (f", with the reason {safe_line(out.reason)!r}" if out.reason else "")
+                 + (f", with the reason {shown(safe_line(out.reason))}" if out.reason else "")
                  + f". memory_history still shows them, marked {done}."]
         lines += [f"- [{c.id} {_state(c)}] {safe_line(c.text)}" for c in out.closed]
         return "\n".join(lines)
@@ -2569,7 +2577,7 @@ def _why(ctx: ToolContext, args: dict[str, Any]) -> str:
     claim_id = args["claim_id"]
     prov = ctx.memory.why(claim_id)
     if prov is None:
-        return (f"Claim {claim_id!r} is not visible here. Ids come from memory_search; "
+        return (f"Claim {shown(claim_id)} is not visible here. Ids come from memory_search; "
                 "one from another user or tenant will not resolve.")
     claim = prov.claim
     lines = [

@@ -589,6 +589,30 @@ def test_the_local_config_is_the_clients_own_server_with_this_process_winning(
     assert extract.SENTINEL not in got["env"]
 
 
+@pytest.mark.parametrize("name, text", [
+    ("config.toml", '[mcp_servers.memvara]\ncommand = "/venv/bin/python"\n'
+                    'args = ["-m", "memvara.server"]\n\n[mcp_servers.memvara.env]\n'
+                    'MEMVARA_DB = "/from/config.db"\n'),
+    ("opencode.json", json.dumps({"mcp": {"memvara": {
+        "type": "local", "command": ["/venv/bin/python", "-m", "memvara.server"],
+        "environment": {"MEMVARA_DB": "/from/config.db"}}}})),
+], ids=["codex", "opencode"])
+def test_the_local_config_is_read_in_the_shape_each_client_keeps_it(
+        monkeypatch, tmp_path, name, text):
+    """Codex keeps its servers in TOML under `mcp_servers`, and OpenCode under `mcp`, with
+    the command and its arguments in one list and the variables under `environment`. The
+    run used to read only `mcpServers` in JSON, so on those two it started the server with
+    this interpreter and without the store the client names (#341)."""
+    config = tmp_path / name
+    config.write_text(text)
+    monkeypatch.setattr(ipc, "_CLIENT_CONFIGS", (str(config),))
+    for key in [k for k in os.environ if k.startswith("MEMVARA_")]:
+        monkeypatch.delenv(key)
+    got = agentic.mcp_config(hosted=False)["mcpServers"]["memvara"]
+    assert (got["command"], got["args"]) == ("/venv/bin/python", ["-m", "memvara.server"])
+    assert got["env"]["MEMVARA_DB"] == "/from/config.db"
+
+
 def test_without_a_client_block_the_server_is_started_with_this_interpreter(
         monkeypatch, tmp_path):
     _local_env(monkeypatch, tmp_path)

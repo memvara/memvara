@@ -6,8 +6,10 @@ by reading the memvara server block in the client config files the host record l
 over that block (`client_env`). `HookRunner(server_env=...)` writes the block where and
 how the host itself keeps its MCP servers (`harness.hooks.CLIENT_CONFIGS`), which is where
 a user who runs a local store configures it. Claude Code and Copilot keep their MCP
-servers in files their host records list. Codex, Cursor and OpenCode keep theirs in a
-file or a shape the hooks do not read, which B59 (#341) pins.
+servers in JSON under `mcpServers`, Cursor in `~/.cursor/mcp.json`, Codex in TOML under
+`mcp_servers`, and OpenCode under `mcp` with the variables in `environment`. The hooks
+used to read only the first shape, and only from files Cursor does not keep its servers
+in, so on Codex, Cursor and OpenCode a local store was never found (#341, B59).
 """
 
 from __future__ import annotations
@@ -17,24 +19,17 @@ from typing import Callable
 
 import pytest
 
-from harness import known_bugs
 from harness.hooks import HookRunner
 
 from . import support
 
 Make = Callable[..., HookRunner]
 
-@pytest.mark.parametrize("host", ["claude", "copilot", *(
-    pytest.param(host, marks=[known_bugs.xfail("B59")])
-    for host in ("codex", "cursor", "opencode"))])
+@pytest.mark.parametrize("host", ["claude", "copilot", "codex", "cursor", "opencode"])
 def test_the_hooks_find_the_store_their_hosts_own_mcp_config_names(
         hooks: Make, store_env: dict[str, str], host: str) -> None:
     result = hooks(host, server_env=store_env).run("session_start")
     assert result.exit_code == 0
-    if result.reply is None and result.logs == {}:
-        raise known_bugs.Reproduced(
-            f"B59: session start on {host} finds no store in the MCP config that {host} "
-            f"keeps, and says nothing")
     assert support.MEMORY in support.context_of(host, result.reply)
 
 

@@ -12,6 +12,7 @@ tier rules copied into it, and replace pytest with a runner that records its com
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -20,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from types import ModuleType
 
 import pytest
@@ -48,20 +50,19 @@ tc = _load()
     ("pyproject.toml", "pytest's options"),
     ("requirements-dev.txt", "lockfile"),
     ("npm/memvara/package-lock.json", "lockfile"),
-    ("tests/harness/env.py", "harness"),
+    ("tests/harness/tiers.py", "tiers module"),
     ("tests/fixtures/stores/v0.1.0/memory.db", "test data"),
     ("tests/scenarios/scripted/first.json", "test data"),
     ("tests/adversarial/nightly_runner/gh_recorded.json", "test data"),
     ("memvara/packs/engineering.toml", "package data"),
     ("memvara/skills/memvara/SKILL.md", "package data"),
     (".github/workflows/ci.yml", "CI configuration"),
-    ("plugin/hooks/run.py", "separate processes"),
 ])
 def test_a_change_selection_cannot_follow_runs_the_full_suite(path: str, named: str) -> None:
     """Each of these reaches tests by a route the import graph does not see: pytest loads
-    conftest files itself, pyproject.toml configures every run, and data, CI configuration
-    and hook scripts are read or run by path. The reason is printed, so it has to say
-    what the file is."""
+    conftest files itself, the root conftest loads the tiers module from its path,
+    pyproject.toml configures every run, and data and CI configuration are read by path.
+    The reason is printed, so it has to say what the file is."""
     reason = tc.full_suite_reason(path)
     assert reason is not None and named in reason
 
@@ -69,10 +70,16 @@ def test_a_change_selection_cannot_follow_runs_the_full_suite(path: str, named: 
 @pytest.mark.parametrize("path", [
     "memvara/core.py", "tests/test_fast.py", "tests/adversarial/sessions/runner.py",
     "scripts/nightly/filing.py", "bench/soak.py", "docs/claude/testing.md", "README.md",
-    "CLAUDE.md", "examples/quickstart.py"])
+    "CLAUDE.md", "examples/quickstart.py", "tests/harness/env.py", "plugin/hooks/run.py"])
 def test_an_ordinary_source_test_or_document_is_not_on_the_named_list(path: str) -> None:
     """These go through selection. Whether one of them still runs the full suite depends on
-    whether any test reaches it, which the end-to-end tests below check."""
+    whether any test reaches it, which the end-to-end tests below check.
+
+    The test harness and the plugin's hooks were on the named list until 2026-09-27, and
+    between them they sent 15 of 19 merged pull requests to the full suite. They are
+    followed now: a harness module through imports, including a conftest's imports, and a
+    hook through the strings that name the plugin folder, which is how every test that
+    starts a hook finds it."""
     assert tc.full_suite_reason(path) is None
 
 
@@ -213,13 +220,30 @@ def test_a_changed_test_file_is_always_its_own_target() -> None:
     assert _affected(["tests/test_alone.py"]) == {"tests/test_alone.py"}
 
 
-def test_the_packaged_skill_is_never_collected_and_helpers_count_only_with_doctests() -> None:
+def test_every_module_pytest_imports_to_look_for_doctests_is_a_target() -> None:
+    """pyproject.toml passes --doctest-modules, so pytest imports every module under tests/
+    and memvara/ while it collects, whether or not the module holds an example. A support
+    module that fails to import fails the run, so it has to be run itself. The packaged
+    skill is ignored by pytest, and a conftest file is loaded rather than collected."""
     assert not tc.is_target("memvara/skills/memvara/auth.py")
-    assert not tc.is_target("memvara/skills/memvara/auth.py", doctests=True)
-    assert not tc.is_target("tests/harness/runner.py")
-    assert tc.is_target("tests/adversarial/parity/compare.py", doctests=True)
+    assert tc.is_target("tests/harness/runner.py")
+    assert tc.is_target("tests/harness/__init__.py")
+    assert tc.is_target("tests/adversarial/parity/compare.py")
     assert tc.is_target("tests/adversarial/test_adv_x.py")
     assert tc.is_target("memvara/core.py")
+    assert not tc.is_target("tests/adversarial/conftest.py")
+    assert not tc.is_target("tests/fixtures/notes.md")
+    assert not tc.is_target("scripts/nightly/filing.py")
+
+
+def test_a_support_module_that_no_test_imports_is_still_run_when_it_changes() -> None:
+    """The mutation check that found this broke tests/harness/known_bugs.py so that it
+    could not be imported. It failed through that module itself, collected for its
+    doctests, although it holds none."""
+    files = {"tests/harness/__init__.py": "", "tests/harness/ledger.py": "X = 1\n",
+             "tests/test_alone.py": "import json\n"}
+    assert set(tc.affected(_graph(files), ["tests/harness/ledger.py"])) == {
+        "tests/harness/ledger.py"}
 
 
 COMPARE = 'def normalise(x):\n    """>>> normalise(1)\n    {}\n    """\n    return x\n'
@@ -235,6 +259,285 @@ def test_a_support_module_under_tests_with_a_doctest_is_its_own_target() -> None
     reached = set(tc.affected(_graph(files), ["tests/adversarial/parity/compare.py"]))
     assert reached == {"tests/adversarial/parity/compare.py",
                        "tests/adversarial/parity/test_adv_parity_x.py"}
+
+
+# -- Routes that are not an import of the test file itself ---------------------------------
+#
+# A mutation check on 2026-09-27 broke eleven files one at a time, ran the whole fast tier
+# each time, and compared the failing tests with what this selection chose. The rule of
+# the time missed a failing test twice: a new Markdown file that tests/test_docs.py reads
+# through ROOT.rglob("*.md"), and a module that only a conftest file imports, whose break
+# failed tests/adversarial/test_adv_tiers.py. The tests below pin each route it follows now.
+
+def test_a_file_a_test_reads_through_a_glob_pattern_reaches_that_test() -> None:
+    """A bare "*" matches everything and says nothing, and a glob in the library is a
+    message or an address, like every other string there."""
+    files = {"tests/test_docs.py": "PAGES = sorted(ROOT.rglob('*.md'))\n",
+             "tests/test_any.py": "EVERYTHING = sorted(ROOT.glob('*'))\n",
+             "memvara/__init__.py": "PATTERN = '*.yaml'\n",
+             "tests/test_library.py": "import memvara\n"}
+    assert set(tc.affected(_graph(files), ["release/NOTES.md"])) == {"tests/test_docs.py"}
+    assert set(tc.affected(_graph(files), ["release/notes.yaml"])) == set()
+
+
+def test_a_pattern_is_also_read_as_a_regular_expression() -> None:
+    """A regular expression that holds `*` or `?` looks like a glob, and as a glob it can
+    miss the file it selects: fnmatch reads the `.` and the `\\d` literally. It is tried
+    both ways, and a match either way selects the test."""
+    files = {"tests/test_notes.py": "NOTES = re.compile(r'notes-\\d+.*\\.yaml')\n",
+             "tests/test_other.py": "import json\n"}
+    changed = "release/notes-2026-09.yaml"
+    assert not tc.fnmatch.fnmatchcase(changed.rsplit("/", 1)[-1], r"notes-\d+.*\.yaml")
+    assert set(tc.affected(_graph(files), [changed])) == {"tests/test_notes.py"}
+    assert set(tc.affected(_graph(files), ["release/notes.json"])) == set()
+
+
+def test_a_glob_over_a_folder_no_literal_names_reaches_python_files_too() -> None:
+    """tests/harness/checklist.py reads the source of every test file through
+    `root.rglob("*.py")` and imports none of them, so a changed test file can fail the
+    checklist's tests. A glob whose folder a string names, such as the plugin's host
+    list, is followed through that folder's name instead, and any other string is not
+    tried against a Python file at all."""
+    files = {"tests/harness/__init__.py": "",
+             "tests/harness/checklist.py": "def scan(root):\n    return root.rglob('*.py')\n",
+             "tests/test_checklist.py": "from harness import checklist\n",
+             "tests/harness/hosts.py": "HOSTS = (ROOT / 'plugin' / 'hosts').glob('*.py')\n",
+             "tests/test_hosts.py": "from harness import hosts\n",
+             "tests/test_strings.py": "PATTERN = '*.py'\n"}
+    reached = set(tc.affected(_graph(files), ["tests/test_login.py"]))
+    assert reached == {"tests/harness/checklist.py", "tests/test_checklist.py"}
+
+
+def test_a_module_only_a_conftest_imports_reaches_every_test_below_that_conftest() -> None:
+    """pytest imports a conftest file before the tests below it, so a module that fails to
+    import there fails all of them, whether or not they use its fixtures. This is the
+    shape of tests/adversarial/sessions/switches.py."""
+    files = {"tests/adversarial/__init__.py": "",
+             "tests/adversarial/sessions/__init__.py": "",
+             "tests/adversarial/sessions/conftest.py": "from . import switches\n",
+             "tests/adversarial/sessions/switches.py": "X = 1\n",
+             "tests/adversarial/sessions/test_adv_a.py": "def test_a():\n    pass\n",
+             "tests/adversarial/test_adv_elsewhere.py": "def test_b():\n    pass\n"}
+    reached = set(tc.affected(_graph(files), ["tests/adversarial/sessions/switches.py"]))
+    assert reached == {"tests/adversarial/sessions/__init__.py",
+                       "tests/adversarial/sessions/switches.py",
+                       "tests/adversarial/sessions/test_adv_a.py"}
+
+
+HOOKS_CONFTEST = """import pytest
+
+@pytest.fixture{arguments}
+def runner():
+    return ROOT / "plugin" / "hooks"
+"""
+
+
+@pytest.mark.parametrize("arguments, test_b, reached", [
+    ("", "def test_b():\n    pass\n", {"tests/hooks/test_uses.py"}),
+    ("", "pytestmark = pytest.mark.usefixtures('runner')\n",
+     {"tests/hooks/test_uses.py", "tests/hooks/test_other.py"}),
+    ("(autouse=True)", "def test_b():\n    pass\n",
+     {"tests/hooks/__init__.py", "tests/hooks/test_uses.py", "tests/hooks/test_other.py"}),
+], ids=["only-the-test-that-asks", "usefixtures", "autouse"])
+def test_a_string_in_a_conftest_reaches_the_tests_that_use_its_fixtures(
+        arguments: str, test_b: str, reached: set[str]) -> None:
+    """This is how a test that starts a plugin hook finds it: a conftest fixture builds
+    the path from the plugin folder's name. A test that uses none of that conftest's
+    fixtures runs none of its code, so the string does not reach it. An autouse fixture
+    runs for the doctests of the package's own __init__.py as well."""
+    files = {"tests/hooks/__init__.py": "",
+             "tests/hooks/conftest.py": HOOKS_CONFTEST.format(arguments=arguments),
+             "tests/hooks/test_uses.py": "def test_a(runner):\n    pass\n",
+             "tests/hooks/test_other.py": test_b}
+    assert set(tc.affected(_graph(files), ["plugin/hooks/recall.py"])) == reached
+
+
+REGISTERS = """{imports}
+
+def pytest_configure(config):
+    config.pluginmanager.register(skips.SkipLedger(), "skip-ledger")
+"""
+
+
+def test_what_a_plugin_registering_conftest_imports_is_session_wide() -> None:
+    """tests/conftest.py registers the skip ledger as a plugin that sees every test in a
+    run, so a change to the ledger, or to anything it imports, runs the full suite. A
+    conftest that only imports a module registers nothing, and its imports are followed
+    like any other."""
+    files = {"memvara/__init__.py": "",
+             "tests/conftest.py": REGISTERS.format(
+                 imports="import memvara\nfrom harness import skips"),
+             "tests/harness/__init__.py": "",
+             "tests/harness/skips.py": "from . import rules\n",
+             "tests/harness/rules.py": "",
+             "tests/harness/other.py": "",
+             "tests/other/conftest.py": "from harness import other\n"}
+    assert tc.session_wide(_graph(files)) == {
+        "tests/harness/__init__.py": "tests/conftest.py",
+        "tests/harness/skips.py": "tests/conftest.py",
+        "tests/harness/rules.py": "tests/conftest.py"}
+    assert tc.session_wide(_graph({"tests/test_a.py": ""})) == {}
+
+
+def test_a_nested_conftest_that_registers_a_plugin_is_session_wide_too() -> None:
+    """A plugin registered from any conftest sees every test in the run, not only the
+    tests below that conftest."""
+    files = {"tests/harness/__init__.py": "",
+             "tests/harness/skips.py": "",
+             "tests/adversarial/__init__.py": "",
+             "tests/adversarial/deep/__init__.py": "",
+             "tests/adversarial/deep/conftest.py": REGISTERS.format(
+                 imports="from harness import skips")}
+    assert tc.session_wide(_graph(files)) == {
+        "tests/harness/__init__.py": "tests/adversarial/deep/conftest.py",
+        "tests/harness/skips.py": "tests/adversarial/deep/conftest.py"}
+
+
+@pytest.fixture(scope="module")
+def this_repository() -> object:
+    """The import graph of this repository's tests, library and plugin."""
+    paths = [path.relative_to(ROOT).as_posix()
+             for folder in ("tests", "memvara", "plugin")
+             for path in (ROOT / folder).rglob("*.py")]
+    return tc.Graph.build(ROOT, paths)
+
+
+@pytest.mark.parametrize("changed, reader", [
+    ("release/NOTES.md", "tests/test_docs.py"),
+    ("tests/adversarial/sessions/switches.py", "tests/adversarial/sessions/test_adv_runner.py"),
+    ("plugin/hooks/recall.py", "tests/adversarial/hooks/test_adv_hook_approve.py"),
+])
+def test_the_two_misses_and_the_plugin_route_hold_in_this_repository(
+        this_repository: object, changed: str, reader: str) -> None:
+    """The same routes, checked against the real files rather than a model of them."""
+    assert reader in tc.affected(this_repository, [changed])
+
+
+def _registers_a_plugin(path: pathlib.Path) -> bool:
+    """Read independently of the script: whether a file calls `...pluginmanager.register`."""
+    return any(isinstance(node, ast.Call) and ast.unparse(node.func).endswith(
+                   "pluginmanager.register")
+               for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))))
+
+
+def test_every_conftest_in_this_repository_that_registers_a_plugin_is_session_wide(
+        this_repository: object) -> None:
+    wide = tc.session_wide(this_repository)
+    registering = [path.relative_to(ROOT).as_posix()
+                   for path in (ROOT / "tests").rglob("conftest.py") if _registers_a_plugin(path)]
+    assert "tests/conftest.py" in registering
+    for conftest in registering:
+        imported = {path for path in this_repository.closure(conftest)
+                    if not path.startswith(tc.LIBRARY) and path != conftest}
+        assert imported <= set(wide), (conftest, imported - set(wide))
+    assert "tests/harness/skips.py" in wide
+
+
+#: A module that collects the tree the way tests/adversarial/test_adv_tiers.py does.
+COLLECTOR = """import subprocess
+import sys
+
+def collect(*args):
+    return subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", *args])
+"""
+
+
+def test_a_second_module_that_collects_the_tree_is_a_reader_and_so_are_its_importers() -> None:
+    """The shape is recognised wherever it is, so a new test of this kind needs no list
+    entry. A test that imports a helper of that shape collects the tree as well."""
+    files = {"tests/adversarial/__init__.py": "",
+             "tests/adversarial/test_adv_tiers.py": COLLECTOR,
+             "tests/harness/__init__.py": "",
+             "tests/harness/collect.py": COLLECTOR,
+             "tests/test_uses_it.py": "from harness import collect\n",
+             "tests/test_runs_pytest.py": "ARGS = ['-m', 'pytest', '-q']\n",
+             "scripts/runner.py": COLLECTOR,
+             "tests/test_runner.py": "import runner\n"}
+    assert tc.whole_tree_readers(_graph(files)) == [
+        "tests/adversarial/test_adv_tiers.py", "tests/harness/collect.py",
+        "tests/test_uses_it.py"]
+
+
+def _collects_the_tree(path: pathlib.Path) -> bool:
+    """Read independently of the script: whether a module holds both strings as literals."""
+    literals = {node.value for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    return tc.COLLECTS_THE_TREE <= literals
+
+
+def test_every_module_in_this_repository_that_collects_the_tree_is_a_reader(
+        this_repository: object) -> None:
+    readers = set(tc.whole_tree_readers(this_repository))
+    shaped = {path.relative_to(ROOT).as_posix() for path in (ROOT / "tests").rglob("*.py")
+              if _collects_the_tree(path)}
+    assert "tests/adversarial/test_adv_tiers.py" in shaped
+    assert {path for path in shaped if tc.is_target(path)} <= readers
+
+
+#: The calls under tests/ that glob every file, "*" or "**", below a folder that no string
+#: in the call names as a top-level folder of the repository. A bare pattern is not tried
+#: against changed files (it would tie every test that makes one to every change), so each
+#: of these needs a reason why a change below its folder still reaches its test.
+BARE_GLOB_EXCEPTIONS = {
+    "tests/adversarial/test_adv_tiers.py":
+        "walks folders under tests/adversarial. It collects the whole tree, so it runs "
+        "for every Python change, and a non-Python file under tests/ runs the full suite.",
+    "tests/harness/tiers.py":
+        "walks folders under tests/ for tests/adversarial/test_adv_tiers.py, which "
+        "collects the whole tree; a non-Python file under tests/ runs the full suite.",
+    "tests/test_packaging.py":
+        "walks the packaged skill under memvara/skills. A non-Python file under memvara/ "
+        "runs the full suite, and the one Python file there, memvara_auth.py, is named "
+        "in this file.",
+    "tests/test_plugin.py":
+        "walks the packaged skill and plugin/skills/memvara. A non-Python file under "
+        "memvara/ runs the full suite, and this file names the plugin folder.",
+    "tests/adversarial/coverage/test_adv_cover_inv_core_release.py":
+        "walks the packaged skill and plugin/skills/memvara. A non-Python file under "
+        "memvara/ runs the full suite, and this file names the plugin folder.",
+    "tests/test_hook_file_modes.py":
+        "walks a home directory the test creates under tmp_path, not a folder of the "
+        "repository, so no change in the repository is missed.",
+}
+
+
+def _bare_globs(path: pathlib.Path) -> list[ast.Call]:
+    return [node for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("glob", "rglob") and node.args
+            and isinstance(node.args[0], ast.Constant) and node.args[0].value in ("*", "**")]
+
+
+def _names_a_top_level_folder(call: ast.Call) -> bool:
+    """Whether a string in the call's receiver names a top-level folder of the repository
+    that the folder-name route follows, as `(ROOT / "docs").rglob("*")` does."""
+    assert isinstance(call.func, ast.Attribute)
+    for node in ast.walk(call.func.value):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            top = node.value.split("/", 1)[0]
+            if (ROOT / top).is_dir() and f"{top}/" not in tc.NAMED_THROUGH_IMPORTS:
+                return True
+    return False
+
+
+def test_every_bare_glob_under_tests_names_its_folder_or_has_a_reason() -> None:
+    """A future test that builds its folder from __file__ and globs everything under it
+    would be selected for no change below that folder. This makes it fail here instead,
+    until its folder is spelled out or its reason is written down above."""
+    unexplained, stale = [], []
+    for path in sorted((ROOT / "tests").rglob("*.py")):
+        name = path.relative_to(ROOT).as_posix()
+        calls = [call for call in _bare_globs(path) if not _names_a_top_level_folder(call)]
+        if calls and name not in BARE_GLOB_EXCEPTIONS:
+            unexplained += [f"{name}:{call.lineno}" for call in calls]
+        if not calls and name in BARE_GLOB_EXCEPTIONS:
+            stale.append(name)
+    assert unexplained == [], (
+        "These glob every file under a folder that no string names, so no change under that "
+        "folder selects their test. Spell the folder as a string, such as "
+        "ROOT / \"docs\", or add the file to BARE_GLOB_EXCEPTIONS with the reason a change "
+        f"there still reaches it: {unexplained}")
+    assert stale == [], f"These no longer glob everything; remove their exception: {stale}"
 
 
 # -- The last run's failures ---------------------------------------------------------------
@@ -288,6 +591,17 @@ def repo(tmp_path: pathlib.Path) -> pathlib.Path:
     return root
 
 
+def _given(command: list[str]) -> list[str]:
+    """The targets and the arguments passed through, without the options main adds: `-n
+    auto` when pytest-xdist is installed, and the run's own `--basetemp`."""
+    rest = command[4:]
+    if rest[:2] == ["-n", "auto"]:
+        rest = rest[2:]
+    if rest and rest[0].startswith("--basetemp="):
+        rest = rest[1:]
+    return rest
+
+
 class Recorder:
     def __init__(self, code: int = 0) -> None:
         self.code = code
@@ -310,8 +624,9 @@ def test_a_source_change_runs_the_tests_that_reach_it_and_the_last_failures(
     assert tc.main(["--base", "main", "--", "-x"], repo=repo, runner=runner) == 0
     [(command, cwd, env)] = runner.calls
     assert command[:4] == [sys.executable, "-m", "pytest", "-q"]
-    assert command[4:] == ["memvara/server/__main__.py", "memvara/server/tools.py",
-                           "tests/test_alone.py", "tests/test_runner.py",
+    assert _given(command) == ["memvara/server/__main__.py", "memvara/server/tools.py",
+                           "tests/harness/runner.py", "tests/test_alone.py",
+                           "tests/test_runner.py",
                            "tests/test_readme.py::test_x", "-x"]
     assert cwd == repo
     assert env["PYTHONPATH"].split(os.pathsep)[0] == str(repo)
@@ -328,7 +643,7 @@ def test_a_change_it_cannot_follow_runs_the_full_suite_and_says_which_file(
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
     [(command, _, _)] = runner.calls
-    assert command == [sys.executable, "-m", "pytest", "-q"]
+    assert command[:4] == [sys.executable, "-m", "pytest", "-q"] and _given(command) == []
     printed = capsys.readouterr().out
     assert "Mode: the full suite" in printed
     assert "pyproject.toml changed: it holds pytest's options" in printed
@@ -357,8 +672,7 @@ def test_a_file_no_test_reaches_runs_the_full_suite_unless_it_is_prose(
     _write(repo, ".pre-commit-config.yaml", "repos: []\n")
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
-    assert [command for command, _, _ in runner.calls] == [
-        [sys.executable, "-m", "pytest", "-q"]]
+    assert [_given(command) for command, _, _ in runner.calls] == [[]]
     assert (".pre-commit-config.yaml changed: no test imports or names it, and it is not "
             "prose") in capsys.readouterr().out
     (repo / ".pre-commit-config.yaml").unlink()
@@ -373,7 +687,7 @@ def test_a_file_no_test_reaches_runs_the_full_suite_unless_it_is_prose(
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
     [(command, _, _)] = runner.calls
-    assert command[4:] == ["tests/test_docs.py"]
+    assert _given(command) == ["tests/test_docs.py"]
     assert "Mode: selected tests." in capsys.readouterr().out
 
 
@@ -390,7 +704,7 @@ def test_a_broken_doctest_in_a_support_module_is_run_itself(repo: pathlib.Path) 
     runner = Recorder()
     assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
     [(command, _, _)] = runner.calls
-    assert command[4:] == ["tests/adversarial/parity/compare.py",
+    assert _given(command) == ["tests/adversarial/parity/compare.py",
                            "tests/adversarial/parity/test_adv_parity_x.py"]
 
 
@@ -426,3 +740,125 @@ def test_a_renamed_module_counts_under_its_old_name_too(repo: pathlib.Path) -> N
     _git(repo, "mv", "memvara/lazy.py", "memvara/eager.py")
     _, changed = tc.changed_files("main", cwd=repo)
     assert changed == ["memvara/eager.py", "memvara/lazy.py"]
+
+
+def test_a_new_document_a_test_globs_for_runs_that_test(repo: pathlib.Path) -> None:
+    """The first miss the mutation check found, end to end: a new release note with a
+    wording the project has retired failed tests/test_docs.py, which never names it."""
+    _write(repo, "tests/test_wording.py", "PAGES = sorted(ROOT.rglob('*.md'))\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "add a glob reader")
+    _git(repo, "branch", "-f", "main", "HEAD")
+    _write(repo, "release/NOTES.md", "# Notes\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
+    [(command, _, _)] = runner.calls
+    assert _given(command) == ["tests/test_wording.py"]
+
+
+def test_a_python_change_runs_the_test_that_collects_the_whole_tree(
+        repo: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The second miss: tests/adversarial/test_adv_tiers.py collects every tier in a child
+    process, so a nightly test that cannot be imported fails it, and nothing else in the
+    fast tier. A change to a document does not select it."""
+    _write(repo, "tests/adversarial/test_adv_tiers.py", COLLECTOR)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "add the whole-tree reader")
+    _git(repo, "branch", "-f", "main", "HEAD")
+    _write(repo, "tests/adversarial/nightly/test_slow.py", "import memvara  # edited\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
+    [(command, _, _)] = runner.calls
+    assert _given(command) == ["tests/adversarial/test_adv_tiers.py"]
+    printed = capsys.readouterr().out
+    assert ("tests/adversarial/test_adv_tiers.py runs as well, because it collects every "
+            "test module in a child process") in printed
+    assert "Not run: tests/adversarial/nightly/test_slow.py is in the nightly tier." in printed
+
+    _git(repo, "checkout", "-q", "--", "tests/adversarial/nightly/test_slow.py")
+    _write(repo, "README.md", "# Changed\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
+    [(command, _, _)] = runner.calls
+    assert _given(command) == ["tests/test_readme.py"]
+
+
+def test_a_change_to_what_the_tests_conftest_registers_runs_the_full_suite(
+        repo: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write(repo, "tests/conftest.py", REGISTERS.format(imports="from harness import skips"))
+    _write(repo, "tests/harness/skips.py", "RULES = ()\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "add the ledger")
+    _git(repo, "branch", "-f", "main", "HEAD")
+    _write(repo, "tests/harness/skips.py", "RULES = ('changed',)\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=runner) == 0
+    [(command, _, _)] = runner.calls
+    assert _given(command) == []
+    assert ("tests/harness/skips.py changed: tests/conftest.py imports it and registers a "
+            "plugin that sees every test in the run.") in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("installed, passed, workers", [
+    (True, [], ["-n", "auto"]),
+    (True, ["-n", "0"], []),
+    (True, ["-n4"], []),
+    (True, ["--numprocesses=2"], []),
+    (True, ["-p", "no:xdist"], []),
+    (False, [], []),
+])
+def test_it_runs_one_worker_per_core_when_pytest_xdist_is_installed(
+        repo: pathlib.Path, monkeypatch: pytest.MonkeyPatch, installed: bool,
+        passed: list[str], workers: list[str]) -> None:
+    """Workers cost about two seconds to start and cut a large selection several times
+    over. Arguments after -- that choose the workers win, and without pytest-xdist the
+    run is serial rather than an error."""
+    monkeypatch.setattr(tc, "xdist_installed", lambda: installed)
+    _write(repo, "README.md", "# Changed\n")
+    runner = Recorder()
+    assert tc.main(["--base", "main", "--", *passed], repo=repo, runner=runner) == 0
+    [(command, _, _)] = runner.calls
+    options = [arg for arg in command[4:] if not arg.startswith("--basetemp=")]
+    assert options == [*workers, "tests/test_readme.py", *passed]
+
+
+class TempRecorder(Recorder):
+    """A runner that also records whether the run's base temporary directory existed."""
+
+    def __call__(self, command: list[str], cwd: pathlib.Path, env: dict[str, str]) -> int:
+        [basetemp] = [arg.split("=", 1)[1] for arg in command if arg.startswith("--basetemp=")]
+        self.basetemp = pathlib.Path(basetemp)
+        self.existed = self.basetemp.is_dir()
+        return super().__call__(command, cwd, env)
+
+
+def test_each_run_gets_a_base_temporary_directory_of_its_own(
+        repo: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """pytest's default base temporary directory is shared by every run of one user, and
+    pytest deletes all but the newest three runs' folders in it, so concurrent runs by
+    several agents deleted each other's files. A run that passes leaves nothing behind; a
+    run that fails keeps its files and says where."""
+    _write(repo, "README.md", "# Changed\n")
+    first, second = TempRecorder(), TempRecorder()
+    assert tc.main(["--base", "main"], repo=repo, runner=first) == 0
+    assert tc.main(["--base", "main"], repo=repo, runner=second) == 0
+    assert first.existed and second.existed and first.basetemp != second.basetemp
+    assert first.basetemp.parent == pathlib.Path(tempfile.gettempdir())
+    assert not first.basetemp.exists() and not second.basetemp.exists()
+
+    failing = TempRecorder(code=1)
+    assert tc.main(["--base", "main"], repo=repo, runner=failing) == 1
+    assert failing.basetemp.is_dir()
+    assert (f"the temporary files of this run are kept in {failing.basetemp}"
+            in capsys.readouterr().out)
+    shutil.rmtree(failing.basetemp)
+
+
+def test_a_base_temporary_directory_passed_through_is_used_instead(
+        repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    _write(repo, "README.md", "# Changed\n")
+    runner = Recorder()
+    chosen = f"--basetemp={tmp_path / 'mine'}"
+    assert tc.main(["--base", "main", "--", chosen], repo=repo, runner=runner) == 0
+    [(command, _, _)] = runner.calls
+    assert [arg for arg in command if arg.startswith("--basetemp")] == [chosen]
