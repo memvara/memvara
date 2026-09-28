@@ -24,8 +24,8 @@ import approve  # noqa: E402 - plugin/hooks is not a package; the path is set ju
 
 LEVELS = ("session", "agent")
 
-#: The two read-only tools that #267 is about.
-B3_MISSING = {"memory_get_document", "memory_list_documents"}
+#: The two read-only tools that #267 was about.
+DOCUMENT_READERS = ("memory_get_document", "memory_list_documents")
 
 
 def _live(scoped: object) -> list[str]:
@@ -98,31 +98,19 @@ def test_a_bound_scope_reads_its_own_value_in_place_of_the_user_wide_one(level: 
     assert _live(mem.scope(user="u", **{level: "one"})) == ["Paris"]
 
 
-# -- B3: auto-approve misses two read-only tools --------------------------------------
+# -- B3, fixed: auto-approve missed two read-only tools --------------------------------
 
-def test_the_approve_hook_differs_from_the_server_only_by_the_known_bug() -> None:
-    """Passes today and after the fix for #267. Any other difference between the hook's
-    list and the server's read-only tools fails here at once."""
-    allowed, read_only = set(approve.READ_ONLY), _read_only_tools()
-    assert allowed <= read_only, allowed - read_only
-    assert read_only - allowed <= B3_MISSING, read_only - allowed
-
-
-@known_bugs.xfail("B3")
 def test_the_approve_hook_allows_exactly_the_servers_read_only_tools() -> None:
-    if _read_only_tools() - set(approve.READ_ONLY) == B3_MISSING:
-        raise known_bugs.Reproduced("B3: the approve list misses the two document tools")
+    """The approve list missed `memory_get_document` and `memory_list_documents` (#267)."""
     assert set(approve.READ_ONLY) == _read_only_tools()
 
 
-@pytest.mark.parametrize("tool", sorted(B3_MISSING))
-@known_bugs.xfail("B3")
+@pytest.mark.parametrize("tool", DOCUMENT_READERS)
 def test_the_approve_hook_allows_the_read_only_document_tools(
         hook_runner: Callable[..., HookRunner], tool: str) -> None:
     result = hook_runner("claude").run("approve", tool_name=f"mcp__memvara__{tool}")
     assert result.exit_code == 0
-    if result.reply is None:
-        raise known_bugs.Reproduced(f"B3: the approve hook printed no decision for {tool}")
+    assert result.reply is not None
     assert result.reply["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
@@ -197,9 +185,8 @@ def test_a_future_retraction_leaves_a_tombstone_that_does_not_end_before_it_begi
     assert tombstone.valid_to == tombstone.valid_from
 
 
-# -- B45: a backdated retraction's tombstone is live in reads of the past ----------------
+# -- B45, fixed: no read returns a backdated retraction's tombstone ---------------------
 
-@known_bugs.xfail("B45")
 def test_a_backdated_retraction_leaves_a_tombstone_that_no_read_returns() -> None:
     """A tombstone is closed on both clocks at the instant its write is recorded, so it
     can never be live (docs/INTERNALS.md). A retraction backdated with `recorded_at` must
@@ -211,14 +198,11 @@ def test_a_backdated_retraction_leaves_a_tombstone_that_no_read_returns() -> Non
     user.remember("user", "likes", "tea", valid_from=jan, recorded_at=jan)
     user.remember("user", "likes", "tea", polarity=-1, valid_from=feb, recorded_at=feb)
     seen = [(c.object, c.polarity) for c in user.get_all(as_of=mar)]
-    if seen == [("tea", -1)]:
-        raise known_bugs.Reproduced(f"a read at March returned the tombstone: {seen}")
     assert seen == [], seen
 
 
-# -- B69: a repeated future-dated retraction writes a new tombstone each time ------------
+# -- B69, fixed: a repeated future-dated retraction reinforces its one tombstone ---------
 
-@known_bugs.xfail("B69")
 def test_a_future_dated_retraction_sent_again_is_a_repeat() -> None:
     """A repeat of a retraction dated now reinforces its tombstone and reports nothing.
     A repeat of one dated in the future must do the same (#349)."""
@@ -231,8 +215,6 @@ def test_a_future_dated_retraction_sent_again_is_a_repeat() -> None:
                 for _ in range(3)]
     tombstones = [c for c in mem.store.iter_claims(None, True) if c.polarity < 0]
     reported = [len(r.invalidated) for r in receipts]
-    if len(tombstones) == 3 and reported == [1, 1, 1]:
-        raise known_bugs.Reproduced(f"{len(tombstones)} tombstones; ended reported {reported}")
     assert len(tombstones) == 1 and reported == [1, 0, 0], (len(tombstones), reported)
 
 
@@ -364,9 +346,8 @@ def test_search_returns_its_results_best_first() -> None:
     assert {"C", "C#", "C++"} <= set(session[:3]), session
 
 
-# -- B70: a different value written twice for an earlier period is stored twice ---------
+# -- B70, fixed: a different value written twice for an earlier period is stored once ---
 
-@known_bugs.xfail("B70")
 def test_a_value_written_twice_for_an_earlier_period_is_stored_once() -> None:
     """A different value dated before the live one is written already ended, at the live
     value's start. Writing it again is a repeat: it must reinforce the claim on record, not
@@ -379,6 +360,5 @@ def test_a_value_written_twice_for_an_earlier_period_is_stored_once() -> None:
     user.remember("user", "lives_in", "Rome", valid_from=jan)
     again = user.remember("user", "lives_in", "Rome", valid_from=jan)
     seen = [c.object for c in user.get_all(valid_at=feb)]
-    if seen == ["Rome", "Rome"] and again.added and not again.reinforced:
-        raise known_bugs.Reproduced(f"the repeat stored a copy; February reads {seen}")
     assert seen == ["Rome"] and not again.added, (seen, [c.id for c in again.added])
+    assert [c.object for c in again.reinforced] == ["Rome"]

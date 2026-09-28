@@ -274,3 +274,44 @@ def test_a_declared_predicate_outranks_a_learned_one_on_a_tie(reg):
     reg.learn("aa_employer_guess", Cardinality.ONE)
     assert reg.nearest("previous_employer") == "works_at"
     assert reg.candidates("previous_employer")[0] == "works_at"
+
+
+# -- the cost of learning an alias (#309) --------------------------------------------------
+
+
+def _learned(registry: PredicateRegistry, n: int) -> PredicateRegistry:
+    for i in range(n):
+        registry.learn_alias("works_at", f"zqx employer spelling {i}")
+    return registry
+
+
+def test_learning_an_alias_does_not_rebuild_the_index(monkeypatch):
+    """Past the learned cap every novel spelling is folded on as an alias, and one reply
+    can bring thousands. Rebuilding the whole index for each one made a write take time
+    that grew with the square of their number (#309)."""
+    registry = PredicateRegistry()
+    registry.resolve("works_at")  # builds the index once
+    rebuilds = []
+    monkeypatch.setattr(registry, "_reindex",
+                        lambda: rebuilds.append(1) or PredicateRegistry._reindex(registry))
+    _learned(registry, 50)
+    assert registry.resolve("zqx_employer_spelling_7").name == "works_at"
+    assert rebuilds == []
+
+
+def test_an_index_kept_up_alias_by_alias_equals_one_built_whole():
+    kept = _learned(PredicateRegistry(), 30)
+    kept.resolve("works_at")
+    whole = PredicateRegistry(specs=kept.all_specs())
+    whole.resolve("works_at")
+    assert (kept._alias, kept._strict, kept._loose) == (whole._alias, whole._strict,
+                                                        whole._loose)
+    for surface in ("employer spelling 3", "zqx_employer", "lives in", "spelling"):
+        assert kept.nearest(surface) == whole.nearest(surface)
+        assert kept.resolve(surface) == whole.resolve(surface)
+
+
+def test_an_alias_learned_before_the_index_exists_is_indexed_when_it_is_built():
+    registry = PredicateRegistry()
+    registry.learn_alias("works_at", "paycheck source")
+    assert registry.resolve("paycheck_source").name == "works_at"

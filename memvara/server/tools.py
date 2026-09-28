@@ -74,7 +74,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import Any, Callable, Collection, Mapping, Sequence, cast
 
 from ..confirm import ConfirmationRefused
 # `PROFILE_WINDOW` is the library's: how far back a profile looks when no `since` is
@@ -94,9 +94,9 @@ from ..types import (CUSTOM_ID_CHARS, DOCUMENT_STATES, LINK_RELATIONS, REASON_CH
 from .memory_api import MemoryAPI
 from .validate import ToolError, shown, validate
 
-__all__ = ["FEATURE_ARGUMENTS", "TOOLS", "Tool", "ToolContext", "ToolError",
-           "anchoring_by_default", "for_a_hosted_deployment", "safe_detail", "safe_line",
-           "without_arguments", "without_expiry", "without_reasons"]
+__all__ = ["DESCRIBED_BY_ARGUMENTS", "FEATURE_ARGUMENTS", "TOOLS", "Tool", "ToolContext",
+           "ToolError", "anchoring_by_default", "for_a_hosted_deployment", "safe_detail",
+           "safe_line", "without_arguments", "without_expiry", "without_reasons"]
 
 #: Framing for any block of stored claims. `Memvara.recall` applies its own; this is for
 #: the tools that render results themselves. It names the text below it as data, which
@@ -329,14 +329,74 @@ def without_expiry(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
         for tool in tools)
 
 
+#: `memory_recall`'s sentence about model calls, for whether the server serves
+#: `query_rewrite` and `synthesize`, in that order. Each is removed with its switch.
+_RECALL_MODEL_CALLS: Mapping[tuple[bool, bool], str] = {
+    (True, True): "It calls a model only on a server that has one configured: there it "
+                  "rewrites the query into a few other phrasings before searching "
+                  "(query_rewrite), and ranked and synthesize each add one more call when "
+                  "you set them. ",
+    (True, False): "It calls a model only on a server that has one configured: there it "
+                   "rewrites the query into a few other phrasings before searching "
+                   "(query_rewrite), and ranked adds one more call when you set it. ",
+    (False, True): "It calls a model only on a server that has one configured, and there "
+                   "only when you set ranked or synthesize, each of which adds one call. ",
+    (False, False): "It calls a model only on a server that has one configured, and there "
+                    "only when you set ranked, which adds one call. ",
+}
+
+
+def _recall_description(served: Collection[str]) -> str:
+    """`memory_recall`'s description, naming only the model-calling arguments in `served`.
+
+    A switch that removes `query_rewrite` or `synthesize` removes it from the schema
+    (`FEATURE_ARGUMENTS`), and a description that still named it would send a model to
+    pass an argument the server refuses (#295). With the query-rewrite switch off the
+    server does not rewrite at all, so that clause goes with the argument.
+
+    >>> "query_rewrite" in _recall_description({"synthesize"})
+    False
+    >>> "synthesize" in _recall_description({"query_rewrite"})
+    False
+    """
+    model = _RECALL_MODEL_CALLS["query_rewrite" in served, "synthesize" in served]
+    return (
+        "Look up what is already known about this user and read it before you "
+        "answer. Call it at the START of a turn whenever the reply could depend on "
+        "something the user told you earlier — their name, where they live or work, "
+        "how they like things done, a decision they already made, a preference, a "
+        "constraint. Call it speculatively; it is cheap. " + model + "Returns "
+        "numbered plain-text notes, ready to read as context, with no scores or JSON "
+        "to filter out. An empty result means nothing is stored, not that you should "
+        "try again. Prefer this over memory_search whenever the goal is to answer "
+        "the user rather than to inspect the memory itself. When the question is "
+        "about the past ('what was I working on in June'), pass valid_at and the "
+        "notes describe that day; the block's header says so. as_of is refused "
+        "here: what this system used to believe is an inspection, on memory_search."
+    )
+
+
+#: The tools whose description names arguments a feature switch can remove, each with
+#: the function that describes it for the arguments it still serves.
+DESCRIBED_BY_ARGUMENTS: Mapping[str, Callable[[Collection[str]], str]] = {
+    "memory_recall": _recall_description,
+}
+
+
 def without_arguments(tools: "tuple[Tool, ...]",
                       names: Sequence[str]) -> "tuple[Tool, ...]":
-    """The same tools with every argument in `names` removed from their schemas."""
-    return tuple(
-        replace(tool, properties={k: v for k, v in tool.properties.items()
-                                  if k not in names})
-        if set(names) & set(tool.properties) else tool
-        for tool in tools)
+    """The same tools with every argument in `names` removed from their schemas, and
+    described for the arguments they still serve (`DESCRIBED_BY_ARGUMENTS`)."""
+    changed = []
+    for tool in tools:
+        if not set(names) & set(tool.properties):
+            changed.append(tool)
+            continue
+        properties = {k: v for k, v in tool.properties.items() if k not in names}
+        describe = DESCRIBED_BY_ARGUMENTS.get(tool.name)
+        changed.append(replace(tool, properties=properties, description=(
+            describe(set(properties)) if describe is not None else tool.description)))
+    return tuple(changed)
 
 
 def for_a_hosted_deployment(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
@@ -912,6 +972,17 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "would be rendered into the prompt as a fact. Send valid_at for how things "
             "were on that day as far as we know now, or call memory_search with as_of "
             "to inspect what was believed then.")
+    # `recall()` refuses this too, with the same reason, but as a bare `ValueError` that
+    # reaches the model through `mcp.py`'s catch-all as an exception rather than as a
+    # mistake in its arguments -- the reason `_search` refuses as_of with valid_at here.
+    memory_types = _memory_types(args.get("memory_types"))
+    if args.get("ranked") and (not args.get("include_episodes") or memory_types is not None):
+        raise ToolError(
+            "memory_recall ranked=true needs turns to rank, so it takes "
+            "include_episodes=true and no memory_types. A type filter skips the "
+            "conversation turns entirely, and without include_episodes none are "
+            "retrieved, so the model would be handed nothing to rank. Send "
+            "include_episodes=true without memory_types, or leave ranked off.")
     valid_at = args.get("valid_at")
     # A local store is asked for its `RecallResult`, whose `text` is byte for byte the
     # string above, so that a block that came back empty can say which day a query
@@ -929,9 +1000,9 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             # then off here.
             query_rewrite=bool(args.get("query_rewrite", False)),
             synthesize=bool(args.get("synthesize", False)),
-            memory_types=_memory_types(args.get("memory_types")),
+            memory_types=memory_types,
             budget=args.get("budget"),
-            include_episodes=bool(args.get("include_episodes", False)),
+            include_episodes=bool(args["include_episodes"]),
             valid_at=(_timestamp(valid_at, "memory_recall.valid_at")
                       if valid_at is not None else None),
             filters=args.get("filters"),
@@ -1324,14 +1395,20 @@ def _may_replace_note(claims: Sequence[Claim]) -> str:
 
 
 def _unextracted_note(ctx: ToolContext, count: int) -> str:
-    """Say when content was accepted and then quietly not stored.
+    """Say when a turn was stored and no fact was extracted from it.
 
     This is the failure the library warns about at construction, arriving through a
-    transport where nobody reads the process's stderr. Without it a write that stored
-    nothing reports a clean success, and the agent goes on believing it remembered.
+    transport where nobody reads the process's stderr. Without it a write that stored no
+    fact reports a clean success, and the agent goes on believing it remembered the fact.
+
+    The turn itself is stored: turns commit before extraction runs (`WritePipeline`), and
+    `memory_recall` with `include_episodes` finds it. The note used to say the turn was
+    not stored, which could lead an agent to send it again or to tell the user nothing
+    was saved (#353).
     """
-    note = (f"note: {count} turn(s) carried something extraction did not recognise and "
-            f"were not stored (extractor: {ctx.extractor}).")
+    note = (f"note: {count} turn(s) were stored, but extraction recognised no fact in "
+            f"them, so no fact was stored (extractor: {ctx.extractor}). memory_recall "
+            f"with include_episodes=true still finds the turn.")
     if ctx.extractor == "fast-path-only":
         note += (
             " This server has no extraction model, so only a fixed set of sentence forms "
@@ -1373,7 +1450,7 @@ def _accumulated_note(items: Sequence[Accumulation]) -> str:
     """Say when a write added a value beside one that is still answering.
 
     The sibling of `_unextracted_note`, and the same failure shape one step further in:
-    there, content was accepted and quietly not stored; here, a value was stored and the
+    there, a turn was stored and quietly yielded no fact; here, a value was stored and the
     value it was probably meant to replace quietly stayed live. Both report a clean
     success on this transport — `added 1, ended 0` is exactly what a correct replacement
     returns — and neither has any other symptom until a later `memory_recall` answers the
@@ -1483,28 +1560,55 @@ def _disputed_note(items: Sequence[Dispute]) -> str:
     fix is usually to restate the value with one that says how sure the model actually
     is — a fact it has just confirmed with the user is not a 0.2.
 
+    A retraction faces the same rule (`Dispute.retraction`). It stores no value beside
+    the one it named, so it gets its own sentence, which says that value still answers
+    and names the tools that close it.
+
     >>> note = _disputed_note([Dispute("cl_1a", "user", "lives_in",
     ...                                "London", 1.0, "Paris", 0.1)])
     >>> "kept 'London' (confidence 1.00" in note
     True
     >>> "stored 'Paris' (confidence 0.10)" in note
     True
+    >>> note = _disputed_note([Dispute("cl_1a", "user", "lives_in",
+    ...                                "London", 1.0, "London", 0.05, True)])
+    >>> "(confidence 1.00, claim_id cl_1a) against a retraction at confidence 0.05" in note
+    True
+    >>> "stored" in note
+    False
     """
-    pairs = "; ".join(
-        f"{safe_line(d.subject)} {safe_line(d.predicate)}: kept "
-        f"'{safe_line(d.incumbent)}' (confidence {d.incumbent_confidence:.2f}, "
-        f"claim_id {d.claim_id}), stored '{safe_line(d.candidate)}' "
-        f"(confidence {d.candidate_confidence:.2f}) beside it" for d in items)
-    return (
-        f"note: {len(items)} value(s) were stored without replacing what was already "
-        f"there, because the value already there is more than twice as confident: "
-        f"{pairs}. Both now answer memory_recall, more confident first. Nothing was "
-        "ended, and that is deliberate — ending a value says the world changed, and what "
-        "happened here is that two sources disagree. If the value you just wrote is the "
-        "true one, say so: write it again with a confidence that reflects how sure you "
-        "actually are, and it will replace the other. If the old value is simply wrong, "
-        "memory_forget is the tool that says the record was wrong."
-    )
+    values = [d for d in items if not d.retraction]
+    retractions = [d for d in items if d.retraction]
+    notes: list[str] = []
+    if values:
+        pairs = "; ".join(
+            f"{safe_line(d.subject)} {safe_line(d.predicate)}: kept "
+            f"'{safe_line(d.incumbent)}' (confidence {d.incumbent_confidence:.2f}, "
+            f"claim_id {d.claim_id}), stored '{safe_line(d.candidate)}' "
+            f"(confidence {d.candidate_confidence:.2f}) beside it" for d in values)
+        notes.append(
+            f"note: {len(values)} value(s) were stored without replacing what was already "
+            f"there, because the value already there is more than twice as confident: "
+            f"{pairs}. Both now answer memory_recall, more confident first. Nothing was "
+            "ended, and that is deliberate — ending a value says the world changed, and "
+            "what happened here is that two sources disagree. If the value you just wrote "
+            "is the true one, say so: write it again with a confidence that reflects how "
+            "sure you actually are, and it will replace the other. If the old value is "
+            "simply wrong, memory_forget is the tool that says the record was wrong.")
+    if retractions:
+        pairs = "; ".join(
+            f"{safe_line(d.subject)} {safe_line(d.predicate)}: kept "
+            f"'{safe_line(d.incumbent)}' (confidence {d.incumbent_confidence:.2f}, "
+            f"claim_id {d.claim_id}) against a retraction at confidence "
+            f"{d.candidate_confidence:.2f}" for d in retractions)
+        notes.append(
+            f"note: {len(retractions)} value(s) named by a retraction were not ended, "
+            f"because each is more than twice as confident as the retraction: {pairs}. "
+            "Each still answers memory_recall. The retraction is kept in the record, and "
+            "no read returns it. If a value has stopped being true, memory_end with its "
+            "claim_id ends it. If it was never true, memory_forget is the tool that says "
+            "the record was wrong.")
+    return " ".join(notes)
 
 
 def _collapsed_note(items: Sequence[Collapse]) -> str:
@@ -1807,7 +1911,9 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
             confidence=args["confidence"],
             memory_type=memory_type,
             valid_from=since, valid_to=until,
-            extractor=args.get("extractor") or "api",
+            # The schema's default fills an omitted extractor; an empty string is read
+            # the same way, as it always was.
+            extractor=args["extractor"] or "api",
             # Ids, never Episode objects. `_cite` stores anything it is handed as an
             # Episode and merely links a string, so accepting text here would duplicate
             # a turn the caller has usually just stored through memory_add.
@@ -2745,23 +2851,7 @@ def _delete_document(ctx: ToolContext, args: dict[str, Any]) -> str:
 TOOLS: tuple[Tool, ...] = (
     Tool(
         name="memory_recall",
-        description=(
-            "Look up what is already known about this user and read it before you "
-            "answer. Call it at the START of a turn whenever the reply could depend on "
-            "something the user told you earlier — their name, where they live or work, "
-            "how they like things done, a decision they already made, a preference, a "
-            "constraint. Call it speculatively; it is cheap. It calls a model only on a "
-            "server that has one configured: there it rewrites the query into a few "
-            "other phrasings before searching (query_rewrite), and ranked and "
-            "synthesize each add one more call when you set them. Returns "
-            "numbered plain-text notes, ready to read as context, with no scores or JSON "
-            "to filter out. An empty result means nothing is stored, not that you should "
-            "try again. Prefer this over memory_search whenever the goal is to answer "
-            "the user rather than to inspect the memory itself. When the question is "
-            "about the past ('what was I working on in June'), pass valid_at and the "
-            "notes describe that day; the block's header says so. as_of is refused "
-            "here: what this system used to believe is an inspection, on memory_search."
-        ),
+        description=_recall_description({"query_rewrite", "synthesize"}),
         properties={
             "valid_at": {
                 "type": "string",
@@ -2786,6 +2876,7 @@ TOOLS: tuple[Tool, ...] = (
             },
             "include_episodes": {
                 "type": "boolean",
+                "default": False,
                 "description": (
                     "Also return raw excerpts from earlier conversation, not just the "
                     "facts extracted from them. On a local store, each excerpt starts "
@@ -3396,7 +3487,7 @@ TOOLS: tuple[Tool, ...] = (
                 ),
             },
             "extractor": {
-                "type": "string", "maxLength": 64,
+                "type": "string", "maxLength": 64, "default": "api",
                 "description": (
                     "What derived this fact, when that is not the caller asserting "
                     "something it already knew. Defaults to 'api', and 'api' is a claim "

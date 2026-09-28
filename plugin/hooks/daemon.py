@@ -199,8 +199,10 @@ class Daemon:
                 if not isinstance(request, dict):
                     return
                 conn.sendall(json.dumps(self._answer(request)).encode("utf-8"))
-            except (OSError, ValueError, socket.timeout):
+            except (OSError, ValueError, RecursionError, socket.timeout):
                 # Client vanished mid-exchange, or sent nonsense. Neither is fatal.
+                # RecursionError is nonsense too: a request nested deeper than the
+                # recursion limit, which json.loads does not report as ValueError (#346).
                 return
 
     def _sweep_stale(self) -> None:

@@ -3,11 +3,8 @@
 The approve hook answers a host's permission check for a memvara tool. It allows a tool
 in its READ_ONLY list and says nothing about any other, which leaves the host to ask the
 person (plugin/hooks/approve.py). That list must be the tools the server marks read-only,
-`readOnlyHint` in its `tools/list`, as a client sees it over stdio.
-
-#267 (B3) is already pinned for the two document tools the list misses
-(test_adv_known_bugs.py). While B3 is registered, those two are left out here, and any
-other difference between the lists fails.
+`readOnlyHint` in its `tools/list`, as a client sees it over stdio. The list used to
+miss the two document readers (#267, B3).
 """
 
 from __future__ import annotations
@@ -26,21 +23,12 @@ from harness.stdio import McpProcess
 
 from . import support
 
-#: The two read-only tools that #267 is about.
-B3_MISSING = frozenset({"memory_get_document", "memory_list_documents"})
-
-
 def _approve_module() -> ModuleType:
     """plugin/hooks/approve.py. plugin/hooks is not a package, so its folder goes on the
     path first."""
     if str(HOOKS_DIR) not in sys.path:
         sys.path.insert(0, str(HOOKS_DIR))
     return importlib.import_module("approve")
-
-
-def _known_gap() -> frozenset[str]:
-    """The tools B3 leaves out of the approve list, while B3 is registered."""
-    return B3_MISSING if "B3" in known_bugs.KNOWN_BUGS else frozenset()
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +66,7 @@ def test_the_approve_list_is_the_servers_read_only_tools(server_tools: dict[str,
     read_only = {name for name, only_reads in server_tools.items() if only_reads}
     allowed = set(_approve_module().READ_ONLY)
     assert allowed - read_only == set(), "approved, but the server does not mark it read-only"
-    assert read_only - allowed <= _known_gap(), "read-only on the server, but not approved"
+    assert read_only <= allowed, "read-only on the server, but not approved"
 
 
 @pytest.mark.parametrize("host", support.HOSTS)
@@ -98,17 +86,24 @@ def test_support_tool_names_are_the_names_the_host_record_describes(host: str) -
         f"approves {sorted(approve.prefixes)}")
 
 
-@pytest.mark.parametrize("host", ("cursor", "opencode"))
-@pytest.mark.parametrize("name", ("memvara_memory_search", "memory_search"))
+#: How each host spells a memvara tool's name in the event its approve hook answers,
+#: measured on 2026-09-28 with the real clients (#340).
+MEASURED_NAMES = (("cursor", "MCP:memory_search"), ("opencode", "memvara_memory_search"))
+
+
+@pytest.mark.parametrize(("host", "name"), MEASURED_NAMES)
 @known_bugs.xfail("B58")
-def test_a_read_only_tool_named_with_a_single_underscore_is_approved(
+def test_a_read_only_tool_is_approved_under_the_name_its_host_sends(
         hooks: Callable[..., HookRunner], host: str, name: str) -> None:
-    """Nobody has measured how Cursor and OpenCode spell a memvara tool's name when they
-    ask the approve hook. Their records approve only the Claude Code spelling,
-    `mcp__memvara__`, so a name joined with one underscore, or the bare tool name, is left
-    to the host's prompt, and a read that prompts is one the model learns to avoid.
-    Approving either form on a guess would approve a tool of any server that spells its
-    name that way, so this stays open until the spelling is measured."""
+    """Measured on 2026-09-28. Cursor 2026.09.15 sends `MCP:memory_search` to preToolUse,
+    which does not name the server, so approving it there would approve any server's
+    `memory_search`. Its beforeMCPExecution names the server (`mcp_server_name`), but
+    headless Cursor ignored an `allow` from that hook: the call ran only with `--force`,
+    while a `deny` was honoured. OpenCode 1.18.20 sends `memvara_memory_search`, and
+    approving by that prefix would approve a tool of any server whose name starts with
+    `memvara_`; its permission.ask never fired in a headless run. Both records therefore
+    still approve only `mcp__memvara__`, and a memvara read prompts on both hosts. This
+    stays open until each host's approval path is measured in an interactive session."""
     result = hooks(host).run("approve", tool_name=name)
     if (result.exit_code, result.reply, support.crashes(result)) == (0, None, []):
         raise known_bugs.Reproduced(f"B58: approve on {host} says nothing about {name!r}")
@@ -120,7 +115,7 @@ def test_every_host_approves_exactly_the_read_only_tools(
         approvals: support.Runs, server_tools: dict[str, bool], host: str) -> None:
     wrong = []
     for (asked_on, name, tool), outcome in approvals.results.items():
-        if asked_on != host or tool in _known_gap():
+        if asked_on != host:
             continue
         result = support.result_of(outcome)
         decision = support.decision_of(host, result.reply)

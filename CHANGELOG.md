@@ -21,6 +21,133 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   deployment that does not send one still hydrates, with it empty. The hosted service
   itself does not send them yet; until memvara-cloud's renderer does, a hosted receipt
   still reports them empty. #334 (B52), this repository's half.
+- **A write receipt read through the hosted client reports `ungrounded` and `polluted`.**
+  The deployment sends both counts, and `RemoteMemvara` never read them, so a hosted
+  receipt always said 0: a caller could not tell that the write refused claims an
+  extraction model proposed, and a server in cloud mode never wrote the note about
+  ungrounded claims. Both are read now, and a deployment that does not send them still
+  hydrates, with 0. #335 (B53).
+- **Recall logs a line when nothing is configured and when nothing matches.** Both
+  outcomes were reported only on the status line, and Codex, Copilot and OpenCode show
+  none, so on those hosts a missing store and an empty answer left the same trace: no
+  reply and no log line. Recall now writes `skipped=not configured` or `recalled=0
+  repeats=N` to `~/.memvara/.hooks/recall.log`, the same shape as the line a recall that
+  injected something writes. When nothing new matched but the standing preferences
+  changed, the line adds what was injected: `injected=<N>c standing=updated`. #338 (B56).
+- **A retraction far less confident than the value it names no longer ends it.** A new
+  value closes the value on record only when it is worth at least half as much
+  (`AUTHORITY_SHARE`); below that both stay and the write reports a dispute. A retraction
+  skipped that rule, so a model's retraction at confidence 0.05, read from a turn, ended a
+  fact the user had stated at 1.0. A retraction now faces the same rule. Below half, the
+  value stays live, the retraction is kept only as its tombstone, and `receipt.disputed`
+  reports a `Dispute` whose new field `retraction` is true. `memory_add` says so in a
+  note that names `memory_end` and `memory_forget` as the tools that close the value. `remember(polarity=-1)` at its default confidence of 1.0
+  and the fast path's retractions at 0.95 are not affected. #307 (B30).
+- **A backdated retraction's tombstone is no longer returned by reads of the past.** A
+  retraction written with a `recorded_at` in the past stored a tombstone closed on both
+  clocks at the moment of the call rather than at its own `recorded_at`, so
+  `get_all(as_of=...)` and `search(..., as_of=...)` at an instant between the two
+  returned it as a live negative claim. The tombstone now closes both clocks at the
+  instant its write is recorded, so no read at any instant returns it. #317 (B45).
+- **Sending the same retraction dated in the future again is a repeat.** The retracted
+  value stays live until the retraction's date, so every repeat still found it, ended it
+  again at the same instant, wrote one more tombstone and reported the value ended in
+  its receipt. A repeat now reinforces the tombstone on record and reports nothing ended,
+  as a repeat of a retraction dated now already did. A retraction dated sooner still ends
+  the value sooner. #349 (B69).
+- **Writing the same value twice for a period that is already over stores it once.**
+  With Paris live from March, `remember("user", "lives_in", "Rome", valid_from=January)`
+  stores Rome from January to March. Writing it again stored a second, identical Rome
+  claim, and a read of February returned Rome twice. The second write now reinforces the
+  claim on record, reports it under `reinforced` and stores nothing. The same holds for a
+  value written twice with the same `valid_to`. #351 (B70).
+- **The benchmark refuses a `--timeout` of NaN or infinity.** `bench/evalkit.py` checked
+  `timeout <= 0`, which a NaN passes, so `--timeout nan` reached the reader's client as its
+  timeout. It now asks for a finite number of seconds above zero, and so does
+  `bench/extract_cost.py`'s `--timeout`, which had no check at all. #431.
+- **Malformed output from an extraction model is dropped, not raised on.** A backend that
+  does no validation of its own could return an item that is not an object, a
+  `source_index` that is a list, an infinite polarity, a confidence of `10**400`, or a
+  reply that is not a list at all. `add()` raised on each, and the fast path's facts from
+  the same call were lost with it. The write path now drops such an item, or the whole
+  reply when it is not a list, before anything else reads it, and returns a receipt. This
+  holds when `extraction_chunks` cuts a long turn into pieces, too. #303.
+- **A claim with no subject, or with an object that is not text, is dropped.** One with no
+  subject used to be filed under `user`, where it could end the user's own value, and an
+  object that was a list was stored as its Python text, such as `['Porto']`. A subject
+  or an object that is a finite number is still stored as its text. #306.
+- **A claim dropped as ungrounded costs no model call and teaches no predicate.** The
+  grounding check now runs before a new predicate is acquired, so a dropped claim no
+  longer spends an acquisition call or takes one of the 200 learned-predicate slots.
+  #305.
+- **A confidence that is not a finite number is read as the default, 0.7.** NaN used to be
+  read as 0.0, a guess that could displace nothing, and infinity as 1.0.
+- **An open that refuses a store's embedder leaves an older store file as it was.**
+  `SQLiteStore` upgrades a file an older version wrote as it opens it, and commits the
+  upgrade; `Memvara` then checked its embedder and refused one of another width. So the
+  refused file had already been upgraded, and the release that wrote it could no longer
+  open it. The width check now also runs before the upgrade: `SQLiteStore` takes a new
+  keyword, `before_upgrade`, which it calls with the width of the stored vectors before it
+  writes anything to an older file, and `Memvara` refuses there with the same
+  `EmbedderMismatchError`. This covers an embedder you pass and the default one.
+  `reembed=True` still upgrades the file and re-encodes it. #300.
+- **A store whose open fails closes its database connection.** A store refused because a
+  newer version wrote it released its lock but left its SQLite connection open until
+  garbage collection, so on Windows the caller could not delete or replace the file, and
+  Python 3.13 warned about an unclosed database. #301.
+- **A model reply with thousands of invented predicates no longer stalls a write.** Past
+  the cap of 200 learned predicates, each new spelling is folded onto the nearest known
+  predicate as an alias. Each alias rebuilt the registry's whole index, and each search
+  for the nearest predicate read every alias again, so one `add()` took time that grew
+  with the square of the number of invented spellings: 100 to 130 seconds for 5,000 on a
+  laptop. An alias is now added to the index in place, and each predicate's words are kept
+  once, so the same write takes about 6 seconds. The model is still called 201 times,
+  and every predicate resolves as before. #309.
+
+- **A hook answers a payload nested too deeply to decode as it answers an empty one.**
+  `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
+  Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
+  such as `{"prompt": [[[...]]]}` 100,000 levels deep crashed the body of every hook.
+  The exit code stayed 0, but the hook printed nothing: session start gave the model no
+  memories and showed no status line. The only trace was a `failed hook=... RecursionError`
+  line in `~/.memvara/.hooks/hooks.log`. `payload()` in `plugin/hooks/lib/ipc.py` and
+  `read_event()` in `plugin/hooks/core/envelope.py` now read such a payload as an empty
+  one. #346 (B64).
+- **`memory_recall` refuses `ranked` without conversation turns as an argument error.**
+  `ranked=true` needs turns to rank, so it takes `include_episodes=true` and no
+  `memory_types`. The library refused the other combinations with a `ValueError`, which
+  reached the model through the server's catch-all as `memory_recall failed: ValueError:
+  ...`, a Python exception rather than a mistake in its arguments. The tool now refuses
+  them itself, before the store is asked, with a message that says which argument to
+  change. #316 (B39).
+- **`memory_add` no longer says a stored turn was not stored.** When extraction
+  recognised no fact in a turn, the note said the turn "carried something extraction did
+  not recognise and [was] not stored", right after the reply gave the turn's id.
+  `memory_recall` with `include_episodes` returns that turn word for word: only the fact
+  was not stored. A model that believed the note could send the turn again, which stores
+  it twice, or tell the user nothing was saved. The note now says the turn was stored,
+  that no fact was extracted from it, and that a recall with `include_episodes=true`
+  finds it; the advice that follows it is unchanged. The packaged skill said the same
+  thing in `references/write-and-correct.md`, and says what happens now. #353 (B73).
+- **`memory_recall`'s description names only the arguments the server serves.** It
+  said that the tool rewrites the query "(query_rewrite)" and that "ranked and synthesize
+  each add one more call". A server started with `MEMVARA_FEATURE_QUERY_REWRITE=0` or
+  `MEMVARA_FEATURE_SYNTHESIS=0` removes that argument from the schema, so a model that
+  followed the description was refused with `unknown argument(s)`. The description now
+  drops each argument its switch removes, and with query rewrite off it no longer says
+  the query is rewritten. With every feature on, it reads exactly as before. #295 (B19).
+- **Two defaults stated in tool descriptions are declared in the schema.**
+  `memory_recall.include_episodes` ("Default false") and `memory_remember.extractor`
+  ("Defaults to 'api'") had no `default` in their input schemas; each handler supplied
+  the value itself. Both schemas now declare it, so `tools/list` shows it to a client and
+  the validator fills it, and the handlers read the filled value. Behaviour is unchanged:
+  an empty `extractor` is still read as `api`. #296 (B20).
+- **The plugin's approve hook lets the two document readers run without a prompt.**
+  `memory_get_document` and `memory_list_documents` only read, and the server marks both
+  `readOnlyHint`, but they were missing from the hook's list of read-only tools
+  (`READ_ONLY` in `plugin/hooks/approve.py`). So the host asked the person every time an
+  agent read a stored document. The list now matches the server's read-only tools
+  exactly, and a test fails if the two ever differ. #267 (B3).
 - **The plugin's hooks find a local store configured in Codex's, Cursor's or OpenCode's
   own MCP config.** The hooks read the store's variables from the client's config, and
   they read only JSON with the servers under `mcpServers` and the variables under `env`.

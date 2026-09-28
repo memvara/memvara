@@ -256,6 +256,10 @@ def receipt(body: dict[str, Any]) -> WriteReceipt:
         proposals_refused=[RefusedProposal(tool=p["tool"], target=p["target"],
                                            reason=p["reason"])
                            for p in body.get("proposals_refused", ())],
+        # The deployment sends both, and they were never read, so a hosted receipt said
+        # 0 whatever it counted (#335). `.get` for a deployment that does not send them.
+        ungrounded=int(body.get("ungrounded", 0)),
+        polluted=int(body.get("polluted", 0)),
     )
 
 

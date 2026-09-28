@@ -115,10 +115,13 @@ LIMITS: Mapping[str, Mapping[str, int]] = {
 #: The names each host gives a tool of the memvara server when it reaches the approve
 #: hook. Claude Code and Codex prefix `mcp__<server>__` (hosts/claude.py, hosts/codex.py),
 #: and a server a plugin installed is named `plugin_memvara_memvara` (approve.py).
-#: Copilot joins with a hyphen, which was measured (hosts/copilot.py). Nobody has
-#: measured Cursor's or OpenCode's names. Their records approve only the Claude Code
-#: spelling, and leave a name in any other form to the host's prompt, so these use that
-#: spelling. Each form is one of its record's approve prefixes followed by the tool.
+#: Copilot joins with a hyphen, which was measured (hosts/copilot.py). Cursor and OpenCode
+#: send other names, measured on 2026-09-28: `MCP:memory_search` and
+#: `memvara_memory_search`. Their records approve neither, which B58 pins
+#: (test_adv_hook_approve.py), and approve only the Claude Code spelling. So on those two
+#: hosts these names check the record's rule, not what the host sends: a real memvara read
+#: there still prompts. Each form is one of its record's approve prefixes followed by the
+#: tool.
 TOOL_NAMES: Mapping[str, tuple[str, ...]] = {
     "claude": ("mcp__memvara__{tool}", "mcp__plugin_memvara_memvara__{tool}"),
     "codex": ("mcp__memvara__{tool}",),
@@ -189,9 +192,10 @@ MORE_HOSTILE: Mapping[str, tuple[bytes, Mapping[str, str]]] = {
 
 #: The payloads that are not a JSON object once they are read. A hook must answer each
 #: one exactly as it answers `{}`: plugin/hooks/core/envelope.py, `read_event`, says that
-#: anything unreadable becomes an empty event.
+#: anything unreadable becomes an empty event. `json.loads` raises RecursionError on the
+#: deep nesting, not ValueError, and every hook body used to crash on it (#346, B64).
 UNREADABLE = ("empty stdin", "text that is not JSON", "a JSON list",
-              "invalid UTF-8, read strictly")
+              "invalid UTF-8, read strictly", "nesting 100,000 levels deep")
 
 #: The line run.py writes when a hook's body raised and its last guard kept the exit code
 #: at 0 (plugin/hooks/run.py, `main`). A line about handing capture to a child is not one.
@@ -531,15 +535,13 @@ def pin_cannot_open(runs: Runs, host: str, hook: str) -> None:
     check_told_apart(runs, host, hook, "store cannot open", "not configured")
 
 
-def pin_nothing_matches(runs: Runs, host: str) -> None:
-    """B56: on a host that shows no status line, recall prints nothing and logs nothing,
-    both when nothing matches and when nothing is configured."""
+def check_nothing_matches_is_logged(runs: Runs, host: str) -> None:
+    """On a host that shows no status line, recall's log tells nothing matching from
+    nothing configured. Both used to print nothing and log nothing (#338, B56)."""
     nothing = runs[host, "recall", "nothing matches"]
     missing = runs[host, "recall", "not configured"]
-    if (nothing.reply, nothing.logs, missing.reply, missing.logs) == (None, {}, None, {}):
-        raise known_bugs.Reproduced(
-            f"B56: recall on {host} prints and logs nothing both when nothing matches and "
-            f"when nothing is configured")
+    assert "recalled=0 repeats=0" in nothing.log("recall"), nothing.logs
+    assert "skipped=not configured" in missing.log("recall"), missing.logs
     check_told_apart(runs, host, "recall", "nothing matches", "not configured")
 
 
@@ -630,18 +632,3 @@ def check_no_extraction(hostile: Hostile) -> None:
     assert hostile.clis.calls("codex") == []
 
 
-#: The hostile payload that B64 is about.
-DEEP = "nesting 100,000 levels deep"
-
-
-def pin_deep_nesting(hostile: Hostile, host: str, hook: str) -> None:
-    """B64: json.loads raises RecursionError on the payload, which neither
-    plugin/hooks/lib/ipc.py, `payload`, nor core/envelope.py, `read_event`, catches, so the
-    hook's body raises and only run.py's last guard keeps the exit code at 0."""
-    if hook == "capture" and hostile.clis is None:
-        pytest.skip(NO_FAKES)
-    crashed = [line for line in crashes(hostile.runs[host, hook, DEEP])
-               if "RecursionError" in line]
-    if crashed:
-        raise known_bugs.Reproduced(f"B64: {hook} on {host}: {crashed[0]}")
-    check_read_as_empty(hostile, host, hook, DEEP)

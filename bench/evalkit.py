@@ -242,6 +242,7 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -3019,7 +3020,9 @@ def hosted_reader(provider: str, args: Any, *,
         ("timeout", getattr(args, "timeout", None)),
     ) if value is not None}
     timeout = pinned.get("timeout")
-    if timeout is not None and timeout <= 0:
+    # `not timeout > 0` rather than `timeout <= 0`, which a NaN passes, because every
+    # comparison with NaN is false (#431); infinity is no bound at all.
+    if timeout is not None and not (0 < timeout < math.inf):
         raise SystemExit(f"--timeout must be a number of seconds above zero; got "
                          f"{timeout:g}.")
     base_url = getattr(args, "base_url", None)
