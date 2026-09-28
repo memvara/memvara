@@ -1,7 +1,13 @@
 """The two memvara arms, reading from a hosted deployment instead of a local file.
 
-    PYTHONPATH=. python3 demo/harness.py --memory hosted \\
-        --hosted-credentials ~/.memvara/demo-credentials.json ...
+    # write every scope, then read them at least a day later with the same run id
+    PYTHONPATH=. python3 demo/harness.py --memory hosted --write-only \\
+        --hosted-credentials ~/.memvara/demo-credentials.json --hosted-run-id RUN
+    PYTHONPATH=. python3 demo/harness.py --memory hosted --reader ... \\
+        --hosted-credentials ~/.memvara/demo-credentials.json --hosted-run-id RUN
+
+`--min-scope-age 0` writes and reads in one run instead, which gives up the wait: the
+scopes are read before the service's background extraction has had time to run.
 
 `demo/baselines.py` builds `memvara` and `memvara_structured` over a local store that
 lives and dies inside the process. This module builds the same two arms over the hosted
@@ -62,6 +68,35 @@ noise-floor repeat measures the reader twice over the same stored contexts. A sc
 the fact table into a scope that holds part of it would close values at instants they were
 never closed at, and there is no safe way to finish it.
 
+## Write now, read a day later
+
+The service extracts claims from stored turns in a background worker, after the write has
+returned. `add()`'s receipt says `deferred` when that happens, but nothing the client can
+reach says when the worker has finished with a scope: `/v1/stats` returns counts, and a
+turn the worker read and found nothing in looks exactly like a turn it has not read yet.
+A claim count that stops changing is not proof either, because the worker reads one turn
+at a time across every project on the service and pauses between passes. On 2026-09-23
+the `memvara` arm read its scopes straight after writing them and found 0 claims in them;
+the same scopes held 3 to 4 once the worker had been through them.
+
+So a run is two steps. `--write-only` (`HostedMemvara.write_all`) writes every scope and
+the manifest and exits without building a reader. The read is a later run with the same
+`--hosted-run-id`, and `min_age` (`--min-scope-age`, 24 hours on the command line) makes
+it refuse any scope whose `complete` row in the manifest is younger than that, and any
+scope the write step never finished. The manifest's time is the only record of when a
+scope was written. The write step also records the minimum age it was written for, and a
+read that asks for less is refused unless it passes `--override-min-scope-age`
+(`override_min_age`). Each context carries its scope's name and age, and the report prints
+both beside the claim count at read time.
+
+Each plain `memvara` context also carries `claims_expected`: the number of facts the desk
+gave the structured scope for the same question time. A plain scope holding fewer claims
+than half of that is one the service barely extracted from, as happened on 2026-09-23 and
+2026-09-28, and the report names it and marks that arm's rows as not a result. The wait is a fixed delay chosen by whoever
+runs the demo, and the report says so: it is not a confirmation that extraction finished.
+`min_age=0` keeps the one-step run, and its report says the scopes may have been read
+before extraction finished.
+
 ## Whose store
 
 Never the one this machine already uses. `load_demo_credential` refuses the default
@@ -81,14 +116,14 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from demo import baselines as bl
 from demo.baselines import Context, Question, Turn, Write
 
-from memvara import HashingEmbedder, Memvara, NullLLM
+from memvara import HashingEmbedder, Memvara, NullLLM, utcnow
 from memvara.retrieve import EpisodeResult
 from memvara.schema import PredicateRegistry
 from memvara.select import PLAIN_READ
@@ -102,6 +137,12 @@ __all__ = ["HostedCredential", "HostedMemvara", "Manifest",
 CHUNK = 50
 
 _DEFAULT_SERVER = "https://app.memvara.dev"
+
+
+#: Hours a scope must stand between its write and its read, unless told otherwise. The
+#: command line's default for `--min-scope-age`, and what the write step names when it was
+#: given none.
+DEFAULT_MIN_SCOPE_AGE = 24.0
 
 
 # --- the credential ---------------------------------------------------------------
@@ -287,34 +328,64 @@ class Manifest:
     Appended as it happens, like `evalkit.Checkpoint`, so a run killed mid-write leaves
     the evidence that it was: `started` with no `complete`. A torn last line is skipped
     rather than refusing the file, for the same reason the checkpoint skips one.
+
+    Every row carries the time it was written, `at`, taken from `clock`. The `complete`
+    row's time is when the scope finished being written, and it is what a later read
+    measures the scope's age from; see `HostedMemvara`.
     """
 
-    def __init__(self, path: str | os.PathLike[str]) -> None:
+    def __init__(self, path: str | os.PathLike[str], *,
+                 clock: Callable[[], datetime] | None = None) -> None:
         self.path = Path(path)
-        self._status: dict[str, str] = {}
+        self._clock = clock
+        #: The latest row for each scope. A scope's rows only ever go `started` then
+        #: `complete`, so the latest row says both its status and, once complete, its
+        #: counts and when it finished.
+        self._latest: dict[str, dict[str, Any]] = {}
         if self.path.exists():
             for line in self.path.read_text(encoding="utf-8").splitlines():
                 try:
                     row = json.loads(line)
-                    self._status[str(row["scope"])] = str(row["status"])
+                    self._latest[str(row["scope"])] = {**row, "status": str(row["status"])}
                 except (ValueError, KeyError, TypeError):
                     continue
 
     def status(self, scope: str) -> str | None:
-        return self._status.get(scope)
+        row = self._latest.get(scope)
+        return row["status"] if row is not None else None
+
+    def completed(self, scope: str) -> dict[str, Any] | None:
+        """The `complete` row for `scope`, with its counts and its `at`, or `None`."""
+        row = self._latest.get(scope)
+        return dict(row) if row is not None and row["status"] == "complete" else None
+
+    def completed_at(self, scope: str) -> datetime | None:
+        """When `scope` finished being written, or `None` if the manifest cannot say:
+        the scope is not complete, or its row holds no readable time."""
+        return finished_at(self.completed(scope))
 
     def started(self, scope: str) -> None:
         self._append({"scope": scope, "status": "started"})
 
-    def complete(self, scope: str, **counts: int) -> None:
-        self._append({"scope": scope, "status": "complete", **counts})
+    def complete(self, scope: str, **fields: Any) -> None:
+        self._append({"scope": scope, "status": "complete", **fields})
 
     def _append(self, row: dict[str, Any]) -> None:
-        self._status[row["scope"]] = row["status"]
+        now = self._clock() if self._clock is not None else utcnow()
+        row = {**row, "at": now.isoformat()}
+        self._latest[row["scope"]] = row
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as out:
-            out.write(json.dumps({**row, "at": datetime.now(timezone.utc).isoformat()})
-                      + "\n")
+            out.write(json.dumps(row) + "\n")
+
+
+def finished_at(row: Mapping[str, Any] | None) -> datetime | None:
+    """The time a manifest row was written, or `None` for no row or no readable time."""
+    try:
+        at = datetime.fromisoformat(str((row or {})["at"]))
+    except (KeyError, ValueError):
+        return None
+    return at if at.tzinfo is not None else at.replace(tzinfo=timezone.utc)
 
 
 # --- the writes -------------------------------------------------------------------
@@ -400,12 +471,25 @@ class HostedMemvara:
 
     `client` is a `RemoteMemvara` (see `connect`). Each arm method has the `Arm`
     signature, so `arms()` drops straight into the harness in place of the local two.
+
+    `min_age` is the youngest a scope may be when it is read, measured from its `complete`
+    row in the manifest to `clock()`. `None`, the default here, checks nothing and writes
+    a scope on first read, as the one-step run always did, and so does zero. A value above
+    zero refuses to write a scope during a read: a scope written now could never be old
+    enough.
+    The command line passes 24 hours unless told otherwise; see the module docstring.
+
+    The write step records `min_age` in each scope's `complete` row. A read whose
+    `min_age` is smaller than the one recorded is refused unless `override_min_age` is
+    set, so a scope written for a day's wait is not read after an hour by accident.
     """
 
     def __init__(self, client: Any, *, run_id: str, scale: int, manifest: Manifest,
                  facts: Sequence[Write] = bl.SUPPORT_FACTS,
                  registry: PredicateRegistry = bl.SUPPORT_REGISTRY,
-                 chunk: int = CHUNK) -> None:
+                 chunk: int = CHUNK, min_age: timedelta | None = None,
+                 override_min_age: bool = False,
+                 clock: Callable[[], datetime] | None = None) -> None:
         self.client = client
         self.run_id = run_id
         self.scale = scale
@@ -413,6 +497,9 @@ class HostedMemvara:
         self.facts = tuple(facts)
         self.registry = registry
         self.chunk = chunk
+        self.min_age = min_age
+        self.override_min_age = override_min_age
+        self._clock = clock
 
     def scope_name(self, arm: str, question: Question) -> str:
         """The `user` a scope is written under: run, scale, arm and question instant."""
@@ -422,8 +509,102 @@ class HostedMemvara:
     def arms(self) -> dict[str, Any]:
         return {"memvara": self.memvara, "memvara_structured": self.memvara_structured}
 
-    def _prepared(self, arm: str, question: Question, turns: Sequence[Turn]) -> Any:
-        """The scope for this arm and instant, written first if this run has not."""
+    @property
+    def _waits(self) -> bool:
+        """True when a read must find its scope already written and old enough."""
+        return self.min_age is not None and self.min_age > timedelta(0)
+
+    def write_all(self, questions: Sequence[Question],
+                  turns: Sequence[Turn]) -> list[str]:
+        """Write every scope both arms would read for `questions`, and read nothing.
+
+        This is the write step of `--write-only`. A scope an earlier run completed is left
+        alone. Returns the scope names in the order they were visited, one per arm and
+        question instant, each once.
+        """
+        names: list[str] = []
+        seen: set[str] = set()
+        for arm in ("memvara", "memvara_structured"):
+            for question in questions:
+                name = self.scope_name(arm, question)
+                if name not in seen:
+                    self._written(arm, question, turns)
+                    seen.add(name)
+                    names.append(name)
+        return names
+
+    def write_summary(self, names: Sequence[str]) -> str:
+        """What the write step prints: each scope with its counts and finish time, and
+        when the read may start. The later read needs the run id and that time, and
+        nothing else from this run."""
+        lines = [f"  wrote hosted run {self.run_id}, scale {self.scale}, "
+                 f"manifest {self.manifest.path}"]
+        finished: list[datetime] = []
+        for name in names:
+            row = self.manifest.completed(name) or {}
+            at = finished_at(row)
+            if at is not None:
+                finished.append(at)
+            lines.append(f"    {name}: turns {row.get('turns', '?')}, facts "
+                         f"{row.get('facts', '?')}, finished {_stamp(at)}")
+        wait = (self.min_age if self.min_age is not None
+                else timedelta(hours=DEFAULT_MIN_SCOPE_AGE))
+        last = max(finished) if finished else None
+        lines += [f"  writes finished {_stamp(last)}.",
+                  f"  Read with the same --hosted-run-id {self.run_id} no earlier than "
+                  f"{_stamp(last + wait if last is not None else None)} "
+                  f"(--min-scope-age {_hours(wait)})."]
+        return "\n".join(lines)
+
+    def _prepared(self, arm: str, question: Question,
+                  turns: Sequence[Turn]) -> tuple[Any, str, float | None]:
+        """The scope for this arm and instant, ready to read, with its name and its age
+        in hours.
+
+        Without `min_age` it is written first if this run has not written it. With one,
+        it must already be complete and at least `min_age` old, or the read is refused.
+        The age is taken once, here, so the age the report prints is the age that was
+        checked.
+        """
+        name = self.scope_name(arm, question)
+        if self._waits and self.manifest.status(name) is None:
+            raise SystemExit(
+                f"hosted scope {name} has not been written ({self.manifest.path}). Write "
+                f"every scope first with --write-only and the same --hosted-run-id "
+                f"{self.run_id}, then read them after --min-scope-age has passed.")
+        scoped = self._written(arm, question, turns)
+        return scoped, name, self._age(name)
+
+    def _age(self, name: str) -> float | None:
+        """The scope's age in hours, refusing a scope younger than `min_age` and a read
+        that asks for a shorter wait than the write recorded. `None` only when no age is
+        required and the manifest cannot say."""
+        row = self.manifest.completed(name) or {}
+        recorded = row.get("min_age_hours")
+        asked = self.min_age.total_seconds() / 3600 if self.min_age is not None else 0.0
+        if recorded is not None and asked < float(recorded) and not self.override_min_age:
+            raise SystemExit(
+                f"hosted scope {name} was written to be read after at least "
+                f"{float(recorded):.1f} h, as its manifest row records, and this read asks "
+                f"for {asked:.1f} h. Pass --min-scope-age {float(recorded):g}, or pass "
+                "--override-min-scope-age to read it sooner and have the report say so.")
+        at = finished_at(row)
+        if at is None:
+            if not self._waits:
+                return None
+            raise SystemExit(
+                f"hosted scope {name} is complete in {self.manifest.path} but its row "
+                "records no time, so its age cannot be shown to meet --min-scope-age.")
+        age = (self._clock() if self._clock is not None else utcnow()) - at
+        if self._waits and self.min_age is not None and age < self.min_age:
+            raise SystemExit(
+                f"hosted scope {name} was written {_hours(age)} h ago, at {_stamp(at)}, "
+                f"and --min-scope-age is {_hours(self.min_age)} h. Read it after "
+                f"{_stamp(at + self.min_age)}, or pass a smaller --min-scope-age.")
+        return age.total_seconds() / 3600
+
+    def _written(self, arm: str, question: Question, turns: Sequence[Turn]) -> Any:
+        """The scope for this arm and instant, written first if no run has written it."""
         name = self.scope_name(arm, question)
         scoped = self.client.scope(user=name)
         status = self.manifest.status(name)
@@ -445,19 +626,22 @@ class HostedMemvara:
             visible = bl.visible_facts(question, self.facts)
             apply_facts_hosted(scoped, visible, self.registry)
             written = len(visible)
-        self.manifest.complete(name, turns=len(seen), facts=written)
+        recorded = ({"min_age_hours": self.min_age.total_seconds() / 3600}
+                    if self.min_age is not None else {})
+        self.manifest.complete(name, turns=len(seen), facts=written, **recorded)
         return scoped
 
     def memvara(self, question: Question, turns: Sequence[Turn], *,
                 k: int = bl.DEFAULT_K, max_chars: int = bl.MAX_CONTEXT_CHARS) -> Context:
         """The shipped defaults over the service: turns in, `recall()` out."""
-        scoped = self._prepared("memvara", question, turns)
+        scoped, name, age = self._prepared("memvara", question, turns)
         text = bl.clip(scoped.recall(question.text, k=k, include_episodes=True,
                                      **PLAIN_READ), max_chars)
-        return Context(arm="memvara", text=text,
-                       turns_visible=len(bl.visible_turns(question, turns)),
-                       items_used=bl.count_entries(text), read="recall",
-                       claims_in_scope=scoped.count())
+        # What the desk gave the structured scope for this question time, which is also
+        # its `facts` in the manifest. See the module docstring.
+        expected = len(bl.visible_facts(question, self.facts))
+        return self._context("memvara", question, turns, text, "recall", scoped, name,
+                             age, claims_expected=expected)
 
     def memvara_structured(self, question: Question, turns: Sequence[Turn], *,
                            k: int = bl.DEFAULT_K,
@@ -465,7 +649,7 @@ class HostedMemvara:
         """The integration over the service: turns and the desk's facts in, and a dated
         question read at its own instant — through `search(valid_at=)`, see the module
         docstring."""
-        scoped = self._prepared("memvara_structured", question, turns)
+        scoped, name, age = self._prepared("memvara_structured", question, turns)
         if question.about is None:
             block = scoped.recall(question.text, k=k, include_episodes=True,
                                   **PLAIN_READ)
@@ -475,11 +659,18 @@ class HostedMemvara:
                                                include_episodes=True, **PLAIN_READ),
                                  question.about, question.text)
             read = "search"
-        text = bl.clip(block, max_chars)
-        return Context(arm="memvara_structured", text=text,
+        return self._context("memvara_structured", question, turns,
+                             bl.clip(block, max_chars), read, scoped, name, age)
+
+    @staticmethod
+    def _context(arm: str, question: Question, turns: Sequence[Turn], text: str,
+                 read: str, scoped: Any, name: str, age: float | None, *,
+                 claims_expected: int | None = None) -> Context:
+        return Context(arm=arm, text=text,
                        turns_visible=len(bl.visible_turns(question, turns)),
                        items_used=bl.count_entries(text), read=read,
-                       claims_in_scope=scoped.count())
+                       claims_in_scope=scoped.count(), claims_expected=claims_expected,
+                       scope=name, scope_age_hours=age)
 
     def backend_note(self, credential: HostedCredential) -> str:
         """The lines the report prints above its tables, naming where these arms read and
@@ -494,7 +685,33 @@ class HostedMemvara:
         if folds:
             lines.append(f"  On the built-in vocabulary these support predicates are filed "
                          f"under another name: {folds}.")
+        if self._waits and self.min_age is not None:
+            lines.append(
+                f"  Every scope was read at least {_hours(self.min_age)} h after it was "
+                "written. That wait is a fixed delay chosen for this run. The service does "
+                "not report when its background extraction has finished with a scope, so "
+                "the wait is not a confirmation that extraction had finished; each "
+                "scope's age and claim count at read time are listed below the table.")
+        elif self.min_age is not None:
+            lines.append(
+                "  The scopes were read straight after they were written "
+                "(--min-scope-age 0). The service extracts claims in the background, so "
+                "these scopes may have been read before extraction finished with them.")
+        if self.override_min_age:
+            lines.append(
+                "  This read passed --override-min-scope-age, so a scope may have been read "
+                "sooner than the wait its write step recorded.")
         return "\n".join(lines)
+
+
+def _hours(delta: timedelta) -> str:
+    """A duration in hours to one decimal place, as the report and refusals print it."""
+    return f"{delta.total_seconds() / 3600:.1f}"
+
+
+def _stamp(at: datetime | None) -> str:
+    """A time as the report prints it, in UTC to the minute, or `unknown`."""
+    return at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if at else "unknown"
 
 
 def folded_predicates(registry: PredicateRegistry | None = None,
