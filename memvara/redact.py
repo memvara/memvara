@@ -54,8 +54,8 @@ secret — a phone number, a national ID, a card — a digest is a confirmation 
 anyone holding the file tests a guess in a microsecond, and the redaction is undone. So
 the hash is taken **after** redaction, and the price is paid in the open: two turns
 differing only inside a redacted span now hash identically, so the second is recorded as
-an exact repeat. Its claims are reinforced rather than re-extracted and its own text is
-never stored at all. Distinct-but-indistinguishable turns collapse. That is a real loss,
+an exact repeat, unless the first one's claims have all ended by then. Its claims are
+reinforced rather than re-extracted and its own text is never stored at all. Distinct-but-indistinguishable turns collapse. That is a real loss,
 and it is the recoverable kind — the other ordering loses the secret.
 
 The loss is not only informational, which is worth knowing before turning an aggressive

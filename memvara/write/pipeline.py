@@ -5,8 +5,9 @@ every turn, forever. This pipeline is organised so that call is the last resort 
 than the first step, and `WriteReceipt.llm_calls` reports honestly how often we still
 needed it.
 
-    Tier 0   store the episode, drop content-hash repeats, catch near-duplicate
-             restatements against existing claim embeddings          -- 0 calls
+    Tier 0   store the episode, drop content-hash repeats whose claims have not
+             ended, catch near-duplicate restatements against existing
+             claim embeddings                                         -- 0 calls
     Tier 1   SalienceGate drops factless turns, FastExtractor handles
              the unambiguous statement forms                          -- 0 calls
     Tier 2   whatever survived both, batched into one extract()       -- 1 call per add()
@@ -202,6 +203,10 @@ _GROUNDING_CHUNK_CHARS = 1200
 #: rather than applied on the spot because the identification is a read and the bump is
 #: a write, and only the write belongs in the transaction.
 _Reinforcement = tuple[Claim, list[str], datetime]
+
+#: The `extractor` of a claim tier 0 takes from a turn that restates a stored claim with
+#: an earlier date (`WritePipeline._restated_earlier`). No extractor read the turn.
+RESTATED_EXTRACTOR = "tier0/restated"
 
 
 
@@ -417,14 +422,17 @@ class WritePipeline:
                 for ep in fresh:
                     self.store.add_episode(ep)
 
-        kept = self._tier0_near_dupes(fresh, receipt, now, pending)
+        earlier: dict[str, Claim] = {}
+        kept = self._tier0_near_dupes(fresh, receipt, now, pending, earlier)
         gated, fast_claims = self._tier1(kept, receipt, pre_redaction_script)
         llm_claims, plan = self._tier2(gated, receipt, now, background=False)
 
         # Reconcile in input order so a batch containing two claims for the same slot
         # resolves the same way every run.
         candidates: list[Claim] = []
-        for ep in kept:
+        for ep in fresh:
+            if ep.id in earlier:
+                candidates.append(earlier[ep.id])
             candidates.extend(fast_claims.get(ep.id, ()))
             candidates.extend(llm_claims.get(ep.id, ()))
         if self.redactor is not None:
@@ -756,6 +764,14 @@ class WritePipeline:
         transaction of their own, and the reinforcements this identifies are applied in
         the claim transaction at the end - so a lookup that used to sit behind the write
         lock now costs nothing but a read.
+
+        A turn is an exact repeat when an earlier turn with the same hash is dated at or
+        before it (`_earlier_occurrence`), and the claims that earlier turn produced have
+        not all ended by this turn's time (`_ended_by`). Otherwise it is a new statement:
+        it is stored as a turn of its own and goes on to extraction. So a retry or a
+        replay of a turn converges on the rows it wrote the first time, while a turn
+        repeated after its value changed makes that value current again (#332), and a
+        turn dated before every earlier copy of it keeps its own, earlier date (#318).
         """
         fresh: list[Episode] = []
         pending: list[_Reinforcement] = []
@@ -763,30 +779,76 @@ class WritePipeline:
         # an insert made earlier in the same transaction. Every lookup now happens before
         # every insert, so the batch has to remember its own turns or a transcript that
         # repeats a line would store it twice and hand back two different episode ids.
-        seen: dict[tuple[str, str], Episode] = {}
+        # A list per hash, because a batch can hold a turn and a copy of it dated earlier,
+        # and both are stored.
+        seen: dict[tuple[str, str], list[Episode]] = {}
         for ep in episodes:
             key = (ep.scope.tenant, ep.hash)
-            existing = seen.get(key)
-            if existing is None:
-                existing = self.store.find_episode_by_hash(ep.scope.tenant, ep.hash)
-                # A turn stored under '*' or '' before those scope values were refused was
-                # hashed with the key of the scope above it, so it can share this turn's
-                # hash without being in this turn's scope. It is not a repeat of this turn,
-                # and its claims are not this caller's to reinforce.
-                if existing is not None and existing.scope != ep.scope:
-                    existing = None
+            existing = self._earlier_occurrence(ep, seen.get(key, ()))
             if existing is not None:
-                # Byte-identical text we have already extracted from. Re-running any
-                # extractor on it can only reproduce what it produced the first time, so
-                # we reinforce those claims directly and pay nothing.
-                receipt.episode_ids.append(existing.id)
-                receipt.skipped += 1
-                pending.extend(self._reinforcements_from_source(existing, now))
-                continue
-            seen[key] = ep
+                claims = self._claims_from(existing)
+                if not self._ended_by(claims, ep.ts, now):
+                    # Byte-identical text we have already extracted from. Re-running any
+                    # extractor on it can only reproduce what it produced the first time,
+                    # so we reinforce those claims directly and pay nothing.
+                    receipt.episode_ids.append(existing.id)
+                    receipt.skipped += 1
+                    pending.extend(self._reinforcements_from_source(existing, now,
+                                                                    claims))
+                    continue
+            seen.setdefault(key, []).append(ep)
             receipt.episode_ids.append(ep.id)
             fresh.append(ep)
         return fresh, pending
+
+    def _earlier_occurrence(self, ep: Episode,
+                            batch: Iterable[Episode]) -> Episode | None:
+        """The latest turn with `ep`'s hash and scope dated at or before it, or `None`.
+
+        Looked for among the turns of this batch already kept and in the store. The
+        latest one dated at or before `ep`, because that is the turn a retry or a replay
+        of `ep` repeats. The hash covers the scope, the role and the text but not the
+        time, so a store can hold the same text several times: once as it was first said,
+        and again for each time it was said after its value changed. A replay of the first
+        must be compared with the first, and a turn dated before every copy repeats none
+        of them.
+        """
+        found = [o for o in batch if o.ts <= ep.ts]
+        tenant = ep.scope.tenant
+        try:
+            stored = self.store.find_episode_by_hash(tenant, ep.hash, at=ep.ts)
+        except TypeError:
+            # A `Store` predating `at`, which returns any turn with the hash. One dated
+            # after `ep` is not a turn `ep` repeats.
+            stored = self.store.find_episode_by_hash(tenant, ep.hash)
+            if stored is not None and stored.ts > ep.ts:
+                stored = None
+        # A turn stored under '*' or '' before those scope values were refused was
+        # hashed with the key of the scope above it, so it can share this turn's hash
+        # without being in this turn's scope. It is not a repeat of this turn, and its
+        # claims are not this caller's to reinforce.
+        if stored is not None and stored.scope == ep.scope:
+            found.append(stored)
+        return max(found, key=lambda o: o.ts, default=None)
+
+    @staticmethod
+    def _ended_by(claims: Sequence[Claim], at: datetime, now: datetime) -> bool:
+        """Whether every claim in `claims` the store still believes had ended by `at`.
+
+        True when the earlier turn stated a value that has since stopped being true: the
+        user moved away, or took back a like. Then a repeat of that turn says the value
+        is true again, and it is a new statement. False when `claims` holds no believed
+        claim, which is a turn nothing was extracted from, or one whose claims were all
+        retired. A retired claim says the record was wrong, not that the world changed,
+        so re-extracting the same text would only store it again.
+
+        A claim that begins after `at` has not ended, so a retry of a turn about a future
+        date converges too.
+        """
+        believed = [c for c in claims
+                    if c.invalidated_at is None or c.invalidated_at > now]
+        return bool(believed) and all(
+            not c.is_unended(valid_at=at, known_at=now) for c in believed)
 
     @staticmethod
     def own_claims(ep: Episode, claims: Iterable[Claim]) -> list[Claim]:
@@ -809,32 +871,44 @@ class WritePipeline:
         seen = {c.id for c in ep.scope.visible(cited)}
         return [c for c in cited if c.id in seen or c.scope == filed]
 
-    def _reinforcements_from_source(self, ep: Episode, now) -> list[_Reinforcement]:
-        """Every claim that already cites this episode, queued for a bump.
+    def _claims_from(self, ep: Episode) -> list[Claim]:
+        """Every claim that cites this episode and belongs to its own scope's memory.
 
         One indexed lookup where this used to scan the tenant's claims. The scan was
         defensible while exact repeats were rare; the redaction seam is what stopped them
         being rare, because two turns differing only inside a redacted span hash
-        identically once the redactor has run, and that is this branch. Its cost rose
-        with the store, so a redacting workload's total cost was quadratic — 1.57 / 2.85 /
-        5.52 ms per round at 100 / 200 / 400 rounds, against 0.26 / 0.28 / 0.28 now.
+        identically once the redactor has run, and that is the exact-repeat branch. Its
+        cost rose with the store, so a redacting workload's total cost was quadratic —
+        1.57 / 2.85 / 5.52 ms per round at 100 / 200 / 400 rounds, against 0.26 / 0.28 /
+        0.28 now.
 
         Behind `getattr` because `claims_citing` is new to the `Store` protocol and a
         third-party store predating it must keep working rather than raise on the write
         path. Same pattern as `_transaction`.
+
+        Only claims the turn's own scope can see, the rule `Reconciler.apply` follows for
+        a repeated value. A store written before that rule can hold this turn in the
+        sources of another project's or session's claim, and a repeat of the turn must
+        not reach it from here either.
         """
-        # `ep.ts`, not `now`: the observation happened when the turn was uttered.
-        # Stamping wall-clock time here would mark every turn of a replayed historical
-        # transcript as observed today, which is exactly the recency signal an import
-        # exists to reconstruct. Clamped so a turn dated in the future cannot push the
-        # trace clock ahead.
-        at = min(ep.ts, now)
         citing = getattr(self.store, "claims_citing", None)
         if citing is None:
             found: Iterable[Claim] = (c for c in self.store.iter_claims(ep.scope.tenant)
                                       if ep.id in c.sources)
         else:
             found = citing(ep.scope.tenant, ep.id)
+        return self.own_claims(ep, found)
+
+    def _reinforcements_from_source(self, ep: Episode, now,
+                                    claims: Sequence[Claim]) -> list[_Reinforcement]:
+        """The claims in `claims`, which cite this episode, that are live, queued for a
+        bump."""
+        # `ep.ts`, not `now`: the observation happened when the turn was uttered.
+        # Stamping wall-clock time here would mark every turn of a replayed historical
+        # transcript as observed today, which is exactly the recency signal an import
+        # exists to reconstruct. Clamped so a turn dated in the future cannot push the
+        # trace clock ahead.
+        at = min(ep.ts, now)
         # Claims that are no longer in force are skipped: reinforcement raises a claim's
         # storage strength so retrieval ranks it higher, and neither a claim we have
         # stopped believing nor one that has finished being true has a present-tense
@@ -846,16 +920,19 @@ class WritePipeline:
         # back up the chain restating the storage strength and the observation stamp of
         # every city the user had ever lived in. Same set as before the change; the
         # predicate is now the one that actually means it.
-        #
-        # And only claims the turn's own scope can see, the rule `Reconciler.apply`
-        # follows for a repeated value. A store written before that rule can hold this
-        # turn in the sources of another project's or session's claim, and a repeat of
-        # the turn must not reach it from here either.
-        live = [c for c in found if c.is_live(now)]
-        return [(c, [ep.id], at) for c in self.own_claims(ep, live)]
+        return [(c, [ep.id], at) for c in claims if c.is_live(now)]
 
     def _tier0_near_dupes(self, episodes: Sequence[Episode], receipt: WriteReceipt,
-                          now, pending: list[_Reinforcement]) -> list[Episode]:
+                          now, pending: list[_Reinforcement],
+                          earlier: dict[str, Claim]) -> list[Episode]:
+        """The turns that go on to tier 1. The rest restate a stored claim.
+
+        A restatement dated at or after the claim begins is queued in `pending` to
+        reinforce it. One dated before the claim begins says the value was true earlier
+        than the store records, so it is not a repeat (#318). The claim it restates,
+        dated to the turn, goes in `earlier` under the turn's id, and the reconciler
+        stores it for the earlier period, as it does for `remember()` (#283).
+        """
         if not episodes:
             return []
         # Outside the transaction on purpose: `encode` is a local hash for the shipped
@@ -868,12 +945,34 @@ class WritePipeline:
             if hit is None:
                 kept.append(ep)
                 continue
+            claim, at = hit
+            if ep.ts < claim.valid_from:
+                earlier[ep.id] = self._restated_earlier(claim, ep)
+                continue
             # A restatement of something we already believe. Queue a reinforcement and
             # move on rather than extracting a claim that would immediately dedupe.
-            claim, at = hit
             pending.append((claim, [ep.id], at))
             receipt.skipped += 1
         return kept
+
+    @staticmethod
+    def _restated_earlier(claim: Claim, ep: Episode) -> Claim:
+        """What a turn restating `claim`, dated before `claim` begins, states.
+
+        The same value, true from the turn's time, cited to the turn and filed in the
+        turn's scope as extraction would file it. Tier 0 has already read the turn as a
+        restatement of `claim`, so the value is taken from `claim` and no extractor runs,
+        and the write still costs no model call. `Reconciler.apply` then stores it for the
+        period before the value's stored claims begin, or reinforces a stored claim that
+        already holds that period.
+        """
+        return Claim(
+            subject=claim.subject, predicate=claim.predicate, object=claim.object,
+            scope=ep.scope, text=claim.text, polarity=claim.polarity,
+            memory_type=claim.memory_type, valid_from=ep.ts,
+            object_kind=claim.object_kind, amount=claim.amount, unit=claim.unit,
+            confidence=claim.confidence, sources=[ep.id],
+            derivation=Derivation.FAST_PATH, extractor=RESTATED_EXTRACTOR)
 
     def _near_duplicate(self, vec, ep: Episode, now) -> tuple[Claim, datetime] | None:
         """The claim this turn merely restates, and when the restatement was uttered."""

@@ -552,6 +552,186 @@ def test_a_repeat_does_not_reinforce_a_claim_that_has_been_retired():
     store.close()
 
 
+# --- tier 0: a repeat said after its value ended, or dated before it ------------------
+#
+# The content hash covers the scope, the role and the text, not the time. So a turn said
+# again after the value it stated has ended matches the first turn, and so does a turn
+# dated before it. Neither is a retry. A retry or a replay still converges on what the
+# first turn wrote.
+
+T0 = datetime(2026, 3, 1, tzinfo=timezone.utc)
+DAY = timedelta(days=1)
+
+
+def lives_in(store) -> list[str]:
+    return [c.object for c in store.iter_claims("acme")
+            if c.predicate == "lives_in" and c.is_live()]
+
+
+def test_a_turn_repeated_after_its_value_ended_is_stored_and_extracted():
+    """#332. The repeat is the only evidence that the old value is current again."""
+    llm = CountingLLM()
+    pipe, store, _ = build(llm)
+    first = pipe.add([ep("I live in Berlin.", ts=T0)])
+    pipe.add([ep("I moved to Paris.", ts=T0 + DAY)])
+    again = ep("I live in Berlin.", ts=T0 + 2 * DAY)
+
+    receipt = pipe.add([again])
+
+    assert receipt.episode_ids == [again.id] != first.episode_ids
+    assert receipt.skipped == 0
+    assert [(c.object, c.valid_from) for c in receipt.added] == [("Berlin", again.ts)]
+    assert lives_in(store) == ["Berlin"]
+    assert store.stats()["episodes"] == 3
+    assert llm.total_calls == 0
+    store.close()
+
+
+def test_a_replay_converges_although_the_value_ended_after_the_turn():
+    """A replay has the turn's own time, and at that time the value it stated was still
+    true, so it is a repeat whatever happened later."""
+    pipe, store, _ = build()
+    turns = [("I live in Berlin.", T0), ("I moved to Paris.", T0 + DAY)]
+    first = pipe.add([ep(text, ts=at) for text, at in turns])
+    claims = store.stats()["claims"]
+
+    replay = pipe.add([ep(text, ts=at) for text, at in turns])
+
+    assert replay.episode_ids == first.episode_ids
+    assert replay.skipped == 2 and replay.added == []
+    assert store.stats()["episodes"] == 2 and store.stats()["claims"] == claims
+    assert lives_in(store) == ["Paris"]
+    store.close()
+
+
+def test_a_replay_repeats_the_copy_dated_at_or_before_each_turn():
+    """After a repeat is stored as a turn of its own, the store holds the text twice. A
+    replay of each turn converges on its own copy: the first on the first, the third on
+    the third. Compared with the latest copy instead, the first turn's replay would be
+    dated before it and be stored a third time."""
+    pipe, store, _ = build()
+    turns = [("I live in Berlin.", T0), ("I moved to Paris.", T0 + DAY),
+             ("I live in Berlin.", T0 + 2 * DAY)]
+    first = [pipe.add([ep(text, ts=at)]).episode_ids[0] for text, at in turns]
+    claims = store.stats()["claims"]
+
+    replay = [pipe.add([ep(text, ts=at)]).episode_ids[0] for text, at in turns]
+
+    assert replay == first and len(set(first)) == 3
+    assert store.stats()["episodes"] == 3 and store.stats()["claims"] == claims
+    assert lives_in(store) == ["Berlin"]
+    store.close()
+
+
+def test_a_copy_dated_before_every_stored_copy_is_stored_and_extracted():
+    """#318, the exact-repeat path. The turn is not a repeat of a turn said later, and it
+    carries an earlier start for the fact, which the reconciler keeps as a claim for the
+    earlier period (#283)."""
+    pipe, store, _ = build()
+    first = pipe.add([ep("I live in Berlin.", ts=T0 + 30 * DAY)])
+    earlier = ep("I live in Berlin.", ts=T0)
+
+    receipt = pipe.add([earlier])
+
+    assert receipt.episode_ids == [earlier.id] and receipt.skipped == 0
+    [added] = receipt.added
+    assert (added.valid_from, added.valid_to) == (T0, T0 + 30 * DAY)
+    assert first.added[0].id not in {c.id for c in receipt.reinforced}
+    store.close()
+
+
+def test_a_batch_holding_a_turn_and_an_earlier_copy_stores_both():
+    """The batch remembers every copy it kept, and a copy dated after a turn is not one
+    that turn repeats. A third copy dated between them repeats the earlier one."""
+    pipe, store, _ = build()
+    later, earlier = ep("I live in Berlin.", ts=T0 + 2 * DAY), ep("I live in Berlin.", ts=T0)
+    between = ep("I live in Berlin.", ts=T0 + DAY)
+
+    receipt = pipe.add([later, earlier, between])
+
+    assert receipt.episode_ids == [later.id, earlier.id, earlier.id]
+    assert receipt.skipped == 1 and store.stats()["episodes"] == 2
+    store.close()
+
+
+class StoreBeforeHashTime:
+    """A third-party `Store` whose `find_episode_by_hash` takes no `at`, and so returns
+    any stored turn with the hash. Here it returns the latest one, whatever its date."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def find_episode_by_hash(self, tenant: str, ep_hash: str):
+        return self._inner.find_episode_by_hash(tenant, ep_hash)
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+
+def test_a_store_without_the_time_argument_still_finds_repeats():
+    """The write path calls it without `at`, and a turn it returns that is dated after the
+    turn being written is not one that turn repeats."""
+    inner = SQLiteStore(":memory:")
+    pipe = WritePipeline(StoreBeforeHashTime(inner), HashingEmbedder(),
+                         PredicateRegistry(), CountingLLM())
+    first = pipe.add([ep("I live in Berlin.", ts=T0 + 30 * DAY)])
+
+    retry = pipe.add([ep("I live in Berlin.", ts=T0 + 30 * DAY)])
+    earlier = pipe.add([ep("I live in Berlin.", ts=T0)])
+
+    assert retry.episode_ids == first.episode_ids and retry.skipped == 1
+    assert earlier.episode_ids != first.episode_ids and earlier.skipped == 0
+    assert inner.stats()["episodes"] == 2
+    inner.close()
+
+
+def test_whether_a_repeat_restates_an_ended_value():
+    """`_ended_by` decides it from the claims the earlier turn produced."""
+    at = T0 + 10 * DAY
+    ended = Claim(subject="user", predicate="lives_in", object="Berlin", valid_from=T0,
+                  valid_to=T0 + DAY, recorded_at=T0)
+    ends_at = replace(ended, valid_to=at)
+    live = replace(ended, valid_to=None)
+    later = replace(ended, valid_from=at + DAY, valid_to=None)
+    retired = replace(ended, valid_to=None, invalidated_at=T0 + DAY)
+    ended_by = WritePipeline._ended_by
+    now = utcnow()
+
+    assert ended_by([ended, ends_at], at, now)
+    assert ended_by([ended, retired], at, now), "a retired claim is left out"
+    assert not ended_by([ended, live], at, now), "one claim still true is a repeat"
+    assert not ended_by([later], at, now), "a claim that begins later has not ended"
+    assert not ended_by([retired], at, now), "nothing believed: a repeat, as before"
+    assert not ended_by([], at, now), "a turn nothing was extracted from is a repeat"
+
+
+def test_a_near_duplicate_dated_before_the_claim_is_kept_for_the_earlier_period():
+    """#318, the near-duplicate path. The turn is worded like the claim, so tier 0 takes
+    the value from the claim, with no extractor and no model call, and the reconciler
+    stores it for the period before the claim begins. Said again, it repeats that claim,
+    so the earlier period is stored once."""
+    llm = CountingLLM()
+    pipe, store, _ = build(llm)
+    april = pipe.assert_claim(Claim(subject="user", predicate="likes", object="tea",
+                                    scope=SCOPE, valid_from=T0 + 30 * DAY)).added[0]
+    turn = ep(april.text, ts=T0)
+
+    receipt = pipe.add([turn])
+    # Worded like the claim again, but not byte-identical, so it is not an exact repeat.
+    again = pipe.add([ep(april.text.capitalize(), ts=T0 + DAY)])
+
+    [added] = receipt.added
+    assert (added.object, added.valid_from, added.valid_to) == ("tea", T0, april.valid_from)
+    assert (added.sources, added.scope) == ([turn.id], SCOPE)
+    assert (added.derivation, added.extractor) == (Derivation.FAST_PATH, "tier0/restated")
+    assert receipt.skipped == 0 and receipt.reinforced == []
+    assert again.added == [] and [c.id for c in again.reinforced] == [added.id]
+    assert store.get_claim(april.id).observation_count == 1
+    assert llm.total_calls == 0
+    store.close()
+
+
+
 # Tier 0 finds the claims a repeated turn restates and queues them for a reinforcement
 # that the claim transaction applies after tiers 1 and 2, one of which can call a model.
 # Another handle on the same file can erase or end a queued claim in between, or erase the

@@ -258,17 +258,16 @@ def test_restating_a_fact_with_an_earlier_start_keeps_the_earlier_start() -> Non
     assert earlier_view == []
 
 
-# -- B46: tier 0 of add() reinforces a restatement dated before the claim --------------
+# -- B46, fixed: tier 0 of add() reinforced a restatement dated before the claim -------
 
 @pytest.mark.parametrize("path", ["near-duplicate", "exact repeat"])
-@known_bugs.xfail("B46")
 def test_a_turn_restating_a_fact_with_an_earlier_date_keeps_the_earlier_period(
         path: str) -> None:
-    """Tier 0 reinforces a stored claim before the reconciler sees the turn, in two cases:
+    """Tier 0 reinforced a stored claim before the reconciler saw the turn, in two cases:
     a turn that embeds as a near-duplicate of the claim, and a turn whose text is exactly
-    that of the turn the claim came from, which is taken for that turn and not stored.
-    Either way the rule #283 set for remember() never reaches add(), and a turn dated
-    before the claim loses the earlier period (#318)."""
+    that of the turn the claim came from, which was taken for that turn and not stored.
+    Either way the rule #283 set for remember() never reached add(), and a turn dated
+    before the claim lost the earlier period (#318)."""
     from datetime import datetime, timezone
 
     jan, feb, apr = (datetime(2026, month, 1, tzinfo=timezone.utc) for month in (1, 2, 4))

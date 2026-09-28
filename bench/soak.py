@@ -750,8 +750,8 @@ def current_facts(obs: Observations) -> Finding:
 
     This is not one of the design's failure modes. It is here because a soak that knows
     what it last said can check that the store says the same, and the others cannot see a
-    store that holds a stale value: in the nightly soak, #332 (B50) keeps an old city and
-    an old employer current and trips none of them. A slot holding two values, or none,
+    store that holds a stale value: in the nightly soak, #332 (B50) kept an old city and
+    an old employer current until it was fixed, and tripped none of them. A slot holding two values, or none,
     fails as well as one holding a stale one.
     """
     name = "current facts match what was last said"

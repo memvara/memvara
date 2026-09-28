@@ -639,10 +639,9 @@ claim:
    it from January or February again reinforces that claim; and restating it from
    October stores October to January only. A stored claim that ends before the next one
    begins leaves a gap and does not move the end, so a restatement from before it still
-   covers the gap, and overlaps that claim. None of this reaches a turn that tier 0 of
-   `add()` takes for a repeat, a near-duplicate of a stored claim or an exact repeat of
-   the turn a claim came from: tier 0 reinforces the claim before the reconciler runs,
-   so such a turn still loses its earlier date (#318).
+   covers the gap, and overlaps that claim. Tier 0 of `add()` sends a turn dated before
+   the claim it restates here too, rather than taking it for a repeat (#318); see the
+   tier-0 entry under *`memvara/write/`* below.
 
    "Can see" is `Scope.sees`: the writer's own scope and the broader ones it reads, such
    as the user-wide scope above a project. `value_key` covers the owner and not the
@@ -929,11 +928,35 @@ slots, counts each consultation in `llm_calls`, and closes nothing. A judge that
 warns once per instance and leaves the list empty; the claim is already durable and a
 suggestion must not turn it into an exception the caller retries.
 
-- **Tier 0 (no LLM):** store the episode; skip content-hash duplicates
-  (`store.find_episode_by_hash`). For surviving episodes, embed and find the nearest live
-  claim. A cosine at or above `near_dup_threshold` reinforces that claim instead of
-  extracting from the turn, unless the turn and the claim's text hold different numbers
-  (`embed/calibration.numbers`, the rule the merge also applies). `None`, the default,
+- **Tier 0 (no LLM):** store the episode; skip content-hash repeats
+  (`store.find_episode_by_hash`). The hash covers the scope, the role and the text, not
+  the time, so a turn with the same hash is not always a repeat. Tier 0 compares the turn
+  with the latest earlier copy of it dated at or before the turn, among the turns of the
+  batch and in the store (`_earlier_occurrence`). The turn is a repeat when that copy
+  exists and the claims extracted from it have not all ended by the turn's time
+  (`_ended_by`). A repeat is not stored, its episode id is the copy's, and the copy's
+  live claims are reinforced. Otherwise the turn is a new statement: it is stored as a
+  turn of its own, with its own id, and goes on to extraction. This covers two cases.
+  A turn said again after the value it stated ended, such as "I live in Berlin." after
+  "I moved to Paris.", makes that value current again (#332). A turn dated before every
+  earlier copy of it keeps its own, earlier date, which the reconciler stores as a claim
+  for the earlier period (#318). A retry or a replay of a turn still converges on the
+  rows it wrote the first time. It is dated at or after the copy it repeats, and at that
+  time the copy's value had not ended, even when it ended later. Four details decide the
+  edges. A claim the store has retired is left out, because retiring says the record
+  was wrong, not that the world changed, so a turn whose claims were all retired stays a
+  repeat and its text is not extracted again. A turn nothing was extracted from also
+  stays a repeat. A claim that begins after the turn has not ended, so a retry of a turn
+  about a future date converges. And a batch cannot know what its own earlier turns will
+  produce, so a copy repeated later in the same batch is a repeat. A `Store` whose
+  `find_episode_by_hash` predates the `at` argument is called without it, and a copy it
+  returns that is dated after the turn is ignored.
+
+  For surviving episodes, embed and find the nearest live claim. A cosine at or above
+  `near_dup_threshold` reinforces that claim instead of extracting from the turn, unless
+  the turn and the claim's text hold different numbers
+  (`embed/calibration.numbers`, the rule the merge also applies), or the turn is dated
+  before the claim begins (see the next paragraph). `None`, the default,
   reads the merge's threshold for the embedder's space from `embed/calibration.py`,
   because a turn worded like a claim embeds exactly as that claim would. Over the 69 pairs
   of different values in `bench/embedder_calibration.py`, a flat 0.97 would read the
@@ -946,6 +969,16 @@ suggestion must not turn it into an exception the caller retries.
   the write lock. A claim that another writer erased, ended or retired in the meantime
   is left alone. Writing back the copy tier 0 had read used to undo that writer's change,
   or bring an erased claim back, text and all.
+
+  A near-duplicate turn dated before the claim it restates begins is not a repeat. It
+  says the value was true earlier than the store records (#318). Tier 0 takes the
+  claim's value, dated to the turn, cited to it and filed in the turn's scope, with
+  `derivation` `fast_path` and `extractor` `tier0/restated`, and sends it to the
+  reconciler with the other candidates. The reconciler stores it for the period before
+  the value's stored claims begin, or reinforces a stored claim that already holds that
+  period, as it does for `remember()` (#283). No model is called. A retraction is never
+  a near-duplicate, because its tombstone is closed as it is written and the search
+  finds only live claims.
 - **Tier 1 (no LLM):** `SalienceGate` drops turns carrying no durable fact
   (count them in `receipt.skipped`), then `FastExtractor` handles what it can.
 - **Tier 2 (LLM):** only the turns that survived both and produced no fast-path claim are

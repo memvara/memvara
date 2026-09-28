@@ -7,6 +7,51 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A turn said again after its value ended is stored and extracted again
+
+### What changed
+
+`add()` used to skip every turn whose text, role and scope matched a stored turn, and
+reinforce the claims that stored turn produced. It now skips such a turn only when it
+repeats an earlier copy: a copy dated at or before it whose claims have not all ended by
+the turn's time. Two kinds of turn are now stored as turns of their own and extracted:
+
+- A turn said again after the value it stated ended. "I live in Berlin.", then "I moved
+  to Paris.", then "I live in Berlin." again now makes Berlin current (#332).
+- A turn dated before every stored copy of it. Its earlier date is kept as a claim for
+  the earlier period (#318).
+
+A turn worded like a stored claim and dated before that claim begins is no longer read as
+a restatement either. The claim's value, dated to the turn, goes to the reconciler, which
+stores it for the earlier period (#318). This costs no model call.
+
+A retry or a replay of a turn is unchanged: it converges on the turn and the claims it
+wrote the first time.
+
+`Store.find_episode_by_hash` takes a keyword argument, `at`. It returns the latest stored
+turn with the hash, and with `at`, the latest one dated at or before `at`. It used to
+return any one of them.
+
+### Who this changes
+
+**If you read `receipt.episode_ids` or `receipt.skipped`**, such a turn now has a new
+episode id, and it is not counted in `skipped`. Its claims are in `receipt.added`. The
+store holds one more episode, and `stats()["episodes"]` counts it.
+
+**If you read `receipt.reinforced` to decide whether a fact was already known**, a turn
+worded like a stored claim and dated before it now shows up in `receipt.added`, as a
+claim that ends where the stored claim begins. "A restatement with an earlier start is
+added, not reinforced", below, says how to tell such a claim apart.
+
+**If you implement `Store` yourself**, add `at` to `find_episode_by_hash`. Until you do,
+the write path calls it without `at` and ignores a turn it returns that is dated after
+the turn being written. That keeps the old behaviour for a text stored once. For a text
+stored several times, a replay can then be compared with the wrong copy and stored again.
+`SQLiteStore` in `memvara/store/sqlite.py` is the reference. Find your implementations
+with `grep -rn "def find_episode_by_hash" your_package/`.
+
+---
+
 ## Erasing through the mem0 layer or an adapter erases every version of the memory
 
 ### What changed
@@ -889,8 +934,9 @@ This applies to `remember()`, `supersede()`, `memory_remember`, and every claim 
 - `memory_remember`'s reply for such a write reads `added 1 ... already-known 0` where
   it read `added 0 ... already-known 1`, followed by a note that the same value is
   already stored from where the new claim ends.
-- A turn that `add()` takes for a repeat in tier 0, before extraction, is not covered
-  yet and still reinforces the stored claim (#318).
+- A turn that `add()` took for a repeat in tier 0, before extraction, was not covered
+  and still reinforced the stored claim until #318 was fixed. See "A turn said again
+  after its value ended is stored and extracted again" above.
 
 ### Who this changes
 

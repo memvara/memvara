@@ -37,28 +37,7 @@ def healthy() -> dict[str, soak.Finding]:
     return findings_of()
 
 
-def first_repeat_after_a_change(turns: int) -> int | None:
-    """The first turn that repeats an earlier user sentence word for word about a city or
-    an employer that has changed in between, which B50 (#332) drops; None if none does."""
-    said: set[str] = set()
-    current: dict[str, str] = {}
-    for turn in soak.Workload(soak.SoakConfig(turns)):
-        if turn.states is None:
-            continue
-        predicate, value = turn.states
-        if turn.text in said and current.get(predicate) != value:
-            return turn.index
-        said.add(turn.text)
-        current[predicate] = value
-    return None
-
-
 def test_a_healthy_soak_trips_no_detector(healthy: dict[str, soak.Finding]) -> None:
-    # B50 (#332) keeps an old city current when a move repeats an earlier sentence. Seed 0
-    # has no such repeat in its first 200 turns (the first is turn 285), so B50 cannot trip
-    # the current-facts detector here. If the workload changes and one appears, choose a
-    # seed without one rather than let B50 fail the healthy run.
-    assert first_repeat_after_a_change(TURNS) is None
     failing = {name: finding.detail for name, finding in healthy.items()
                if finding.status == "fail"}
     assert failing == {}

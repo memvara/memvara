@@ -120,6 +120,30 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `memory_remember`'s `replaces`, and `memory_profile`'s query and bucket names. A string
   is cut before it is quoted, so an escape such as `\u2028` is never cut in half. A value
   of 80 characters or fewer is quoted whole, as before. #313 (B36).
+- **A turn said again after its value ended is stored and extracted again.** `add()`
+  skipped every turn whose text, role and scope matched a stored turn, because the content
+  hash leaves out the time, and reinforced the claims the stored turn produced. When those
+  claims had ended, nothing was stored. After "I live in Berlin.", "I moved to Paris.",
+  and "I live in Berlin." again two days later, the store still said Paris, and "I like
+  vasnu." said again after "I no longer like vasnu." left no like at all. Tier 0 now
+  compares the turn with the latest copy of it dated at or before the turn. When every
+  claim that copy produced has ended by the turn's time, the turn is a new statement: it
+  is stored as a turn of its own and extracted, so Berlin is current again. A retry or a
+  replay of a turn still converges on the rows it wrote the first time, because at the
+  turn's own time its claims had not ended. A turn whose copy produced no claim, or only
+  claims that were retired since, stays a repeat. `Store.find_episode_by_hash` takes a new
+  keyword argument, `at`, and returns the latest matching turn dated at or before it; a
+  store without `at` is still called without it. The nightly and weekly soaks, pinned to
+  this bug, now pass every detector. #332 (B50).
+- **A turn restating a stored fact with an earlier date keeps the earlier period.** Tier
+  0 reinforced the stored claim before the reconciler saw the turn, so the fix for #283
+  never reached `add()`: after `remember("user", "likes", "tea")` from April,
+  `add("user likes tea")` dated January reinforced the April claim and a read at February
+  found nothing. Two paths did this. A turn worded like the claim, and dated before the
+  claim begins, now sends the claim's value, dated to the turn, to the reconciler, which
+  stores it for the period before the claim begins, with no model call. A turn whose text
+  is exactly that of a turn said later is no longer taken for that turn: it is stored and
+  extracted, and its earlier date is kept the same way. #318 (B46).
 
 ## [0.17.0] — 2026-09-28
 
