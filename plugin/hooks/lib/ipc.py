@@ -657,7 +657,9 @@ def payload() -> "dict":
         return {}
     try:
         data = json.loads(raw)
-    except ValueError:
+    # RecursionError is not a ValueError: `json.loads` raises it on nesting deeper than
+    # the interpreter's recursion limit, and it would reach run.py's last guard (#346).
+    except (ValueError, RecursionError):
         return {}
     return data if isinstance(data, dict) else {}
 

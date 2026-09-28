@@ -19,8 +19,10 @@ from dataclasses import dataclass
 
 import pytest
 
+
 class Reproduced(Exception):
     """A known bug's own symptom, seen by the test that pins it."""
+
 
 @dataclass(frozen=True)
 class KnownBug:
@@ -33,10 +35,13 @@ class KnownBug:
     #: filed by hand before that are in memvara/memvara.
     repo: str = "memvara/memvara"
 
+
 KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B2", 266, "a session-bound or agent-bound write ends the user-wide value"),
     KnownBug("B7", 273, "a session bound inside a project cannot read the global facts it "
              "writes"),
+
+
 
     KnownBug("B26", 303, "malformed model output makes add() raise instead of dropping the "
              "item"),
@@ -59,7 +64,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              'memories" look identical'),
     KnownBug("B58", 340, 'the "_" approve separator never recovers a tool name on Cursor and '
              "OpenCode"),
-    KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
     KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
@@ -78,6 +82,7 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B85", 364, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "
              "consolidation threshold of 0.85, so a repeated memory is stored twice"),
 )}
+
 
 def xfail(bug_id: str) -> pytest.MarkDecorator:
     """The strict expected-failure marker for a registered bug."""
