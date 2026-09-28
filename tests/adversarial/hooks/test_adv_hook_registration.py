@@ -20,6 +20,7 @@ from types import ModuleType
 
 import pytest
 
+from harness import known_bugs
 from harness.env import child_env
 from harness.hooks import HOOKS_DIR, host_record
 
@@ -90,6 +91,30 @@ def test_the_registration_declares_what_the_host_record_measured(
             assert entry["matcher"] == record.approve.matcher
         else:
             assert "matcher" not in entry
+
+
+@known_bugs.xfail("B87")
+def test_capture_returns_at_once_and_hands_its_work_to_a_detached_child(
+        generator: ModuleType) -> None:
+    """No shell host may register capture as a background hook, and every one must detach it.
+
+    A background hook is not a safe way to keep a 12 to 14 second extraction off the turn.
+    Codex skips one entirely (hosts/codex.py), and Claude Code cancels one when `claude -p`
+    exits, so a headless session captured nothing (#398). The capture hook that `run.py`
+    detaches returns in milliseconds, and its child runs in a session of its own, so the
+    client's exit cannot reach it.
+    """
+    background = []
+    for host in SHELL_HOSTS:
+        record = host_record(host)
+        body = json.loads(generator.registration(record))
+        (entry,) = body["hooks"][support.EVENTS[host]["capture"]]
+        (command,) = entry["hooks"]
+        if command.get("async") or not record.detach_capture:
+            background.append(host)
+    if background == ["claude"]:
+        raise known_bugs.Reproduced("B87: Claude Code's capture is async and not detached")
+    assert background == []
 
 
 @pytest.mark.parametrize("host", SHELL_HOSTS)
