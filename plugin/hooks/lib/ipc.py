@@ -35,6 +35,7 @@ import os
 import os.path
 import socket
 
+from .private import private_dir, private_open
 from .project import ENV as PROJECT_ENV
 from .state_file import read_json, write_json
 
@@ -50,7 +51,7 @@ RUNTIME_DIR = os.path.join(_HOME, ".memvara", ".hooks", "run")
 
 #: Files whose contents decide what a daemon actually does. A change to any of them must
 #: strand the old daemon rather than let it keep serving.
-CODE_FILES = ("daemon.py", "lib/ipc.py", "lib/open.py", "recall.py",
+CODE_FILES = ("daemon.py", "lib/ipc.py", "lib/open.py", "lib/private.py", "recall.py",
               "run.py", "core/host.py", "core/envelope.py", "hosts/claude.py")
 
 #: Set in the environment of the `claude -p` child that `capture.py` spawns to mine a turn.
@@ -152,7 +153,7 @@ def _write_alert(data: dict) -> None:
     `clear_capture_alert` is the OTHER thing that touches this file, and does not call
     this function -- it does a plain `os.unlink`, which needs no atomicity dance because
     an unlink has no partial-write state to leave behind. The two are still genuinely
-    concurrent with each other: `raise_capture_alert` (the async extraction child) and
+    concurrent with each other: `raise_capture_alert` (the detached extraction child) and
     `clear_capture_alert` (the same child, the next time it succeeds) can each run while
     the other is mid-call, with no lock between them -- `capture.py` says extraction takes
     12-14s and hands the turn back immediately, so an extraction still finishing while
@@ -266,7 +267,7 @@ def _write_notified_alert(data: dict) -> None:
 
     Two things write here, from two different, genuinely concurrent processes: `recall.py`
     calls `due_alert_for_model()` synchronously on every prompt, and `clear_capture_alert()`
-    -- called from the async extraction child, the same one `raise_capture_alert` runs from
+    -- called from the detached extraction child, the same one `raise_capture_alert` runs from
     -- resets this file the moment capture recovers. Those two can race exactly the way
     `raise_capture_alert`/`clear_capture_alert` already race on `capture-alert.json`: each
     does its own read-then-conditional-write with no lock between them, so a recovery's
@@ -319,8 +320,8 @@ def due_alert_for_model() -> str:
 def with_alert(text: str, alert: str) -> str:
     """A status line, with word of a failing extractor riding along on it.
 
-    `capture.py` runs `async` and cannot print anything of its own -- the client discards
-    an async hook's output entirely, which is why its whole account moved to `capture.log`
+    `capture.py` runs detached and cannot print anything of its own -- nothing its child
+    process prints reaches the client, which is why its whole account moved to `capture.log`
     in the first place. Nobody reads that on a schedule, so a `claude -p` that has been
     failing for hours says nothing anyone sees until a hook that speaks -- `recall.py` on
     every prompt, `session_start.py` once per session -- relays it.
@@ -373,7 +374,9 @@ def status(text: str) -> str:
 
 
 def runtime_dir() -> str:
-    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    # `private_dir` makes `~/.memvara` and `.hooks` private as well, and the chmod below
+    # still runs on every call, as it always has, for a daemon that outlives its first.
+    private_dir(RUNTIME_DIR)
     try:
         os.chmod(RUNTIME_DIR, 0o700)
     except OSError:
@@ -626,18 +629,20 @@ def log_line(name: str, text: str) -> None:
     has had none -- so the hook that spends context on every single prompt was the one
     nobody could measure, which is exactly how it came to spend four times what it needed
     to without anyone noticing.
+
+    The directory is 0700 and the file 0600 (`lib.private`): `recall-sample.log` holds the
+    start of each prompt.
     """
     import time
 
     directory = os.path.join(_HOME, ".memvara", ".hooks")
     path = os.path.join(directory, f"{name}.log")
     try:
-        os.makedirs(directory, exist_ok=True)
+        private_dir(directory)
         if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
-            with open(path, "w", encoding="utf-8"):
-                pass
+            private_open(path, "w").close()
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "+00:00"
-        with open(path, "a", encoding="utf-8") as fh:
+        with private_open(path, "a") as fh:
             fh.write(f"{stamp} {text}\n")
     except OSError:
         pass

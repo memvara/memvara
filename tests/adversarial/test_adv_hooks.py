@@ -176,7 +176,7 @@ def test_capture_runs_against_the_stub_clis(hook_runner: Make, clis: FakeClis,
     transcript.write_text(json.dumps({"type": "user", "message": {"content": "ok"}}) + "\n")
     result = hook_runner("claude", stubs=clis).run("capture", transcript_path=str(transcript))
     assert result.exit_code == 0
-    assert result.detached_pid is None
+    assert result.detached_pid is not None
     assert result.log("capture") == ("turn=8c skipped=continuation",)
 
 
@@ -425,12 +425,26 @@ def test_a_patch_that_names_nothing_the_hooks_have_is_refused(hook_runner: Make)
         runner.run("recall", prompt="where does the user live")
 
 
-def test_patches_are_refused_for_a_capture_the_host_hands_to_a_child(
-        hook_runner: Make, clis: FakeClis, tmp_path: pathlib.Path) -> None:
-    """run.py starts that child afresh, so a patch would not reach the capture."""
-    runner = hook_runner("codex", stubs=clis, patches={"lib.extract.TIMEOUT_SEC": 1.0})
-    with pytest.raises(ValueError, match="child"):
-        runner.run("capture", transcript_path=str(tmp_path / "t.jsonl"))
+def test_patches_reach_a_capture_the_host_hands_to_a_child(
+        hook_runner: Make, tmp_path: pathlib.Path) -> None:
+    """run.py starts that child afresh, so the launcher never runs in it; the runner's
+    `sitecustomize` sets the patches there instead. With the extraction limit shrunk to a
+    second, a `codex` that never answers is given up on after one second, not ninety."""
+    if sys.platform == "win32":
+        pytest.skip(NO_FAKES)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"type": "response_item", "payload": {
+        "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "Please remember that I live in Lisbon."}]}})
+        + "\n")
+    db = tmp_path / "memory.db"
+    stores.file(db).close()
+    runner = hook_runner("codex", stubs=HangingClis(tmp_path / "hanging"),
+                         env={"MEMVARA_DB": str(db), "MEMVARA_USER": "tester"},
+                         patches={"lib.extract.TIMEOUT_SEC": 1.0})
+    result = runner.run("capture", transcript_path=str(transcript), timeout=8)
+    assert result.detached_pid is not None
+    assert any("no reply within 1.0s" in line for line in result.log("capture")), result.logs
 
 
 def test_output_that_is_not_utf8_is_reported(hook_runner: Make,

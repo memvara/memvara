@@ -20,14 +20,18 @@ Three properties, and each test here defends one:
 """
 
 import sqlite3
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
 
 import pytest
 
-from memvara import ErasureIncomplete, ErasureProof, Memvara, NullLLM
+from memvara import Episode, ErasureIncomplete, ErasureProof, Memvara, NullLLM, utcnow
 from memvara.embed import HashingEmbedder
 from memvara.store import SQLiteStore
 from memvara.store.sqlite import SCHEMA_VERSION
+
+DAY = timedelta(days=1)
 
 
 @pytest.fixture()
@@ -46,7 +50,7 @@ def stored(mem) -> str:
     tell the two apart.
     """
     receipt = mem.remember("Dara Wray", "lives_in", "Lisbon",
-                           sources=["Dara told me she lives in Lisbon."])
+                           sources=[Episode(content="Dara told me she lives in Lisbon.")])
     return receipt.added[0].id
 
 
@@ -64,14 +68,15 @@ def test_a_claim_that_is_still_there_cannot_be_proved_gone(mem):
 
 def test_an_erased_claim_is_proved_gone_in_every_table_it_could_survive_in(mem):
     """Five tables, because those are the five a claim can survive in: the row, the text
-    index over it, its vector, its provenance edges, and the typed links that name it."""
+    index over it, its vector, its provenance edges, and the typed links that name it.
+    And one file, the claim's row of the vector file, read from the file itself."""
     claim_id = stored(mem)
     assert mem.erase(claim_id) is True
     proof = mem.prove_erased(claim_id)
     assert proof.proven is True
     assert proof.surviving == {}
     assert set(proof.residue) == {"claims", "claims_fts", "embeddings", "claim_sources",
-                                  "claim_links"}
+                                  "claim_links", "vector_file"}
 
 
 def test_an_id_nothing_ever_stored_is_proved_gone_rather_than_raising(mem):
@@ -257,9 +262,12 @@ def test_the_erasures_table_is_schema_seven():
     still means "nothing erased since the upgrade", and the sentence holds. Version 16
     changed the entity fold and added no table or column. Its migration is the key
     re-derivation `_migrate_to_v12` already runs on every upgrade, which neither reads nor
-    writes `erasures`, so the sentence holds.
+    writes `erasures`, so the sentence holds. Version 17 added one nullable column to
+    `erasures`, `vector_slot`, and backfills nothing into it; the migration adds no row
+    and removes none, so an empty table still means "nothing erased since the upgrade",
+    and the sentence holds.
     """
-    assert SCHEMA_VERSION == 16
+    assert SCHEMA_VERSION == 17
     store = SQLiteStore(":memory:")
     try:
         assert store.erasure_record("anything") is None
@@ -356,9 +364,104 @@ def test_the_shipped_stores_residue_names_every_table_a_claim_can_survive_in():
     store = SQLiteStore(":memory:")
     try:
         assert set(store.residue("cl_anything")) == {
-            "claims", "claims_fts", "embeddings", "claim_sources", "claim_links"}
+            "claims", "claims_fts", "embeddings", "claim_sources", "claim_links",
+            "vector_file"}
     finally:
         store.close()
+
+
+# --- the proof reads the vector file ----------------------------------------------------
+
+
+def on_disk(tmp_path) -> Memvara:
+    return Memvara(str(tmp_path / "m.db"), llm=NullLLM(), embedder=HashingEmbedder(dim=64),
+                   tenant="acme", user="alice")
+
+
+def test_the_proof_reads_the_erased_claims_row_in_the_vector_file(tmp_path):
+    """An erasure blanks the claim's row in `<db>.vecs`, and a proof that counted only the
+    database's rows could not tell whether it had: a store whose erasure left the vector
+    on disk still received a certificate. The proof now reads that row from the file. Put
+    the vector back in the row, as such an erasure left it, and the proof refuses."""
+    mem = on_disk(tmp_path)
+    try:
+        claim = mem.remember("user", "likes", "coffee with oat milk").added[0]
+        slot = mem.store._db.execute(
+            "SELECT slot FROM embeddings WHERE claim_id=?", (claim.id,)).fetchone()[0]
+        raw = mem.store.get_embedding(claim.id).tobytes()
+        assert mem.prove_erased(claim.id).residue["vector_file"] == 1
+        assert mem.erase(claim.id) is True
+        assert mem.prove_erased(claim.id).residue["vector_file"] == 0
+        with open(str(tmp_path / "m.db.vecs"), "r+b") as fh:
+            fh.seek(64 + slot * len(raw))
+            fh.write(raw)
+        proof = mem.prove_erased(claim.id)
+        assert proof.proven is False, "a vector left in the file was certified as erased"
+        assert proof.residue["vector_file"] == 1 and "vector_file" in (proof.reason or "")
+    finally:
+        mem.close()
+
+
+def test_a_row_another_vector_holds_now_is_not_counted_against_the_erased_claim(tmp_path):
+    """A freed row goes to the next vector written, and from then on it holds that
+    vector, not the erased one."""
+    mem = on_disk(tmp_path)
+    try:
+        tea = mem.remember("user", "likes", "green tea").added[0]
+        held = "SELECT slot FROM embeddings WHERE claim_id=?"
+        slot = mem.store._db.execute(held, (tea.id,)).fetchone()[0]
+        assert mem.erase(tea.id) is True
+        coffee = mem.remember("user", "likes", "coffee").added[0]
+        assert mem.store._db.execute(held, (coffee.id,)).fetchone()[0] == slot
+        assert mem.prove_erased(tea.id).proven is True
+    finally:
+        mem.close()
+
+
+def test_an_erasure_recorded_before_schema_17_is_proved_from_the_database(tmp_path):
+    """Schema 17 records which row of the vector file an erased claim's vector held, and
+    backfills nothing: no earlier version recorded it. The proof of an erasure from
+    before the upgrade cannot read the file, so it answers from the database, as it did
+    before, rather than refusing every erasure a store already holds."""
+    mem = on_disk(tmp_path)
+    claim = mem.remember("user", "likes", "coffee with oat milk").added[0]
+    assert mem.erase(claim.id) is True
+    mem.store._db.execute("ALTER TABLE erasures DROP COLUMN vector_slot")
+    mem.store._db.execute("PRAGMA user_version = 16")
+    mem.store._db.commit()
+    mem.close()
+    reopened = on_disk(tmp_path)
+    try:
+        db = reopened.store._db
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 17
+        assert db.execute("SELECT vector_slot FROM erasures WHERE claim_id=?",
+                          (claim.id,)).fetchone()[0] is None
+        proof = reopened.prove_erased(claim.id)
+        assert proof.proven is True and proof.residue["vector_file"] == 0
+    finally:
+        reopened.close()
+
+
+def test_a_vector_file_that_is_gone_or_cut_short_holds_nothing_for_the_proof(tmp_path):
+    """The proof opens the vector file by its path, apart from this store's own handle on
+    it. A file that is gone, or too short to say how wide its rows are, has no row that
+    could hold the erased vector, so the proof counts 0 for it rather than raising."""
+    mem = on_disk(tmp_path)
+    vectors = mem.store._vec
+    real = vectors.path
+    try:
+        claim = mem.remember("user", "likes", "coffee with oat milk").added[0]
+        assert mem.erase(claim.id) is True
+        vectors.path = str(tmp_path / "gone.vecs")
+        proof = mem.prove_erased(claim.id)
+        assert proof.proven is True and proof.residue["vector_file"] == 0
+        (tmp_path / "short.vecs").write_bytes(b"MVEC")
+        vectors.path = str(tmp_path / "short.vecs")
+        proof = mem.prove_erased(claim.id)
+        assert proof.proven is True and proof.residue["vector_file"] == 0
+    finally:
+        vectors.path = real
+        mem.close()
 
 
 # --- the audit row cannot outlive a failed delete -----------------------------
@@ -461,3 +564,141 @@ def test_the_erasure_record_names_the_project_the_claim_was_erased_from(tmp_path
         assert "gh%2Fo%2Fx" in recorded[0]
     finally:
         mem.close()
+
+
+# --- an erasure beside another write ---------------------------------------------------
+#
+# Two handles on one file stand for two processes. One handle opens a batch, which holds
+# the database's write lock. The write under test starts through the other handle, on a
+# thread, and has to wait for that lock. While it waits, the first handle erases or changes
+# the claim, and then commits. The write must act on the store as the first handle left
+# it: a claim erased while it waited stays erased, with its one erasure record.
+
+
+@pytest.fixture()
+def two(tmp_path):
+    """Two handles on one store file."""
+    path = str(tmp_path / "s.db")
+    first = Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme",
+                    user="alice")
+    second = Memvara(path, llm=NullLLM(), embedder=HashingEmbedder(dim=64), tenant="acme",
+                     user="alice")
+    yield first, second
+    first.close()
+    second.close()
+
+
+def behind(holder: Memvara, change: Callable[[], Any],
+           call: Callable[[], Any]) -> tuple[Any, Any]:
+    """Start `call` on a thread while `holder` holds the write lock, then make `change`
+    through `holder` and commit it. Returns what `change` and `call` returned, and raises
+    what `call` raised. `call` must still be waiting for the lock when `change` runs, and
+    that is checked."""
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as exc:  # noqa: BLE001 - raised again below
+            outcome["error"] = exc
+
+    with holder.store.batch():
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(0.2)
+        assert worker.is_alive(), f"the write did not wait for the lock: {outcome}"
+        changed = change()
+    worker.join(10)
+    assert not worker.is_alive(), "the write never finished"
+    if "error" in outcome:
+        raise outcome["error"]
+    return changed, outcome["value"]
+
+
+def test_a_delete_does_not_bring_back_a_claim_erased_while_it_waited(two):
+    """The delete used to read the claim before it had the lock and write the whole row
+    back after the erasure had committed, so the erased text was back on disk beside its
+    own erasure record."""
+    holder, deleter = two
+    claim_id = stored(holder)
+    erased, deleted = behind(holder, lambda: holder.erase(claim_id),
+                             lambda: deleter.delete(claim_id))
+    assert (erased, deleted) == (True, False)
+    assert deleter.store.get_claim(claim_id) is None
+    assert deleter.prove_erased(claim_id).proven
+
+
+def test_a_second_erasure_of_one_claim_finds_nothing_and_records_nothing(two):
+    holder, eraser = two
+    claim_id = stored(holder)
+    first, second = behind(holder, lambda: holder.erase(claim_id),
+                           lambda: eraser.erase(claim_id))
+    assert (first, second) == (True, False)
+    rows = eraser.store._db.execute(
+        "SELECT count(*) FROM erasures WHERE claim_id=?", (claim_id,)).fetchone()[0]
+    assert rows == 1, "the second erasure recorded an erasure that erased nothing"
+
+
+def test_a_link_to_a_claim_erased_while_it_waited_is_refused(two):
+    holder, linker = two
+    doomed = stored(holder)
+    other = holder.remember("Dara Wray", "works_at", "Acme").added[0].id
+    with pytest.raises(KeyError):
+        behind(holder, lambda: holder.erase(doomed),
+               lambda: linker.link(other, doomed, "extends"))
+    assert linker.prove_erased(doomed).proven, "a link still names the erased claim"
+
+
+def test_the_expiry_sweep_leaves_a_claim_whose_expiry_moved_while_it_waited(two):
+    holder, sweeper = two
+    code = holder.remember("user", "door_code", "4411", expires_at=utcnow() + DAY).added[0]
+    _, swept = behind(
+        holder,
+        lambda: holder.remember("user", "door_code", "4411", expires_at=utcnow() + 10 * DAY),
+        lambda: sweeper.erase_expired(now=utcnow() + 2 * DAY))
+    assert swept == []
+    assert sweeper.store.get_claim(code.id).expires_at > utcnow() + 2 * DAY
+
+
+# --- the store's own erasure methods beside another write -------------------------------
+#
+# The same two handles, calling the store directly, as `purge()`, the documents service and
+# any caller of the `Store` protocol do. Each erasure method reads what it is about to
+# erase, and that read must happen under the write lock too.
+
+
+def test_a_second_store_erasure_of_one_claim_finds_nothing_and_records_nothing(two):
+    holder, eraser = two
+    claim_id = stored(holder)
+    first, second = behind(holder, lambda: holder.store.erase_claim(claim_id),
+                           lambda: eraser.store.erase_claim(claim_id))
+    assert (first["claims"], second["claims"]) == (1, 0)
+    rows = eraser.store._db.execute(
+        "SELECT count(*) FROM erasures WHERE claim_id=?", (claim_id,)).fetchone()[0]
+    assert rows == 1, "the second erasure recorded an erasure that erased nothing"
+
+
+def test_a_turn_a_claim_began_citing_while_its_erasure_waited_is_kept(two):
+    """`erase_episode` erases only a turn nothing cites, and must decide that as the store
+    stands once it holds the lock, or it erases a turn a claim has just come to cite."""
+    holder, eraser = two
+    turn = Episode(content="I like green tea.", role="user", scope=holder.default_scope)
+    holder.store.add_episode(turn)
+    _, erased = behind(
+        holder, lambda: holder.remember("user", "likes", "green tea", sources=[turn.id]),
+        lambda: eraser.store.erase_episode(turn.id))
+    assert erased is False
+    assert eraser.store.get_episode(turn.id) is not None
+
+
+def test_a_purge_lists_the_vector_of_a_claim_written_while_it_waited(two):
+    """`purge` deletes rows by scope, and blanks and counts only the vectors it listed
+    first. The list must be taken under the lock, or a claim written while the purge
+    waited loses its row while its vector is neither blanked nor counted."""
+    holder, purger = two
+    holder.remember("user", "likes", "tea")
+    coffee, counts = behind(
+        holder, lambda: holder.remember("user", "likes", "coffee with oat milk").added[0],
+        lambda: purger.purge())
+    assert (counts["claims"], counts["embeddings"]) == (2, 2)
+    assert purger.store.get_claim(coffee.id) is None

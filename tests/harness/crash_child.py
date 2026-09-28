@@ -7,8 +7,10 @@ Run it as `python crash_child.py`, with the program as one line of JSON on stand
      "point": "after-claim", "action": op, "hold": false}
 
 `point` and `action` may be null. An op is `[name, arguments]`, and the names are listed
-in `OPS`. In `erase`, the argument `{"ref": i}` stands for the first claim id that setup
-op `i` produced.
+in `OPS`. In `erase` and `delete`, the argument `{"ref": i}` stands for the first claim id
+that setup op `i` produced. JSON has no type for an instant, so an instant argument of
+`remember` (the names are in `INSTANT_ARGS`) is written as an ISO 8601 string, and the
+child parses it.
 
 The child prints one line per event, and flushes each at once:
 - `ACK {"index": i, "ids": [...]}` after setup op `i` returns;
@@ -31,6 +33,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime
 from typing import Any, Callable
 
 #: The ten points the crash tests kill a child at.
@@ -41,7 +44,10 @@ POINTS = ("after-episode", "after-claim", "after-vector", "erase-before-delete",
 #: uncommitted batch after every op in it, and before its action starts.
 PAUSES = ("before-claim", "inside-batch", "before-action")
 
-OPS = ("remember", "add", "erase", "add_document", "batch", "open", "encrypt", "fill")
+OPS = ("remember", "add", "erase", "delete", "add_document", "batch", "open", "encrypt",
+       "fill")
+#: The arguments of `remember` that are instants, which a program writes in ISO 8601.
+INSTANT_ARGS = ("valid_from", "valid_to", "recorded_at", "expires_at")
 #: `fill` gives up after this many seconds, so a limit that never trips fails the test
 #: with a message instead of leaving a child writing until the test's own timeout.
 FILL_SECONDS = 60.0
@@ -168,6 +174,9 @@ class Program:
         if name not in OPS:
             raise ValueError(f"unknown op {name!r}; use one of {OPS}")
         if name == "remember":
+            for key in INSTANT_ARGS:
+                if key in args:
+                    args[key] = datetime.fromisoformat(args[key])
             receipt = self.mem().remember(args.pop("subject", "user"), args.pop("predicate"),
                                           args.pop("object"), user=self.user, **args)
             return [c.id for c in receipt.added] + [c.id for c in receipt.reinforced]
@@ -176,6 +185,9 @@ class Program:
             return list(receipt.episode_ids) + [c.id for c in receipt.added]
         if name == "erase":
             done = self.mem().erase(self.ref(args.pop("id")), user=self.user, **args)
+            return ["yes" if done else "no"]
+        if name == "delete":
+            done = self.mem().delete(self.ref(args.pop("id")), user=self.user, **args)
             return ["yes" if done else "no"]
         if name == "add_document":
             doc = self.mem().add_document(args.pop("content"), user=self.user, **args)

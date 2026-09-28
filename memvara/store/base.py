@@ -19,6 +19,9 @@ below the facade sees it. See `memvara.types.time_axes`.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import fields
 from datetime import datetime
 from contextlib import AbstractContextManager, nullcontext
 from typing import (TYPE_CHECKING, Any, Collection, Iterable, Literal, Protocol, Sequence,
@@ -382,6 +385,35 @@ def bulk_claims(store: "Store", claim_ids: Sequence[str]) -> dict[str, Claim]:
             if (claim := store.get_claim(cid)) is not None}
 
 
+#: Every field of a claim. Each one is a column `put_claim` writes.
+_CLAIM_COLUMNS = tuple(f.name for f in fields(Claim))
+
+
+def claim_digest(claim: Claim) -> bytes:
+    """A 16-byte digest of every column of `claim`, to tell later whether its row changed.
+
+    A pass that reads claims, decides, and writes them back later takes one of these for
+    each row it reads, and writes a row back only if the row it reads again, under the
+    write lock, has the same digest; otherwise another writer changed the row in between,
+    and writing the old copy back would undo that change. `meta` is serialised with its
+    keys sorted, and every other value by `repr`, which is exact for the strings,
+    numbers, instants and enums a claim holds. Two rows with the same digest hold the same
+    values, short of a 128-bit hash collision.
+
+    >>> from datetime import datetime, timezone
+    >>> jan = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    >>> claim = Claim(subject="user", predicate="lives_in", object="Berlin", id="cl_1",
+    ...               valid_from=jan, recorded_at=jan)
+    >>> read = claim_digest(claim)
+    >>> claim.valid_to = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    >>> claim_digest(claim) == read
+    False
+    """
+    values = [json.dumps(value, sort_keys=True, default=str) if isinstance(value, dict)
+              else value for value in (getattr(claim, name) for name in _CLAIM_COLUMNS)]
+    return hashlib.blake2b(repr(values).encode(), digest_size=16).digest()
+
+
 def transaction(store: object) -> AbstractContextManager[Any]:
     """`store.batch()` where the store has one, and a context that does nothing where it
     does not.
@@ -515,7 +547,25 @@ class Store(Protocol):
         ...
 
     def batch(self) -> AbstractContextManager["Store"]:
-        """Context manager deferring commits to one transaction for bulk work."""
+        """Context manager that runs a block as one transaction, committed once at the end.
+
+        Every guarantee `Memvara` gives about a read followed by a write depends on the
+        batch taking the store's write lock when it begins, before the block's first read,
+        and holding it until the block commits or rolls back. `remember()` and the claim
+        transaction of `add()`, `delete()`, `forget()`, `forget_matching()`, `supersede()`,
+        `link()`, `erase()`, the expiry sweep, consolidation, the backfills and the document
+        writes all read what they are about to change inside a batch. They are safe
+        against another writer only because no other writer can commit between that read
+        and the write. `SQLiteStore.batch()` takes the lock: it begins with
+        `BEGIN IMMEDIATE`.
+
+        A store whose `batch()` only defers commits, or that has no `batch()` at all, runs
+        the same code without that guarantee: another writer can commit between a read and
+        the write that follows it, and the write then puts back the copy it read over the
+        other writer's change. `RemoteStore.batch()` is one of these. It yields the store
+        and does nothing else, because the hosted API has no transaction a client can hold
+        open.
+        """
         ...
 
     def competing_claims(self, tenant: str, fact_key: str, *,
@@ -563,7 +613,15 @@ class Store(Protocol):
         """
         ...
 
-    def find_by_value(self, tenant: str, value_key: str) -> list[Claim]: ...
+    def find_by_value(self, tenant: str, value_key: str) -> list[Claim]:
+        """Every claim with this `value_key` in the tenant, from every scope.
+
+        `value_key` names the owner and not the project, agent or session, so the answer
+        spans every scope the owner has. A caller acting for one scope filters it with
+        `Scope.visible` before it reinforces or reports anything, as `Reconciler.apply`
+        does.
+        """
+        ...
 
     def claims_citing(self, tenant: str, episode_id: str) -> list[Claim]:
         """Every claim whose `sources` names this turn — provenance, backwards.
@@ -577,6 +635,10 @@ class Store(Protocol):
 
         No liveness filter: a retired claim was still extracted from that turn. Callers
         that want only live claims say so.
+
+        No scope filter either: the answer spans the tenant. A caller acting for one scope
+        filters it with `Scope.visible`, because a claim in a scope the caller cannot see
+        must not be reinforced, reported, or counted as the turn's extraction.
         """
         ...
 
@@ -974,8 +1036,9 @@ class Store(Protocol):
         returned, or a cached count, would not be.
 
         Keys are the implementation's own tables — `SQLiteStore` returns `claims`,
-        `claims_fts`, `embeddings` and `claim_sources` — because "which tables can this
-        claim's content survive in" is a property of the backend and not of the protocol.
+        `claims_fts`, `embeddings`, `claim_sources` and `claim_links`, and `vector_file`
+        for the claim's row of its vector file — because "which tables can this claim's
+        content survive in" is a property of the backend and not of the protocol.
         Every value zero is the answer that proves an erasure; any non-zero means it did
         not complete, whatever `erase_claim` said.
 

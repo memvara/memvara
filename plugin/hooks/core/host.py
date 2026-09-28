@@ -56,7 +56,16 @@ TranscriptSpec = namedtuple("TranscriptSpec", "format role_key", defaults=("type
 #: read-only tool list: which memory_* tools are safe to run unprompted is a fact about
 #: our own MCP server, identical everywhere, and duplicating it per host would let one
 #: copy start approving a forget.
-ApproveSpec = namedtuple("ApproveSpec", "matcher separators decision_key reason_key allow")
+#:
+#: `prefixes` are the exact prefixes this host puts on the tools of the server keyed
+#: `memvara`, which is the key every installer writes: `mcp__memvara__` on Claude Code.
+#: A tool is approved only when its whole name is one of them followed by a read-only
+#: tool's name. The prefix is the only part of the name that says which server a tool
+#: belongs to, so anything looser -- the word `memvara` anywhere in the name, or only the
+#: name's last segment -- approves a tool from any server whose name contains it. The
+#: `matcher` stays wide on purpose: it only decides when the host runs the hook, and on
+#: OpenCode nothing reads it, because the shim asks the hook about every tool.
+ApproveSpec = namedtuple("ApproveSpec", "matcher prefixes decision_key reason_key allow")
 
 #: The headless CLI `capture` shells out to in order to mine a turn: the command without
 #: the prompt, which is appended, plus where to read the answer out of the envelope it
@@ -264,6 +273,13 @@ Host = namedtuple(
 #: spawns with `start_new_session=True` OUTLIVES the `codex exec` process and finishes
 #: twelve seconds after the turn ended. So Codex is `supports_async=False` -- asking for
 #: async would silently disable capture -- and `detach_capture=True`.
+#:
+#: Claude Code is the same for a different reason. Its async Stop hook runs in the
+#: background in a session a person is typing into, but `claude -p` cancels it when the
+#: process exits: measured on Claude Code 2.1.281, the hook reported the outcome
+#: "cancelled" and capture wrote nothing (#398). Declared synchronous and detached, the
+#: hook returned at once and its child finished the capture after `claude -p` had exited.
+#: No shell host sets `supports_async` now; OpenCode's JavaScript plugin does.
 #:
 #: A host may have neither (capture blocks, and must be short), one, or in principle both.
 #: Nothing infers one from the other, because "the client honours the flag" and "we fork"

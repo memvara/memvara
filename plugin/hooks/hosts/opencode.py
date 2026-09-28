@@ -99,7 +99,9 @@ HOST = Host(
     #: OpenCode hands a hook no transcript path, so the shim materialises one: it reads
     #: the session's messages through the plugin's own `client` and writes them as the
     #: same JSONL entries `lib.transcript` already parses. `TranscriptSpec` is present
-    #: rather than None because capture CAN run here -- the file just has to be made.
+    #: rather than None because capture CAN run here -- the file just has to be made. It
+    #: is made 0600 in `~/.memvara/.hooks/opencode`, never in the shared temporary
+    #: directory, and removed when the capture that reads it is done.
     transcript=TranscriptSpec(format="jsonl"),
     #: The tools whose use is evidence a turn did something, in OpenCode's spelling.
     tools=frozenset({"edit", "write", "bash", "patch"}),
@@ -127,7 +129,11 @@ HOST = Host(
     #: which is what happens today anyway.
     approve=ApproveSpec(
         matcher="memvara",
-        separators=("__", "_"),
+        #: Only the Claude Code spelling, which is the one form this hook approved here
+        #: before approval was pinned to a prefix. How this host spells an MCP tool's name
+        #: in this event has not been measured, so a tool arriving in any other form is
+        #: asked about rather than approved on a guess.
+        prefixes=("mcp__memvara__",),
         decision_key="status",
         reason_key="reason",
         allow="allow",

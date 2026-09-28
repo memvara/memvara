@@ -43,16 +43,21 @@ HOST = Host(
     #: Uncapped: this client imposes no ceiling of its own on injected context, so the
     #: only budget is the one `recall.BUDGET` sets for cost reasons.
     context_token_cap=0,
-    #: Claude Code honours `async: true` on Stop, so capture never blocks and never
-    #: needs to fork. See the note on both fields in `core/host.py`.
-    supports_async=True,
-    detach_capture=False,
+    #: Claude Code runs an `async: true` Stop hook in the background in a session a person
+    #: is typing into, but `claude -p` cancels it when the process exits, so a headless
+    #: session captured nothing (#398). Capture is registered synchronous and forks
+    #: instead, as on Codex. See the note on both fields in `core/host.py`.
+    supports_async=False,
+    detach_capture=True,
     #: This client imposes no ceiling of its own, so nothing is declared to it.
     context_limit_key=0,
     #: `capture` covers an agentic run (`lib.agentic.TIMEOUT_SEC`, 60s) followed, when that
     #: run fails, by the single-call extraction (`lib.extract.TIMEOUT_SEC`, 90s), plus the
     #: writes. Only this host runs agentic capture, because only here is `claude` the
-    #: first extractor. The hook is async, so the longer limit holds no turn open.
+    #: first extractor. The hook hands its work to a detached child and returns at once, so
+    #: the client applies this limit to a process that ends in milliseconds; the child is
+    #: bounded by the two extraction limits above. The test that each host's capture limit
+    #: covers its extractions keeps the number honest for a host that does not detach.
     timeouts={"session_start": 20, "recall": 10, "capture": 180, "approve": 5},
     client_configs=("~/.claude.json", "~/.claude/settings.json"),
     config_format="json",
@@ -80,9 +85,9 @@ HOST = Host(
     reentry_field="stop_hook_active",
     approve=ApproveSpec(
         matcher="mcp__.*memvara.*",
-        #: How a namespaced tool name splits into its leaf. `mcp__memvara__memory_search`
-        #: and `mcp__plugin_memvara_memvara__memory_search` both end in the leaf.
-        separators=("__",),
+        #: `mcp__memvara__memory_search` from a server configured as `memvara`, and
+        #: `mcp__plugin_memvara_memvara__memory_search` from this plugin's own server.
+        prefixes=("mcp__memvara__", "mcp__plugin_memvara_memvara__"),
         decision_key="permissionDecision",
         reason_key="permissionDecisionReason",
         allow="allow",
@@ -105,9 +110,10 @@ HOST = Host(
         "Memvara: recall on every prompt, capture when a turn ends. Every command goes "
         "through run.py, which binds the host record in hosts/claude.py before "
         "dispatching -- the client's field names, reply keys and event names are data "
-        "there rather than literals in the hook bodies. Capture runs async so a 12-14s "
-        "extraction never holds the turn open; async hook output is discarded by the "
-        "client, so its record is ~/.memvara/.hooks/capture.log rather than a "
+        "there rather than literals in the hook bodies. Capture hands its work to a "
+        "detached process and returns at once, so a 12-14s extraction never holds the turn "
+        "open and still finishes after claude -p exits; that process prints nothing the "
+        "client sees, so its record is ~/.memvara/.hooks/capture.log rather than a "
         "systemMessage."
     ),
 )

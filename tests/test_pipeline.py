@@ -349,6 +349,35 @@ def test_near_duplicate_restatement_reinforces_instead_of_adding():
     store.close()
 
 
+def test_the_claims_a_batch_restates_are_read_again_in_one_query(monkeypatch):
+    """The claim transaction reads every claim tier 0 queued for a reinforcement again,
+    under the write lock, before it reinforces it. It read them one `get_claim` at a time,
+    one query under the lock for every restating turn; they are read together, in one
+    `get_claims`. Two turns restating one claim must still both reinforce it, the second
+    building on the first rather than on the copy read before either was applied."""
+    pipe, store, _ = build()
+    berlin = pipe.add([ep("I live in Berlin.")]).added[0]
+    acme = pipe.add([ep("I work at Acme.")]).added[0]
+    asked: list[list[str]] = []
+    real = store.get_claims
+
+    def get_claims(claim_ids: Sequence[str]) -> dict[str, Claim]:
+        asked.append(sorted(claim_ids))
+        return real(claim_ids)
+
+    monkeypatch.setattr(store, "get_claims", get_claims)
+    turns = [ep(berlin.text), ep(berlin.text + "."), ep(acme.text)]
+    receipt = pipe.add(turns)
+
+    assert receipt.skipped == 3 and receipt.added == []
+    assert asked == [sorted([berlin.id, acme.id])]
+    stored = store.get_claim(berlin.id)
+    assert stored.observation_count == 3
+    assert {turns[0].id, turns[1].id} <= set(stored.sources)
+    assert store.get_claim(acme.id).observation_count == 2
+    store.close()
+
+
 def test_near_dup_threshold_of_one_disables_the_shortcut():
     # Guard against the threshold being ignored: at 1.0 only an exact vector match counts.
     pipe, store, _ = build(near_dup_threshold=1.01)
@@ -521,6 +550,129 @@ def test_a_repeat_does_not_reinforce_a_claim_that_has_been_retired():
     assert receipt.skipped == 1, "the turn is still recognised as a repeat"
     assert store.get_claim(claim.id).observation_count == 1
     store.close()
+
+
+# Tier 0 finds the claims a repeated turn restates and queues them for a reinforcement
+# that the claim transaction applies after tiers 1 and 2, one of which can call a model.
+# Another handle on the same file can erase or end a queued claim in between, or erase the
+# turn itself; each test does it from inside a patched `_tier1` or `_tier2`, while the
+# adding handle holds no lock.
+
+
+def two_handles(tmp_path: pathlib.Path) -> tuple[Memvara, Memvara]:
+    path = str(tmp_path / "s.db")
+    return (Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="u"),
+            Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="u"))
+
+
+@pytest.mark.covers("inv:WP12")
+def test_a_repeat_does_not_bring_back_a_claim_erased_while_it_extracted(tmp_path,
+                                                                       monkeypatch):
+    """The reinforcement reads the claim again under the write lock and leaves alone one
+    that is gone: writing back the copy tier 0 read brought an erased claim back, text
+    and all."""
+    adder, other = two_handles(tmp_path)
+    try:
+        turn = "I really like green tea in the morning."
+        tea = other.remember("user", "likes", "green tea",
+                             sources=[Episode(content=turn, role="user")]).added[0].id
+        real_tier1 = WritePipeline._tier1
+
+        def tier1(self: WritePipeline, *args: Any, **kwargs: Any) -> Any:
+            assert other.erase(tea)
+            return real_tier1(self, *args, **kwargs)
+
+        monkeypatch.setattr(WritePipeline, "_tier1", tier1)
+        receipt = adder.add(turn)
+        assert receipt.reinforced == []
+        assert other.store.get_claim(tea) is None, "the erased claim is back"
+        assert other.store.erasure_record(tea) is not None
+    finally:
+        adder.close()
+        other.close()
+
+
+@pytest.mark.covers("inv:WP12")
+def test_a_repeat_keeps_an_ending_made_while_it_extracted(tmp_path, monkeypatch):
+    """A claim that another writer ended in the meantime is no longer live, so it is not
+    reinforced, and its ending stays: writing back the copy tier 0 read undid it, and two
+    values of one slot were live."""
+    adder, other = two_handles(tmp_path)
+    try:
+        turn = "I live in Berlin."
+        berlin = other.remember("user", "lives_in", "Berlin",
+                                valid_from=utcnow() - timedelta(days=60),
+                                sources=[Episode(content=turn, role="user")]).added[0].id
+        paris: list[Claim] = []
+        real_tier1 = WritePipeline._tier1
+
+        def tier1(self: WritePipeline, *args: Any, **kwargs: Any) -> Any:
+            paris.extend(other.remember("user", "lives_in", "Paris",
+                                        valid_from=utcnow() - timedelta(days=30)).added)
+            return real_tier1(self, *args, **kwargs)
+
+        monkeypatch.setattr(WritePipeline, "_tier1", tier1)
+        receipt = adder.add(turn)
+        assert receipt.reinforced == []
+        kept = other.store.get_claim(berlin)
+        assert kept is not None and kept.valid_to == paris[0].valid_from
+        assert [c.object for c in other.get_all() if c.predicate == "lives_in"] == ["Paris"]
+    finally:
+        adder.close()
+        other.close()
+
+
+@pytest.mark.covers("inv:WP13")
+def test_an_add_whose_turn_is_purged_while_it_extracts_writes_nothing_read_from_it(
+        tmp_path, monkeypatch):
+    """The claims are written after extraction, which can include a model call. A purge
+    committed in between erased the turn, and the claim read from it was written anyway,
+    citing a turn that no longer existed, after the purge had reported removing it."""
+    adder, other = two_handles(tmp_path)
+    try:
+        real_tier2 = WritePipeline._tier2
+
+        def tier2(self: WritePipeline, *args: Any, **kwargs: Any) -> Any:
+            assert other.purge()["episodes"] == 1
+            return real_tier2(self, *args, **kwargs)
+
+        monkeypatch.setattr(WritePipeline, "_tier2", tier2)
+        receipt = adder.add("I live in Berlin.")
+        stored = list(other.store.iter_claims("default", include_invalidated=True))
+        assert stored == [], "a claim read from the purged turn was written"
+        assert receipt.added == []
+    finally:
+        adder.close()
+        other.close()
+
+
+@pytest.mark.covers("inv:WP13")
+def test_a_restatement_whose_turn_is_purged_before_it_is_applied_reinforces_nothing(
+        tmp_path, monkeypatch):
+    """A turn in a session restates a claim the user holds, so tier 0 queues a
+    reinforcement of that claim, citing the turn. A purge of the session, committed before
+    the claim transaction, erases the turn and leaves the user's claim. The reinforcement
+    then had no turn left to cite, and it was applied anyway: the claim gained an
+    observation and salience with no evidence behind them, and the receipt reported it as
+    reinforced. It is skipped, as a new claim whose every turn is gone is dropped."""
+    adder, other = two_handles(tmp_path)
+    try:
+        tea = other.remember("user", "likes", "green tea").added[0]
+        before = other.store.get_claim(tea.id)
+        real_tier1 = WritePipeline._tier1
+
+        def tier1(self: WritePipeline, *args: Any, **kwargs: Any) -> Any:
+            assert other.scope(session="s1").purge()["episodes"] == 1
+            return real_tier1(self, *args, **kwargs)
+
+        monkeypatch.setattr(WritePipeline, "_tier1", tier1)
+        receipt = adder.scope(session="s1").add(tea.text)
+        assert receipt.skipped == 1, "the turn was not read as a restatement"
+        assert receipt.reinforced == []
+        assert other.store.get_claim(tea.id) == before, "the claim was reinforced"
+    finally:
+        adder.close()
+        other.close()
 
 
 # --- tier 2: schema acquisition is paid for once -----------------------------

@@ -30,11 +30,13 @@ its watermark past *all* of it, so on a session with large tool outputs most of 
 transcript was skipped unread and could never be reconsidered. Measured on one session:
 630KB consumed, six extractions paid for, and only the tail of each batch ever seen.
 
-**It runs async, and therefore silently.** Extraction shells out to `claude -p` and takes
-12-14 seconds, and a synchronous `Stop` hook holds the turn open for all of it. Async hands
-the turn back immediately -- but the client discards an async hook's output, so the
+**It runs detached, and therefore silently.** Extraction shells out to `claude -p` and takes
+12-14 seconds, and a `Stop` hook that did the work itself would hold the turn open for all
+of it. So `run.py` hands the payload to a child in a session of its own and returns at
+once, on every shell host -- but nothing the child prints reaches the client, so the
 `systemMessage` this used to print could not survive the change and is gone rather than
-merely unread.
+merely unread. (It used to be an async hook on Claude Code, whose output the client
+discards just the same; `claude -p` cancels an async hook when it exits, #398.)
 
 That reverses a rule this repository states in CLAUDE.md, and the reason it was stated is
 still true: a hook nobody can see working is one nobody notices breaking. The compensating
@@ -43,7 +45,7 @@ disappearing -- every path that reaches a decision writes a line, including the 
 decide to do nothing.
 
 `recall.py` and `session_start.py` are the second half of that obligation, not exempt from
-it. Neither is this hook's own async -- both are synchronous, both already speak on every
+it. Neither is detached as this hook is -- both are synchronous, both already speak on every
 event they answer, and `lib.ipc.raise_capture_alert`/`due_capture_alert` are how a failure
 here reaches whichever of them a person is actually watching next: on the terminal, as
 `⋈ Memvara · ... · capture failing: <reason>` riding on a banner that file was printing
@@ -74,7 +76,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.envelope import read_event  # noqa: E402
 from core.host import active  # noqa: E402
-from lib import agentic, counts, settings  # noqa: E402
+from lib import agentic, counts, settings, state_file  # noqa: E402
 from lib.extract import project_subject, triples  # noqa: E402
 from lib.ipc import payload  # noqa: E402
 from lib.project import bind as bind_project  # noqa: E402
@@ -199,16 +201,14 @@ def _write_state(state: dict) -> None:
     A transcript that is gone cannot be mined again, so its watermark can never be read.
     Dropping it here costs one `exists` per key at write time and removes the entry exactly
     when it stops meaning anything.
-    """
-    import json
 
-    try:
-        state = {key: size for key, size in state.items() if os.path.exists(key)}
-        STATE.parent.mkdir(parents=True, exist_ok=True)
-        STATE.write_text(json.dumps(state), encoding="utf-8")
-    except OSError:
-        # A lost marker costs one repeated extraction, not correctness.
-        pass
+    Written through `lib.state_file`, so the file is 0600 in a private directory: it names
+    every transcript this machine has mined. It was written with the default mode, 0644
+    under the usual umask. A write that fails is not raised: a lost marker costs one
+    repeated extraction, not correctness.
+    """
+    state = {key: size for key, size in state.items() if os.path.exists(key)}
+    state_file.write_json(str(STATE), state, prefix=".capture-state-")
 
 
 def _turn(transcript: Path) -> "tuple[str, list[str], str]":
@@ -243,25 +243,30 @@ def main() -> int:
     event = read_event(host, "capture", payload())
     if event.reentrant:
         # Re-entry from a hook-triggered continuation. Mining here would double-count.
+        log("skipped=stop triggered by a hook")
         return 0
     # Before anything else that can be slow: a config an earlier, killed capture left
     # behind holds a credential, and this is the next moment anything can remove it.
     agentic.sweep_configs()
 
     if not event.transcript_path:
+        log("skipped=no transcript path")
         return 0
     transcript = Path(event.transcript_path).expanduser()
     if not transcript.is_file():
+        log("skipped=transcript is not a file")
         return 0
 
     key = str(transcript.resolve())
     try:
         size = transcript.stat().st_size
-    except OSError:
+    except OSError as exc:
+        log(f"skipped=transcript size unreadable: {type(exc).__name__}")
         return 0
     state = _read_state()
     if state.get(key) == size:
         # Stop fired twice over one reply. Nothing has been added since the last run.
+        log("skipped=transcript unchanged since the last capture")
         return 0
 
     turn, injected, context = _turn(transcript)

@@ -76,6 +76,11 @@ rather than only describing a fresh one. Loading a pack needs Python 3.11 or new
 - **`Sweep` reads its snapshot once and writes back in bounded transactions.** Off the write
   path is not the same as out of the way; without this the pass would scan the table three
   times or hold the write lock for its own duration.
+- **The write-back never overwrites another writer.** Each transaction reads its rows again
+  under the write lock and writes a row only if it is still exactly as the snapshot read
+  it; the two rows of one merge are written together or not at all. A row another handle or
+  process changed or erased during the pass is left for the next pass, so the pass cannot
+  undo an ending or bring an erased claim back.
 - **`now` is read once for the whole pass.** Pass it explicitly to evaluate two passes at the
   same instant, because the decay target depends on that instant and a claim near a rounding
   boundary would otherwise change on the second call.

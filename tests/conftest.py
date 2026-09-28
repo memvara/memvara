@@ -287,10 +287,9 @@ def pytest_configure(config: Any) -> None:
         "markers",
         "derives_project: let ServerConfig.from_env() derive the project from a git "
         "remote, which tests/conftest.py otherwise switches off")
-    # Registered here as well as in tests/adversarial/conftest.py, because tests outside
-    # tests/adversarial carry covers marks too, and a run of one of those files alone
-    # never loads the adversarial conftest. Without this, pytest warns that the mark is
-    # unknown.
+    # Here rather than in tests/adversarial/conftest.py, because tests outside that folder
+    # carry the mark too, and a run of one of their files alone loads only this conftest.
+    # tests/harness/checklist.py reads the marks from each test's source.
     config.addinivalue_line(
         "markers",
         "covers(*items): the checklist items this test covers, such as "

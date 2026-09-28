@@ -9,7 +9,6 @@ which closes the graph leg on a store where no claim leads to another.
 from __future__ import annotations
 
 import inspect
-import math
 import warnings
 from collections import Counter
 from contextlib import contextmanager
@@ -153,8 +152,11 @@ def test_a_pass_reads_its_snapshot_once_and_writes_each_claim_once_in_bounded_ba
     nor holds the write lock for its own length.
 
     Decay, merge and promote all run here, and some claims are changed by two of them.
-    The pass must read the claims once, write each changed claim once, and commit at
-    most `window` rows per transaction.
+    The pass must read the claims once and write each changed claim once. A transaction
+    closes once it holds `window` rows, but the two rows of one merge are one unit that is
+    never split across two transactions, so the transaction that reaches the merge takes
+    both rows and holds one more than `window`. Every transaction therefore holds at most
+    `window` rows plus the largest unit's rows less one.
     """
     store = SQLiteStore(":memory:")
     claims = seed(store)
@@ -172,8 +174,10 @@ def test_a_pass_reads_its_snapshot_once_and_writes_each_claim_once_in_bounded_ba
     assert counting.snapshots == 1, "the pass read the table more than once"
     assert set(counting.writes) == {c.id for c in claims.values()}
     assert set(counting.writes.values()) == {1}, f"a claim was written twice: {counting.writes}"
-    assert counting.transactions == [2, 2, 1]
-    assert len(counting.transactions) == math.ceil(len(claims) / window)
+    assert counting.transactions == [3, 2]
+    largest_unit = 2  # the merge's survivor and the duplicate it retires
+    assert max(counting.transactions) <= window + largest_unit - 1
+    assert sum(counting.transactions) == len(claims)
     store.close()
 
 

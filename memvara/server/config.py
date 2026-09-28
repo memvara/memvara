@@ -32,6 +32,7 @@ from .validate import _suggest
 from ..schema import (BUILTIN_PREDICATES, PredicatePackError,
                       PredicateRegistry, load_all_specs)
 from ..store.encryption import KEY_ENV, EncryptionError, EncryptionUnavailable, parse_key
+from ..types import check_scope_value
 
 if TYPE_CHECKING:
     # Imported for the annotation alone. At runtime `memvara.remote.api` reaches back
@@ -314,7 +315,9 @@ class ServerConfig:
     #: the credentials file `memvara-mcp login` writes) and talks to `server_url` instead.
     mode: str = "local"
     server_url: str = DEFAULT_SERVER_URL
-    api_key: str | None = None
+    #: The bearer token for the hosted service in cloud mode. Kept out of `repr` because
+    #: it is a secret, like `confirm_secret` and `db_key` below.
+    api_key: str | None = field(default=None, repr=False)
     #: Which vector space this server's store is opened in. Named rather than discovered,
     #: for the same reason `llm` is: a store outlives the environment it was created in,
     #: and a setting that reads "whatever happens to be installed" makes the store's
@@ -492,15 +495,31 @@ class ServerConfig:
         project = _project(env.get("MEMVARA_PROJECT"),
                            derive="project_scope" not in features_off, cwd=cwd)
 
+        # An empty value means the variable is not set, as `_optional` says. '*' is a value
+        # no scope may hold (`types.REFUSED_SCOPE_VALUES`), refused here so the error
+        # names the variable rather than surfacing from inside `Memvara`.
+        tenant = (env.get("MEMVARA_TENANT") or "default").strip() or "default"
+        user = _optional(env.get("MEMVARA_USER"))
+        agent = _optional(env.get("MEMVARA_AGENT"))
+        session = _optional(env.get("MEMVARA_SESSION"))
+        for variable, level, value in (("MEMVARA_TENANT", "tenant", tenant),
+                                       ("MEMVARA_USER", "user", user),
+                                       ("MEMVARA_AGENT", "agent", agent),
+                                       ("MEMVARA_SESSION", "session", session)):
+            try:
+                check_scope_value(level, value)
+            except ValueError as exc:
+                raise ConfigError(f"{variable}: {exc}") from None
+
         return cls(
             # `~` is what a human types in a JSON settings file, and nothing else in the
             # launch path will expand it.
             path=(path if path == ":memory:" else os.path.expanduser(path))
                 if path else "",
-            tenant=(env.get("MEMVARA_TENANT") or "default").strip() or "default",
-            user=_optional(env.get("MEMVARA_USER")),
-            agent=_optional(env.get("MEMVARA_AGENT")),
-            session=_optional(env.get("MEMVARA_SESSION")),
+            tenant=tenant,
+            user=user,
+            agent=agent,
+            session=session,
             read_only=_flag(env.get("MEMVARA_READ_ONLY"), "MEMVARA_READ_ONLY"),
             llm=backend,
             llm_model=_optional(env.get("MEMVARA_LLM_MODEL")),

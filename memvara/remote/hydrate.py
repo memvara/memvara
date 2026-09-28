@@ -44,7 +44,7 @@ from ..types import (
     DOCUMENT_STATES, LAST_OBSERVED, SALIENCE_BASE, Answer, Claim, DeleteResult, Delta,
     Derivation, Document, DocumentState, DocumentStatus, Episode, Explanation,
     ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Reading,
-    Result, Row, Scope, WriteReceipt, closure, link_relation,
+    Result, Row, Scope, WriteReceipt, closure, link_relation, stored_scope,
 )
 
 __all__ = ["claim", "episode", "result", "explanation", "receipt", "provenance",
@@ -108,8 +108,12 @@ def scope(body: dict[str, Any]) -> Scope:
     # scope component silently reading as "unbound".
     # `project` is read with `get`, because a deployment that predates project scope
     # renders no such field, and a scope without one is a scope with no project.
-    return Scope(body["tenant"], body["user"], body["agent"], body["session"],
-                 project=body.get("project"))
+    #
+    # `stored_scope` rather than `Scope`: this is a row the deployment already holds, and
+    # one stored before '*' and '' were refused can hold either. Refusing it here would
+    # fail the whole read over one row the caller cannot do anything about.
+    return stored_scope(body["tenant"], body["user"], body["agent"], body["session"],
+                        project=body.get("project"))
 
 
 def claim(body: dict[str, Any]) -> Claim:

@@ -51,6 +51,18 @@ def test_cloud_mode_reads_the_api_key_from_the_environment():
     assert config.server_url == "https://app.memvara.dev"
 
 
+def test_the_repr_of_a_config_shows_none_of_its_three_secrets():
+    """A config holds three secrets: `api_key`, the bearer token for the hosted service;
+    `db_key`, the key to an encrypted store; and `confirm_secret`, which signs the tokens
+    the matching tools hand out. Anything that prints the config as text prints its repr:
+    a debug log line, an exception message that includes it, or a traceback formatter
+    that shows local variables. So the repr must contain none of the three."""
+    secrets = {"api_key": "sk-sentinel-api-key", "db_key": "sentinel-db-key",
+               "confirm_secret": "sentinel-confirm-secret"}
+    shown = repr(ServerConfig(mode="cloud", **secrets))
+    assert [name for name, value in secrets.items() if value in shown] == []
+
+
 def test_cloud_mode_prefers_the_environment_key_over_the_credentials_file(tmp_path,
                                                                           monkeypatch):
     creds = tmp_path / "credentials.json"
