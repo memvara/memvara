@@ -2697,7 +2697,9 @@ seconds for 300,000 claims on a loaded laptop, 88.5 microseconds a claim, so ten
 covers about 6.8 million claims. A holder that dies lets go at once, so the wait runs long
 only while the holder is alive. The lock is asked for in tries of a quarter of a second
 (`_LOCK_TRY`, in `_reserve`), because Python acts on Ctrl-C only between calls into SQLite:
-one ten-minute wait inside SQLite would have held an interrupt back until it ended. The
+one ten-minute wait inside SQLite would have held an interrupt back until it ended. Python
+loses an interrupt that arrives while it is running a finalizer, such as a `__del__`, as it
+does in any program, and a second Ctrl-C then ends the wait within one try (#440). The
 60-second wait for a clear, in `_hold_presence`, is still one wait inside SQLite, as it was
 before this change. The reserved lock leaves every open store's shared lock alone, so a
 store that is merely open delays nobody. `_creating` lets go by closing its connection,
