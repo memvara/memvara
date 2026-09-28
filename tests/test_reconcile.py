@@ -1729,6 +1729,58 @@ def test_a_write_that_two_stored_periods_cover_together_is_a_repeat_of_both(rec,
     assert len(store.find_by_value("acme", a.value_key)) == 2
 
 
+def test_a_restatement_before_the_live_claim_that_two_stored_periods_hold_is_a_repeat(
+        rec, store):
+    """#283 with #435. Tea is live from June and stored for January to March and March to
+    May. Tea for February to April starts before the live claim, so it is a restatement
+    of an earlier period, and the caller's end, April, bounds that period. No one claim
+    holds February to April, but the two stored ones do together, so the write stores
+    nothing, reinforces both, and still names the live claim it restated."""
+    live = stored(rec, "likes", "tea", at(2026, 6, 1))
+    a = stored(rec, "likes", "tea", at(2026, 1, 1), at(2026, 3, 1))
+    b = stored(rec, "likes", "tea", at(2026, 3, 1), at(2026, 5, 1))
+
+    res = rec.apply(claim("likes", "tea", valid_from=at(2026, 2, 1),
+                          valid_to=at(2026, 4, 1), sources=["ep_2"]), now=LATER)
+
+    assert res.action == "reinforce" and res.claim.id == a.id
+    assert [(p.action, p.claim.id) for p in res.also] == [("reinforce", b.id)]
+    assert res.restated is not None and res.restated.id == live.id
+    assert len(store.find_by_value("acme", a.value_key)) == 3
+
+
+def test_a_write_three_stored_periods_hold_is_a_repeat_of_each(rec, store):
+    """The stored claims can overlap each other, as claims stored directly or before #435
+    can. January to March, March to May and 20 March to June hold February to April
+    between them, the last two overlapping, so the write reinforces all three."""
+    periods = [(at(2026, 1, 1), at(2026, 3, 1)), (at(2026, 3, 1), at(2026, 5, 1)),
+               (at(2026, 3, 20), at(2026, 6, 1))]
+    held = [claim("likes", "tea", valid_from=start, valid_to=end, recorded_at=start)
+            for start, end in periods]
+    for c in held:
+        store.put_claim(c)
+
+    res = rec.apply(claim("likes", "tea", valid_from=at(2026, 2, 1),
+                          valid_to=at(2026, 4, 1), sources=["ep_2"]), now=LATER)
+
+    assert res.action == "reinforce"
+    assert [res.claim.id] + [p.claim.id for p in res.also] == [c.id for c in held]
+    assert len(store.find_by_value("acme", held[0].value_key)) == 3
+
+
+def test_a_write_of_no_length_is_stored_as_it_is(rec, store):
+    """`remember()` refuses a period that ends where it begins, but `Reconciler.apply`
+    takes whatever a caller builds. Such a period overlaps nothing, so it is stored as it
+    was before #435 rather than being cut into pieces."""
+    instant = at(2026, 2, 1)
+
+    res = rec.apply(claim("likes", "tea", valid_from=instant, valid_to=instant),
+                    now=LATER)
+
+    assert res.action == "add" and res.also == []
+    assert pieces_of(res) == [(instant, instant)]
+
+
 def test_a_write_that_overlaps_no_stored_period_is_stored_whole(rec, store):
     held = stored(rec, "lives_in", "Rome", at(2026, 1, 1), at(2026, 3, 1))
 

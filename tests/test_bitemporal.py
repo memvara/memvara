@@ -976,6 +976,20 @@ def test_remember_stores_only_the_part_of_a_period_the_store_does_not_hold(mem):
     assert len(mem.history("user", "lives_in")) == 3
 
 
+def test_a_type_asserted_on_a_write_over_part_of_a_stored_period_refiles_the_overlap(mem):
+    """A repeat that asserts a `memory_type` re-files the claim it reinforces. A write that
+    overlaps part of a stored claim reinforces that claim for the overlap, so it re-files
+    it the same way, and the receipt reports the move in `retyped`."""
+    first = mem.remember("user", "likes", "tea", valid_from=JAN, valid_to=MAR).added[0]
+
+    receipt = mem.remember("user", "likes", "tea", valid_from=MID_FEB, valid_to=APR,
+                           memory_type="episodic")
+
+    assert [c.id for c in receipt.reinforced] == [first.id]
+    assert [(r.claim_id, r.now.value) for r in receipt.retyped] == [(first.id, "episodic")]
+    assert mem.get(first.id).memory_type.value == "episodic"
+
+
 # --- ask(): the three readings, and the one that had no surface ---------------
 #
 # `recall()` renders the current answer. The question the whole two-clock model exists

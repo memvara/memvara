@@ -1682,12 +1682,10 @@ class WritePipeline:
             # A write whose period stored claims of its value already held in part (#435):
             # each further piece it stored is added, and each stored claim it reinforced
             # for the overlap is reinforced, in the order of their periods.
-            if part.claim is None:
-                continue
-            if part.action == "add":
+            if part.action == "add" and part.claim is not None:
                 receipt.added.append(part.claim)
                 to_embed.append(part.claim)
-            elif part.action == "reinforce":
+            elif part.action == "reinforce" and part.claim is not None:
                 receipt.reinforced.append(part.claim)
             if part.retyped is not None:
                 receipt.retyped.append(part.retyped)
