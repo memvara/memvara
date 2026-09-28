@@ -165,8 +165,9 @@ def test_a_hosted_receipt_carries_the_ungrounded_and_polluted_counts() -> None:
     assert (sent["ungrounded"], sent["polluted"]) == (2, 1), "the fake no longer sends them"
     read = hydrate.receipt(sent)
     assert (read.ungrounded, read.polluted) == (2, 1)
-    older = {key: value for key, value in sent.items() if key not in ("ungrounded", "polluted")}
-    assert (hydrate.receipt(older).ungrounded, hydrate.receipt(older).polluted) == (0, 0), (
+    older = hydrate.receipt({key: value for key, value in sent.items()
+                             if key not in ("ungrounded", "polluted")})
+    assert (older.ungrounded, older.polluted) == (0, 0), (
         "a deployment that sends neither count must still hydrate")
 
 
