@@ -243,25 +243,30 @@ def main() -> int:
     event = read_event(host, "capture", payload())
     if event.reentrant:
         # Re-entry from a hook-triggered continuation. Mining here would double-count.
+        log("skipped=stop triggered by a hook")
         return 0
     # Before anything else that can be slow: a config an earlier, killed capture left
     # behind holds a credential, and this is the next moment anything can remove it.
     agentic.sweep_configs()
 
     if not event.transcript_path:
+        log("skipped=no transcript path")
         return 0
     transcript = Path(event.transcript_path).expanduser()
     if not transcript.is_file():
+        log("skipped=transcript is not a file")
         return 0
 
     key = str(transcript.resolve())
     try:
         size = transcript.stat().st_size
-    except OSError:
+    except OSError as exc:
+        log(f"skipped=transcript size unreadable: {type(exc).__name__}")
         return 0
     state = _read_state()
     if state.get(key) == size:
         # Stop fired twice over one reply. Nothing has been added since the last run.
+        log("skipped=transcript unchanged since the last capture")
         return 0
 
     turn, injected, context = _turn(transcript)
