@@ -266,7 +266,12 @@ refuses a store this one has opened.
   default.** It also refuses a scope the write step never finished, instead of writing it
   and reading it at once. The report prints each scope's age and claim count at read time,
   and says the wait is a fixed delay, not a confirmation that extraction finished. Pass
-  `--min-scope-age 0` for the old one-step run.
+  `--min-scope-age 0` for the old one-step run. The write step records the minimum age it
+  used, and a read asking for less is refused unless it passes `--override-min-scope-age`.
+- **A hosted demo report flags a plain `memvara` scope the service barely extracted
+  from.** When such a scope holds fewer claims than half the facts its structured sibling
+  was given, the report names it in a warning and marks the `memvara` arm's rows
+  `[NOT A RESULT]` in every results table.
 
 ### Fixed
 

@@ -639,7 +639,7 @@ def test_the_write_step_fills_every_scope_and_the_manifest_without_asking_a_read
     write step can run while the reader's server is down."""
     client = FakeHosted()
     _patch_demo_credential(monkeypatch, client)
-    monkeypatch.setattr(ho, "_utcnow", lambda: T0)
+    monkeypatch.setattr(ho, "utcnow", lambda: T0)
 
     def no_reader(*args: Any, **kw: Any) -> Any:
         raise AssertionError("the write step must not build a reader")
@@ -742,11 +742,11 @@ def test_the_report_prints_each_scopes_age_and_claims_and_says_the_wait_is_only_
     monkeypatch.setattr(hz, "load_scenario", lambda: (QUESTIONS[:3], TURNS))
     common = ["--memory", "hosted", "--hosted-credentials", str(tmp_path / "demo.json"),
               "--hosted-run-id", "w2", "--hosted-manifest", str(tmp_path / "m.jsonl")]
-    monkeypatch.setattr(ho, "_utcnow", lambda: T0)
+    monkeypatch.setattr(ho, "utcnow", lambda: T0)
     assert hz.main(["--write-only", *common]) == 0
     capsys.readouterr()
 
-    monkeypatch.setattr(ho, "_utcnow", lambda: T0 + timedelta(hours=26))
+    monkeypatch.setattr(ho, "utcnow", lambda: T0 + timedelta(hours=26))
     assert hz.main(["--reader", "stub", *common]) == 0
     printed = capsys.readouterr().out
     scopes = {user for kind, user, _ in client.calls if kind == "add"}
@@ -777,6 +777,152 @@ def test_the_minimum_age_flag_must_not_be_negative(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         hz.main(["--reader", "stub", "--min-scope-age", "-1"])
     assert "--min-scope-age" in capsys.readouterr().err
+
+
+def test_the_age_printed_is_the_age_that_was_checked(tmp_path):
+    """One read of a scope takes its age once. A clock that moves on between two readings
+    would let the report print an age the check never saw, so the clock is read once per
+    read and the context carries that reading."""
+    client = FakeHosted()
+    path = _written(tmp_path, client)
+    ticks = iter(T0 + timedelta(hours=24.5 + i) for i in range(100))
+    calls: list[datetime] = []
+
+    def clock() -> datetime:
+        calls.append(next(ticks))
+        return calls[-1]
+
+    later = ho.HostedMemvara(client, run_id="r1", scale=1, manifest=ho.Manifest(path),
+                             min_age=timedelta(hours=24), clock=clock)
+    first = later.memvara(QUESTIONS[0], TURNS)
+    second = later.memvara_structured(QUESTIONS[0], TURNS)
+    assert len(calls) == 2, "each read must read the clock exactly once"
+    assert first.scope_age_hours == pytest.approx(24.5)
+    assert second.scope_age_hours == pytest.approx(25.5)
+
+
+def test_the_expected_claim_count_is_the_facts_the_structured_sibling_was_given(tmp_path):
+    """The plain arm has no facts of its own to compare with, so its claim count is
+    checked against what the desk gave the structured scope for the same question time,
+    which is also what the manifest records for that scope."""
+    client = FakeHosted()
+    path = _written(tmp_path, client)
+    manifest = ho.Manifest(path)
+    later = ho.HostedMemvara(client, run_id="r1", scale=1, manifest=manifest)
+    for question in QUESTIONS:
+        context = later.memvara(question, TURNS)
+        sibling = manifest.completed(later.scope_name("memvara_structured", question))
+        assert context.claims_expected == sibling["facts"]
+
+
+def test_a_plain_scope_with_almost_no_claims_is_reported_and_its_rows_marked(
+        tmp_path, monkeypatch, capsys):
+    """What happened on 2026-09-23 and again on 2026-09-28: the service's extraction did
+    next to nothing, so the plain arm read turns alone. A plain scope holding fewer claims
+    than half the facts its structured sibling was given is named in a warning, and the
+    arm's rows in every results table say they are not a result."""
+    client = FakeHosted()
+    _patch_demo_credential(monkeypatch, client)
+    monkeypatch.setattr(hz, "load_scenario", lambda: (QUESTIONS[:3], TURNS))
+    common = ["--memory", "hosted", "--hosted-credentials", str(tmp_path / "demo.json"),
+              "--hosted-run-id", "w3", "--hosted-manifest", str(tmp_path / "m.jsonl")]
+    monkeypatch.setattr(ho, "utcnow", lambda: T0)
+    assert hz.main(["--write-only", *common]) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(ho, "utcnow", lambda: T0 + timedelta(hours=25))
+    assert hz.main(["--reader", "stub", *common]) == 0
+    printed = capsys.readouterr().out
+
+    plain = sorted(u for k, u, _ in client.calls if k == "add" and "-memvara-" in u)
+    assert plain and all(client.scope(user=u).count() == 0 for u in plain), (
+        "the fake stores no claims from turns, as the service did on those days")
+    assert "EXTRACTION DID NOT HAPPEN" in printed
+    for scope in plain:
+        assert any(scope in line and "fewer than half" in line
+                   for line in printed.splitlines())
+    rows = [line for line in printed.splitlines() if line.lstrip().startswith("memvara ")]
+    assert rows and all("NOT A RESULT" in line for line in rows[1:]), rows
+    assert not any(line.lstrip().startswith("memvara_structured") and "NOT A RESULT" in line
+                   for line in printed.splitlines())
+
+
+def test_a_plain_scope_with_enough_claims_is_not_flagged():
+    items = [hz.Item(id="1", arm="memvara", qid="q", prompt="p",
+                     context=bl.Context(arm="memvara", text="", turns_visible=1,
+                                        items_used=0, claims_in_scope=9,
+                                        claims_expected=17, scope="s"))]
+    assert hz.short_of_claims(items) == {}
+    thin = [replace(items[0], context=replace(items[0].context, claims_in_scope=8))]
+    assert hz.short_of_claims(thin) == {"s": (8, 17)}
+
+
+def test_the_write_step_records_its_minimum_age_and_a_shorter_read_is_refused(tmp_path):
+    """A scope written for a 24-hour wait must not be read sooner by passing a smaller
+    --min-scope-age, including 0, without saying so on the command line."""
+    client = FakeHosted()
+    path = tmp_path / "m.jsonl"
+    ho.HostedMemvara(client, run_id="r1", scale=1,
+                     manifest=ho.Manifest(path, clock=lambda: T0),
+                     min_age=timedelta(hours=24)).write_all(QUESTIONS[:1], TURNS)
+    name = ho.HostedMemvara(client, run_id="r1", scale=1,
+                            manifest=ho.Manifest(path)).scope_name("memvara", QUESTIONS[0])
+    assert ho.Manifest(path).completed(name)["min_age_hours"] == 24.0
+
+    for shorter in (timedelta(hours=1), timedelta(0)):
+        hurried = ho.HostedMemvara(client, run_id="r1", scale=1, manifest=ho.Manifest(path),
+                                   min_age=shorter, clock=lambda: T0 + timedelta(hours=2))
+        with pytest.raises(SystemExit, match="--override-min-scope-age"):
+            hurried.memvara(QUESTIONS[0], TURNS)
+
+    allowed = ho.HostedMemvara(client, run_id="r1", scale=1, manifest=ho.Manifest(path),
+                               min_age=timedelta(hours=1), override_min_age=True,
+                               clock=lambda: T0 + timedelta(hours=2))
+    assert allowed.memvara(QUESTIONS[0], TURNS).scope_age_hours == pytest.approx(2.0)
+    note = allowed.backend_note(ho.HostedCredential(api_key="k", base_url="u",
+                                                    project="p", path=tmp_path))
+    assert "--override-min-scope-age" in note
+
+
+def test_the_override_flag_reaches_the_arms(tmp_path, monkeypatch):
+    client = FakeHosted()
+    _patch_demo_credential(monkeypatch, client)
+    args = hz.argparse.Namespace(hosted_credentials=str(tmp_path / "d.json"),
+                                 hosted_run_id="r9", hosted_manifest=str(tmp_path / "m"),
+                                 corpus_scale=1, min_scope_age=2.0,
+                                 override_min_scope_age=True)
+    arms, _ = hz.hosted_backend(args)
+    assert arms.override_min_age is True and arms.min_age == timedelta(hours=2)
+
+
+class _TimedOpenAI:
+    """Stands in for `openai.OpenAI(**kwargs)` and answers every request the same way."""
+
+    built: list[dict] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        _TimedOpenAI.built.append(kwargs)
+        self.chat = self
+        self.completions = self
+
+    def create(self, **kwargs: Any) -> Any:
+        return {"choices": [{"message": {"content": "I do not know."}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+def test_the_demo_passes_its_timeout_flag_to_the_reader_client(monkeypatch, capsys):
+    """`--timeout` is defined once, in `evalkit`, and the demo is the entry point that
+    needed it; this runs it through the demo's own command line."""
+    import sys
+
+    sdk = type(sys)("openai")
+    sdk.OpenAI = _TimedOpenAI
+    _TimedOpenAI.built = []
+    monkeypatch.setitem(sys.modules, "openai", sdk)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(hz, "load_scenario", lambda: (QUESTIONS[:1], TURNS))
+    assert hz.main(["--reader", "openai", "--model", "m", "--timeout", "900"]) == 0
+    assert _TimedOpenAI.built and all(b.get("timeout") == 900.0 for b in _TimedOpenAI.built)
+    assert "timeout=900s" in capsys.readouterr().out
 
 
 def test_the_hosted_backend_needs_a_credential_named_for_it(monkeypatch, capsys):

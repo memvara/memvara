@@ -3018,9 +3018,10 @@ def hosted_reader(provider: str, args: Any, *,
         ("max_tokens", getattr(args, "max_tokens", None)),
         ("timeout", getattr(args, "timeout", None)),
     ) if value is not None}
-    if pinned.get("timeout", 1) <= 0:
+    timeout = pinned.get("timeout")
+    if timeout is not None and timeout <= 0:
         raise SystemExit(f"--timeout must be a number of seconds above zero; got "
-                         f"{pinned['timeout']:g}.")
+                         f"{timeout:g}.")
     base_url = getattr(args, "base_url", None)
     api_key_file = getattr(args, "api_key_file", None)
     extra_body = getattr(args, "extra_body", None)

@@ -551,13 +551,23 @@ builds no reader, so it runs while the reader's server is down. The read is a la
 with the same `--hosted-run-id`. It refuses any scope whose manifest row is younger than
 `--min-scope-age` hours (24 by default), and any scope the write step never finished,
 before a single reader call is made. The manifest is the only record of when a scope was
-written.
+written. The write step also records the `--min-scope-age` it was given, and a read that asks
+for a shorter wait is refused unless it passes `--override-min-scope-age`, in which case the
+report says so.
 
 The report prints, for every scope, how many hours after its write it was read, how many
 turns it holds, and how many claims it held at read time. It also says plainly that the
 wait is a fixed delay chosen for the run, not a confirmation that extraction had finished.
 `--min-scope-age 0` keeps the one-step run for a rehearsal, and its report says the scopes
 may have been read before extraction finished with them.
+
+**A plain scope the service barely extracted from is flagged, not quoted.** At read time
+the report compares each plain `memvara` scope's claim count with the number of facts the
+desk gave its structured sibling for the same question time. A scope with fewer claims than
+half of that is named in an `EXTRACTION DID NOT HAPPEN` warning, and the `memvara` arm's rows
+in every results table carry `[NOT A RESULT]`. The check counts claims and cannot tell
+whether they are the right ones, so a scope that passes it is not thereby shown to be well
+extracted.
 
 **It writes to a project of its own, and refuses to do otherwise.** A run writes a few
 thousand turns, which no code here can take back, so `--hosted-credentials` refuses the
@@ -755,7 +765,8 @@ turns in a background worker. The claims it wrote into these scopes name the sam
 build as their extractor, so the worker most likely uses the same server as the reader, and
 that server was offline for much of the 63 hours. When the scopes were read, the plain
 `memvara` arm's scopes held 2 to 3 live claims at scale 1 and 5 to 10 at scale 10, out of
-32 to 640 turns. None of them was filed under the plan, an address, the mobile number or
+32 to 640 turns. These runs were made before the report learned to flag that; the check it
+has now would mark all three scale-1 scopes and two of the three scale-10 scopes. None of them was filed under the plan, an address, the mobile number or
 the serial number. Most were filed in the wrong slot, such as `works_at = "under the
 bench"`, and the one that mentions a phone number is a `prefers` claim quoting the
 mistyped mobile. So the arm was answering from retrieved turns, not from facts, and its

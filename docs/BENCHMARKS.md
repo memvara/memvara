@@ -1630,7 +1630,8 @@ every scope and exits, and a later run with the same `--hosted-run-id` reads the
 refuses any scope younger than `--min-scope-age` hours, 24 by default, by the time the
 manifest recorded for its write. The report prints each scope's age and claim count at
 read time, and says that the wait is a fixed delay, not a confirmation that extraction
-finished.
+finished. A plain `memvara` scope holding fewer claims than half the facts its structured
+sibling was given is named in a warning, and that arm's rows are marked `[NOT A RESULT]`.
 [`demo/README.md`](../demo/README.md#the-memvara-arms-against-the-hosted-service) has the
 whole of it.
 

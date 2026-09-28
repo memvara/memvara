@@ -213,6 +213,11 @@ class Context:
     #: tier a hosted `memvara` row was measured on is not known in advance; this is the
     #: record of what it was.
     claims_in_scope: int | None = None
+    #: For the hosted plain `memvara` arm, the number of facts the desk gave the
+    #: structured scope for the same question time; `None` for every other context. A
+    #: plain scope holding fewer claims than half of this is one the service barely
+    #: extracted from, and the report says so.
+    claims_expected: int | None = None
     #: The hosted scope this context was read from, or `None` for a local arm.
     scope: str | None = None
     #: Hours between the scope's write finishing and this read, from the run's manifest,

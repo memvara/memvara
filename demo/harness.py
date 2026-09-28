@@ -436,11 +436,17 @@ def size_table(items: Sequence[Item], arms: Mapping[str, Arm] | None = None) -> 
         rows)
 
 
-def results_table(cells: Mapping[Any, Tally], label: str) -> str:
+def results_table(cells: Mapping[Any, Tally], label: str,
+                  unmeasured: Iterable[str] = ()) -> str:
+    """One row per key. An arm in `unmeasured` has "[NOT A RESULT]" after its name on
+    every row, so a table copied out of the report carries the warning with it."""
+    marked = set(unmeasured)
     rows = []
     for key, t in cells.items():
+        name = key if isinstance(key, str) else " / ".join(str(k) for k in key)
+        arm = key if isinstance(key, str) else key[0]
         rows.append([
-            key if isinstance(key, str) else " / ".join(str(k) for k in key),
+            f"{name} [NOT A RESULT]" if arm in marked else name,
             t.n, t.answered,
             rate(t.correct, t.n),
             f"{rate(t.trapped, t.trap_defined)} ({t.trapped}/{t.trap_defined})",
@@ -554,6 +560,7 @@ def hosted_reads(items: Sequence[Item], arms: Mapping[str, Arm]) -> list[str]:
         lines.append(f"  {name}: claims in the hosted scope at read time {_spread(counts)}; "
                      f"{searched} of {len(mine)} contexts read through search(valid_at=) "
                      "and rendered by the library's recall renderer")
+    thin = short_of_claims(items)
     scopes: dict[str, list[Context]] = {}
     for item in items:
         if item.context.scope is not None:
@@ -565,9 +572,43 @@ def hosted_reads(items: Sequence[Item], arms: Mapping[str, Arm]) -> list[str]:
         age = (f"read {min(ages):.1f} h after it was written" if ages
                else "age unknown")
         claims = [c.claims_in_scope for c in read if c.claims_in_scope is not None]
+        short = thin.get(scope)
+        flag = (f" (fewer than half the {short[1]} facts its structured sibling was given)"
+                if short is not None else "")
         lines.append(f"    {scope}: {age}, turns {read[0].turns_visible}, "
-                     f"claims at read {_spread(claims)}")
+                     f"claims at read {_spread(claims)}{flag}")
+    if thin:
+        lines += ["", "  EXTRACTION DID NOT HAPPEN, or barely, in "
+                      f"{len(thin)} plain memvara scope(s): each held fewer claims than half",
+                  "  the facts the desk gave its structured sibling for the same question time.",
+                  "  That arm answered from retrieved turns, so its rows below are marked",
+                  "  NOT A RESULT. The service does not say when its background extraction",
+                  "  has finished; a longer wait, or a working extractor, is the fix."]
     return ["", *lines] if lines else []
+
+
+#: A plain hosted scope with fewer claims than this share of the facts its structured
+#: sibling was given is reported as one the service barely extracted from.
+EXTRACTION_FLOOR = 0.5
+
+
+def short_of_claims(items: Sequence[Item]) -> dict[str, tuple[int, int]]:
+    """Plain hosted scopes that held too few claims to count as extracted, as
+    `{scope: (fewest claims seen at a read, facts expected)}`.
+
+    Only contexts that carry `claims_expected` are judged, which is the hosted plain
+    `memvara` arm. The rule is deliberately crude: a count says nothing about whether the
+    claims are the right ones, only that there are too few of them to be.
+    """
+    out: dict[str, tuple[int, int]] = {}
+    for item in items:
+        c = item.context
+        if c.scope is None or c.claims_expected is None or c.claims_in_scope is None:
+            continue
+        if c.claims_in_scope < EXTRACTION_FLOOR * c.claims_expected:
+            fewest = min(c.claims_in_scope, out.get(c.scope, (c.claims_in_scope, 0))[0])
+            out[c.scope] = (fewest, c.claims_expected)
+    return out
 
 
 def _spread(counts: Sequence[int]) -> str:
@@ -652,11 +693,13 @@ def report(items: Sequence[Item], scored: Sequence[Scored], *, reader: ek.Reader
                 "  as incorrect, which is right for a scoring run and wrong for a",
                 "  conclusion: finish the dump before quoting any of these numbers."]
 
+    unmeasured = {i.arm for i in items if i.context.scope in short_of_claims(items)}
     out += ["", "  per arm", ""]
-    out.append(results_table(tally(scored, lambda r: r.arm), "arm"))
+    out.append(results_table(tally(scored, lambda r: r.arm), "arm", unmeasured))
     out += ["", "  per arm and question kind", ""]
     by_kind = sorted(scored, key=lambda r: (order.index(r.arm), r.kind))
-    out.append(results_table(tally(by_kind, lambda r: (r.arm, r.kind)), "arm / kind"))
+    out.append(results_table(tally(by_kind, lambda r: (r.arm, r.kind)), "arm / kind",
+                             unmeasured))
 
     # The trapped rate split by which clock closed, which `demo/README.md` asks for. One
     # trapped percentage merges "served a value that expired" (`ended`, a stale cache)
@@ -671,7 +714,7 @@ def report(items: Sequence[Item], scored: Sequence[Scored], *, reader: ek.Reader
                                                if r.closure in closures else len(closures)))
     out.append(results_table(tally(by_closure,
                                    lambda r: (r.arm, r.closure or "neither")),
-                             "arm / closure"))
+                             "arm / closure", unmeasured))
     out += ["", "  On `correction` questions a correct answer names the wrong value in order "
                 "to say it was",
             "  wrong, so read `trapped only` there, not `trapped`."]
@@ -878,15 +921,12 @@ def ordered_arms(extra: Mapping[str, Arm]) -> dict[str, Arm]:
     return out
 
 
-#: Hours a hosted scope must have stood before a run reads it. See `demo/hosted.py`.
-DEFAULT_MIN_SCOPE_AGE = 24.0
-
-
 def hosted_backend(args: Any) -> tuple[Any, Any]:
     """`demo/hosted.py`'s two arms for this run, and the credential they write with.
 
     The credential is refused here if it could reach this machine's own store, before
-    anything is written. `--min-scope-age` becomes the arms' `min_age`.
+    anything is written. `--min-scope-age` becomes the arms' `min_age`, and
+    `--override-min-scope-age` their `override_min_age`.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -896,9 +936,11 @@ def hosted_backend(args: Any) -> tuple[Any, Any]:
     run_id = args.hosted_run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     manifest = ho.Manifest(args.hosted_manifest
                            or _ROOT / "demo" / "runs" / f"{run_id}.hosted.jsonl")
-    min_age = timedelta(hours=getattr(args, "min_scope_age", DEFAULT_MIN_SCOPE_AGE))
+    min_age = timedelta(hours=getattr(args, "min_scope_age", ho.DEFAULT_MIN_SCOPE_AGE))
     return (ho.HostedMemvara(ho.connect(credential), run_id=run_id,
-                             scale=args.corpus_scale, manifest=manifest, min_age=min_age),
+                             scale=args.corpus_scale, manifest=manifest, min_age=min_age,
+                             override_min_age=getattr(args, "override_min_scope_age",
+                                                      False)),
             credential)
 
 
@@ -928,6 +970,9 @@ def build_arms(args: Any) -> tuple[dict[str, Arm], str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # For one default. The module imports nothing that needs the `cloud` extra.
+    from demo.hosted import DEFAULT_MIN_SCOPE_AGE
+
     parser = argparse.ArgumentParser(
         description="Blinded answer-quality run: five arms, plus any competitor arm "
                     "asked for with --arm-mem0 or --arm-supermemory.")
@@ -985,7 +1030,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                              "this many hours ago, by its manifest row, or one the write "
                              "step never finished. Default 24. It is a fixed delay, not a "
                              "sign that the service finished extracting. 0 writes and "
-                             "reads in one run")
+                             "reads in one run. The write step records the value it used, "
+                             "and a read asking for less is refused")
+    parser.add_argument("--override-min-scope-age", action="store_true",
+                        help="--memory hosted: read scopes with a smaller "
+                             "--min-scope-age than their write step recorded. The report "
+                             "says this was done")
     # The two competitor arms. Off unless asked for, because each needs something a clean
     # checkout does not have, and the offline run CI depends on must keep working without
     # either. See demo/competitors.py.
