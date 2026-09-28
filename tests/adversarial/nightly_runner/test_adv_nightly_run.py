@@ -314,8 +314,9 @@ def test_a_long_run_that_fails_is_a_confirmed_break_and_is_not_rerun(
 
 def test_a_long_runs_strict_expected_failure_that_passes_is_reported_not_filed(
         repo: pathlib.Path, tmp_path: pathlib.Path) -> None:
-    """The soak is pinned to B50. When the fix lands, the pin passes and strict mode fails
-    the run: a person removes the marker, and nothing is filed."""
+    """A long run pinned to a known bug, as the soak was to B50 until #332 was fixed. When
+    the fix lands, the pin passes and strict mode fails the run: a person removes the
+    marker, and nothing is filed."""
     table = _table(tmp_path, [PASSED], 0, soak=_long_step(
         tmp_path, "soak", {"outcome": "xpass-strict", "message": "[XPASS(strict)] B50"}, 1))
     notify = Notifications()

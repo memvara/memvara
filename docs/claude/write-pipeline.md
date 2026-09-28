@@ -50,16 +50,33 @@ A write starts as an `Episode` — one raw turn, stored verbatim — and ends as
 
 `WritePipeline.add()` runs three tiers in order.
 
-1. **Tier 0 needs no model.** The episode is stored, and an episode whose content hash is
-   already present is skipped. Surviving episodes are embedded and compared with the
-   nearest live claim. A turn whose cosine reaches `near_dup_threshold`, and which holds
-   the same numbers as the claim's text, is a restatement: the claim is reinforced and
-   nothing is extracted from the turn. The threshold defaults to the merge threshold
-   measured for the embedder's space in `memvara/embed/calibration.py`: 0.985 for
-   all-MiniLM-L6-v2, 0.99 for bge-small-en-v1.5 and 0.97 for any other embedder. A turn
-   worded like a claim but holding another number, such as "user has appointment on
-   2023-05-02" against the claim for 2023-05-01, states another value and goes on to
-   extraction.
+1. **Tier 0 needs no model.** The episode is stored, and an exact repeat of an earlier
+   turn is skipped. The content hash covers the scope, the role and the text, not the
+   time, so tier 0 compares the turn with the latest copy of it dated at or before the
+   turn. The turn is a repeat, and reinforces that copy's live claims, when the claims
+   extracted from the copy have not all ended by the turn's time. Otherwise it is a new
+   statement, stored and extracted like any other turn. So "I live in Berlin." said again
+   after "I moved to Paris." makes Berlin current again (#332), a copy dated before every
+   earlier copy keeps its earlier date (#318), and a retry or a replay of a turn still
+   converges on the rows it wrote the first time. A turn whose copy produced no claim,
+   or only claims that were retired since, stays a repeat. Surviving episodes are
+   embedded and compared with the nearest live claim. A turn whose cosine reaches
+   `near_dup_threshold`, and which holds the same numbers as the claim's text, is a
+   restatement: the claim is reinforced and nothing is extracted from the turn. The
+   threshold defaults to the merge threshold measured for the embedder's space in
+   `memvara/embed/calibration.py`: 0.985 for all-MiniLM-L6-v2, 0.99 for
+   bge-small-en-v1.5 and 0.97 for any other embedder. A turn worded like a claim but
+   holding another number, such as "user has appointment on 2023-05-02" against the
+   claim for 2023-05-01, states another value and goes on to extraction. A restatement
+   dated before the claim begins is not a repeat either (#318): tier 0 sends the claim's
+   value, dated to the turn, to the reconciler, which stores it for the earlier period as
+   it does for `remember()`.
+
+   The two cases cost different amounts. A turn said again after its value ended is
+   extracted again, so a turn that needed the model the first time costs a model call
+   again. Its copy's value has ended, so the turn is read as a new statement rather than
+   rebuilt from the old claims. A near-duplicate dated before its claim costs no call,
+   because tier 0 already knows which claim the turn restates and only the date is new.
 2. **Tier 1 needs no model.** `SalienceGate` drops turns that carry no durable fact and
    counts them on `receipt.skipped`. What survives goes to `FastExtractor`, which emits a
    claim only for a form it recognises with confidence and emits nothing otherwise.

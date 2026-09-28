@@ -1907,10 +1907,12 @@ def ingest(mem: Any, sessions: Iterable[Sequence[Turn]],
     reason.
 
     `labels`, when given, is filled in with `episode id -> Turn.label`. It is read back
-    from the store rather than zipped against the input, because `add()` returns the
-    *existing* id for a hash-identical repeat and a transcript with two identical turns
-    would otherwise shift every later label by one — the kind of off-by-one that makes a
-    retrieval score look plausible and be wrong.
+    from the store rather than zipped against the input, because `add()` can return the
+    *existing* id for a hash-identical repeat. It does when the earlier copy is dated at
+    or before the repeat and the value it stated has not ended by then; otherwise the
+    repeat gets an id of its own. Either way a transcript with two identical turns would
+    shift every later label by one if the ids were zipped — the kind of off-by-one that
+    makes a retrieval score look plausible and be wrong.
     """
     stats = IngestStats()
     start = time.perf_counter()
