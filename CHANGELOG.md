@@ -212,6 +212,15 @@ Upgrading notes are in `docs/UPGRADING.md`.
 
 ### Fixed
 
+- **A hook answers a payload nested too deeply to decode as it answers an empty one.**
+  `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
+  Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
+  such as `{"prompt": [[[...]]]}` 100,000 levels deep crashed the body of every hook.
+  The exit code stayed 0, but the hook printed nothing: session start gave the model no
+  memories and showed no status line. The only trace was a `failed hook=... RecursionError`
+  line in `~/.memvara/.hooks/hooks.log`. `payload()` in `plugin/hooks/lib/ipc.py` and
+  `read_event()` in `plugin/hooks/core/envelope.py` now read such a payload as an empty
+  one. #346 (B64).
 - **`docs/API.md` names every method that only one client has.** Its section on a hosted
   deployment did not mention `end()`, `health()` or `whoami()`, which only the hosted client
   has, or `bind()` and `merge_predicate()`, which only the local client has. A caller who

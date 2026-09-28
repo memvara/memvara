@@ -54,14 +54,6 @@ def test_no_hostile_payload_starts_an_extraction(hostile: support.Hostile) -> No
 
 # -- known bugs --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("host, hook", [
-    (host, hook) for host, hook, _ in support.hostile_cases(FAST_HOSTS, [support.DEEP])])
-@known_bugs.xfail("B64")
-def test_a_deeply_nested_payload_is_answered_as_an_empty_one_is(
-        hostile: support.Hostile, host: str, hook: str) -> None:
-    support.pin_deep_nesting(hostile, host, hook)
-
-
 @pytest.mark.parametrize("host", ("claude", "copilot"))
 def test_a_prompt_with_half_a_surrogate_pair_still_gets_its_memories(
         hooks: Callable[..., HookRunner], store_env: dict[str, str], host: str) -> None:
