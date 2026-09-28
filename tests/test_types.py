@@ -538,7 +538,9 @@ def test_ancestors_drops_the_project_between_user_and_agent():
 
     A search from inside a repository widens up to that user's project-less claims, which
     is what lets a preference written in one repository answer a question asked in
-    another. It does not widen sideways into a sibling project.
+    another. It does not widen sideways into a sibling project. After the project levels
+    come the project-less forms of the reader's own agent and session, where a global
+    fact the session wrote is filed (#273).
     """
     from memvara.types import Scope
 
@@ -547,6 +549,8 @@ def test_ancestors_drops_the_project_between_user_and_agent():
         "acme/alice/gh%2Fo%2Fa/bot/s1",
         "acme/alice/gh%2Fo%2Fa/bot/*",
         "acme/alice/gh%2Fo%2Fa/*/*",
+        "acme/alice/*/bot/s1",
+        "acme/alice/*/bot/*",
         "acme/alice/*/*/*",
         "acme/*/*/*/*",
     ]

@@ -278,14 +278,40 @@ because one turn can source several claims.
 
 ### Scoping
 
-`tenant > user > agent > session`, with inheritance. A query at session scope also sees
-that user's durable memory, but never a sibling session's scratch space or another user's
-anything. mem0's flat `user_id`/`agent_id`/`run_id` triple can't express that.
+`tenant > user > project > agent > session`, with inheritance. A query at session scope
+also sees that user's durable memory, but never a sibling session's scratch space or
+another user's anything. mem0's flat `user_id`/`agent_id`/`run_id` triple can't express
+that.
 
 ```python
 bob = mem.scope(user="bob")     # the whole API, with the scope bound
 bob.add("I live in Oslo")
 ```
+
+A read uses the chain `Scope.ancestors()` returns, narrowest first. For a handle bound to
+user u, project P, agent a and session s, that is (u, P, a, s), (u, P, a), (u, P), then the
+same session and agent outside the project, (u, a, s) and (u, a), then (u) and the tenant.
+Levels the handle is not bound to are left out. The project-less session and agent levels
+are where a session files a fact whose predicate is declared global, such as `lives_in`.
+
+A value written in a session, by an agent or inside a project is a local value. It does
+not end the user-wide value, and a user-level write does not end it. A present-tense read
+of a single-valued fact returns the value from the first level of the chain that holds
+one, so a session reads its own value while every other session reads the user-wide one:
+
+```python
+mem.scope(user="bob").remember("user", "lives_in", "Oslo")
+trip = mem.scope(user="bob", session="trip")
+trip.remember("user", "lives_in", "Lisbon")
+[c.object for c in trip.get_all()]                        # ['Lisbon']
+[c.object for c in mem.scope(user="bob").get_all()]       # ['Oslo']
+trip.count()                                              # 2: count() is not shadowed
+```
+
+Reads at another instant (`valid_at`, `known_at`, `as_of`), `count()`, `get()` and `why()`
+return both values. A retraction closes only the values its writer can see: a session's
+retraction ends the user-wide value it reads, and a user-level retraction leaves a
+session's value alone. `forget()` at the user level clears the fact in every scope.
 
 Scope filters fail **closed**: a scope that resolves to nothing matches nothing, rather
 than degrading into an unfiltered query across every user.

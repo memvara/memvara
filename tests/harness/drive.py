@@ -13,6 +13,9 @@ wrong in the same way:
 - no read by one user returns another user's row (I8);
 - a positive write under a predicate nobody declared closes no row (I11).
 
+The reads run for each user at the user level, and again bound to every other scope in
+`model.LEVELS`, so each read is checked from a session, an agent and a project as well.
+
 `replay(ops)` runs a program on a fresh pair and raises `ModelDivergence` at the first
 operation where the two disagree. `format_program(ops)` prints a program in the form
 `replay` accepts, which is how a failure found at random becomes a fixed test.
@@ -27,11 +30,12 @@ from types import TracebackType
 from typing import Any, Sequence
 
 from memvara import Memvara, NullLLM
+from memvara.core import ScopedMemvara
 from memvara.embed import HashingEmbedder
 from memvara.types import Claim, utcnow
 
 from harness.clock import FAR_FUTURE, INSTANTS, within
-from harness.model import (DECLARED, POOLS, STATES, SUBJECT, USERS, Delete, Erase,
+from harness.model import (DECLARED, LEVELS, POOLS, STATES, SUBJECT, USERS, Delete, Erase,
                            EraseExpired, Expect, Forget, Lapse, Op, ReferenceStore,
                            Remember, Row)
 
@@ -49,6 +53,8 @@ READ_AT: list[tuple[datetime | None, datetime | None]] = [
 Clocks = dict[str, tuple[datetime | None, datetime | None]]
 #: The fields compared on every row.
 FIELDS = ("valid_from", "valid_to", "recorded_at", "invalidated_at", "expires_at")
+#: The scopes below a user that the reads are also checked from, in a fixed order.
+BOUND = [name for name in LEVELS if name]
 
 
 class ModelDivergence(AssertionError):
@@ -72,6 +78,7 @@ class Pair:
         self.ops: list[Op] = []
         #: Erased rows keep their real id here, so a later operation can still name them.
         self.handles: dict[str, str] = {}
+        self._views: dict[tuple[str, str], ScopedMemvara] = {}
 
     def __enter__(self) -> "Pair":
         return self
@@ -85,6 +92,15 @@ class Pair:
 
     def real(self, handle: str) -> str:
         return self.model.real_ids[handle]
+
+    def view(self, user: str, level: str) -> ScopedMemvara:
+        """The store bound to `user` and to the scope `level` names in `model.LEVELS`."""
+        key = (user, level)
+        if key not in self._views:
+            project, agent, session = LEVELS[level]
+            self._views[key] = self.mem.scope(user=user, agent=agent, session=session,
+                                              project=project)
+        return self._views[key]
 
     def handle_of(self, real_id: str) -> str:
         return self.handles.get(real_id, f"<unknown {real_id}>")
@@ -122,8 +138,8 @@ class Pair:
         if isinstance(op, Remember):
             expect = m.remember(op, t)
             try:
-                result: Any = mem.remember(
-                    SUBJECT, op.predicate, op.obj, user=op.user, polarity=op.polarity,
+                result: Any = self.view(op.user, op.level).remember(
+                    SUBJECT, op.predicate, op.obj, polarity=op.polarity,
                     valid_from=op.valid_from, recorded_at=op.recorded_at,
                     confidence=op.confidence, close=op.close, expires_at=op.expires_at,
                     valid_to=op.valid_to)
@@ -131,14 +147,16 @@ class Pair:
                 result = exc
         elif isinstance(op, Forget):
             expect = m.forget(op, t)
-            result = mem.forget(SUBJECT, op.predicate, user=op.user, close=op.close)
+            result = self.view(op.user, op.level).forget(SUBJECT, op.predicate,
+                                                         close=op.close)
         elif isinstance(op, Delete):
             expect = m.delete(op, t)
-            result = mem.delete(self.real(op.handle), user=op.user, close=op.close)
+            result = self.view(op.user, op.level).delete(self.real(op.handle),
+                                                         close=op.close)
         elif isinstance(op, Erase):
             real_id = self.real(op.handle)
             expect = m.erase(op)
-            result = mem.erase(real_id, user=op.user)
+            result = self.view(op.user, op.level).erase(real_id)
         elif isinstance(op, Lapse):
             expect = m.lapse(op)
             claim = mem.store.get_claim(self.real(op.handle))
@@ -222,8 +240,9 @@ class Pair:
                 and (claim.valid_to is None or claim.valid_to > now)
                 and (claim.expires_at is None or claim.expires_at > now))
         if live:
-            assert claim.id in {c.id for c in self.mem.get_all(user=op.user)}, (
-                f"{op.user} cannot read back {expect.new}, a live row it has just written")
+            assert claim.id in {c.id for c in self.view(op.user, op.level).get_all()}, (
+                f"{op.user} cannot read back {expect.new}, a live row it has just written "
+                f"bound to the scope {op.level!r}")
 
     def _compare_result(self, op: Op, expect: Expect, result: Any) -> None:
         if expect.refused:
@@ -275,6 +294,8 @@ class Pair:
         now = utcnow()
         for user in USERS:
             self._check_reads(user, now)
+            for level in BOUND:
+                self._check_bound_reads(user, level, now)
         stats = self.mem.stats()
         got = {k: stats[k] for k in ("claims", "live_claims", "ended_claims", "invalidated")}
         want = self.model.stats(now)
@@ -301,6 +322,10 @@ class Pair:
 
     @staticmethod
     def _compare_row(handle: str, row: Row, claim: Claim) -> None:
+        stored = (claim.scope.user, claim.scope.project, claim.scope.agent,
+                  claim.scope.session)
+        assert stored == (row.user, *row.level), (
+            f"{handle} is stored at {stored}, the model has {(row.user, *row.level)}")
         for name in FIELDS:
             got, want = getattr(claim, name), getattr(row, name)
             assert got == want, f"{handle}.{name} is {got}, the model has {want}"
@@ -314,19 +339,23 @@ class Pair:
                 f"{handle} ends at {claim.valid_to}, before it starts at {claim.valid_from}")
 
     def _check_search(self, user: str, value: str, valid_at: datetime | None,
-                      known_at: datetime | None, now: datetime) -> None:
-        """I12: `search(k=3)` returns at most three rows, none twice, all visible."""
-        found = [r.claim for r in self.mem.search(value, k=3, user=user, valid_at=valid_at,
-                                                  known_at=known_at)]
+                      known_at: datetime | None, now: datetime, level: str = "") -> None:
+        """I12: `search(k=3)` returns at most three rows, none twice, all visible. A search
+        in the present tense leaves out a row a narrower level's row shadows, as
+        `get_all()` does."""
+        found = [r.claim for r in self.view(user, level).search(
+            value, k=3, valid_at=valid_at, known_at=known_at)]
         hits = self._read(user, found, now if known_at is None else known_at)
         ids = [c.id for c in found]
         twice = sorted({self.handle_of(i) for i in ids if ids.count(i) > 1})
         assert not twice, f"{user}: search({value!r}) returned {', '.join(twice)} more than once"
         assert len(found) <= 3, f"{user}: search({value!r}, k=3) returned {len(found)} rows"
-        visible = self.model.visible(user, valid_at=valid_at, known_at=known_at, now=now)
+        visible = self.model.visible(user, valid_at=valid_at, known_at=known_at, now=now,
+                                     level=level)
         assert hits <= visible, (
-            f"{user}: search({value!r}, valid_at={valid_at}, known_at={known_at}) returned "
-            f"{sorted(hits - visible)}, which are not live in that view")
+            f"{user} at {level!r}: search({value!r}, valid_at={valid_at}, "
+            f"known_at={known_at}) returned {sorted(hits - visible)}, which are not live "
+            "in that view")
 
     def _read(self, user: str, claims: Sequence[Claim], known_at: datetime) -> set[str]:
         """The handles of the rows a read by `user` returned, after two checks that do
@@ -378,11 +407,51 @@ class Pair:
         got = self._read(user, mem.get_all(user=user, as_of=at), at)
         want = model.visible(user, valid_at=at, known_at=at, now=now)
         assert got == want, f"{user}: get_all(as_of={at}) is {sorted(got)}, not {sorted(want)}"
-        for handle, row in model.rows.items():
-            got_one = mem.get(self.real(handle), user=user)
-            readable = row.user == user and not row.expired(now)
+        self._check_get(user, "", now)
+
+    def _check_get(self, user: str, level: str, now: datetime) -> None:
+        """`get` returns a row exactly when the reader's chain holds it and its expiry
+        has not passed. A shadowed row is still readable by id."""
+        view = self.view(user, level)
+        for handle, row in self.model.rows.items():
+            got_one = view.get(self.real(handle))
+            readable = self.model.readable(row, user, level) and not row.expired(now)
             assert (got_one is not None) == readable, (
-                f"{user}: get({handle}) returned {got_one is not None}, expected {readable}")
+                f"{user} at {level!r}: get({handle}) returned {got_one is not None}, "
+                f"expected {readable}")
+
+    def _check_bound_reads(self, user: str, level: str, now: datetime) -> None:
+        """The reads that differ by scope, for `user` bound to `level`: `get_all` in the
+        present, where a narrower level's value shadows a broader one; `count`, which is
+        not shadowed; `get_all` in the present over two states, and at a later instant,
+        which is not shadowed; one search; `history` of each predicate; and `get`."""
+        view, model = self.view(user, level), self.model
+        at = f"{user} at {level!r}"
+        live = model.visible(user, now=now, level=level)
+        got = self._read(user, view.get_all(), now)
+        assert got == live, f"{at}: get_all() is {sorted(got)}, the model has {sorted(live)}"
+        unshadowed = model.visible(user, now=now, level=level, shadowed=False)
+        assert view.count() == len(unshadowed), (
+            f"{at}: count() is {view.count()}, the model has {len(unshadowed)}")
+        both = ("live", "ended")
+        got = self._read(user, view.get_all(states=both), now)
+        want = model.visible(user, states=both, now=now, level=level)
+        assert got == want, (
+            f"{at}: get_all(states={both}) is {sorted(got)}, the model has {sorted(want)}")
+        later = INSTANTS[5]
+        got = self._read(user, view.get_all(valid_at=later), now)
+        want = model.visible(user, valid_at=later, now=now, level=level)
+        assert got == want, (
+            f"{at}: get_all(valid_at={later}) is {sorted(got)}, the model has {sorted(want)}")
+        values = [v for pool in POOLS.values() for v in pool]
+        self._check_search(user, values[BOUND.index(level) % len(values)], None, None, now,
+                           level)
+        for predicate in POOLS:
+            got_history = [self.handle_of(c.id) for c in view.history(SUBJECT, predicate)]
+            want_history = model.history(user, SUBJECT, predicate, now=now, level=level)
+            assert got_history == want_history, (
+                f"{at}: history({predicate}) is {got_history}, the model has {want_history}")
+        self._check_get(user, level, now)
 
 
 def replay(ops: Sequence[Op], path: pathlib.Path | None = None) -> None:

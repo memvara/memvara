@@ -20,6 +20,14 @@ from memvara.confirm import Confirmer
 from . import runner
 
 
+@pytest.fixture(autouse=True)
+def registered_bug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B998, a bug registered for these tests alone. The runner reads the registry, and a
+    real entry leaves it when its bug is fixed, so these tests name this one instead."""
+    monkeypatch.setitem(known_bugs.KNOWN_BUGS, "B998", known_bugs.KnownBug(
+        "B998", 998, "a bug registered for the runner's own tests"))
+
+
 def sample(**changes: Any) -> dict[str, Any]:
     """A small scenario that follows the format: the user says where they live, and a
     later session asks."""
@@ -117,7 +125,7 @@ def test_a_scenario_without_gold_is_refused() -> None:
 
 def test_a_known_bug_needs_a_gold_item_a_registered_bug_and_the_right_symptom() -> None:
     scenario = sample(known_bugs={
-        "no-such-item": {"bug": "B2", "symptom": {"states": ["ended"]}},
+        "no-such-item": {"bug": "B998", "symptom": {"states": ["ended"]}},
         "says-lisbon": {"bug": "B99", "symptom": {"states": ["ended"]}}})
     found = errors(scenario)
     assert "known_bugs names 'no-such-item', which is not a gold id" in found
@@ -576,13 +584,13 @@ def test_a_store_item_reads_at_the_project_it_names() -> None:
 
 
 def test_a_failure_with_the_known_bugs_own_symptom_is_reported_as_that_bug() -> None:
-    gold = store_item({"bug": "B2", "symptom": {"states": ["ended"]}}, state="live")
-    with pytest.raises(known_bugs.Reproduced, match="B2"):
+    gold = store_item({"bug": "B998", "symptom": {"states": ["ended"]}}, state="live")
+    with pytest.raises(known_bugs.Reproduced, match="B998"):
         runner.judge(gold, fabricated({None: [ENDED]}))
 
 
 def test_a_failure_with_any_other_symptom_is_a_plain_failure() -> None:
-    gold = store_item({"bug": "B2", "symptom": {"states": ["ended"]}}, state="live")
+    gold = store_item({"bug": "B998", "symptom": {"states": ["ended"]}}, state="live")
     with pytest.raises(AssertionError, match="wanted at least one live, found nothing"):
         runner.judge(gold, fabricated({None: []}))
 
@@ -597,12 +605,12 @@ def test_an_answer_symptom_is_matched_on_the_bugs_own_words() -> None:
 
 
 def test_a_passing_item_passes_even_when_a_known_bug_is_attached() -> None:
-    gold = store_item({"bug": "B2", "symptom": {"states": ["ended"]}}, state="live")
+    gold = store_item({"bug": "B998", "symptom": {"states": ["ended"]}}, state="live")
     runner.judge(gold, fabricated({None: [LIVE]}))
 
 
 def test_only_the_item_a_known_bug_breaks_carries_its_marker() -> None:
-    scenario = sample(known_bugs={"says-lisbon": {"bug": "B2",
+    scenario = sample(known_bugs={"says-lisbon": {"bug": "B998",
                                                   "symptom": {"answer_contains": "Paris"}}})
     marks = {param.id: list(param.marks) for param in runner.gold_params([scenario])}
     assert marks["sample/lisbon-live"] == []

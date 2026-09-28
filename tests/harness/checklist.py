@@ -504,7 +504,7 @@ def scan(root: pathlib.Path = tiers.TESTS) -> Scan:
     need Docker or a package that this machine does not have. A test covers nothing when
     it is not expected to pass: when it is marked xfail, marked skip with no condition,
     or sits in the quarantine tier. A known bug is covered by the test that carries its
-    strict expected failure, `known_bugs.xfail("B2")`, as a decorator or on one case of a
+    strict expected failure, `known_bugs.xfail("B45")`, as a decorator or on one case of a
     parametrised test.
     """
     result = Scan()
@@ -590,7 +590,7 @@ def _scan_test(path: pathlib.Path, marks: list[ast.expr], runs: bool, result: Sc
             result.declared.update((_where(path, mark), item) for item in ids)
         elif name == "xfail":
             passes = False
-            if not is_pytest_mark:  # known_bugs.xfail("B2"), this suite's own marker
+            if not is_pytest_mark:  # known_bugs.xfail("B45"), this suite's own marker
                 bugs += _literals(mark, path, "known_bugs.xfail", result)[:1]
         elif name == "skip" and is_pytest_mark:
             runs = False
@@ -603,7 +603,7 @@ def _scan_test(path: pathlib.Path, marks: list[ast.expr], runs: bool, result: Sc
 def _mark_name(node: ast.AST) -> tuple[str | None, bool]:
     """The name of the mark that `node` applies, and whether it is one of pytest's marks.
 
-    `pytest.mark.xfail(...)` and `mark.skip` are pytest's own. `known_bugs.xfail("B2")`
+    `pytest.mark.xfail(...)` and `mark.skip` are pytest's own. `known_bugs.xfail("B45")`
     is not: it is this suite's marker for a registered bug.
     """
     target = node.func if isinstance(node, ast.Call) else node

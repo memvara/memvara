@@ -356,7 +356,8 @@ class RemoteStore:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="count_competing", why="See competing_claims: same missing lookup."))
 
-    def occupied_slots(self, tenant: str, fact_keys: Collection[str]) -> set[str]:
+    def occupied_slots(self, tenant: str, fact_keys: Collection[str], *,
+                       scopes: Sequence[Scope] | None = None) -> set[str]:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="occupied_slots", why="See competing_claims: same missing lookup."))
 
