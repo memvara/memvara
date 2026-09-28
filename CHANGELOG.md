@@ -11,6 +11,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`memory_recall` refuses `ranked` without conversation turns as an argument error.**
+  `ranked=true` needs turns to rank, so it takes `include_episodes=true` and no
+  `memory_types`. The library refused the other combinations with a `ValueError`, which
+  reached the model through the server's catch-all as `memory_recall failed: ValueError:
+  ...`, a Python exception rather than a mistake in its arguments. The tool now refuses
+  them itself, before the store is asked, with a message that says which argument to
+  change. #316 (B39).
 - **Capture logs a line on every path where it decides to do nothing.** It returned
   without a line when a hook had triggered the Stop, when the payload named no
   transcript, when the transcript path named no file, when the transcript's size could

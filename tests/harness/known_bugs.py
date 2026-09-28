@@ -50,8 +50,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B24", 301, "a store refused as too new leaves its SQLite connection open"),
 
     KnownBug("B36", 313, "a refusal or a no-match reply quotes the whole argument"),
-    KnownBug("B39", 316, "memory_recall reports ranked without include_episodes as a "
-             "ValueError"),
 
     KnownBug("B26", 303, "malformed model output makes add() raise instead of dropping the "
              "item"),

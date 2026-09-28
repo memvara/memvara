@@ -905,6 +905,17 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "would be rendered into the prompt as a fact. Send valid_at for how things "
             "were on that day as far as we know now, or call memory_search with as_of "
             "to inspect what was believed then.")
+    # `recall()` refuses this too, with the same reason, but as a bare `ValueError` that
+    # reaches the model through `mcp.py`'s catch-all as an exception rather than as a
+    # mistake in its arguments -- the reason `_search` refuses as_of with valid_at here.
+    memory_types = _memory_types(args.get("memory_types"))
+    if args.get("ranked") and (not args.get("include_episodes") or memory_types is not None):
+        raise ToolError(
+            "memory_recall ranked=true needs turns to rank, so it takes "
+            "include_episodes=true and no memory_types. A type filter skips the "
+            "conversation turns entirely, and without include_episodes none are "
+            "retrieved, so the model would be handed nothing to rank. Send "
+            "include_episodes=true without memory_types, or leave ranked off.")
     valid_at = args.get("valid_at")
     # A local store is asked for its `RecallResult`, whose `text` is byte for byte the
     # string above, so that a block that came back empty can say which day a query
@@ -922,7 +933,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             # then off here.
             query_rewrite=bool(args.get("query_rewrite", False)),
             synthesize=bool(args.get("synthesize", False)),
-            memory_types=_memory_types(args.get("memory_types")),
+            memory_types=memory_types,
             budget=args.get("budget"),
             include_episodes=bool(args.get("include_episodes", False)),
             valid_at=(_timestamp(valid_at, "memory_recall.valid_at")

@@ -206,14 +206,13 @@ def test_a_lone_surrogate_in_an_object_key_is_refused_like_one_in_a_value(
     assert changed(before, rows(shared_server.db)) == []
 
 
-# -- B39: memory_recall refuses ranked without turns from the catch-all ------------------
+# -- B39, fixed: memory_recall refused ranked without turns from the catch-all -----------
 
 @pytest.mark.parametrize("arguments", [
     {"query": "tea", "ranked": True},
     {"query": "tea", "ranked": True, "include_episodes": True,
      "memory_types": ["semantic"]},
 ], ids=["without include_episodes", "with memory_types"])
-@known_bugs.xfail("B39")
 def test_ranked_recall_without_turns_is_refused_as_an_argument_error(
         shared_server: McpProcess, arguments: dict[str, Any]) -> None:
     """memory_search refuses its own invalid combination, as_of with valid_at, at the
@@ -221,6 +220,4 @@ def test_ranked_recall_without_turns_is_refused_as_an_argument_error(
     replies = exchange(shared_server, call_line(2, "memory_recall", arguments))
     assert len(replies) == 1 and replies[0]["result"]["isError"] is True, replies
     text = text_of(replies[0])
-    if text.startswith("memory_recall failed: ValueError: ranked=True needs turns to rank"):
-        raise known_bugs.Reproduced(text)
-    assert "ranked" in text and not text.startswith("memory_recall failed:"), text
+    assert text.startswith("memory_recall ranked=true needs turns to rank"), text
