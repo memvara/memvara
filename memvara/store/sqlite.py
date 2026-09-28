@@ -1735,6 +1735,14 @@ class SQLiteStore:
     open the store someone already has would lock them out of their own memory. A store
     with no file (`:memory:`) is never encrypted, since nothing of it reaches the disk.
     `encrypted` says which one this is.
+
+    **Before an upgrade.** A file an older version wrote is upgraded as it opens, and the
+    upgrade is committed, after which that older version can no longer open it.
+    `before_upgrade`, when given, is called first, with the width of the vectors the file
+    holds (None when it holds none), before anything is written. It is called only for a
+    file an older version wrote, never for a new or a current one. When it raises, the
+    open fails and the file is left as it was. `Memvara` refuses an embedder of another
+    width there, so that a refused open does not upgrade the store.
     """
 
     #: This store implements the document methods. `Memvara` asks this marker rather
@@ -1748,7 +1756,8 @@ class SQLiteStore:
 
     def __init__(self, path: str = ":memory:", *, encryption: bool = False,
                  key: bytes | None = None,
-                 key_env: Mapping[str, str] | None = None) -> None:
+                 key_env: Mapping[str, str] | None = None,
+                 before_upgrade: Callable[[int | None], None] | None = None) -> None:
         if key is not None and len(key) != 32:
             raise ValueError(f"key must be 32 bytes, got {len(key)}")
         self.path = path
@@ -1851,6 +1860,8 @@ class SQLiteStore:
         try:
             with self._lock:
                 if self._needs_schema_step():
+                    if before_upgrade is not None and self._written_by_older_version():
+                        before_upgrade(self._stored_width())
                     # Nothing may ever be written through `_creating`'s connection to the
                     # lock file. A commit there would have to write the file's first page,
                     # and that waits for every other open store's shared lock to go, which
@@ -1870,10 +1881,12 @@ class SQLiteStore:
                         self._db.execute("PRAGMA cipher_salt").fetchone()[0])
                 self._attach_vectors()
         except BaseException:
-            # A store that failed to open would otherwise hold the lock until it was
-            # garbage collected, and an interactive session keeps the traceback, and with
-            # it the store, until the next error.
+            # A store that failed to open would otherwise hold the lock and its database
+            # connection until it was garbage collected, and an interactive session keeps
+            # the traceback, and with it the store, until the next error. On Windows the
+            # open connection would also stop the caller deleting or replacing the file.
             self._drop_presence()
+            self._db.close()
             raise
 
     # -- connections ---------------------------------------------------------
@@ -2258,6 +2271,29 @@ class SQLiteStore:
                 self._readers.append(conn)
             self._local.db = conn
         return conn
+
+    def _written_by_older_version(self) -> bool:
+        """Whether an older version wrote this file: its version stamp is set and lower
+        than this version's. A new file has no stamp, and a newer one is refused later."""
+        found = int(self._db.execute("PRAGMA user_version").fetchone()[0])
+        return 0 < found < SCHEMA_VERSION
+
+    def _stored_width(self) -> int | None:
+        """The width of the vectors this file holds, read before any upgrade, or None when
+        it holds none or holds vectors of more than one width.
+
+        Every schema version since the first keeps each vector's width in the `dim`
+        column of `embeddings` and `episode_embeddings`, so this reads a file of any
+        version. A file with mixed widths is refused later, when the vectors are attached.
+        """
+        tables = {r[0] for r in self._db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        widths: set[int] = set()
+        for table in _VEC_TABLE_NAMES:
+            if table in tables:
+                widths |= {int(r[0]) for r in self._db.execute(
+                    f"SELECT DISTINCT dim FROM {table}")}
+        return widths.pop() if len(widths) == 1 else None
 
     def _needs_schema_step(self) -> bool:
         """Whether this open must run the schema step, which creates or upgrades the file.
