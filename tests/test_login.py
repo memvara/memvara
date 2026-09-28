@@ -618,7 +618,7 @@ def test_the_read_side_is_redirected_too_not_only_the_write():
         "its own import time, so patching config does not reach it")
 
 
-def test_a_child_process_inherits_the_redirect_through_HOME():
+def test_a_child_process_inherits_the_redirect_through_HOME(tmp_path_factory):
     """The monkeypatch is in-process; a subprocess re-imports and computes `Path.home()`.
 
     Six test files here spawn subprocesses. `Path.home()` reads HOME on POSIX, so setting
@@ -630,6 +630,9 @@ def test_a_child_process_inherits_the_redirect_through_HOME():
         [sys.executable, "-c",
          "import pathlib; print(pathlib.Path.home())"],
         capture_output=True, text=True, check=True).stdout.strip()
-    assert "pytest-of" in written, (
+    # Compared with pytest's base temporary directory for this run, not with the name of
+    # pytest's default one ("pytest-of-<user>"), which is not in the path when a run
+    # passes its own --basetemp, as scripts/test_changed.py does.
+    assert tmp_path_factory.getbasetemp() in pathlib.Path(written).parents, (
         f"a child process resolved home to {written}; HOME is not redirected, so anything "
         "it writes lands in the developer's real home")
