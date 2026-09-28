@@ -47,13 +47,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "the names measured there do not name the server safely, and an approval path "
              "that does waits for an interactive measurement"),
     # Found by the framework tests against the real packages.
-    KnownBug("B80", 359, "the mem0 shim's add() and delete_all() refuse the entity ids "
-             "mem0 2.x takes there, and search() and get_all() refuse them with TypeError "
-             "where mem0 raises ValueError"),
-    KnownBug("B81", 360, "the mem0 shim lacks close(), the with statement, arguments mem0 "
-             "2.x's methods take, and the score key of mem0's get() row"),
-    KnownBug("B82", 361, "the mem0 shim's search() and get_all() default to top_k 10 and "
-             "100, where mem0 2.x defaults to 20"),
 )}
 
 

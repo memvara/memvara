@@ -52,6 +52,38 @@ with `grep -rn "def find_episode_by_hash" your_package/`.
 
 ---
 
+## The mem0 shim takes mem0's entity ids, and its search() and get_all() return up to 20
+
+### What changed
+
+`memvara.compat.mem0.Memory` now matches mem0 2.x in three ways that code written against
+the shim can notice:
+
+- `get_all()` returns up to 20 memories by default, where it returned up to 100.
+  `search()` returns up to 20 where it returned up to 10.
+- `search()` and `get_all()` refuse a top-level `user_id`, `agent_id` or `run_id` with
+  `ValueError`, where they raised `TypeError`.
+- `add()` and `delete_all()` accept `user_id`, `agent_id` and `run_id`, where they raised
+  `TypeError`. `add(user_id="alice")` now writes alice's memory.
+
+### Who this changes
+
+**If you call `get_all()` without `top_k` and expect more than 20 memories**, pass
+`top_k=` with the number you want. Find your instances with
+`grep -rn "get_all(" | grep -v top_k`.
+
+**If you catch `TypeError` around `search()` or `get_all()` to detect a top-level entity
+id**, catch `ValueError` instead, which is what mem0 raises.
+
+**If you catch `TypeError` around a call that passes one of mem0's arguments the shim
+cannot honour**, catch `memvara.compat.Mem0CompatError` instead. `add(timestamp=,
+expiration_date=)`, `search(reference_date=, show_expired=True)`,
+`get_all(show_expired=True)` and `update(metadata=, expiration_date=)` raised `TypeError`
+for an unknown argument; the shim now takes each of them and refuses it with
+`Mem0CompatError`, naming the argument and why.
+
+---
+
 ## MemvaraStorage.search scores by similarity, and orders by it
 
 ### What changed
