@@ -40,10 +40,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B2", 266, "a session-bound or agent-bound write ends the user-wide value"),
     KnownBug("B7", 273, "a session bound inside a project cannot read the global facts it "
              "writes"),
-    KnownBug("B19", 295, "memory_recall's description names arguments that a feature "
-             "switch removes"),
-    KnownBug("B20", 296, "two tool descriptions state a default that the schema does not "
-             "declare"),
 
     KnownBug("B23", 300, "a store refused for its embedder has already been migrated"),
     KnownBug("B24", 301, "a store refused as too new leaves its SQLite connection open"),

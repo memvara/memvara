@@ -11,6 +11,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **`memory_recall`'s description names only the arguments the server serves.** It
+  said that the tool rewrites the query "(query_rewrite)" and that "ranked and synthesize
+  each add one more call". A server started with `MEMVARA_FEATURE_QUERY_REWRITE=0` or
+  `MEMVARA_FEATURE_SYNTHESIS=0` removes that argument from the schema, so a model that
+  followed the description was refused with `unknown argument(s)`. The description now
+  drops each argument its switch removes, and with query rewrite off it no longer says
+  the query is rewritten. With every feature on, it reads exactly as before. #295 (B19).
+- **Two defaults stated in tool descriptions are declared in the schema.**
+  `memory_recall.include_episodes` ("Default false") and `memory_remember.extractor`
+  ("Defaults to 'api'") had no `default` in their input schemas; each handler supplied
+  the value itself. Both schemas now declare it, so `tools/list` shows it to a client and
+  the validator fills it, and the handlers read the filled value. Behaviour is unchanged:
+  an empty `extractor` is still read as `api`. #296 (B20).
 - **The plugin's approve hook lets the two document readers run without a prompt.**
   `memory_get_document` and `memory_list_documents` only read, and the server marks both
   `readOnlyHint`, but they were missing from the hook's list of read-only tools
