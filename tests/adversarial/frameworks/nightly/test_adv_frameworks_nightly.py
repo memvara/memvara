@@ -61,21 +61,6 @@ class Symptom:
 #: Checks that fail today because of a known bug: (framework, pin, check) -> the bug's
 #: strict expected failure, and its symptom.
 PINNED: dict[tuple[str, str, str], tuple[pytest.MarkDecorator, Symptom]] = {
-    # crewai 1.10.1's EncodingFlow takes storage.write_lock, which the StorageBackend
-    # protocol does not declare. From 1.11.0 on, CrewAI no longer asks for it.
-    ("crewai", "floor", "crewais_memory_remembers_and_recalls_through_the_storage"): (
-        known_bugs.xfail("B84"),
-        Symptom("AttributeError", "object has no attribute 'write_lock'")),
-    # The same bug stops this check before it can reach B85. The fix for B84 moves this
-    # pin to B85, with the symptom of the pin below.
-    ("crewai", "floor", "a_repeated_memory_reaches_crewais_consolidation"): (
-        known_bugs.xfail("B84"),
-        Symptom("AttributeError", "object has no attribute 'write_lock'")),
-    ("crewai", "latest", "a_repeated_memory_reaches_crewais_consolidation"): (
-        known_bugs.xfail("B85"),
-        Symptom("AssertionError", "CrewAI asked its model to consolidate 0 times: the "
-                "stored copy scored 0.50 against CrewAI's threshold of 0.85, and 2 live "
-                "copies remain", whole=True)),
 }
 
 

@@ -39,6 +39,28 @@ for an unknown argument; the shim now takes each of them and refuses it with
 
 ---
 
+## MemvaraStorage.search scores by similarity, and orders by it
+
+### What changed
+
+`memvara.integrations.crewai.MemvaraStorage.search` returned memvara's fused ranking score
+beside each record, in memvara's ranking order, and compared `min_score` with that score.
+It now returns the cosine similarity of the query vector to each record's stored vector,
+in [0, 1], orders the results by it, and compares `min_score` with it. That is the score
+CrewAI's `StorageBackend` contract describes, and what CrewAI itself compares with its
+consolidation threshold.
+
+### Who this changes
+
+**If you use `MemvaraStorage` through CrewAI's `Memory`**, nothing to do: CrewAI now
+consolidates a repeated memory, as it does with its own storage.
+
+**If you call `MemvaraStorage.search()` yourself with a `min_score`**, the number is now a
+similarity, not a ranking score. A threshold tuned for the old score filters differently;
+find your calls with `grep -rn --include="*.py" "min_score" . | grep -i crewai`.
+
+---
+
 ## A retraction far less confident than the value it names does not end it
 
 ### What changed

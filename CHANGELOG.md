@@ -30,6 +30,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
     `config_dict` and still refuses. #360 (B81).
   - `search()` and `get_all()` defaulted to `top_k` 10 and 100, where mem0 defaults to 20
     for both. Both now default to 20. #361 (B82).
+- **CrewAI can save through `MemvaraStorage` at crewai 1.10.1, the declared floor.**
+  CrewAI 1.10.1 takes `storage.write_lock` around its writes, though the `StorageBackend`
+  protocol does not declare it, so every save raised `AttributeError`. `MemvaraStorage`
+  now provides a reentrant lock under that name. The adapter's own floor, which said
+  `crewai>=1.0`, now says `crewai>=1.10.1` like the extra. #363 (B84).
+- **`MemvaraStorage.search` returns the similarity CrewAI expects, so CrewAI consolidates
+  a repeated memory.** It returned memvara's fused ranking score, on which an exact
+  duplicate scored 0.50, below CrewAI's consolidation threshold of 0.85, so remembering
+  the same sentence twice left two live copies. Each result is now scored by the cosine
+  similarity of CrewAI's query vector to the record's stored vector, in [0, 1], which is
+  what CrewAI's `StorageBackend` contract says the score is. The candidates still come
+  from memvara's hybrid retrieval; they are now returned in order of that similarity, and
+  `min_score` is compared with it. `docs/UPGRADING.md` covers a direct caller of
+  `search()`. #364 (B85).
 - **The hosted client reads the lists a write receipt fills to say what the write did.**
   `accumulated`, `disputed`, `collapsed`, `retyped`, `agentic_fallback` and
   `proposals_refused` were never read from a hosted receipt, so a write through

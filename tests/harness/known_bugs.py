@@ -51,10 +51,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B50", 332, "add() drops a turn repeated word for word after the value it "
              "stated has changed"),
     # Found by the framework tests against the real packages.
-    KnownBug("B84", 363, "at crewai 1.10.1, memvara's declared floor, CrewAI's Memory "
-             "cannot save through MemvaraStorage, which has no write_lock"),
-    KnownBug("B85", 364, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "
-             "consolidation threshold of 0.85, so a repeated memory is stored twice"),
 )}
 
 
