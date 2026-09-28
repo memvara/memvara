@@ -58,51 +58,9 @@ class Symptom:
         return result.message == self.text if self.whole else self.text in result.message
 
 
-def _both_pins(name: str, check: str, mark: pytest.MarkDecorator,
-               symptom: Symptom) -> dict[tuple[str, str, str], tuple[pytest.MarkDecorator,
-                                                                    Symptom]]:
-    """The PINNED entries for a check that fails the same way at both pins. It takes the
-    mark rather than the bug's id, because the coverage checklist finds each pin by
-    reading `known_bugs.xfail("B..")` with a string literal in the source."""
-    return {(name, pin, check): (mark, symptom) for pin in environments.PINS}
-
-
 #: Checks that fail today because of a known bug: (framework, pin, check) -> the bug's
 #: strict expected failure, and its symptom.
 PINNED: dict[tuple[str, str, str], tuple[pytest.MarkDecorator, Symptom]] = {
-    # mem0 2.x's add() requires one of the entity ids and its delete_all() takes them,
-    # and its search() and get_all() refuse them with ValueError, not TypeError.
-    **_both_pins("mem0", "add_and_delete_all_take_the_entity_ids_mem0_takes",
-                 known_bugs.xfail("B80"),
-                 Symptom("TypeError", "mem0 2.x moved entity ids into filters=")),
-    **_both_pins("mem0", "search_and_get_all_refuse_entity_ids_as_mem0_does",
-                 known_bugs.xfail("B80"),
-                 Symptom("AssertionError", "the shim's search raises TypeError where mem0 "
-                         "raises ValueError", whole=True)),
-    # What mem0 has and the shim lacks grew between 2.0.0 and the newest release, so each
-    # pin lists its own.
-    ("mem0", "floor", "the_shim_takes_every_method_and_argument_mem0_takes"): (
-        known_bugs.xfail("B81"),
-        Symptom("AssertionError", "missing from the shim: close(), "
-                "from_config(config_dict=), update(metadata=)", whole=True)),
-    ("mem0", "latest", "the_shim_takes_every_method_and_argument_mem0_takes"): (
-        known_bugs.xfail("B81"),
-        Symptom("AssertionError", "missing from the shim: __enter__(), __exit__(), "
-                "add(expiration_date=), add(timestamp=), close(), from_config(config_dict=), "
-                "get_all(show_expired=), search(reference_date=), search(show_expired=), "
-                "update(expiration_date=), update(metadata=)", whole=True)),
-    **_both_pins("mem0", "every_row_carries_mem0s_memoryitem_fields",
-                 known_bugs.xfail("B81"),
-                 Symptom("AssertionError", "fields mem0's rows carry and the shim's do not: "
-                         "{'get': ['score']}", whole=True)),
-    **_both_pins("mem0", "update_and_from_config_refuse_with_mem0compaterror",
-                 known_bugs.xfail("B81"),
-                 Symptom("TypeError", "got an unexpected keyword argument 'metadata'")),
-    **_both_pins("mem0", "defaults_match_mem0s_except_the_documented_threshold",
-                 known_bugs.xfail("B82"),
-                 Symptom("AssertionError", "defaults that differ from mem0's: "
-                         "get_all(top_k=100, mem0 20), search(top_k=10, mem0 20)",
-                         whole=True)),
 }
 
 
