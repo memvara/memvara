@@ -124,8 +124,17 @@ The two dishonest alternatives were both rejected: storing CrewAI's vectors and 
 to cosine top-k (Memvara becomes a numpy matmul with extra steps), or re-embedding text
 the interface never provides (impossible).
 
+**The score beside each result is a similarity, as CrewAI expects.** Memvara's hybrid
+retrieval picks the candidates, and each one is scored by the cosine similarity of
+CrewAI's query vector to the record's stored vector, in [0, 1]. The results come back in
+that order, and `min_score` is compared with it. CrewAI uses the score twice: in its own
+composite relevance score, and against its consolidation threshold of 0.85, which decides
+whether a new memory is compared with a similar one before it is stored. An exact
+duplicate scores 1.0, so CrewAI consolidates it.
+
 `crewai>=1.10.1` is a load-bearing floor. Releases 1.0.0 through 1.9.3 ship the previous
-memory system with no `StorageBackend` protocol at all.
+memory system with no `StorageBackend` protocol at all. 1.10.1 takes a `write_lock` from
+the storage, which `MemvaraStorage` provides.
 
 Deleting a record retires it by default, as in the LangGraph store. With
 `MemvaraStorage(mem, on_delete="erase")`, deleting a record erases it together with every

@@ -11,6 +11,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **CrewAI can save through `MemvaraStorage` at crewai 1.10.1, the declared floor.**
+  CrewAI 1.10.1 takes `storage.write_lock` around its writes, though the `StorageBackend`
+  protocol does not declare it, so every save raised `AttributeError`. `MemvaraStorage`
+  now provides a reentrant lock under that name. The adapter's own floor, which said
+  `crewai>=1.0`, now says `crewai>=1.10.1` like the extra. #363 (B84).
+- **`MemvaraStorage.search` returns the similarity CrewAI expects, so CrewAI consolidates
+  a repeated memory.** It returned memvara's fused ranking score, on which an exact
+  duplicate scored 0.50, below CrewAI's consolidation threshold of 0.85, so remembering
+  the same sentence twice left two live copies. Each result is now scored by the cosine
+  similarity of CrewAI's query vector to the record's stored vector, in [0, 1], which is
+  what CrewAI's `StorageBackend` contract says the score is. The candidates still come
+  from memvara's hybrid retrieval; they are now returned in order of that similarity, and
+  `min_score` is compared with it. `docs/UPGRADING.md` covers a direct caller of
+  `search()`. #364 (B85).
 - **A reply that quotes a caller's argument quotes at most 80 characters of it.** A
   refusal quoted the whole value it refused, and the reply to a read that found nothing
   quoted the whole query, so a long argument was copied into the model's context a second

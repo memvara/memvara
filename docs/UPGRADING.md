@@ -7,6 +7,28 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## MemvaraStorage.search scores by similarity, and orders by it
+
+### What changed
+
+`memvara.integrations.crewai.MemvaraStorage.search` returned memvara's fused ranking score
+beside each record, in memvara's ranking order, and compared `min_score` with that score.
+It now returns the cosine similarity of the query vector to each record's stored vector,
+in [0, 1], orders the results by it, and compares `min_score` with it. That is the score
+CrewAI's `StorageBackend` contract describes, and what CrewAI itself compares with its
+consolidation threshold.
+
+### Who this changes
+
+**If you use `MemvaraStorage` through CrewAI's `Memory`**, nothing to do: CrewAI now
+consolidates a repeated memory, as it does with its own storage.
+
+**If you call `MemvaraStorage.search()` yourself with a `min_score`**, the number is now a
+similarity, not a ranking score. A threshold tuned for the old score filters differently;
+find your calls with `grep -rn "min_score" | grep -i crewai`.
+
+---
+
 ## Erasing through the mem0 layer or an adapter erases every version of the memory
 
 ### What changed
