@@ -801,7 +801,7 @@ class WritePipeline:
                     # extractor on it can only reproduce what it produced the first time,
                     # so we reinforce those claims directly and pay nothing.
                     receipt.episode_ids.append(existing.id)
-                    receipt.skipped += 1
+                    receipt.repeated += 1
                     pending.extend(self._reinforcements_from_source(existing, now,
                                                                     claims))
                     continue
@@ -966,7 +966,7 @@ class WritePipeline:
             # A restatement of something we already believe. Queue a reinforcement and
             # move on rather than extracting a claim that would immediately dedupe.
             pending.append((claim, [ep.id], at))
-            receipt.skipped += 1
+            receipt.repeated += 1
         return kept
 
     @staticmethod

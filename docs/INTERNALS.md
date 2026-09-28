@@ -1041,8 +1041,17 @@ suggestion must not turn it into an exception the caller retries.
   period, as it does for `remember()` (#283). No model is called. A retraction is never
   a near-duplicate, because its tombstone is closed as it is written and the search
   finds only live claims.
+
+  Every turn tier 0 reads as a repeat, exact or near-duplicate, is counted in
+  `receipt.repeated`. The count is made when tier 0 decides, so a repeat whose claims
+  another writer closed before the claim transaction still counts, although
+  `receipt.reinforced` does not list those claims. A near-duplicate dated before its claim
+  is not a repeat and is not counted. Until #439 these turns were counted in
+  `receipt.skipped`, which the MCP summary shows as `no-fact`, so a restatement read as a
+  turn with nothing in it.
 - **Tier 1 (no LLM):** `SalienceGate` drops turns carrying no durable fact
-  (count them in `receipt.skipped`), then `FastExtractor` handles what it can.
+  (count them in `receipt.skipped`, and only them), then `FastExtractor` handles what it
+  can.
 - **Tier 2 (LLM):** only the turns that survived both and produced no fast-path claim are
   batched into a single `llm.extract(...)` call. Map `source_index` back to the
   originating episode for provenance. Unknown predicates trigger one

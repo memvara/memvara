@@ -1311,11 +1311,17 @@ def _receipt_summary(ctx: ToolContext, receipt: WriteReceipt) -> list[str]:
     the field was split, `ended 0, retired 1` and `ended 1, retired 0` are the outcomes a
     reader has to be able to tell apart, and a line whose shape depends on the answer is
     harder to read than one number that is sometimes zero.
+
+    `repeated` and `no-fact` are shown side by side for the same reason. Both count turns
+    nothing was extracted from, and they mean different things: a repeated turn restated a
+    fact already stored, and a no-fact turn carried none. The line used to fold the first
+    into the second (#439), so a batch of restatements read as a batch of empty turns.
     """
     lines = [
         f"added {len(receipt.added)}, ended {len(receipt.ended)}, "
         f"retired {len(receipt.retired)}, already-known {len(receipt.reinforced)}, "
-        f"no-fact {receipt.skipped} ({receipt.llm_calls} model call(s))"
+        f"repeated {receipt.repeated}, no-fact {receipt.skipped} "
+        f"({receipt.llm_calls} model call(s))"
     ]
     lines += _claim_lines("+", receipt.added)
     # `_state` on each, because with both counts on the header line a bare "-" no longer

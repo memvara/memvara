@@ -2231,7 +2231,16 @@ class WriteReceipt:
     #: is named here and nothing about it changes, salience included, so a replay is
     #: idempotent. Either way, nothing in this list was written by this call.
     reinforced: list[Claim] = field(default_factory=list)
-    skipped: int = 0                                       # turns that carried no durable fact
+    #: Turns that carried no durable fact: the salience gate dropped them, so nothing was
+    #: extracted and nothing was reinforced. A repeat is not counted here; see `repeated`.
+    skipped: int = 0
+    #: Turns tier 0 recognised as a repeat of what is already stored, so nothing was
+    #: extracted from them. Two kinds: an exact repeat of a stored turn, and a turn worded
+    #: like a stored claim and dated at or after it begins. Each carries a fact, and the
+    #: claims it restates are in `reinforced`, unless another writer ended, retired or
+    #: erased them first. Until #439 these were counted in `skipped`, so a batch of
+    #: restatements read as a batch of turns with no fact in them.
+    repeated: int = 0
     #: Turns that got all the way to the extraction tier and yielded nothing. Distinct
     #: from `skipped`, which is the write path working as designed (an acknowledgement
     #: carries no fact). This one is the honest count of *lost* content: with no model
@@ -2413,9 +2422,11 @@ class WriteReceipt:
         return self.closed
 
     def __str__(self) -> str:
-        # `unextracted`, `ungrounded`, `accumulated`, `disputed` and `collapsed` appear
-        # only when non-zero, so they read as events rather than as noise on the writes
-        # that lost, rejected, piled up, disputed and emptied nothing.
+        # `repeated`, `unextracted`, `ungrounded`, `accumulated`, `disputed` and
+        # `collapsed` appear only when non-zero, so they read as events rather than as
+        # noise on the writes that repeated, lost, rejected, piled up, disputed and
+        # emptied nothing.
+        again = f" repeated={self.repeated}" if self.repeated else ""
         lost = f" unextracted={self.unextracted}" if self.unextracted else ""
         refused = f" ungrounded={self.ungrounded}" if self.ungrounded else ""
         piled = f" accumulated={len(self.accumulated)}" if self.accumulated else ""
@@ -2426,8 +2437,8 @@ class WriteReceipt:
                     if self.proposals_refused else "")
         return (
             f"<WriteReceipt +{len(self.added)} ~{len(self.reinforced)} "
-            f"-{len(self.closed)} skip={self.skipped}{lost}{refused}{piled}{split}{empty}"
-            f"{fell}{declined} llm={self.llm_calls} "
+            f"-{len(self.closed)} skip={self.skipped}{again}{lost}{refused}{piled}{split}"
+            f"{empty}{fell}{declined} llm={self.llm_calls} "
             f"{self.latency_ms:.1f}ms{' deferred' if self.deferred else ''}>"
         )
 

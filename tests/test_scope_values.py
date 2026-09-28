@@ -305,7 +305,7 @@ def test_a_turn_like_one_stored_under_either_value_is_stored_as_the_callers_own(
         planted = old.scope(user=value).add("I live in Atlantis.")
     with opened(path) as mem:
         receipt = mem.add("I live in Atlantis.")
-    assert receipt.skipped == 0
+    assert receipt.repeated == 0
     assert receipt.episode_ids and not set(receipt.episode_ids) & set(planted.episode_ids)
 
 

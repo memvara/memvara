@@ -222,6 +222,9 @@ def receipt(body: dict[str, Any]) -> WriteReceipt:
         closed=[claim(c) for c in body["invalidated"]],
         reinforced=[claim(c) for c in body["reinforced"]],
         skipped=body["skipped"],
+        # `.get`: a deployment older than #439 sends no such key and counts its repeats
+        # in `skipped`, so 0 is what it reported, and the client cannot split `skipped`.
+        repeated=int(body.get("repeated", 0)),
         unextracted=body["unextracted"],
         llm_calls=body["llm_calls"],
         latency_ms=body["latency_ms"],
