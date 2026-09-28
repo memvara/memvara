@@ -78,7 +78,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
-    KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
     KnownBug("B50", 332, "add() drops a turn repeated word for word after the value it "
              "stated has changed"),
     KnownBug("B73", 353, "memory_add says a turn was not stored when only no fact was "

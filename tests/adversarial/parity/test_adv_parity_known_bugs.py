@@ -153,9 +153,8 @@ def test_cloud_mode_writes_the_note_a_local_server_writes(
     assert_same(local, cloud, f"the reply that fills {kind}")
 
 
-# -- B53, memvara/memvara#335: a hosted receipt says 0 ungrounded and 0 polluted -----------
+# -- B53, memvara/memvara#335, fixed: a hosted receipt said 0 ungrounded and 0 polluted ----
 
-@known_bugs.xfail("B53")
 def test_a_hosted_receipt_carries_the_ungrounded_and_polluted_counts() -> None:
     """A write that refused claims an extraction model proposed says how many: in
     `ungrounded`, those with no support in the turn they cite, and in `polluted`, a real
@@ -165,9 +164,10 @@ def test_a_hosted_receipt_carries_the_ungrounded_and_polluted_counts() -> None:
     sent = _receipt(WriteReceipt(ungrounded=2, polluted=1), "fast-path-only")
     assert (sent["ungrounded"], sent["polluted"]) == (2, 1), "the fake no longer sends them"
     read = hydrate.receipt(sent)
-    if (read.ungrounded, read.polluted) == (0, 0):
-        raise known_bugs.Reproduced("B53: the hosted receipt says 0 ungrounded, 0 polluted")
     assert (read.ungrounded, read.polluted) == (2, 1)
+    older = {key: value for key, value in sent.items() if key not in ("ungrounded", "polluted")}
+    assert (hydrate.receipt(older).ungrounded, hydrate.receipt(older).polluted) == (0, 0), (
+        "a deployment that sends neither count must still hydrate")
 
 
 # -- B54, memvara/memvara#336: methods only one client has must be documented -----------

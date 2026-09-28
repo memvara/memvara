@@ -11,6 +11,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A write receipt read through the hosted client reports `ungrounded` and `polluted`.**
+  The deployment sends both counts, and `RemoteMemvara` never read them, so a hosted
+  receipt always said 0: a caller could not tell that the write refused claims an
+  extraction model proposed, and a server in cloud mode never wrote the note about
+  ungrounded claims. Both are read now, and a deployment that does not send them still
+  hydrates, with 0. #335 (B53).
 - **A reply that quotes a caller's argument quotes at most 80 characters of it.** A
   refusal quoted the whole value it refused, and the reply to a read that found nothing
   quoted the whole query, so a long argument was copied into the model's context a second
