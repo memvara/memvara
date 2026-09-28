@@ -69,7 +69,9 @@ process.exit(0)
 STUB = """#!/bin/sh
 payload=$(cat)
 path=$(printf '%s' "$payload" | sed -n 's/.*"transcript_path": *"\\([^"]*\\)".*/\\1/p')
-mode=$(stat -f %Lp "$path" 2>/dev/null || stat -c %a "$path")
+# GNU stat first: on Linux, `stat -f` reports the file system instead, over several
+# lines, and does not fail, so the BSD form must be the fallback.
+mode=$(stat -c %a "$path" 2>/dev/null || stat -f %Lp "$path")
 printf '{"path": "%s", "mode": "%s"}\\n' "$path" "$mode" >> "$HOME/captures.jsonl"
 echo '{}'
 """
@@ -177,7 +179,9 @@ exec 3< "$path"
 i=0
 while [ ! -e "$HOME/written" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done
 lines=$(wc -l <&3 | tr -d ' ')
-mode=$(stat -f %Lp "$path" 2>/dev/null || stat -c %a "$path")
+# GNU stat first: on Linux, `stat -f` reports the file system instead, over several
+# lines, and does not fail, so the BSD form must be the fallback.
+mode=$(stat -c %a "$path" 2>/dev/null || stat -f %Lp "$path")
 printf '{"path": "%s", "mode": "%s", "lines": %s}\\n' "$path" "$mode" "$lines" >> "$HOME/captures.jsonl"
 echo '{}'
 """
