@@ -11,6 +11,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
+- **A model reply with thousands of invented predicates no longer stalls a write.** Past
+  the cap of 200 learned predicates, each new spelling is folded onto the nearest known
+  predicate as an alias. Each alias rebuilt the registry's whole index, and each search
+  for the nearest predicate read every alias again, so one `add()` took time that grew
+  with the square of the number of invented spellings: 100 to 130 seconds for 5,000 on a
+  laptop. An alias is now added to the index in place, and each predicate's words are kept
+  once, so the same write takes about 6 seconds. The model is still called 201 times,
+  and every predicate resolves as before. #309.
+
+### Fixed
+
 - **`memory_recall` refuses `ranked` without conversation turns as an argument error.**
   `ranked=true` needs turns to rank, so it takes `include_episodes=true` and no
   `memory_types`. The library refused the other combinations with a `ValueError`, which

@@ -19,10 +19,8 @@ from dataclasses import dataclass
 
 import pytest
 
-
 class Reproduced(Exception):
     """A known bug's own symptom, seen by the test that pins it."""
-
 
 @dataclass(frozen=True)
 class KnownBug:
@@ -35,7 +33,6 @@ class KnownBug:
     #: filed by hand before that are in memvara/memvara.
     repo: str = "memvara/memvara"
 
-
 KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B2", 266, "a session-bound or agent-bound write ends the user-wide value"),
     KnownBug("B7", 273, "a session bound inside a project cannot read the global facts it "
@@ -43,7 +40,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
 
     KnownBug("B23", 300, "a store refused for its embedder has already been migrated"),
     KnownBug("B24", 301, "a store refused as too new leaves its SQLite connection open"),
-
 
     KnownBug("B26", 303, "malformed model output makes add() raise instead of dropping the "
              "item"),
@@ -53,8 +49,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "object is stored as Python text"),
     KnownBug("B30", 307, "a model retraction at low confidence ends a fact the user "
              "asserted"),
-    KnownBug("B32", 309, "invented predicates past the learned cap make one write take "
-             "quadratic time"),
     KnownBug("B45", 317, "a backdated retraction's tombstone is live in reads of the past"),
     KnownBug("B69", 349, "a repeated future-dated retraction writes a new tombstone each "
              "time"),
@@ -85,7 +79,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B85", 364, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "
              "consolidation threshold of 0.85, so a repeated memory is stored twice"),
 )}
-
 
 def xfail(bug_id: str) -> pytest.MarkDecorator:
     """The strict expected-failure marker for a registered bug."""
