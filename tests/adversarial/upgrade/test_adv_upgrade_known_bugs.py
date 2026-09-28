@@ -67,6 +67,9 @@ def test_a_refused_open_closes_the_connection_it_opened(tmp_path: pathlib.Path) 
     constructor used to release its presence lock but not close its connection, which
     Python 3.13 reports as an unclosed database when the connection is collected (#301)."""
     db = newer_store(tmp_path)
+    # Collected first, so that a connection an earlier test in this process left open is
+    # not reported here: the warning cannot say which store its connection belonged to.
+    gc.collect()
     with warnings.catch_warnings(record=True) as seen:
         warnings.simplefilter("always")
         refuse(db)

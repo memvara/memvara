@@ -64,6 +64,9 @@ def test_a_store_from_a_newer_version_is_refused_and_left_as_it_was(
         tmp_path: pathlib.Path) -> None:
     db = newer_store(tmp_path)
     before = golden.snapshot(db)
+    # Collected first, so that a connection an earlier test in this process left open is
+    # not reported here: the warning cannot say which store its connection belonged to.
+    gc.collect()
     with warnings.catch_warnings(record=True) as seen:
         # A refused open closes its connection (#301), so collecting garbage finds no
         # unclosed database, which Python 3.13 would report as a ResourceWarning.
