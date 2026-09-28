@@ -18,10 +18,20 @@ point of the project and it is also the development setup:
 python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install -e ".[dev,cloud,ingest,encrypt]"
 
-python3 -m pytest -q                                              # 9,972 passing, 12 skipped, 91 expected failures
-python3 -m coverage run -m pytest && python3 -m coverage report    # gated at 100%
+python3 -m pytest -q -n auto                                      # 9,972 passing, 12 skipped, 91 expected failures
+python3 -m coverage erase                                          # clear the last run's data
+python3 -m coverage run -m pytest -n auto                          # then combine and report:
+python3 -m coverage combine && python3 -m coverage report          # gated at 100%
 python3 -m mypy -p memvara                                         # must be clean
 ```
+
+`-n auto` runs one pytest-xdist worker per CPU core; leave it out to run one test at a
+time. Coverage is measured in every process the tests start, so each process writes its
+own data file, and `coverage combine` has to run before `coverage report`. Run `coverage
+erase` first: `coverage combine` merges every data file it finds, so data left by an
+earlier run could count a line as covered that the current code no longer covers. Set
+`COVERAGE_CORE=sysmon` on Python 3.12 or later to make the coverage run much cheaper, as CI
+does.
 
 **Before you push, run the tests your change can affect, not the three commands above:**
 
@@ -30,11 +40,15 @@ python3 scripts/test_changed.py            # compares with origin/main; --base <
 python3 scripts/test_changed.py --dry-run  # prints what it would run, and runs nothing
 ```
 
-It runs the test files you changed, the tests that import a changed Python file or name a
-changed file in a string, and the tests that failed on your last run. When you change
-something it cannot follow, such as a `conftest.py`, `pyproject.toml`, the test harness,
-test data, or any file that is not documentation and that no test imports or names, it runs
-the full suite instead and prints which file made it do so. It measures
+It runs the test files you changed, the tests that import a changed Python file (directly,
+or through a `conftest.py` above them), the tests that name a changed file in a string or
+match it with a pattern such as `*.md`, and the tests that failed on your last run. When you
+change something it cannot follow, such as a `conftest.py`, `pyproject.toml`, test data, a
+module that `tests/conftest.py` imports, or any file that is not documentation and that no
+test imports or names, it runs the full suite instead and prints which file made it do so.
+It runs the tests in parallel, one pytest-xdist worker per core, and gives each run its
+own base temporary directory, so several runs on one machine do not delete each other's
+files. Pass `-- -n 0` to run the tests one at a time. It measures
 no coverage. The full suite, coverage and mypy run in CI on your pull request, on every
 interpreter, so a green local run is a quick check and not the gate.
 
@@ -109,9 +123,11 @@ fake that counts its own calls. **If a test you add reaches the network, it is w
 To number the directory it makes, `mktemp()` lists every directory the session has made so
 far, so a call for every test makes the suite's run time grow with the square of its size.
 Make the directory with `tempfile.mkdtemp(dir=...)` inside one directory the session makes
-once, as the `_homes` fixture in `tests/conftest.py` does. A fixture that only the tests
-asking for it run, such as `mcp` in `tests/adversarial/conftest.py`, adds one listing per
-such test, which is fine.
+once, as the `_homes` fixture in `tests/conftest.py` does. pytest's own `tmp_path` numbers
+its directories the same way, and every test here asks for it, so `tests/conftest.py`
+replaces it with a fixture that uses `mkdtemp` too; `tmp_path` works as it always does. A
+fixture that only the tests asking for it run, such as `mcp` in
+`tests/adversarial/conftest.py`, adds one listing per such test, which is fine.
 
 **Slow tests go in a tier folder.** A test under a folder named `nightly/`, `weekly/`, `local/` or `quarantine/` is left out of a plain `python3 -m pytest -q`, which is what CI runs. `--tier nightly`, `--tier weekly`, `--tier local` and `--tier quarantine` collect them, and every run prints which tier folders it left out. `docs/claude/testing.md` has the details.
 

@@ -74,7 +74,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import Any, Callable, Collection, Mapping, Sequence, cast
 
 from ..confirm import ConfirmationRefused
 # `PROFILE_WINDOW` is the library's: how far back a profile looks when no `since` is
@@ -92,11 +92,11 @@ from ..types import (CUSTOM_ID_CHARS, DOCUMENT_STATES, LINK_RELATIONS, REASON_CH
                      ForgetPreview, MemoryType, RecallResult, RefusedProposal, Retype, Row,
                      SearchResults, WriteReceipt, closure_reason, closure_reasons, utcnow)
 from .memory_api import MemoryAPI
-from .validate import ToolError, validate
+from .validate import ToolError, shown, validate
 
-__all__ = ["FEATURE_ARGUMENTS", "TOOLS", "Tool", "ToolContext", "ToolError",
-           "anchoring_by_default", "for_a_hosted_deployment", "safe_detail", "safe_line",
-           "without_arguments", "without_expiry", "without_reasons"]
+__all__ = ["DESCRIBED_BY_ARGUMENTS", "FEATURE_ARGUMENTS", "TOOLS", "Tool", "ToolContext",
+           "ToolError", "anchoring_by_default", "for_a_hosted_deployment", "safe_detail",
+           "safe_line", "without_arguments", "without_expiry", "without_reasons"]
 
 #: Framing for any block of stored claims. `Memvara.recall` applies its own; this is for
 #: the tools that render results themselves. It names the text below it as data, which
@@ -192,9 +192,12 @@ def _timestamp(raw: str, label: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError as exc:
+        # The parser's own message quotes the whole value again ("Invalid isoformat
+        # string: '...'"), so that copy is replaced before the reason is quoted (#313).
+        reason = _clip(str(exc).replace(repr(text), "the value"), 120)
         raise ToolError(
             f"{label} must be an ISO-8601 timestamp such as '2024-06-01T10:00:00Z' or "
-            f"'2024-06-01', got {raw!r} ({exc})") from exc
+            f"'2024-06-01', got {shown(raw)} ({reason})") from exc
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
@@ -326,14 +329,74 @@ def without_expiry(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
         for tool in tools)
 
 
+#: `memory_recall`'s sentence about model calls, for whether the server serves
+#: `query_rewrite` and `synthesize`, in that order. Each is removed with its switch.
+_RECALL_MODEL_CALLS: Mapping[tuple[bool, bool], str] = {
+    (True, True): "It calls a model only on a server that has one configured: there it "
+                  "rewrites the query into a few other phrasings before searching "
+                  "(query_rewrite), and ranked and synthesize each add one more call when "
+                  "you set them. ",
+    (True, False): "It calls a model only on a server that has one configured: there it "
+                   "rewrites the query into a few other phrasings before searching "
+                   "(query_rewrite), and ranked adds one more call when you set it. ",
+    (False, True): "It calls a model only on a server that has one configured, and there "
+                   "only when you set ranked or synthesize, each of which adds one call. ",
+    (False, False): "It calls a model only on a server that has one configured, and there "
+                    "only when you set ranked, which adds one call. ",
+}
+
+
+def _recall_description(served: Collection[str]) -> str:
+    """`memory_recall`'s description, naming only the model-calling arguments in `served`.
+
+    A switch that removes `query_rewrite` or `synthesize` removes it from the schema
+    (`FEATURE_ARGUMENTS`), and a description that still named it would send a model to
+    pass an argument the server refuses (#295). With the query-rewrite switch off the
+    server does not rewrite at all, so that clause goes with the argument.
+
+    >>> "query_rewrite" in _recall_description({"synthesize"})
+    False
+    >>> "synthesize" in _recall_description({"query_rewrite"})
+    False
+    """
+    model = _RECALL_MODEL_CALLS["query_rewrite" in served, "synthesize" in served]
+    return (
+        "Look up what is already known about this user and read it before you "
+        "answer. Call it at the START of a turn whenever the reply could depend on "
+        "something the user told you earlier — their name, where they live or work, "
+        "how they like things done, a decision they already made, a preference, a "
+        "constraint. Call it speculatively; it is cheap. " + model + "Returns "
+        "numbered plain-text notes, ready to read as context, with no scores or JSON "
+        "to filter out. An empty result means nothing is stored, not that you should "
+        "try again. Prefer this over memory_search whenever the goal is to answer "
+        "the user rather than to inspect the memory itself. When the question is "
+        "about the past ('what was I working on in June'), pass valid_at and the "
+        "notes describe that day; the block's header says so. as_of is refused "
+        "here: what this system used to believe is an inspection, on memory_search."
+    )
+
+
+#: The tools whose description names arguments a feature switch can remove, each with
+#: the function that describes it for the arguments it still serves.
+DESCRIBED_BY_ARGUMENTS: Mapping[str, Callable[[Collection[str]], str]] = {
+    "memory_recall": _recall_description,
+}
+
+
 def without_arguments(tools: "tuple[Tool, ...]",
                       names: Sequence[str]) -> "tuple[Tool, ...]":
-    """The same tools with every argument in `names` removed from their schemas."""
-    return tuple(
-        replace(tool, properties={k: v for k, v in tool.properties.items()
-                                  if k not in names})
-        if set(names) & set(tool.properties) else tool
-        for tool in tools)
+    """The same tools with every argument in `names` removed from their schemas, and
+    described for the arguments they still serve (`DESCRIBED_BY_ARGUMENTS`)."""
+    changed = []
+    for tool in tools:
+        if not set(names) & set(tool.properties):
+            changed.append(tool)
+            continue
+        properties = {k: v for k, v in tool.properties.items() if k not in names}
+        describe = DESCRIBED_BY_ARGUMENTS.get(tool.name)
+        changed.append(replace(tool, properties=properties, description=(
+            describe(set(properties)) if describe is not None else tool.description)))
+    return tuple(changed)
 
 
 def for_a_hosted_deployment(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
@@ -781,16 +844,20 @@ def _filter_refusal(tool: str, exc: FilterError) -> ToolError:
 # -- handlers ----------------------------------------------------------------
 
 def _no_match(query: str, day: str | None = None) -> str:
+    # The query is the caller's own text, so quoting it leaks nothing, but a query of any
+    # length would be copied whole into the model's context a second time (#313), so a
+    # long one is shortened the way a refusal shortens a value (`validate.shown`).
+    quoted = shown(safe_line(query))
     if day is not None:
         # A dated miss is not the same fact as a present one: something may well be
         # recorded about it now, and the block is empty because nothing held that day.
         return (
-            f"No stored memory matched {safe_line(query)!r} as things were on "
+            f"No stored memory matched {quoted} as things were on "
             f"{safe_line(day)}. Nothing recorded held on that day, so answer from the "
             "conversation instead of retrying with a reworded query."
         )
     return (
-        f"No stored memory matched {safe_line(query)!r}. Nothing is recorded about that, "
+        f"No stored memory matched {quoted}. Nothing is recorded about that, "
         "so answer from the conversation instead of retrying with a reworded query."
     )
 
@@ -924,7 +991,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             synthesize=bool(args.get("synthesize", False)),
             memory_types=_memory_types(args.get("memory_types")),
             budget=args.get("budget"),
-            include_episodes=bool(args.get("include_episodes", False)),
+            include_episodes=bool(args["include_episodes"]),
             valid_at=(_timestamp(valid_at, "memory_recall.valid_at")
                       if valid_at is not None else None),
             filters=args.get("filters"),
@@ -1103,10 +1170,10 @@ def _profile(ctx: ToolContext, args: dict[str, Any]) -> str:
     lines.append(f"Arrived since {_stamp(when)} ({len(profile.recent)}):")
     lines += _profile_rows(profile.recent)
     if query:
-        lines.append(f"Relevant to {safe_line(query)!r} ({len(profile.relevant)}):")
+        lines.append(f"Relevant to {shown(safe_line(query))} ({len(profile.relevant)}):")
         lines += _profile_rows(profile.relevant)
     for name, rows in profile.buckets.items():
-        lines.append(f"Bucket {safe_line(name)!r} ({len(rows)}):")
+        lines.append(f"Bucket {shown(safe_line(name))} ({len(rows)}):")
         lines += _profile_rows(rows)
     if profile.warnings:
         lines.append("Ignored:")
@@ -1806,7 +1873,9 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
             confidence=args["confidence"],
             memory_type=memory_type,
             valid_from=since, valid_to=until,
-            extractor=args.get("extractor") or "api",
+            # The schema's default fills an omitted extractor; an empty string is read
+            # the same way, as it always was.
+            extractor=args["extractor"] or "api",
             # Ids, never Episode objects. `_cite` stores anything it is handed as an
             # Episode and merely links a string, so accepting text here would duplicate
             # a turn the caller has usually just stored through memory_add.
@@ -1820,7 +1889,8 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> str:
         # Only `replaces` raises this, and the message names no scope on purpose: the
         # same answer for a missing id and one in another scope.
         raise ToolError(
-            f"Nothing written: memory_remember.replaces={args.get('replaces')!r} names no "
+            "Nothing written: memory_remember.replaces="
+            f"{shown(args.get('replaces'))} names no "
             "fact visible here. Run memory_search to get a current id.") from None
     except ValueError as exc:
         # A `replaces` claim that is no longer live, a reason over its limit, or an
@@ -1947,7 +2017,7 @@ def _forget(ctx: ToolContext, args: dict[str, Any]) -> str:
         if already is not None and already.state == "retired":
             return _already_retired(claim_id, already, reason)
         if not ctx.memory.delete(claim_id, reason=reason):
-            return (f"Nothing retired: no claim {claim_id!r} is visible here. Run "
+            return (f"Nothing retired: no claim {shown(claim_id)} is visible here. Run "
                     "memory_search to get a current id.")
         # And read again after the write, as `memory_end` does, because another writer
         # can retire the claim between the read above and this call's write, which then
@@ -2083,7 +2153,7 @@ def _end(ctx: ToolContext, args: dict[str, Any]) -> str:
 
     if claim_id is not None:
         if not ctx.memory.delete(claim_id, at=at, close="ended", reason=reason):
-            return (f"Nothing ended: no claim {claim_id!r} is visible here. Run "
+            return (f"Nothing ended: no claim {shown(claim_id)} is visible here. Run "
                     "memory_search to get a current id.")
         # `delete` returned True, so this id is in scope and was just written back; the
         # re-read is for the instant that *landed*, which `close_out` may have clamped
@@ -2268,7 +2338,7 @@ def _matching(close: Closure) -> Handler:
             raise ToolError(str(exc)) from None
         if isinstance(out, ForgetPreview):
             if not out.matches:
-                return (f"Nothing matched {safe_line(query)!r}, so there is nothing to "
+                return (f"Nothing matched {shown(safe_line(query))}, so there is nothing to "
                         f"{verb}. Nothing was changed.")
             lines = [
                 f"Preview: {len(out.matches)} live match(es). Nothing has changed "
@@ -2283,7 +2353,7 @@ def _matching(close: Closure) -> Handler:
         if not out.closed:
             return f"The preview listed nothing, so nothing was {done}."
         lines = [f"{done.capitalize()} {len(out.closed)} value(s)"
-                 + (f", with the reason {safe_line(out.reason)!r}" if out.reason else "")
+                 + (f", with the reason {shown(safe_line(out.reason))}" if out.reason else "")
                  + f". memory_history still shows them, marked {done}."]
         lines += [f"- [{c.id} {_state(c)}] {safe_line(c.text)}" for c in out.closed]
         return "\n".join(lines)
@@ -2575,7 +2645,7 @@ def _why(ctx: ToolContext, args: dict[str, Any]) -> str:
     claim_id = args["claim_id"]
     prov = ctx.memory.why(claim_id)
     if prov is None:
-        return (f"Claim {claim_id!r} is not visible here. Ids come from memory_search; "
+        return (f"Claim {shown(claim_id)} is not visible here. Ids come from memory_search; "
                 "one from another user or tenant will not resolve.")
     claim = prov.claim
     lines = [
@@ -2743,23 +2813,7 @@ def _delete_document(ctx: ToolContext, args: dict[str, Any]) -> str:
 TOOLS: tuple[Tool, ...] = (
     Tool(
         name="memory_recall",
-        description=(
-            "Look up what is already known about this user and read it before you "
-            "answer. Call it at the START of a turn whenever the reply could depend on "
-            "something the user told you earlier — their name, where they live or work, "
-            "how they like things done, a decision they already made, a preference, a "
-            "constraint. Call it speculatively; it is cheap. It calls a model only on a "
-            "server that has one configured: there it rewrites the query into a few "
-            "other phrasings before searching (query_rewrite), and ranked and "
-            "synthesize each add one more call when you set them. Returns "
-            "numbered plain-text notes, ready to read as context, with no scores or JSON "
-            "to filter out. An empty result means nothing is stored, not that you should "
-            "try again. Prefer this over memory_search whenever the goal is to answer "
-            "the user rather than to inspect the memory itself. When the question is "
-            "about the past ('what was I working on in June'), pass valid_at and the "
-            "notes describe that day; the block's header says so. as_of is refused "
-            "here: what this system used to believe is an inspection, on memory_search."
-        ),
+        description=_recall_description({"query_rewrite", "synthesize"}),
         properties={
             "valid_at": {
                 "type": "string",
@@ -2784,6 +2838,7 @@ TOOLS: tuple[Tool, ...] = (
             },
             "include_episodes": {
                 "type": "boolean",
+                "default": False,
                 "description": (
                     "Also return raw excerpts from earlier conversation, not just the "
                     "facts extracted from them. On a local store, each excerpt starts "
@@ -3394,7 +3449,7 @@ TOOLS: tuple[Tool, ...] = (
                 ),
             },
             "extractor": {
-                "type": "string", "maxLength": 64,
+                "type": "string", "maxLength": 64, "default": "api",
                 "description": (
                     "What derived this fact, when that is not the caller asserting "
                     "something it already knew. Defaults to 'api', and 'api' is a claim "

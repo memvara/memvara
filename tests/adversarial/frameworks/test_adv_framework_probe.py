@@ -21,6 +21,13 @@ from . import environments, probe
 #: The probe's script, run the way the nightly tests run it.
 PROBE = environments.PROBE
 
+#: The watchdog's limit for each step in the hang tests, as `--check-seconds`. The planted
+#: hangs last 30 seconds, so any limit well below that still proves a hang is stopped. It
+#: was 0.5 seconds, which the first step (importing memvara and listing what is installed)
+#: overran in CI once the probe's own process was measured by coverage under pytest-xdist:
+#: three of these tests failed there and nowhere else. Three seconds leaves that step room.
+STEP_SECONDS = "3"
+
 PLANTED = """
     import atexit
     import socket
@@ -114,7 +121,7 @@ sys.meta_path.insert(0, Hang())
 sys.path.insert(0, {folder!r})
 import probe
 
-sys.exit(probe.main([{checks!r}, {report!r}, "--check-seconds", "0.5"]))
+sys.exit(probe.main([{checks!r}, {report!r}, "--check-seconds", "{step_seconds}"]))
 """
 
 Probed = tuple[probe.Run, "subprocess.CompletedProcess[str]"]
@@ -142,7 +149,7 @@ def planted(tmp_path_factory: pytest.TempPathFactory) -> probe.Run:
 
 @pytest.fixture(scope="module")
 def hung(tmp_path_factory: pytest.TempPathFactory) -> Probed:
-    return _probe(tmp_path_factory.mktemp("hung"), HANGS, "--check-seconds", "0.5")
+    return _probe(tmp_path_factory.mktemp("hung"), HANGS, "--check-seconds", STEP_SECONDS)
 
 
 def _accesses(run: probe.Run, phase: str) -> list[str]:
@@ -203,13 +210,13 @@ def test_a_probe_that_hangs_after_its_last_check_is_stopped(tmp_path: Path) -> N
     """A framework can leave a thread running that never ends. The interpreter then never
     reaches the exit handlers, where telemetry sends, so the probe must stop itself and
     exit with a failure rather than wait until the suite kills it."""
-    run, done = _probe(tmp_path, HANGS_AT_EXIT, "--check-seconds", "0.5", timeout=20)
+    run, done = _probe(tmp_path, HANGS_AT_EXIT, "--check-seconds", STEP_SECONDS, timeout=20)
     assert run.results["check_leaves_a_thread_running"].passed and run.finished
     assert done.returncode != 0 and "Timeout" in done.stderr, done.stderr
 
 
 def test_a_checks_file_that_hangs_while_loading_is_stopped(tmp_path: Path) -> None:
-    run, done = _probe(tmp_path, HANGS_WHILE_LOADING, "--check-seconds", "0.5", timeout=20)
+    run, done = _probe(tmp_path, HANGS_WHILE_LOADING, "--check-seconds", STEP_SECONDS, timeout=20)
     assert run.start is not None and run.begun == [] and not run.finished
     assert done.returncode != 0 and "Timeout" in done.stderr, done.stderr
     assert "before its first check" in run.result("check_never_reached").message
@@ -226,7 +233,7 @@ def test_a_probe_that_hangs_before_it_loads_its_checks_is_stopped(tmp_path: Path
     home = tmp_path / "home"
     home.mkdir()
     code = HANGS_IMPORTING_MEMVARA.format(folder=str(PROBE.parent), checks=str(checks),
-                                          report=str(report))
+                                          report=str(report), step_seconds=STEP_SECONDS)
     done = subprocess.run([sys.executable, "-I", "-B", "-c", code],
                           env=environments.probe_env(home), cwd=tmp_path,
                           capture_output=True, text=True, timeout=20)

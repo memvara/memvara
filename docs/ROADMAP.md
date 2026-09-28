@@ -81,13 +81,14 @@ red.
 harness, which does need a reader model and does cost money. The harness already reports a `none` / `memory` / `full`
 triple when a reader is configured, because a memory score with no reader-only floor and no
 whole-haystack ceiling beside it is uninterpretable. On this harness it remains the single most
-valuable remaining item in the repository; a judged number does exist for the hosted read
-path, on LongMemEval-S through the MemoryBench harness
-([`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness)),
-but not on this apparatus. `demo/` built the apparatus and the corpus for it (see
-[What is still missing](#what-is-still-missing) and
-[`demo/README.md`](../demo/README.md)), but a run with an agent in the reader's seat is a
-sanity check, not the measurement.
+valuable remaining item in the repository. `demo/` built the apparatus and the corpus for
+it, and on 2026-09-28 it was run with a model as the reader, at both corpus sizes, against
+the hosted service
+([`demo/README.md`](../demo/README.md#what-the-recorded-runs-produced)). That run measured
+the structured integration: 80% correct at scale 1 and 75% at scale 10, where `naive_rag`
+fell from 75% to 35%. It did not measure the shipped defaults, because the service's
+background extraction had produced almost no claims in those scopes when they were read.
+That half is still open; see [What is still missing](#what-is-still-missing).
 
 Exercising that path end to end offline — `--reader stub` and `--reader file` over both
 suites — found four defects in code that had never run, all now fixed:
@@ -121,8 +122,10 @@ anthropic|openai`, with the model id, effort, output budget and thinking setting
 by flags and printed under the report's title, and `--corpus-scale N`, which pads the
 authored history with generated tickets that name no value a question is about
 (`demo/distractors.py`), so the token argument can be measured at two sizes rather than
-argued from one. The apparatus for the judged number on this corpus therefore exists in
-full; the run itself is still to be made.
+argued from one. The run was made on 2026-09-28 with Qwen3.8-27B as reader and judge, at
+both corpus sizes and against the hosted service, after `--write-only` let the scopes stand
+for about 63 hours before the read. What it did and did not measure is in
+[`demo/README.md`](../demo/README.md#what-the-recorded-runs-produced).
 
 ---
 
@@ -887,20 +890,20 @@ reuses an existing `~/.memvara/credentials.json` without opening a browser.
 
 Stated plainly, because a roadmap that only lists what is done is an advertisement.
 
-1. **End-to-end answer quality has an apparatus and one non-reproducible run, and no
-   benchmark.** `demo/` closed the first half of this: an authored support corpus, twenty
-   questions with authored golds, five arms from a no-context floor to a whole-transcript
-   ceiling, and a blinded dump/answer harness. It now has a reader behind an API as well
-   — `--reader anthropic|openai`, every parameter pinned and printed under the report's
-   title — but no run has been made with it yet. The one run used an agent as the
-   reader, so there is no model id, no seed and no temperature to quote, and it cannot be
-   repeated. Two things it did establish are worth
-   carrying: **at this corpus size the whole-transcript arm scored 100%**, so the memory
-   layer's argument here is 5.6× fewer tokens rather than a better answer; and the trap
-   metric — the column a before/after claim would rest on — produced **no signal at all**,
-   because the reader never gave a superseded value. Still missing on *this* corpus: a
-   run with the hosted reader, at both corpus sizes now that `--corpus-scale` supplies
-   the second.
+1. **End-to-end answer quality is measured for the structured integration, and not yet for
+   the shipped defaults.** `demo/` supplies an authored support corpus, twenty questions
+   with authored golds, five arms from a no-context floor to a whole-transcript ceiling,
+   and a reader behind an API with every parameter pinned. On 2026-09-28 it was run with
+   Qwen3.8-27B as reader and judge, at both corpus sizes, against the hosted service
+   ([`demo/README.md`](../demo/README.md#what-the-recorded-runs-produced)).
+   `memvara_structured` scored 80% at scale 1 and 75% at scale 10 with one trap, while
+   `naive_rag` fell from 75% to 35%, and a repeat of the scale-1 run gave identical
+   answers. Still missing on *this* corpus: a measurement of the plain `memvara` arm. The
+   hosted service extracts claims in a background worker that gives no sign of finishing,
+   and at read time those scopes held 2 to 10 claims, none about a fact a question asks,
+   so that arm's rows are not a result. Measuring it needs either a service that reports
+   when extraction is done or a worker known to have run for the whole wait. The run also
+   has one reader, one corpus and a judge that is the same model.
 
    The comparison against mem0 **on answers** now has its apparatus but not its run.
    `--arm-mem0` adds the real `mem0ai` package as a sixth arm, driven by the same oracle
@@ -916,8 +919,8 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    A hosted reader has since been run on a different corpus — 0.11.0's
    ranked recall, judged on LongMemEval-S through the MemoryBench harness, in
    [`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness)
-   — but it says nothing about this authored support scenario, which still needs its own
-   run.
+   — and it says nothing about this authored support scenario, whose own run is described
+   at the start of this item.
 
    What did land is the *guarded* half: `python3 demo/harness.py --reader stub` runs all
    five arms end to end in one offline, deterministic process, and
