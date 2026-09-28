@@ -495,6 +495,9 @@ BARE_GLOB_EXCEPTIONS = {
     "tests/adversarial/coverage/test_adv_cover_inv_core_release.py":
         "walks the packaged skill and plugin/skills/memvara. A non-Python file under "
         "memvara/ runs the full suite, and this file names the plugin folder.",
+    "tests/test_hook_file_modes.py":
+        "walks a home directory the test creates under tmp_path, not a folder of the "
+        "repository, so no change in the repository is missed.",
 }
 
 
