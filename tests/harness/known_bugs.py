@@ -19,10 +19,8 @@ from dataclasses import dataclass
 
 import pytest
 
-
 class Reproduced(Exception):
     """A known bug's own symptom, seen by the test that pins it."""
-
 
 @dataclass(frozen=True)
 class KnownBug:
@@ -35,20 +33,10 @@ class KnownBug:
     #: filed by hand before that are in memvara/memvara.
     repo: str = "memvara/memvara"
 
-
 KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B2", 266, "a session-bound or agent-bound write ends the user-wide value"),
-    KnownBug("B3", 267, "auto-approve misses two read-only document tools"),
     KnownBug("B7", 273, "a session bound inside a project cannot read the global facts it "
              "writes"),
-    KnownBug("B19", 295, "memory_recall's description names arguments that a feature "
-             "switch removes"),
-    KnownBug("B20", 296, "two tool descriptions state a default that the schema does not "
-             "declare"),
-
-    KnownBug("B36", 313, "a refusal or a no-match reply quotes the whole argument"),
-    KnownBug("B39", 316, "memory_recall reports ranked without include_episodes as a "
-             "ValueError"),
 
     KnownBug("B26", 303, "malformed model output makes add() raise instead of dropping the "
              "item"),
@@ -71,17 +59,12 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              'memories" look identical'),
     KnownBug("B58", 340, 'the "_" approve separator never recovers a tool name on Cursor and '
              "OpenCode"),
-    KnownBug("B59", 341, "the hooks never find a store configured in Codex's, Cursor's or "
-             "OpenCode's own MCP config"),
-    KnownBug("B60", 342, "capture returns without a log line on four paths"),
     KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
     KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
     KnownBug("B50", 332, "add() drops a turn repeated word for word after the value it "
              "stated has changed"),
-    KnownBug("B73", 353, "memory_add says a turn was not stored when only no fact was "
-             "extracted from it"),
     # Found by the framework tests against the real packages.
     KnownBug("B80", 359, "the mem0 shim's add() and delete_all() refuse the entity ids "
              "mem0 2.x takes there, and search() and get_all() refuse them with TypeError "
@@ -95,7 +78,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B85", 364, "MemvaraStorage scores an exact duplicate at 0.5, below CrewAI's "
              "consolidation threshold of 0.85, so a repeated memory is stored twice"),
 )}
-
 
 def xfail(bug_id: str) -> pytest.MarkDecorator:
     """The strict expected-failure marker for a registered bug."""

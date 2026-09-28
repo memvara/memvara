@@ -3036,6 +3036,64 @@ def test_the_reader_flags_build_a_self_hosted_reader_and_refuse_what_does_not_ap
         ek.build_reader(_Args(reader="anthropic", base_url="http://h:1/v1"))
 
 
+def test_the_reader_timeout_reaches_the_client_and_the_header_but_not_the_checkpoint_key(
+        monkeypatch):
+    """`--timeout` sets how long the client waits for one request, and nothing else.
+
+    A full-transcript prompt at corpus scale 10 is about 25,000 tokens, and a model on a
+    server of your own can take longer than the client library's default to answer it.
+    The value has to reach the client, or the flag does nothing. It has to be printed in
+    the header, so a run that stopped on it can be repeated with the same bound. It must
+    not be in `settings()`, which is the checkpoint key: how long the client waits does
+    not change what was asked, so a rerun with a longer timeout replays the answers the
+    first run already paid for instead of asking for them again.
+    """
+    built: dict = {}
+    oai = type(sys)("openai")
+
+    def construct(**kwargs):
+        built.clear()
+        built.update(kwargs)
+        return _FakeOpenAI()
+
+    oai.OpenAI = construct
+    monkeypatch.setitem(sys.modules, "openai", oai)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    timed = ek.build_reader(_Args(reader="openai", model="qwen", timeout=1800.0))
+    assert built["timeout"] == 1800.0
+    untimed = ek.build_reader(_Args(reader="openai", model="qwen"))
+    assert "timeout" not in built, "no --timeout must leave the library's default alone"
+
+    assert timed.settings() == untimed.settings()
+    assert ek.call_id(timed.settings(), "s", "p") == ek.call_id(untimed.settings(), "s", "p")
+    assert "timeout=1800s" in "\n".join(ek.reader_settings_lines(timed))
+    assert ("timeout=not set (the client library's default)"
+            in "\n".join(ek.reader_settings_lines(untimed)))
+    assert timed.spawn("judge").timeout == 1800.0, "the judge is printed with the same bound"
+
+
+def test_the_anthropic_reader_passes_its_timeout_to_the_client_only_when_given(monkeypatch):
+    built: list[dict] = []
+    sdk = type(sys)("anthropic")
+    sdk.Anthropic = lambda **kwargs: built.append(kwargs) or "client"
+    monkeypatch.setitem(sys.modules, "anthropic", sdk)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    ek.hosted_reader("anthropic", _Args(timeout=900.0, max_tokens=None))
+    ek.hosted_reader("anthropic", _Args(max_tokens=None))
+    assert built == [{"timeout": 900.0}, {}]
+
+
+def test_a_timeout_that_is_not_positive_is_refused_before_anything_runs(monkeypatch):
+    oai = type(sys)("openai")
+    oai.OpenAI = lambda **kw: _FakeOpenAI()
+    monkeypatch.setitem(sys.modules, "openai", oai)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    for bad in (0.0, -5.0):
+        with pytest.raises(SystemExit, match="--timeout"):
+            ek.build_reader(_Args(reader="openai", timeout=bad))
+
+
 def test_a_base_url_without_a_key_file_still_needs_a_key_from_somewhere(monkeypatch):
     """A self-hosted server that needs no key is real, and so is one that does. With no
     file the environment is still the source, and its absence is refused the way it

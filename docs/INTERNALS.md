@@ -3236,6 +3236,11 @@ returns. They are separate fields because Codex accepts the async flag and then 
 run the hook at all, and guessing either wrong fails in opposite directions: losing the
 hook, or holding the turn for the whole 12–14 second extraction.
 
+Every shell host detaches now. Claude Code does run an async Stop hook, but `claude -p`
+cancels it when the process exits, so a headless session captured nothing (#398). A
+detached child runs in a session of its own and finishes after the client has gone.
+`supports_async` stays on the record because OpenCode's JavaScript plugin sets it.
+
 **Extraction never recurses, and the guard is one line in one place.**
 `lib/extract.py` refuses to run when `MEMVARA_CAPTURE_ACTIVE` is set, and sets it on the
 child it spawns. This matters more now that a host mines with its own CLI: `codex exec`

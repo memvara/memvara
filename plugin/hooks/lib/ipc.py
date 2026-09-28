@@ -52,7 +52,8 @@ RUNTIME_DIR = os.path.join(_HOME, ".memvara", ".hooks", "run")
 #: Files whose contents decide what a daemon actually does. A change to any of them must
 #: strand the old daemon rather than let it keep serving.
 CODE_FILES = ("daemon.py", "lib/ipc.py", "lib/open.py", "lib/private.py", "recall.py",
-              "run.py", "core/host.py", "core/envelope.py", "hosts/claude.py")
+              "run.py", "core/host.py", "core/envelope.py", "hosts/claude.py",
+              "lib/toml_servers.py")
 
 #: Set in the environment of the `claude -p` child that `capture.py` spawns to mine a turn.
 #: A hook that finds it is running underneath an extraction rather than in front of a
@@ -153,7 +154,7 @@ def _write_alert(data: dict) -> None:
     `clear_capture_alert` is the OTHER thing that touches this file, and does not call
     this function -- it does a plain `os.unlink`, which needs no atomicity dance because
     an unlink has no partial-write state to leave behind. The two are still genuinely
-    concurrent with each other: `raise_capture_alert` (the async extraction child) and
+    concurrent with each other: `raise_capture_alert` (the detached extraction child) and
     `clear_capture_alert` (the same child, the next time it succeeds) can each run while
     the other is mid-call, with no lock between them -- `capture.py` says extraction takes
     12-14s and hands the turn back immediately, so an extraction still finishing while
@@ -267,7 +268,7 @@ def _write_notified_alert(data: dict) -> None:
 
     Two things write here, from two different, genuinely concurrent processes: `recall.py`
     calls `due_alert_for_model()` synchronously on every prompt, and `clear_capture_alert()`
-    -- called from the async extraction child, the same one `raise_capture_alert` runs from
+    -- called from the detached extraction child, the same one `raise_capture_alert` runs from
     -- resets this file the moment capture recovers. Those two can race exactly the way
     `raise_capture_alert`/`clear_capture_alert` already race on `capture-alert.json`: each
     does its own read-then-conditional-write with no lock between them, so a recovery's
@@ -320,8 +321,8 @@ def due_alert_for_model() -> str:
 def with_alert(text: str, alert: str) -> str:
     """A status line, with word of a failing extractor riding along on it.
 
-    `capture.py` runs `async` and cannot print anything of its own -- the client discards
-    an async hook's output entirely, which is why its whole account moved to `capture.log`
+    `capture.py` runs detached and cannot print anything of its own -- nothing its child
+    process prints reaches the client, which is why its whole account moved to `capture.log`
     in the first place. Nobody reads that on a schedule, so a `claude -p` that has been
     failing for hours says nothing anyone sees until a hook that speaks -- `recall.py` on
     every prompt, `session_start.py` once per session -- relays it.
@@ -463,23 +464,72 @@ def server_env() -> "dict[str, str]":
 _SERVER_ENV: "tuple[tuple[str, ...], dict[str, str]] | None" = None
 
 
+#: Where each client keeps its MCP servers inside its config, and what it calls the
+#: variables a server starts with: `mcpServers`/`env` for Claude Code, Copilot and Cursor,
+#: `mcp_servers`/`env` in Codex's TOML, and `mcp`/`environment` for OpenCode (#341).
+_SERVER_SHAPES = (("mcpServers", "env"), ("mcp_servers", "env"), ("mcp", "environment"))
+
+
+def _read_config(path: str) -> "dict | None":
+    """One client config file as a dict: TOML for a `.toml` file, which is Codex's, and
+    JSON for the rest. None when it cannot be read."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, ValueError):
+        return None
+    if path.endswith(".toml"):
+        from . import toml_servers  # noqa: PLC0415 -- only Codex's hooks reach it
+
+        data = toml_servers.read(text)
+    else:
+        try:
+            data = json.loads(text)
+        except (ValueError, RecursionError):
+            return None
+    return data if isinstance(data, dict) else None
+
+
+def server_blocks() -> "list[dict]":
+    """Every memvara server block in the client's config files, in the order they are read,
+    each as `{"command": str | None, "args": list, "env": dict | None}` whatever shape the
+    client keeps it in.
+
+    OpenCode puts the command and its arguments in one list, which is split here. The
+    hooks' `server_env` takes the first block with variables, and agentic capture
+    (`lib.agentic`) takes the first with a command, so the two read one list and cannot
+    disagree about the shapes they understand.
+    """
+    found = []
+    for path in _CLIENT_CONFIGS:
+        data = _read_config(path)
+        if data is None:
+            continue
+        for servers_key, env_key in _SERVER_SHAPES:
+            servers = data.get(servers_key)
+            if not isinstance(servers, dict):
+                continue
+            for name, block in servers.items():
+                if "memvara" not in str(name).lower() or not isinstance(block, dict):
+                    continue
+                command, args = block.get("command"), block.get("args")
+                if isinstance(command, list):
+                    command, args = (command[0] if command else None), command[1:]
+                env = block.get(env_key)
+                found.append({
+                    "command": command if isinstance(command, str) else None,
+                    "args": [str(arg) for arg in args] if isinstance(args, list) else [],
+                    "env": ({str(k): str(v) for k, v in env.items()}
+                            if isinstance(env, dict) else None),
+                })
+    return found
+
+
 def _read_server_env() -> "dict[str, str]":
     """The client config files' memvara env block, read from disk. See `server_env`."""
-    for path in _CLIENT_CONFIGS:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            continue
-        servers = data.get("mcpServers")
-        if not isinstance(servers, dict):
-            continue
-        for name, block in servers.items():
-            if "memvara" not in name.lower() or not isinstance(block, dict):
-                continue
-            env = block.get("env")
-            if isinstance(env, dict):
-                return {str(k): str(v) for k, v in env.items()}
+    for block in server_blocks():
+        if block["env"] is not None:
+            return block["env"]
     return {}
 
 

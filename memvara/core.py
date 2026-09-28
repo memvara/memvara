@@ -10,7 +10,7 @@ itself:
 * **The default configuration is honest about what it cannot do.** `Memvara()` with no
   arguments works offline with no API key, which is a real design property — and it
   also cannot extract facts from arbitrary prose, which used to be discoverable only by
-  noticing that a fourteen-turn conversation had stored nothing. It now says so, once,
+  noticing that a fourteen-turn conversation had yielded no facts. It now says so, once,
   at construction, and `WriteReceipt.unextracted` says so per write.
 * **An embedder swap is caught before it corrupts anything.** See `_check_embedder`.
 * **What was stored can be found again.** Every turn `add()` keeps is indexed, not just

@@ -789,7 +789,7 @@ not win every category, and the table reports the ones it loses.
 | The two clocks, six question families | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#the-two-clocks-measured-synthetic-self-authored) |
 | LOCOMO and LongMemEval, retrieval | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md) |
 | LongMemEval, judged answer accuracy (0.11.0's ranked recall) | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness) |
-| Answer quality, end to end | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#answer-quality-end-to-end-an-authored-corpus-an-agent-as-the-reader) |
+| Answer quality, end to end | [`docs/BENCHMARKS.md`](https://github.com/memvara/memvara/blob/main/docs/BENCHMARKS.md#answer-quality-end-to-end-an-authored-corpus-a-model-as-the-reader) |
 
 The harnesses are in [`bench/`](https://github.com/memvara/memvara/tree/main/bench) and [`demo/`](https://github.com/memvara/memvara/blob/main/demo/README.md), and every number is
 reproducible from this repository. Where a result is synthetic or self-authored, its own
@@ -807,7 +807,8 @@ against another vendor's hosted service.
 
 ```bash
 python3 -m pytest -q                              # 9,972 passing, 12 skipped, 91 expected failures, no API key
-python3 -m coverage run -m pytest && python3 -m coverage report   # gated at 100%
+python3 -m coverage erase && python3 -m coverage run -m pytest -n auto \
+  && python3 -m coverage combine && python3 -m coverage report   # gated at 100%
 python3 -m benchmarks.agent_memory --system memvara --compare   # the agent memory benchmark
 PYTHONPATH=. python3 bench/temporal.py            # the two clocks, six families
 PYTHONPATH=. python3 bench/compare.py             # architecture comparison
