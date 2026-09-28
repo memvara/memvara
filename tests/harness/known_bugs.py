@@ -41,8 +41,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B7", 273, "a session bound inside a project cannot read the global facts it "
              "writes"),
 
-    KnownBug("B23", 300, "a store refused for its embedder has already been migrated"),
-    KnownBug("B24", 301, "a store refused as too new leaves its SQLite connection open"),
 
 
     KnownBug("B26", 303, "malformed model output makes add() raise instead of dropping the "
@@ -53,8 +51,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "object is stored as Python text"),
     KnownBug("B30", 307, "a model retraction at low confidence ends a fact the user "
              "asserted"),
-    KnownBug("B32", 309, "invented predicates past the learned cap make one write take "
-             "quadratic time"),
     KnownBug("B45", 317, "a backdated retraction's tombstone is live in reads of the past"),
     KnownBug("B69", 349, "a repeated future-dated retraction writes a new tombstone each "
              "time"),
@@ -66,7 +62,6 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              'memories" look identical'),
     KnownBug("B58", 340, 'the "_" approve separator never recovers a tool name on Cursor and '
              "OpenCode"),
-    KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
     KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
