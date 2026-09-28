@@ -43,23 +43,13 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
 
 
 
-    KnownBug("B30", 307, "a model retraction at low confidence ends a fact the user "
-             "asserted"),
-    KnownBug("B45", 317, "a backdated retraction's tombstone is live in reads of the past"),
-    KnownBug("B69", 349, "a repeated future-dated retraction writes a new tombstone each "
-             "time"),
     KnownBug("B46", 318, "tier 0 of add() reinforces a restatement dated before the claim, "
              "and the earlier period is lost"),
-    KnownBug("B70", 351, "a different value written twice for a period before the "
-             "current one is stored twice"),
-    KnownBug("B56", 338, 'on Codex, Copilot and OpenCode, "not configured" and "no matching '
-             'memories" look identical'),
     KnownBug("B58", 340, "on Cursor and OpenCode a read-only memvara tool is never approved: "
              "the names measured there do not name the server safely, and an approval path "
              "that does waits for an interactive measurement"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
-    KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
     KnownBug("B50", 332, "add() drops a turn repeated word for word after the value it "
              "stated has changed"),
     # Found by the framework tests against the real packages.
