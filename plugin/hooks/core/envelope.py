@@ -42,7 +42,9 @@ def read_event(host, hook: str, raw) -> "Event":
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
-        except ValueError:
+        # Nesting deeper than the recursion limit raises RecursionError, which is not a
+        # ValueError, and is just as unreadable (#346).
+        except (ValueError, RecursionError):
             raw = {}
     data = raw if isinstance(raw, dict) else {}
 
