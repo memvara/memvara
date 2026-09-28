@@ -38,18 +38,12 @@ class KnownBug:
 
 KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
     KnownBug("B2", 266, "a session-bound or agent-bound write ends the user-wide value"),
-    KnownBug("B3", 267, "auto-approve misses two read-only document tools"),
     KnownBug("B7", 273, "a session bound inside a project cannot read the global facts it "
              "writes"),
-    KnownBug("B19", 295, "memory_recall's description names arguments that a feature "
-             "switch removes"),
-    KnownBug("B20", 296, "two tool descriptions state a default that the schema does not "
-             "declare"),
 
     KnownBug("B23", 300, "a store refused for its embedder has already been migrated"),
     KnownBug("B24", 301, "a store refused as too new leaves its SQLite connection open"),
 
-    KnownBug("B36", 313, "a refusal or a no-match reply quotes the whole argument"),
     KnownBug("B39", 316, "memory_recall reports ranked without include_episodes as a "
              "ValueError"),
 
@@ -72,16 +66,12 @@ KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
              "current one is stored twice"),
     KnownBug("B58", 340, 'the "_" approve separator never recovers a tool name on Cursor and '
              "OpenCode"),
-    KnownBug("B59", 341, "the hooks never find a store configured in Codex's, Cursor's or "
-             "OpenCode's own MCP config"),
     KnownBug("B64", 346, "a payload nested 100,000 levels deep crashes every hook body"),
     KnownBug("B52", 334, "a hosted write's receipt drops accumulated, disputed, collapsed "
              "and retyped, so cloud-mode memory_remember leaves out four notes"),
     KnownBug("B53", 335, "a hosted receipt always reports 0 for ungrounded and polluted"),
     KnownBug("B50", 332, "add() drops a turn repeated word for word after the value it "
              "stated has changed"),
-    KnownBug("B73", 353, "memory_add says a turn was not stored when only no fact was "
-             "extracted from it"),
     # Found by the framework tests against the real packages.
     KnownBug("B80", 359, "the mem0 shim's add() and delete_all() refuse the entity ids "
              "mem0 2.x takes there, and search() and get_all() refuse them with TypeError "

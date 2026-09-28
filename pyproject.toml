@@ -100,7 +100,7 @@ ingest = ["pypdf>=4.0"]
 # macOS Keychain or the Linux Secret Service. All three are imported only when a store is
 # encrypted, so a plain `pip install memvara` never loads them.
 encrypt = ["sqlcipher3>=0.6.2", "cryptography>=42", "keyring>=24"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0", "mypy>=1.8", "hypothesis>=6.100"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "pytest-xdist>=3.5", "coverage>=7.10", "mypy>=1.8", "hypothesis>=6.100"]
 # Only for bench/mem0_real.py, the head-to-head against the real package.
 # `nltk` only for `--stem`: published LOCOMO F1 uses Porter stemming, so an
 # unstemmed number is not comparable to the papers.
@@ -141,6 +141,20 @@ exclude = ["npm", ".claude"]
 
 [tool.coverage.run]
 source = ["memvara"]
+# coverage.py measures the processes the tests start, including pytest-xdist's workers,
+# so the suite can run in parallel under coverage. `patch = ["subprocess"]` needs
+# coverage 7.10 or later and turns on `parallel`: each process writes its own data file,
+# and `coverage combine` must run before `coverage report`. A line that only a test's
+# child process runs now counts as covered, which it did not before; the total was 100%
+# both ways when this was set up on 2026-09-27. pytest-cov is not used: one test in
+# tests/test_store.py fails under it and passes under `coverage run`.
+parallel = true
+patch = ["subprocess"]
+# The packaged skill is data that `memvara-mcp init` writes to disk, not library source,
+# and pytest already ignores it (see addopts below). Its one script is measured when a
+# test runs it in a child process. The suite does not aim to cover it, so it would pull
+# the total below 100%.
+omit = ["memvara/skills/*"]
 
 [tool.coverage.report]
 # The suite covers every executable statement. Keep it that way: an untested line in a

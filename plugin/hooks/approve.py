@@ -28,7 +28,8 @@ from lib.ipc import payload  # noqa: E402
 #: that they were added after this list. `memory_standing` and `memory_ask` were missing for
 #: the same reason, and the memory-research subagent calls both, so it stopped at a
 #: permission prompt on its first search. `memory_profile` is listed before the server
-#: ships it so that the subagent can call it the day it does.
+#: ships it so that the subagent can call it the day it does. The two document readers,
+#: `memory_get_document` and `memory_list_documents`, were missing too (#267).
 READ_ONLY = frozenset({
     "memory_recall",
     "memory_search",
@@ -41,6 +42,8 @@ READ_ONLY = frozenset({
     "memory_standing",
     "memory_ask",
     "memory_profile",
+    "memory_get_document",
+    "memory_list_documents",
 })
 
 
