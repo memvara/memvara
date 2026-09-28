@@ -487,7 +487,8 @@ CONSOLIDATE_DECAYED = "consolidate.decayed"
 CONSOLIDATE_MERGED = "consolidate.merged"
 CONSOLIDATE_PROMOTED = "consolidate.promoted"
 
-#: Rows a pass wrote back, and how long the whole pass took.
+#: Rows a pass wrote back, and how long the whole pass took. A row that another writer
+#: changed or erased during the pass is left unwritten and is not counted here.
 CONSOLIDATE_ROWS_WRITTEN = "consolidate.rows_written"
 CONSOLIDATE_LATENCY_MS = "consolidate.latency_ms"
 

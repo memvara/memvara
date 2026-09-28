@@ -79,7 +79,10 @@ backend implements `llm.ToolChat`, `AgenticExtractor` gives the model six tools:
 search what this write's scope can see, read one memory by id, and propose a new memory,
 the end of a stored memory, a replacement for one, or a link between two. The system
 message carries the project's extraction guidance when there is some, and a proposed
-memory can carry an expiry the turn names. The proposals write nothing. A proposed memory goes through the same guards as single-call output and
+memory can carry an expiry the turn names. That expiry stays on the claim the proposal
+creates; a proposal that repeats a claim on record reinforces it without touching its
+expiry, because only a caller's repeat moves an expiry, and single-call output, which is
+offered no expiry, has any it returns dropped. The proposals write nothing. A proposed memory goes through the same guards as single-call output and
 then `Reconciler.apply()`; a proposed end becomes a retraction with `close="ended"`; a
 proposed link becomes a `claim_links` row. A link from a proposal that restated a live
 value with an earlier start lands on the live claim on record, not on the claim for the
@@ -100,7 +103,16 @@ period),
 conflict (the predicate holds one value, so the incoming claim supersedes the old one),
 retraction (the incoming claim has `polarity == -1`, so matching live claims are closed out),
 or accumulate (insert alongside). `Memvara.supersede()` is the explicit form of the second
-outcome for a caller who already knows which claim is being replaced.
+outcome for a caller who already knows which claim is being replaced. In a conflict, the old
+values are every value believed and neither retired nor ended yet, including one written to
+begin later, that is true at some instant the incoming claim is true; `docs/INTERNALS.md` has
+the three rules.
+
+**An exact duplicate counts only when the writer can see it.** `value_key` leaves out the
+project, agent and session, so the duplicate lookup also finds the same value in a sibling
+project or session. That claim is left alone, and the repeat is stored in the writer's own
+scope; otherwise the writer would read nothing back. INTERNALS, "A repeat reinforces only a
+claim its writer can see", has the rule and the two other paths that follow it.
 
 **Replacement advice is separate from all of this and closes nothing.** When a `Memvara` was
 built with `advise_replacements=True`, when the backend implements `ReplacementJudge`, and
@@ -113,6 +125,23 @@ exception the caller retries.
 
 ## Invariants and assumptions
 
+- **A queued reinforcement reads its claim again before it writes.** Tier 0 finds the
+  claims a repeated or restated turn supports, but the claim transaction reinforces them
+  only after tiers 1 and 2. It reads each claim again there, under the write lock, and
+  leaves alone one that another writer erased, ended or retired in the meantime, so the
+  reinforcement cannot undo that change or bring an erased claim back.
+- **Nothing read from a turn erased during extraction is written.** The claim transaction
+  of `add()` and `reextract()` reads again which of its turns are still stored
+  (`_erased`). It drops a candidate, and a reinforcement tier 0 queued, whose every turn is
+  gone, cites only the stored turns from everything else, and refuses an agentic end read
+  from a gone turn, so a purge or a document delete that lands during a model call is not
+  undone by the claims that call produced.
+- **The backfills write back only onto slots nobody changed.** `backfill_entities()`,
+  `backfill_predicates()` and `split_entity()` read their claims, decide, and write at the
+  end. `_write_back` reads the rows again under the write lock and writes a slot's claims
+  only if every one of them is still exactly as the pass read it, so a pass cannot undo
+  another writer's change or bring an erased claim back. A slot it leaves is applied by
+  the next run.
 - **A document chunk passes the role check.** `add_document()` stores each chunk as a
   system turn with `meta["document_id"]`, and the gate accepts it whatever its role,
   because the caller asked for the document to be read. The fast path still reads user

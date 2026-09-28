@@ -51,8 +51,9 @@ Three more things differ and are handled rather than hidden:
 * **`delete()` retires by default.** CrewAI's own dedup path calls `delete(record_ids=…)`
   when a record is superseded, and retirement is the *right* answer there: the value
   stops being returned and `history()` still has it. It is the wrong answer to "delete
-  my data", so the first one warns and names `on_delete="erase"`. `reset()` is the one
-  deletion that maps exactly — CrewAI means "wipe", memvara's `purge()` is a wipe.
+  my data", so the first one warns and names `on_delete="erase"`, which erases each
+  record with every earlier version of it. `reset()` is the one deletion that maps
+  exactly — CrewAI means "wipe", memvara's `purge()` is a wipe.
 * **`update()` maps better than CrewAI's own contract.** "Replace the record with the
   same ID" becomes a supersession on a single-valued slot: the new text is asserted, the
   old value is ended with `invalidated_by` pointing at its replacement, and
@@ -119,8 +120,8 @@ _RETIRED_NOT_ERASED = (
     "That is the right default for CrewAI's own consolidation path, which deletes a "
     "record because something superseded it and is better off keeping the trail. It is "
     "the wrong answer to a data-deletion request: pass MemvaraStorage(on_delete='erase') "
-    "to erase the record and its source turn outright, or 'retire' to keep this "
-    "behaviour and silence this warning once you have decided."
+    "to erase the record and every earlier version of it outright, or 'retire' to keep "
+    "this behaviour and silence this warning once you have decided."
 )
 
 
@@ -481,6 +482,11 @@ class MemvaraStorage:
         Every given criterion must match (CrewAI's own callers pass exactly one). No
         criteria at all deletes everything in scope, which is what CrewAI's signature
         means and is why `reset()` exists as the separate, unambiguous call.
+
+        The criteria are matched against the records this storage returns, which are the
+        current versions. Under `on_delete="erase"` each matched record is erased with
+        every earlier version of it; see `_erase_record`. The return value counts records,
+        as CrewAI's protocol defines it, so a record erased with two versions counts once.
         """
         if metadata_filter:
             raise CrewAICompatError(_NO_METADATA_FILTER)
@@ -511,12 +517,33 @@ class MemvaraStorage:
 
     def _remove(self, claim: Claim) -> None:
         if self.on_delete == "erase":
-            # `sources=True` is right here and would be wrong for an extracted fact: a
-            # record *is* its source turn, holding the same text and nothing else, so
-            # leaving the episode behind would erase the memory and keep the sentence.
-            self.memory.erase(claim.id, sources=True, **self._kw)
+            self._erase_record(claim)
         else:
             self.memory.delete(claim.id, **self._kw)
+
+    def _erase_record(self, claim: Claim) -> None:
+        """Erase every version of the record whose current version is `claim`.
+
+        A record occupies one slot. Its id is in the slot's subject, and `update()`
+        asserts the new text onto that same slot, so every text the record has held is a
+        claim there: ended when an update replaced it, or retired when the record was
+        deleted by retirement and later saved again under the same id. No other record is
+        stored on that slot, so erasing the slot erases this record and never another.
+
+        The slot is shared by every session and agent of this storage's user, because a
+        slot's key leaves both out, so it can also hold the same record id written from a
+        sibling session. `erase()` refuses a claim in a scope this storage cannot read,
+        and such a claim is left as it is. What is erased is therefore every version in
+        this storage's own scope and in the broader scopes it reads, which are the claims
+        `Memvara.erase()` lets it reach.
+
+        It passes `sources=True`, as the single-claim erasure it replaced did. A record is
+        saved with no source turn, so normally there is nothing more to erase, but a turn
+        that something else attached to one of these claims is erased with it once no
+        other claim cites it.
+        """
+        for version in self.memory.store.slot_history(claim.scope.tenant, claim.fact_key):
+            self.memory.erase(version.id, sources=True, **self._kw)
 
     def reset(self, scope_prefix: str | None = None) -> None:
         """Wipe. The one deletion that maps exactly, so it does not warn.
@@ -526,14 +553,15 @@ class MemvaraStorage:
         behind. CrewAI's `reset` means the same thing, so there is nothing to disclose.
 
         A `scope_prefix` narrows to CrewAI's own scope tree, which memvara cannot purge
-        by (see the module docstring), so those records are erased one at a time —
-        the same erasure, reached the long way.
+        by (see the module docstring), so the records currently under it are erased one
+        at a time, each with every earlier version of it, as `_erase_record` does for
+        `delete()` — the same erasure, reached the long way.
         """
         if not scope_prefix or not scope_prefix.strip("/"):
             self.memory.purge(**self._kw)
             return
         for claim in list(self._matching(scope_prefix, None, None, None)):
-            self.memory.erase(claim.id, sources=True, **self._kw)
+            self._erase_record(claim)
 
     # -- StorageBackend: the async half --------------------------------------
     #

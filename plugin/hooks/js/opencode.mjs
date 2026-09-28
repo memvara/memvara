@@ -18,9 +18,13 @@
  *    session-start hook that can inject -- every once-per-session hook it offers is void.
  */
 
+import { createHash } from "node:crypto"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-import { note, runHook, runHookDetached } from "./shim.mjs"
+import { note, privateDir, runHook, runHookDetached, writePrivate } from "./shim.mjs"
 
 const HOST = "opencode"
 //: `fileURLToPath`, not `new URL(...).pathname`. The latter yields `/C:/Users/...` on
@@ -46,11 +50,61 @@ let askShapeLogged = false
 const TIMEOUTS = { session_start: 20000, recall: 10000, capture: 120000,
                    approve: 5000, transcript: 15000 }
 
+/**
+ * Where a session's transcript is written for capture to read: the account's own hook
+ * directory, 0700, with the file 0600 (`shim.privateDir`, `shim.writePrivate`). A whole
+ * conversation goes into it. It used to be `$TMPDIR/memvara-opencode`, with the default
+ * modes, and on Linux `$TMPDIR` is usually the shared `/tmp`, so every account on the
+ * machine could read it, and a directory of that fixed name could be made there first by
+ * another account.
+ */
+const TRANSCRIPTS = path.join(os.homedir(), ".memvara", ".hooks", "opencode")
+
+/** An OpenCode session id, which becomes a file name. Anything else is not written. */
+const SESSION_ID = /^[A-Za-z0-9_-]{1,200}$/
+
+/**
+ * For each session, a digest of the transcript last handed to capture, and how many
+ * captures are still reading its file.
+ *
+ * The file is removed when the last capture reading it is done, so the capture hook's own
+ * watermark, which it keys on the file, cannot tell a repeated idle event from a new
+ * reply. This remembers instead: a transcript with exactly the content of the one last
+ * captured holds no new reply, and starts no capture. The digest is of the content, not
+ * its length, because a different conversation can be exactly as long, for example when a
+ * reply is undone and another of the same length takes its place. In memory, for the
+ * reason `started` is.
+ */
+const captured = new Map()
+const reading = new Map()
+
+/**
+ * Remove the transcripts an earlier version left in the shared `$TMPDIR`, where every
+ * account could read them and nothing prunes them any more. Only this account's own
+ * files can be removed there, and anything that cannot is left.
+ */
+function removeOldTranscripts() {
+  const old = path.join(os.tmpdir(), "memvara-opencode")
+  let names = []
+  try { names = fs.readdirSync(old) } catch { return }
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) continue
+    try { fs.unlinkSync(path.join(old, name)) } catch { /* not ours to remove */ }
+  }
+  try { fs.rmdirSync(old) } catch { /* not empty, or not ours */ }
+}
+
 export const MemvaraPlugin = async ({ client, directory, worktree }) => {
   note("hooks", `opencode plugin loaded dir=${HOOKS_DIR}`)
+  removeOldTranscripts()
 
-  /** Materialise a transcript OpenCode never hands us, in the shape `lib.transcript` reads. */
+  /** Materialise a transcript OpenCode never hands us, in the shape `lib.transcript` reads.
+   * Returns its path, or `""` when there is nothing new for capture to read. */
   const writeTranscript = async (sessionID) => {
+    if (!SESSION_ID.test(sessionID)) {
+      note("hooks", "skipped=transcript: the session id is not a plain file name")
+      return ""
+    }
     try {
       // Bounded, like every other call out of this file. `runHook` enforces a timeout
       // because the host publishes none; this call had none at all, and it sits BEFORE
@@ -75,25 +129,24 @@ export const MemvaraPlugin = async ({ client, directory, worktree }) => {
         if (content.length) lines.push(JSON.stringify({ type: role, message: { content } }))
       }
       if (!lines.length) return ""
-      const fs = await import("node:fs")
-      const os = await import("node:os")
-      const path = await import("node:path")
-      const dir = path.join(os.tmpdir(), "memvara-opencode")
-      fs.mkdirSync(dir, { recursive: true })
-      // One file per session, rewritten each turn, so this never grows within a session.
-      // Across sessions it would grow without bound -- a machine that has run OpenCode
-      // for a month would hold a file per session it ever opened, each the size of a
-      // whole conversation. Pruned by age on write rather than deleted after capture,
-      // because capture is detached and deleting under a running child is a race.
+      const text = lines.join("\n") + "\n"
+      const digest = createHash("sha256").update(text).digest("hex")
+      if (digest === captured.get(sessionID)) return ""
+      privateDir(TRANSCRIPTS)
+      // One file per session, removed when the capture that reads it is done (`event`
+      // below). A newer transcript replaces it by a rename (`shim.writePrivate`), so a
+      // capture still reading the older one is not disturbed. A file left behind, by a
+      // server that stopped while a capture ran, is pruned by age here.
       const cutoff = Date.now() - 24 * 60 * 60 * 1000
-      for (const name of fs.readdirSync(dir)) {
+      for (const name of fs.readdirSync(TRANSCRIPTS)) {
         try {
-          const full = path.join(dir, name)
+          const full = path.join(TRANSCRIPTS, name)
           if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full)
         } catch { /* another turn pruned it first */ }
       }
-      const file = path.join(dir, `${sessionID}.jsonl`)
-      fs.writeFileSync(file, lines.join("\n") + "\n")
+      const file = path.join(TRANSCRIPTS, `${sessionID}.jsonl`)
+      writePrivate(file, text)
+      captured.set(sessionID, digest)
       return file
     } catch (err) {
       note("hooks", `transcript unavailable session=${sessionID} ${String(err)}`)
@@ -184,12 +237,20 @@ export const MemvaraPlugin = async ({ client, directory, worktree }) => {
       if (!sessionID) return
       const transcript = await writeTranscript(sessionID)
       if (!transcript) return
-      // Not awaited: see shim.runHookDetached.
+      reading.set(sessionID, (reading.get(sessionID) ?? 0) + 1)
+      // Not awaited: see shim.runHookDetached. The transcript is removed when the last
+      // capture reading it is done, whether it finished, failed or was killed: it holds a
+      // whole conversation, and nothing reads it afterwards.
       runHookDetached({
         hooksDir: HOOKS_DIR, hook: "capture", host: HOST,
         payload: { session_id: sessionID, cwd: directory ?? worktree ?? "",
                    transcript_path: transcript },
         timeoutMs: TIMEOUTS.capture,
+      }).finally(() => {
+        const left = (reading.get(sessionID) ?? 1) - 1
+        if (left > 0) { reading.set(sessionID, left); return }
+        reading.delete(sessionID)
+        try { fs.unlinkSync(transcript) } catch { /* already gone */ }
       })
     },
   }

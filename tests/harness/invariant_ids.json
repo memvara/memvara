@@ -17,7 +17,8 @@
       "CG3": "`now` is read once for the whole pass.",
       "CG4": "The graph leg is closed when the store provably has no joins.",
       "CG5": "An empty connectivity result keeps the leg on.",
-      "CG6": "An unregistered predicate accumulates rather than superseding, and decays slowly."
+      "CG6": "An unregistered predicate accumulates rather than superseding, and decays slowly.",
+      "CG7": "The write-back never overwrites another writer."
     },
     "docs/claude/mcp-server.md": {
       "MS1": "The scope is bound at startup and no tool call can change it.",
@@ -25,7 +26,8 @@
       "MS2": "Cloud mode refuses `MEMVARA_LLM` and `MEMVARA_EMBEDDER`.",
       "MS3": "A configuration error is a refusal that names the fix.",
       "MS4": "The documented example and the written entry may not drift.",
-      "MS5": "Tool text and the packaged skill do not repeat each other."
+      "MS5": "Tool text and the packaged skill do not repeat each other.",
+      "MS6": "Every line on stdout is strict JSON."
     },
     "docs/claude/memory-model.md": {
       "I1": "Deterministic paths never call a model.",
@@ -39,7 +41,8 @@
       "MM5": "Each text index row sits at the rowid of the row it indexes.",
       "MM6": "Every commit `SQLiteStore` makes that can change a turn goes through `_maybe_commit`.",
       "MM7": "A claim's state changes with the clock only at one of its five time columns.",
-      "MM8": "A change to the entity fold bumps `SCHEMA_VERSION`."
+      "MM8": "A change to the entity fold bumps `SCHEMA_VERSION`.",
+      "MM9": "A write holds the database's write lock from its first lookup."
     },
     "docs/claude/release-and-plugins.md": {
       "RP1": "A published version is final.",
@@ -91,7 +94,10 @@
       "WP8": "`WriteReceipt` must be fully populated, including `llm_calls`.",
       "WP9": "Extraction that cannot run is reported, and how depends on the deployment.",
       "WP10": "A model proposes and the reconciler applies.",
-      "WP11": "A long turn is extracted whole or not at all."
+      "WP11": "A long turn is extracted whole or not at all.",
+      "WP12": "A queued reinforcement reads its claim again before it writes.",
+      "WP13": "Nothing read from a turn erased during extraction is written.",
+      "WP14": "The backfills write back only onto slots nobody changed."
     }
   }
 }

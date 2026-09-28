@@ -71,6 +71,8 @@ means.
 By default, deleting an item through this interface is a **correction** (reversible, the
 old value stays visible in history), not a permanent deletion. Pass `on_delete="erase"`
 if you specifically want deletions through this interface to actually erase the data.
+Erasing an item erases every value it has held, including values that later changes
+replaced, not only the current one.
 
 ## LangChain chat message history
 

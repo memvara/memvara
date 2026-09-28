@@ -103,6 +103,18 @@ release from before that change leaves a value stored to begin later alone.
 
 - **The scope is bound at startup and no tool call can change it.** That is what stops a
   model reaching another user's memory, and it is why `tenant` is not a tool argument.
+- **Every line on stdout is strict JSON.** `protocol.decode` answers a request whose id is,
+  or holds inside an object or array, `NaN`, `Infinity`, `-Infinity` or a number too large
+  for a double, such as `1e400`, with a parse error (-32700). Python's decoder reads those
+  numbers, and the reply then copied the id as a bare `NaN` or `Infinity` that a strict
+  parser cannot read. The id is the only value a reply copies from its request, so the same
+  numbers elsewhere, such as in a tool's arguments, are read and go to the tool's own
+  argument check. `protocol.encode` passes `allow_nan=False`, so no reply can carry such a
+  number whatever reaches it. A reply it refuses is not written at all:
+  `MemvaraMCPServer.handle_line` answers that request with a JSON-RPC internal error
+  (-32603) that carries its id, writes the reason to standard error, and goes on serving,
+  so one bad reply costs one request rather than the session. `tests/test_server.py` reads
+  every reply line with a strict parser.
 - **No MCP client can backdate the transaction clock.** This is invariant 8 in
   [INTERNALS.md](../INTERNALS.md). A client may state when a fact was true; it may not state
   when this store came to believe it.

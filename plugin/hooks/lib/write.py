@@ -24,6 +24,7 @@ from typing import Any, Iterable, Sequence
 from core.host import active
 
 from .open import open_store
+from .private import private_dir, private_open
 
 #: Beside the store, not in the plugin: the plugin directory is replaced wholesale on
 #: update, and a log that disappears on upgrade is not a log.
@@ -64,12 +65,16 @@ EPISODE_ROLE = "system"
 
 
 def log(line: str) -> None:
-    """Append one line, or give up quietly. Never raises into a hook."""
+    """Append one line, or give up quietly. Never raises into a hook.
+
+    The directory is 0700 and the file 0600 (`lib.private`): a line can quote up to 200
+    characters of a model's reply.
+    """
     try:
-        LOG.parent.mkdir(parents=True, exist_ok=True)
+        private_dir(str(LOG.parent))
         if LOG.exists() and LOG.stat().st_size > LOG_MAX_BYTES:
-            LOG.write_text("")
-        with LOG.open("a", encoding="utf-8") as fh:
+            private_open(str(LOG), "w").close()
+        with private_open(str(LOG), "a") as fh:
             fh.write(f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} {line}\n")
     except OSError:
         pass

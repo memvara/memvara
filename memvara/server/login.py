@@ -53,6 +53,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Sequence, TextIO
 
+from .init import private_directory
+
 __all__ = ["LOGIN_USAGE", "login"]
 
 #: Where the flow starts absent MEMVARA_SERVER_URL — the same default `config.py` gives
@@ -268,7 +270,10 @@ def _write_credentials(*, api_key: str, project: str, server_url: str,
     not add a credential — it moves every one of those callers into that project.
     """
     path = _CREDENTIALS_PATH if path is None else path
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # Private to this account, as `init` makes the store's directory: for the default path
+    # that is `~/.memvara` itself, which an earlier version created 0755 and which loses
+    # the permissions for group and others here. See `init.private_directory`.
+    private_directory(path.parent)
     payload = {
         "api_key": api_key,
         "project": project,

@@ -5,7 +5,8 @@ receipt field and every read with the model, and makes the checks that read only
 store (invariants I4 to I13 in the plan). The machine adds the checks that need the
 history of a run rather than one step, and one check at the end of each run:
 - no step closes both clocks of a row that already existed (I1);
-- a closed clock never moves later, and an ending is never cleared (I2);
+- a closed clock never moves later, an ending is never cleared, and once a row is
+  retired neither of its clocks changes again (I2);
 - a row disappears from the store only through `erase` or `erase_expired` (I3);
 - when the run ends, the store file passes `check_store_integrity` (I14). Each run keeps
   its store in a file of its own for this reason, and the file is deleted afterwards.
@@ -128,9 +129,6 @@ class MemoryMachine(RuleBasedStateMachine):
           close=st.sampled_from(["retired", "ended"]))
     def delete(self, user: str, data: st.DataObject, close: str) -> None:
         handle = data.draw(st.sampled_from(sorted(self.pair.model.real_ids)))
-        row = self.pair.model.rows.get(handle)
-        if close == "retired" and row is not None and row.invalidated_at is not None:
-            return      # the machine retires a row at most once
         self._apply(Delete(user, handle, close))
 
     @precondition(lambda self: bool(self.pair.model.real_ids))
@@ -180,6 +178,9 @@ class MemoryMachine(RuleBasedStateMachine):
             if seen_at is not None:
                 assert row.invalidated_at == seen_at, (
                     f"{handle}'s retirement moved from {seen_at} to {row.invalidated_at}")
+                assert row.valid_to == seen_to, (
+                    f"{handle} was retired, and its end in the world changed from "
+                    f"{seen_to} to {row.valid_to}")
             if seen_to is not None:
                 assert row.valid_to is not None, f"{handle}'s ending at {seen_to} was cleared"
                 assert row.valid_to <= seen_to, (

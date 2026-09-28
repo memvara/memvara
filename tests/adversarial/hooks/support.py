@@ -116,14 +116,15 @@ LIMITS: Mapping[str, Mapping[str, int]] = {
 #: hook. Claude Code and Codex prefix `mcp__<server>__` (hosts/claude.py, hosts/codex.py),
 #: and a server a plugin installed is named `plugin_memvara_memvara` (approve.py).
 #: Copilot joins with a hyphen, which was measured (hosts/copilot.py). Nobody has
-#: measured Cursor's or OpenCode's names, so these use the first separator each record
-#: lists.
+#: measured Cursor's or OpenCode's names. Their records approve only the Claude Code
+#: spelling, and leave a name in any other form to the host's prompt, so these use that
+#: spelling. Each form is one of its record's approve prefixes followed by the tool.
 TOOL_NAMES: Mapping[str, tuple[str, ...]] = {
     "claude": ("mcp__memvara__{tool}", "mcp__plugin_memvara_memvara__{tool}"),
     "codex": ("mcp__memvara__{tool}",),
     "copilot": ("memvara-{tool}",),
-    "cursor": ("memvara__{tool}",),
-    "opencode": ("memvara__{tool}",),
+    "cursor": ("mcp__memvara__{tool}",),
+    "opencode": ("mcp__memvara__{tool}",),
 }
 
 #: Keys each host sends beside the ones the hooks read, as its host record lists them.

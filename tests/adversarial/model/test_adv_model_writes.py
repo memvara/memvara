@@ -222,6 +222,13 @@ def test_delete_ends_a_future_row_at_its_own_start(pair: Pair) -> None:
     assert pair.model.rows["r1"].valid_to == FAR_FUTURE
 
 
+def test_ending_a_retired_row_leaves_it_as_it_was(pair: Pair) -> None:
+    pair.apply(Remember("u1", "likes", "tea"))
+    pair.apply(Delete("u1", "r1"))
+    e = pair.apply(Delete("u1", "r1", close="ended"))
+    assert e.returned is True and pair.model.rows["r1"].valid_to is None
+
+
 def test_a_backdated_record_is_believed_from_its_own_recording(pair: Pair) -> None:
     pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I0, recorded_at=I1))
     pair.apply(Remember("u1", "lives_in", "Paris", valid_from=I3, recorded_at=I4))
@@ -267,3 +274,18 @@ def test_an_end_is_brought_forward_to_where_a_later_value_begins(pair: Pair) -> 
     pair.apply(Remember("u1", "lives_in", "Paris", valid_from=I3))
     pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I1, valid_to=I5))
     assert pair.model.rows["r2"].valid_to == I3
+
+
+def test_a_second_value_scheduled_from_the_same_instant_collapses_the_first(
+        pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Paris", valid_from=FAR_FUTURE))
+    e = pair.apply(Remember("u1", "lives_in", "Rome", valid_from=FAR_FUTURE))
+    assert e.collapsed == ["r1"] and e.closed == ["r1"]
+
+
+def test_a_value_ended_before_a_scheduled_one_begins_is_not_closed_again(
+        pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I0))
+    pair.apply(Remember("u1", "lives_in", "Paris", valid_from=FAR_FUTURE))
+    e = pair.apply(Remember("u1", "lives_in", "Rome", valid_from=FAR_FUTURE))
+    assert e.closed == ["r2"]

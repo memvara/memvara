@@ -50,7 +50,7 @@ from ..filters import SearchFilter
 from ..remote.client import HttpClient
 from ..remote.errors import refuse_project_purge
 from ..types import (Claim, Derivation, Document, DocumentChunk, Episode, Link, MemoryType,
-                     Scope)
+                     Scope, stored_scope)
 
 if TYPE_CHECKING:
     import httpx
@@ -217,8 +217,9 @@ class RemoteStore:
         function, and until it lands this is a real difference between a local store and
         a hosted one rather than an oversight in the conversion.
         """
-        scope = Scope(tenant=body["scope"]["tenant"], user=body["scope"].get("user"),
-                      agent=body["scope"].get("agent"), session=body["scope"].get("session"))
+        # `stored_scope`, as `hydrate.scope` explains: a row the deployment holds.
+        scope = stored_scope(body["scope"]["tenant"], body["scope"].get("user"),
+                             body["scope"].get("agent"), body["scope"].get("session"))
         vt, tt = body["valid_time"], body["transaction_time"]
 
         claim = Claim(

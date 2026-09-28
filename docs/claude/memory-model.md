@@ -39,8 +39,9 @@ landing beside them unnoticed.
 - Tests: `tests/test_bitemporal.py`, `tests/test_types.py`, `tests/test_store.py`,
   `tests/test_erasure.py`, `tests/test_erasure_residue.py`.
 - Documentation: [INTERNALS.md](../INTERNALS.md), sections *`memvara/store/`*, *The two time
-  axes*, *The three states* and *Erasure removes the bytes, not just the rows*. The reader's
-  version is [bitemporal memory](../concepts/bitemporal-memory.md).
+  axes*, *The three states*, *Erasure removes the bytes, not just the rows* and *Two
+  writers on one store*. The reader's version is
+  [bitemporal memory](../concepts/bitemporal-memory.md).
 
 ## How the pieces fit
 
@@ -64,7 +65,10 @@ Scope is a five-part key — tenant, user, project, agent, session — held by `
 flattened by `owner_key()`, which folds only tenant and user because it also scopes entity
 identity. The project is mixed into `fact_key_for()` directly instead, so that two repositories
 keep separate slots while `software:postgresql` stays one entity across both. It is bound where the store is opened, not passed per call by a model, which
-is what stops a tool call reaching another user's memory.
+is what stops a tool call reaching another user's memory. A level left unset is `None`, and
+`Scope.key()` writes it as `*`, so no level may hold `"*"` or `""`: `Scope` refuses both with
+a `ValueError`. Rows stored before that refusal are rebuilt by `stored_scope()`, and their
+keys never match a scope a caller can build; `docs/INTERNALS.md` has the details.
 
 ## Three states, and three different endings
 
@@ -82,7 +86,8 @@ The distinction is the product, and it appears in three places that must agree.
   closure value `"retired"` write it. The claim stops answering present-tense questions but
   stays visible to `history()` and `why()`.
 - **Erased** is the only one that removes bytes. `erase()` deletes the row and its residue,
-  and `prove_erased()` returns an `ErasureProof` with per-table counts as evidence. The
+  and `prove_erased()` returns an `ErasureProof` with per-table counts as evidence, plus
+  `vector_file`, a read of the claim's row in `<db>.vecs` from the file itself. The
   engine erases on its own in one case only: a claim written with `expires_at`, once that
   instant has passed. From that instant no read returns the claim, and `erase_expired()`
   deletes it through the same path as `erase()`, when the store opens and hourly in the
@@ -102,7 +107,10 @@ in the same commit.
 
 `CLOSURES` in `memvara/types.py` is the pair `("ended", "retired")`, and `close_out()` is the
 one function that applies either. Choosing the wrong one records a false reason for the
-change, and nothing downstream can detect it afterwards.
+change, and nothing downstream can detect it afterwards. `close_out()` never closes a retired
+claim again: a claim that is already retired is left as it is, whether it is asked to retire
+or to end it, so a second `delete()` or a `delete(close="ended")` changes nothing and what the
+store believed at any past instant stays what it was.
 
 A closure can also carry the caller's own reason, at most 500 characters, which
 `close_out()` writes onto the closure witness in `meta["closure"]` beside the clock that
@@ -149,6 +157,19 @@ either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/sto
   write that gave a row a new rowid would break both. That is why `put_claim` and
   `add_episode` upsert instead of `INSERT OR REPLACE`. `tests/test_store.py` checks the
   invariant after every write that moves or frees a rowid, and after a `VACUUM`.
+- **A write holds the database's write lock from its first lookup.** `SQLiteStore.batch()`
+  begins with `BEGIN IMMEDIATE`, so what a write reads inside a batch, such as the slot
+  `Reconciler.apply` looks up before it writes, is current, and no other writer can commit
+  before the write does. Two handles on one file, in one process or in two, therefore take
+  turns: the second waits for the first to commit and then reads its rows. A writer that
+  waits longer than SQLite's five-second busy timeout gets `database is locked` before
+  its batch has run. A write given no `recorded_at` is recorded at the instant it takes
+  the lock, which is also the instant it retires what it displaces, and one given no
+  `valid_from` either begins at that instant too. Every `Memvara` method that reads a
+  claim before it writes it — `delete()`, `forget()`, `forget_matching()`, `supersede()`,
+  `link()`, `erase()` and the expiry sweep — reads it inside that batch, so it never
+  writes back a copy that another writer has changed or erased since. INTERNALS.md has
+  the details under *Two writers on one store*.
 - **Every commit `SQLiteStore` makes that can change a turn goes through `_maybe_commit`.**
   That is what empties `_scope_turns`, the vector leg's in-memory list of each scope's turns
   and their matrix rows. Another connection's commit, from another process or another

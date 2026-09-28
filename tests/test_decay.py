@@ -8,6 +8,7 @@ from datetime import timedelta
 
 import pytest
 
+from memvara import Memvara, NullLLM
 from memvara.consolidate import SALIENCE_FLOOR, Consolidator
 from memvara.embed.base import HashingEmbedder
 from memvara.retrieve.scoring import recency_factor
@@ -457,6 +458,78 @@ def test_a_settled_store_opens_no_transaction_at_all(consolidator):
     # `test_run_twice_leaves_identical_state`.
     assert con.run("acme", now=NOW) == {"decayed": 0, "merged": 0, "promoted": 0}
     assert counted.transactions == 0
+
+
+# -- another writer between the snapshot and the write ----------------------------------
+
+
+@pytest.mark.covers("inv:CG7")
+def test_a_pass_leaves_rows_another_writer_changed_after_its_snapshot(tmp_path,
+                                                                     monkeypatch):
+    """The sweep reads a snapshot of the live claims, decides, and writes back what it
+    changed. Another handle on the same file can erase or end one of those claims in
+    between. The pass must re-read each row under the write lock and leave a row that
+    changed since its snapshot as the other writer left it: writing its copy back brought
+    an erased claim back and undid an ending, so two values of one slot were live."""
+    path = str(tmp_path / "s.db")
+    sweeping = Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="u")
+    other = Memvara(path, embedder=HashingEmbedder(dim=64), llm=NullLLM(), user="u")
+    try:
+        tea = other.remember("user", "likes", "tea").added[0].id
+        berlin = other.remember("user", "lives_in", "Berlin",
+                                valid_from=NOW - timedelta(days=60)).added[0].id
+        paris: list[Claim] = []
+        real_flush = Sweep.flush
+
+        def flush(self: Sweep) -> int:
+            # After the snapshot and every decision, before anything is written back.
+            assert other.erase(tea)
+            paris.extend(other.remember("user", "lives_in", "Paris",
+                                        valid_from=NOW - timedelta(days=30)).added)
+            return real_flush(self)
+
+        monkeypatch.setattr(Sweep, "flush", flush)
+        assert sweeping.consolidate()["decayed"] == 2
+        assert other.store.get_claim(tea) is None, "the erased claim is back"
+        assert other.store.erasure_record(tea) is not None
+        stored = other.store.get_claim(berlin)
+        assert stored is not None and stored.valid_to == paris[0].valid_from
+        assert [c.object for c in other.get_all() if c.predicate == "lives_in"] == ["Paris"]
+    finally:
+        sweeping.close()
+        other.close()
+
+
+def test_the_rows_of_one_merge_are_written_together_or_not_at_all(tmp_path):
+    """A merge changes two rows: the survivor takes the duplicate's evidence and the
+    duplicate is retired. When another writer changed either row after the snapshot, the
+    pass writes neither, so the evidence is neither counted twice nor lost."""
+    path = str(tmp_path / "m.db")
+    store = SQLiteStore(path)
+    other = SQLiteStore(path)
+    try:
+        keeper = add(store, "works_at", "Acme", age_days=10)
+        loser = add(store, "works_at", "Acme Corp", age_days=5)
+        sweep = Sweep(store, "acme", now=NOW)
+        rows = {c.id: c for c in sweep.claims}
+        kept, merged = rows[keeper.id], rows[loser.id]
+        kept.observation_count += merged.observation_count
+        merged.invalidated_at, merged.invalidated_by = NOW, kept.id
+        sweep.touch(kept, unit=kept.fact_key)
+        sweep.touch(merged, unit=kept.fact_key)
+        ended = other.get_claim(keeper.id)
+        assert ended is not None
+        ended.valid_to = NOW
+        other.put_claim(ended)
+
+        assert sweep.flush() == 0
+        survivor, duplicate = store.get_claim(keeper.id), store.get_claim(loser.id)
+        assert survivor is not None and duplicate is not None
+        assert (survivor.valid_to, survivor.observation_count) == (NOW, 1)
+        assert duplicate.invalidated_at is None
+    finally:
+        other.close()
+        store.close()
 
 
 # -- telemetry ---------------------------------------------------------------

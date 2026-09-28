@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from harness.fakes.fake_v1 import FakeV1
 from memvara import Memvara, HashingEmbedder, MemoryType, NullLLM
 from memvara.compat import (
     ContestedSlot,
@@ -37,6 +38,7 @@ from memvara.compat import (
     note_subject,
     read_history_db,
 )
+from memvara.compat import mem0_import
 from memvara.compat._notes import ensure_note_predicate
 from memvara.compat.mem0 import _memory_type, _reject_entity_kwargs
 from memvara.compat.mem0_import import _confidence, _parse_ts
@@ -310,6 +312,178 @@ def test_erase_leaves_other_memories_untouched(mem):
     assert [r["id"] for r in api.get_all()["results"]] == [kept]
 
 
+EVERY_STATE = ("live", "ended", "retired")
+
+
+def test_on_delete_erase_erases_every_version_of_the_memory(mem):
+    """When a value changes, the earlier value stays stored as its own claim, ended
+    rather than retired, and it cites its own source turn. Erasing only the current claim
+    reported the memory erased while `history()` and a search of every state still
+    returned the earlier text. Every version goes now, with the turns behind it. A
+    neighbouring memory in the same scope is not a version of this one, and neither is
+    the same memory in another user's scope, so both are left exactly as they were."""
+    api = Memory(mem, on_delete="erase")
+    api.add("I live in Berlin")
+    current = api.add("I live in Lisbon")["results"][0]["id"]
+    neighbour = api.add("My name is Mira")["results"][0]["id"]
+    elsewhere = api.add("I live in Berlin", filters={"user_id": "bob"})["results"][0]["id"]
+    versions = mem.history("user", "lives_in")
+    assert [(c.object, c.state) for c in versions] == [("Berlin", "ended"),
+                                                        ("Lisbon", "live")]
+    turns = [turn for c in versions for turn in c.sources]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        response = api.delete(current)
+
+    assert mem.history("user", "lives_in") == []
+    found = [r.text for r in mem.search("Berlin Lisbon", states=EVERY_STATE,
+                                        include_episodes=True)]
+    assert [text for text in found if "Berlin" in text or "Lisbon" in text] == []
+    assert [mem.why(c.id) for c in versions] == [None, None]
+    assert [mem.store.get_episode(turn) for turn in turns] == [None, None]
+    assert all(mem.prove_erased(c.id).proven for c in versions)
+    # The tenant now holds the neighbour and bob's memory, each with its turn and each
+    # with a vector for the claim and one for the turn.
+    assert mem.stats() == {"episodes": 2, "claims": 2, "live_claims": 2,
+                           "ended_claims": 0, "invalidated": 0, "embeddings": 4}
+    assert api.get(neighbour)["memory"] == "user name Mira"
+    assert len(mem.why(neighbour).episodes) == 1
+    assert [(c.id, c.object) for c in mem.history("user", "lives_in", user="bob")] == [
+        (elsewhere, "Berlin")]
+    # The response lists every version it erased, oldest first.
+    assert response == {"message": "Memory erased", "erased": [c.id for c in versions]}
+
+
+def test_erasing_by_an_earlier_version_id_erases_the_whole_memory(mem):
+    """A memory id here names one version. mem0 code that kept the id `add()` returned
+    before an update still holds the earlier version's id, and mem0's ids are stable, so
+    deleting by that id means deleting the memory: the versions that replaced it go too,
+    up to the current value."""
+    api = Memory(mem, on_delete="erase")
+    first = api.add("I live in Berlin")["results"][0]["id"]
+    api.add("I live in Lisbon")
+    api.add("I live in Porto")
+    versions = [c.id for c in mem.history("user", "lives_in")]
+    assert versions[0] == first and len(versions) == 3
+
+    response = api.delete(first)
+    assert mem.history("user", "lives_in") == []
+    assert api.get_all()["results"] == []
+    assert response == {"message": "Memory erased", "erased": versions}
+
+
+def test_on_delete_erase_leaves_another_value_of_a_many_valued_fact(mem):
+    """`likes` holds many values at once, and each value is its own memory with its own
+    id, although they all share one slot. So the versions of a memory are the claims its
+    own updates link together, not every claim in the slot: erasing one preference must
+    not erase another. A retraction is stored as a claim that points back at the value
+    it ended, so it is a version of that memory and is erased with it."""
+    api = Memory(mem, on_delete="erase")
+    pizza = api.add("I like pizza")["results"][0]["id"]
+    sushi = api.add("I like sushi")["results"][0]["id"]
+    api.add("I no longer like pizza")
+    retraction = mem.get(pizza).invalidated_by
+    assert retraction is not None
+
+    first = api.delete(sushi)
+    assert [c.id for c in mem.history("user", "likes")] == [pizza, retraction]
+    second = api.delete(pizza)
+    assert mem.history("user", "likes") == []
+    assert (first["erased"], second["erased"]) == ([sushi], [pizza, retraction])
+
+
+def test_on_delete_erase_reaches_no_version_in_a_scope_it_cannot_read(mem):
+    """A value written for the user ends the value a session holds for the same fact, so
+    the session's claim is linked into the user-level memory's chain. It is still the
+    session's memory. This `Memory` reads at the user level, which does not see into a
+    session, so erasing the user-level memory leaves the session's claim and its turn as
+    they were."""
+    api = Memory(mem, on_delete="erase")
+    session = api.add("I live in Paris", filters={"run_id": "s1"})["results"][0]["id"]
+    api.add("I live in Berlin")
+    current = api.add("I live in Lisbon")["results"][0]["id"]
+    assert mem.get(session, session="s1").invalidated_by is not None
+
+    response = api.delete(current)
+    assert [(c.id, c.object) for c in mem.history("user", "lives_in")] == [
+        (session, "Paris")]
+    assert len(mem.why(session, session="s1").episodes) == 1
+    assert session not in response["erased"] and len(response["erased"]) == 2
+
+
+def test_on_delete_erase_reaches_the_broader_scope_a_session_reads(mem):
+    """A `Memory` bound to a session reads the user level as well, and a write in
+    either scope can end the value held in the other, so one memory's chain can run
+    through both scopes. Every version the session can read is erased, the user-level
+    ones included."""
+    everyone = Memory(mem)
+    session = Memory(Memvara(store=mem.store, embedder=HashingEmbedder(dim=128),
+                             llm=NullLLM(), user="alice", session="s1"),
+                     on_delete="erase")
+    everyone.add("I live in Berlin")
+    paris = session.add("I live in Paris")["results"][0]["id"]
+    everyone.add("I live in Lisbon")
+    chain = mem.history("user", "lives_in")
+    assert [(c.object, c.scope.session) for c in chain] == [
+        ("Berlin", None), ("Paris", "s1"), ("Lisbon", None)]
+
+    response = session.delete(paris)
+    assert mem.history("user", "lives_in") == []
+    assert response["erased"] == [c.id for c in chain]
+
+
+def test_on_delete_erase_follows_the_chain_only_inside_one_slot(mem):
+    """`remember(replaces=...)` can close a claim with a claim about another fact, and
+    the pointer between them then crosses from one slot to another. The claim in the
+    other slot is another memory, so erasing this one stops at the edge of its slot."""
+    api = Memory(mem, on_delete="erase")
+    berlin = api.add("I live in Berlin")["results"][0]["id"]
+    elsewhere = mem.remember("user", "works_at", "Acme", replaces=berlin).added[0]
+    assert mem.get(berlin).invalidated_by == elsewhere.id
+
+    response = api.delete(berlin)
+    assert mem.history("user", "lives_in") == []
+    assert [c.id for c in mem.history("user", "works_at")] == [elsewhere.id]
+    assert response["erased"] == [berlin]
+
+
+def test_on_delete_erase_erases_every_version_through_a_hosted_deployment():
+    """A hosted deployment gives the shim no store to read the memory's slot from, so
+    the versions come from the deployment's `history()`, and each is erased with its
+    own request."""
+    with FakeV1() as fake:
+        api = Memory(fake.remote(user="alice"), on_delete="erase")
+        api.add("I live in Berlin")
+        current = api.add("I live in Lisbon")["results"][0]["id"]
+        versions = [c.id for c in fake.memvara.history("user", "lives_in", user="alice")]
+        assert len(versions) == 2
+
+        response = api.delete(current)
+        assert fake.memvara.history("user", "lives_in", user="alice") == []
+        assert response == {"message": "Memory erased", "erased": versions}
+
+
+def test_a_hosted_erase_reaches_the_broader_scope_a_session_reads():
+    """A hosted deployment's `history()` reads the slot only at the client's scope and
+    the scopes beneath it, so for a client bound to a session it leaves out the versions
+    held at the user level. The shim finds those through `get()` and `why()`, which read
+    the broader scopes too, and erases what a local store would."""
+    with FakeV1() as fake:
+        everyone = Memory(fake.remote(user="alice"))
+        session = Memory(fake.remote(user="alice", session="s1"), on_delete="erase")
+        everyone.add("I live in Berlin")
+        paris = session.add("I live in Paris")["results"][0]["id"]
+        everyone.add("I live in Lisbon")
+        chain = fake.memvara.history("user", "lives_in", user="alice")
+        assert [(c.object, c.scope.session) for c in chain] == [
+            ("Berlin", None), ("Paris", "s1"), ("Lisbon", None)]
+
+        response = session.delete(paris)
+        assert fake.memvara.history("user", "lives_in", user="alice") == []
+        assert response["erased"] == [c.id for c in chain]
+
+
 def test_deleting_an_unknown_id_raises_rather_than_reporting_success(api):
     with pytest.raises(KeyError, match="cl_nope"):
         api.delete("cl_nope")
@@ -553,6 +727,40 @@ def test_an_existing_note_predicate_is_left_exactly_as_declared(mem):
     before = mem.registry.spec("likes")
     ensure_note_predicate(mem, "likes", "default")
     assert mem.registry.spec("likes") == before
+
+
+def test_an_update_retires_nothing_when_another_writer_erased_the_value(tmp_path,
+                                                                        monkeypatch):
+    """The importer keeps the claim each memory's last event wrote, and an UPDATE retires
+    it. Another handle on the same file can erase that claim between the two events. The
+    UPDATE must read the claim again under the write lock and, finding it gone, retire
+    nothing: writing back the copy the import held brought the erased text back."""
+    path = str(tmp_path / "s.db")
+    history = write_history(tmp_path / "history.db", [
+        row("h1", "m1", "ADD", 0, new="Lives in Berlin"),
+        row("h2", "m1", "UPDATE", 30, old="Lives in Berlin", new="Lives in Lisbon"),
+    ])
+    importer = Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM(), user="alice")
+    other = Memvara(path, embedder=HashingEmbedder(dim=128), llm=NullLLM(), user="alice")
+    erased: list[str] = []
+    real_write_note = mem0_import.write_note
+
+    def write_note(mem, claim, episode, **kwargs):
+        if claim.text == "Lives in Lisbon":      # the UPDATE, before its transaction
+            (berlin,) = other.get_all()
+            assert other.erase(berlin.id)
+            erased.append(berlin.id)
+        return real_write_note(mem, claim, episode, **kwargs)
+
+    monkeypatch.setattr(mem0_import, "write_note", write_note)
+    try:
+        import_mem0(importer, history_db=history)
+        assert importer.store.get_claim(erased[0]) is None, "the erased claim is back"
+        assert importer.store.erasure_record(erased[0]) is not None
+        assert [c.text for c in importer.get_all()] == ["Lives in Lisbon"]
+    finally:
+        importer.close()
+        other.close()
 
 
 # --- reading the log ----------------------------------------------------------

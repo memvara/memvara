@@ -34,14 +34,20 @@ mem.remember(subject, predicate, obj, *, valid_from=, valid_to=, recorded_at=, s
              text=, confidence=, memory_type=, polarity=, extractor=, expires_at=,
              expire_reason=, **meta)
                                                   -> WriteReceipt
+#   recorded_at= left out is the instant the write takes the store's write lock, which is
+#   also the instant it retires anything it displaces. valid_from= left out is
+#   recorded_at= when that was given; with neither given it is that same instant under
+#   the lock, unless valid_to= was given, when it is the instant of the call.
 #   expires_at= is when the claim is ERASED (not ended, not retired): from that instant
 #   no read returns it, and erase_expired() deletes the row, its text index entry and its
 #   vector, with a proof. A repeat carrying an expiry reinforces only a claim in exactly
 #   its own scope; otherwise it is stored as its own claim, so another project's copy is
 #   never given the expiry.
-#   It must be in the future (ValueError otherwise). expire_reason= says why, at most
-#   500 characters, and is a ValueError without expires_at. Repeating a fact the store
-#   holds puts the expiry on the claim on record. Not valid_to, which ends and keeps.
+#   It must be in the future when the call is made and again when the write takes the
+#   store's write lock (ValueError otherwise, and nothing is written). expire_reason=
+#   says why, at most 500 characters, and is a ValueError without expires_at. Repeating
+#   a fact the store holds puts the expiry on the claim on record. Not valid_to, which
+#   ends and keeps.
 #   Repeating a fact with a valid_from before the claim on record begins, and no
 #   expires_at, stores that earlier period as a claim of its own, ending where the
 #   claim on record begins; it is reported under added, and the claim on record is
@@ -219,6 +225,9 @@ mem.merge_predicate(surface, canonical, *, dry_run=True) -> MergeReport
 #   aliases=...)` is the pass underneath it, for an operator applying a mapping.
 #   Like the two repairs above, this runs against the local engine only; a hosted
 #   deployment has no endpoint for it yet.
+#   All three leave alone a slot that another handle or process changed while they
+#   ran. The report's `written` counts only the rows actually written, and running
+#   the repair again applies the rest.
 
 # maintenance
 mem.consolidate()                                 -> dict[str, int]
@@ -280,6 +289,13 @@ bob.add("I live in Oslo")
 
 Scope filters fail **closed**: a scope that resolves to nothing matches nothing, rather
 than degrading into an unfiltered query across every user.
+
+Leave a level unset (`None`) to leave it unbound. No level accepts `"*"` or the empty
+string: `Scope(user="*")`, `mem.scope(user="")`, a read or write given `session=""`,
+`RemoteMemvara(user="*")` and the server's `MEMVARA_USER=*` all raise `ValueError`
+(`ConfigError` for the server), naming the level and the value. A scope's key writes an
+unbound level as `*`, and a claim filed under either value used to share that key, so
+every other user could read it by id.
 
 ### Swapping backends
 
@@ -540,6 +556,16 @@ The library is synchronous, and reads no longer queue behind writes. Read statem
 per-thread connection, and the slow half of a write — the near-duplicate encode and the
 model call — runs with no transaction open, so the store's write lock is held for the
 database work and nothing else.
+
+Two writers on one store file take turns, whether they are two handles in one process or
+two processes, such as the MCP server and the hooks' daemon. A write holds the write lock
+from its first lookup until it commits, so a second writer waits, then sees the first
+writer's value and supersedes or reinforces it as a single writer would. A method that
+reads a claim before it changes it, such as `delete()`, `forget()`, `supersede()` or
+`erase()`, reads it under the same lock, so it acts on the claim as the other writer left
+it: an ending made while it waited is kept, and a claim erased while it waited stays
+erased. A writer that waits longer than SQLite's five-second busy timeout gets
+`OperationalError: database is locked`.
 
 One reader thread against a 20,000-claim consolidation sweep:
 

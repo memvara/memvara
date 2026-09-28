@@ -98,7 +98,11 @@ HOST = Host(
     reentry_field="",
     approve=ApproveSpec(
         matcher="memvara",
-        separators=("__", "_"),
+        #: Only the Claude Code spelling, which is the one form this hook approved here
+        #: before approval was pinned to a prefix. How this host spells an MCP tool's name
+        #: in this event has not been measured, so a tool arriving in any other form is
+        #: asked about rather than approved on a guess.
+        prefixes=("mcp__memvara__",),
         decision_key="permission",
         reason_key="reason",
         allow="allow",

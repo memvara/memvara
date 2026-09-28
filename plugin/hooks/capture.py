@@ -74,7 +74,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.envelope import read_event  # noqa: E402
 from core.host import active  # noqa: E402
-from lib import agentic, counts, settings  # noqa: E402
+from lib import agentic, counts, settings, state_file  # noqa: E402
 from lib.extract import project_subject, triples  # noqa: E402
 from lib.ipc import payload  # noqa: E402
 from lib.project import bind as bind_project  # noqa: E402
@@ -199,16 +199,14 @@ def _write_state(state: dict) -> None:
     A transcript that is gone cannot be mined again, so its watermark can never be read.
     Dropping it here costs one `exists` per key at write time and removes the entry exactly
     when it stops meaning anything.
-    """
-    import json
 
-    try:
-        state = {key: size for key, size in state.items() if os.path.exists(key)}
-        STATE.parent.mkdir(parents=True, exist_ok=True)
-        STATE.write_text(json.dumps(state), encoding="utf-8")
-    except OSError:
-        # A lost marker costs one repeated extraction, not correctness.
-        pass
+    Written through `lib.state_file`, so the file is 0600 in a private directory: it names
+    every transcript this machine has mined. It was written with the default mode, 0644
+    under the usual umask. A write that fails is not raised: a lost marker costs one
+    repeated extraction, not correctness.
+    """
+    state = {key: size for key, size in state.items() if os.path.exists(key)}
+    state_file.write_json(str(STATE), state, prefix=".capture-state-")
 
 
 def _turn(transcript: Path) -> "tuple[str, list[str], str]":

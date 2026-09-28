@@ -1067,11 +1067,24 @@ def test_two_users_in_one_tenant_do_not_collide(rec, store):
     assert store.get_claim(alice.id).invalidated_at is None
 
 
-def test_a_new_session_still_retires_the_old_value(rec, store):
-    # Agent and session are deliberately outside the fact key: a durable fact about a
-    # person is the same fact whichever session observed it.
+def test_a_new_session_leaves_a_sibling_sessions_value_alone(rec, store):
+    # Agent and session are outside the fact key, so two sessions' values share a slot.
+    # A write in s2 used to end the value s1 held, which s2 cannot read, and hand it back
+    # in s2's receipt. A write now closes only claims in its own scope, the broader ones
+    # it reads, and the narrower ones beneath it (`Reconciler._in_reach`).
     old = rec.apply(claim("lives_in", "Berlin",
                           scope=Scope("acme", "alice", "asst", "s1"))).claim
+    res = rec.apply(claim("lives_in", "Lisbon",
+                          scope=Scope("acme", "alice", "asst", "s2")))
+    assert res.invalidated == []
+    assert store.get_claim(old.id).is_live()
+
+
+def test_a_new_session_still_retires_the_value_its_agent_holds(rec, store):
+    # A durable fact on record at a level the session reads is still the same fact
+    # whichever session observes the change, so learning "I moved to Lisbon" in a fresh
+    # session retires the old city held for the agent.
+    old = rec.apply(claim("lives_in", "Berlin", scope=Scope("acme", "alice", "asst"))).claim
     res = rec.apply(claim("lives_in", "Lisbon",
                           scope=Scope("acme", "alice", "asst", "s2")))
     assert [c.id for c in res.invalidated] == [old.id]
