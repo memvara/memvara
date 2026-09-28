@@ -215,8 +215,10 @@ def test_a_lone_surrogate_in_an_object_key_is_refused_like_one_in_a_value(
 ], ids=["without include_episodes", "with memory_types"])
 def test_ranked_recall_without_turns_is_refused_as_an_argument_error(
         shared_server: McpProcess, arguments: dict[str, Any]) -> None:
-    """memory_search refuses its own invalid combination, as_of with valid_at, at the
-    tool boundary, so the model reads an argument error rather than a Python exception."""
+    """ranked needs conversation turns to rank. The library refuses a call without them
+    with a ValueError, which reached the model through the server's catch-all as a Python
+    exception; the tool now refuses it first, as an argument error, the way memory_search
+    refuses as_of with valid_at. tests/test_server.py keeps the two checks in step."""
     replies = exchange(shared_server, call_line(2, "memory_recall", arguments))
     assert len(replies) == 1 and replies[0]["result"]["isError"] is True, replies
     text = text_of(replies[0])
