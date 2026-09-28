@@ -86,6 +86,10 @@ rather than replacing it, and the receipt names both:
 receipt.disputed      # -> [Dispute(...)]  both values live, neither one silently won
 ```
 
+The same guard applies when an extraction takes a value back. A low-confidence "no
+longer lives in Berlin" does not end the Berlin somebody stated. Berlin stays live, and
+the receipt reports a `Dispute` whose `retraction` field is true.
+
 Overwriting there would have recorded that the world changed, when nothing had. That
 distinction — *the world changed* versus *the record was wrong* — is the one mistake in
 this library that cannot be found by reading the data afterwards, which is why the write

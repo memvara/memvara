@@ -232,7 +232,7 @@ class Pair:
         if isinstance(result, ValueError):
             raise AssertionError(f"the store refused {op!r}: {result}")
         if isinstance(op, Remember):
-            self._compare_receipt(expect, result)
+            self._compare_receipt(expect, result, retraction=op.polarity < 0)
         elif isinstance(op, Forget):
             got = sorted(self.handle_of(c.id) for c in result)
             assert got == expect.returned, f"forget closed {got}, not {expect.returned}"
@@ -242,7 +242,7 @@ class Pair:
             got = sorted(self.handle_of(e.claim_id) for e in result)
             assert got == expect.returned, f"erase_expired erased {got}, not {expect.returned}"
 
-    def _compare_receipt(self, e: Expect, receipt: Any) -> None:
+    def _compare_receipt(self, e: Expect, receipt: Any, *, retraction: bool) -> None:
         h = self.handle_of
         added = [h(c.id) for c in receipt.added]
         want_added = [e.new] if e.added and e.new is not None else []
@@ -254,6 +254,10 @@ class Pair:
         assert closed == sorted(e.closed), f"receipt.closed is {closed}, not {sorted(e.closed)}"
         disputed = sorted(h(d.claim_id) for d in receipt.disputed)
         assert disputed == sorted(e.disputed), f"disputed {disputed}, not {sorted(e.disputed)}"
+        # A match a retraction could not end is marked as disputed by a retraction, and
+        # one a new value could not end is not (#307).
+        marked = [h(d.claim_id) for d in receipt.disputed if d.retraction != retraction]
+        assert not marked, f"disputes {marked} do not say retraction={retraction}"
         collapsed = sorted(h(c.claim_id) for c in receipt.collapsed)
         assert collapsed == sorted(e.collapsed), (
             f"collapsed {collapsed}, not {sorted(e.collapsed)}")
