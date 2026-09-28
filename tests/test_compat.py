@@ -571,6 +571,18 @@ def test_a_mem0_argument_the_shim_cannot_honour_is_refused_by_name(api, call, sa
         call(api)
 
 
+def test_false_counts_as_given_except_for_show_expired(api):
+    with pytest.raises(Mem0CompatError, match="reference_date="):
+        api.search("hi", reference_date=False)
+    assert api.search("hi", show_expired=False)["results"] == []
+
+
+def test_a_none_in_filters_does_not_disagree_with_a_keyword_id():
+    with Memvara(embedder=HashingEmbedder(dim=128), llm=NullLLM()) as mem:
+        Memory(mem).add("I live in Berlin", user_id="alice", filters={"user_id": None})
+        assert [c.object for c in mem.get_all(user="alice")] == ["Berlin"]
+
+
 def test_a_refusal_gives_only_the_reasons_for_what_was_passed(api):
     with pytest.raises(Mem0CompatError) as refused:
         api.get_all(show_expired=True)

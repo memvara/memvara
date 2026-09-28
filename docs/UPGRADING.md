@@ -30,6 +30,13 @@ the shim can notice:
 **If you catch `TypeError` around `search()` or `get_all()` to detect a top-level entity
 id**, catch `ValueError` instead, which is what mem0 raises.
 
+**If you catch `TypeError` around a call that passes one of mem0's arguments the shim
+cannot honour**, catch `memvara.compat.Mem0CompatError` instead. `add(timestamp=,
+expiration_date=)`, `search(reference_date=, show_expired=True)`,
+`get_all(show_expired=True)` and `update(metadata=, expiration_date=)` raised `TypeError`
+for an unknown argument; the shim now takes each of them and refuses it with
+`Mem0CompatError`, naming the argument and why.
+
 ---
 
 ## Erasing through the mem0 layer or an adapter erases every version of the memory

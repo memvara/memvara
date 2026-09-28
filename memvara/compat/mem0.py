@@ -175,7 +175,8 @@ def _with_entities(filters: Mapping[str, Any] | None,
         return filters
     merged = dict(filters or {})
     for key, value in given.items():
-        if key in merged and merged[key] != value:
+        # A None in filters names no scope, as a None keyword does.
+        if merged.get(key) is not None and merged[key] != value:
             raise ValueError(f"{key}={value!r} and filters={{{key!r}: {merged[key]!r}}} "
                              "name two different scopes; pass one")
         merged[key] = value
@@ -199,8 +200,10 @@ UNSUPPORTED = {
 def _refuse_unsupported(method: str, **given: Any) -> None:
     """Refuse, with `Mem0CompatError`, each mem0 argument this shim cannot honour that
     was given a value, with the reason `UNSUPPORTED` gives for it (#360)."""
+    # Each argument's own default means "not given": None, except show_expired's False. A
+    # False passed to one of the others is a value like any other, and is refused.
     named = sorted(name for name, value in given.items()
-                   if value is not None and value is not False)
+                   if value is not (False if name == "show_expired" else None))
     if named:
         raise Mem0CompatError(
             f"{method}() does not support {', '.join(f'{n}=' for n in named)}. "
