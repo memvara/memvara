@@ -326,6 +326,23 @@ def without_expiry(tools: "tuple[Tool, ...]") -> "tuple[Tool, ...]":
         for tool in tools)
 
 
+#: `memory_recall`'s sentence about model calls, for whether the server serves
+#: `query_rewrite` and `synthesize`, in that order. Each is removed with its switch.
+_RECALL_MODEL_CALLS: Mapping[tuple[bool, bool], str] = {
+    (True, True): "It calls a model only on a server that has one configured: there it "
+                  "rewrites the query into a few other phrasings before searching "
+                  "(query_rewrite), and ranked and synthesize each add one more call when "
+                  "you set them. ",
+    (True, False): "It calls a model only on a server that has one configured: there it "
+                   "rewrites the query into a few other phrasings before searching "
+                   "(query_rewrite), and ranked adds one more call when you set it. ",
+    (False, True): "It calls a model only on a server that has one configured, and there "
+                   "only when you set ranked or synthesize, each of which adds one call. ",
+    (False, False): "It calls a model only on a server that has one configured, and there "
+                    "only when you set ranked, which adds one call. ",
+}
+
+
 def _recall_description(served: Collection[str]) -> str:
     """`memory_recall`'s description, naming only the model-calling arguments in `served`.
 
@@ -339,18 +356,7 @@ def _recall_description(served: Collection[str]) -> str:
     >>> "synthesize" in _recall_description({"query_rewrite"})
     False
     """
-    rewrite, synthesize = "query_rewrite" in served, "synthesize" in served
-    if rewrite:
-        model = ("It calls a model only on a server that has one configured: there it "
-                 "rewrites the query into a few other phrasings before searching "
-                 "(query_rewrite), and " + ("ranked and synthesize each add one more call "
-                                            "when you set them. " if synthesize else
-                                            "ranked adds one more call when you set it. "))
-    else:
-        model = ("It calls a model only on a server that has one configured, and there "
-                 "only when you set " + ("ranked or synthesize, each of which adds one "
-                                         "call. " if synthesize else
-                                         "ranked, which adds one call. "))
+    model = _RECALL_MODEL_CALLS["query_rewrite" in served, "synthesize" in served]
     return (
         "Look up what is already known about this user and read it before you "
         "answer. Call it at the START of a turn whenever the reply could depend on "
