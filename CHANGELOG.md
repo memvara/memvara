@@ -9,6 +9,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Capture logs a line on every path where it decides to do nothing.** It returned
+  without a line when a hook had triggered the Stop, when the payload named no
+  transcript, when the transcript path named no file, when the transcript's size could
+  not be read, and when the transcript had not grown since the last capture. Capture's
+  output never reaches the person, so `~/.memvara/.hooks/capture.log` is its only
+  account, and on those paths there was no trace that it had run. Each now logs a
+  `skipped=` line saying why. #342 (B60).
+
 ## [0.17.0] — 2026-09-28
 
 This is a security release: it fixes twenty advisories, listed under "Security" below.
