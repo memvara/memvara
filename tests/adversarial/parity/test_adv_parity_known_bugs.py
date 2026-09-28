@@ -25,7 +25,7 @@ from memvara import Memvara, MemoryType
 from memvara.core import ScopedMemvara
 from memvara.remote import hydrate
 from memvara.remote.api import RemoteMemvara, ScopedRemoteMemvara
-from memvara.types import WriteReceipt
+from memvara.types import Accumulation, Collapse, Dispute, RefusedProposal, Retype, WriteReceipt
 
 from .compare import assert_same, labels, normalise, normalise_text, text_labels, timed
 from .test_adv_parity_library import RECEIPT_GAP
@@ -93,8 +93,6 @@ def test_every_receipt_list_survives_render_then_hydrate() -> None:
     """Each of the six lists and outcomes `_receipt_summary` writes a note from, rendered
     in the shape the fake sends and memvara-cloud's renderer is to send, comes back as it
     was; a deployment that sends none of them still hydrates, with each one empty."""
-    from memvara.types import Accumulation, Collapse, Dispute, RefusedProposal, Retype
-
     at = datetime(2025, 6, 1, tzinfo=timezone.utc)
     original = WriteReceipt(
         accumulated=[Accumulation(subject="user", predicate="tagged_with", existing=1)],
