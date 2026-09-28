@@ -28,6 +28,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   #305.
 - **A confidence that is not a finite number is read as the default, 0.7.** NaN used to be
   read as 0.0, a guess that could displace nothing, and infinity as 1.0.
+- **A model reply with thousands of invented predicates no longer stalls a write.** Past
+  the cap of 200 learned predicates, each new spelling is folded onto the nearest known
+  predicate as an alias. Each alias rebuilt the registry's whole index, and each search
+  for the nearest predicate read every alias again, so one `add()` took time that grew
+  with the square of the number of invented spellings: 100 to 130 seconds for 5,000 on a
+  laptop. An alias is now added to the index in place, and each predicate's words are kept
+  once, so the same write takes about 6 seconds. The model is still called 201 times,
+  and every predicate resolves as before. #309.
+
 - **A hook answers a payload nested too deeply to decode as it answers an empty one.**
   `json.loads` raises `RecursionError`, not `ValueError`, on nesting deeper than
   Python's recursion limit, and neither reader of a hook's stdin caught it. So a payload
