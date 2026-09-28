@@ -4,12 +4,10 @@ The same run as the nightly soak at ten times the turns, over the same 21 simula
 so its slots, merges and store are ten times as busy. The record is written before
 anything is asserted.
 
-It carries one known bug, B50 (#332): the user repeats an earlier sentence about their
-city or employer word for word after that fact has changed, `add()` drops the turn, and
-the current-facts detector fails. That detector failing, and no other, counts as the known
-bug. A failure of any other detector still fails the run, and that includes the salience
-detector, which failed here until B51 (#333) was fixed. When B50 is fixed, the set of
-failing detectors changes, the run fails, and the fix removes this pin.
+It carried two known bugs, and both are fixed. Until B50 (#332) was fixed, the user
+repeated an earlier sentence about their city or employer word for word after that fact
+had changed, `add()` dropped the turn, and the current-facts detector failed. The salience
+detector failed here until B51 (#333) was fixed.
 """
 
 from __future__ import annotations
@@ -22,7 +20,6 @@ TURNS = 100_000
 CURRENT_FACTS = "current facts match what was last said"
 
 
-@known_bugs.xfail("B50")
 def test_a_hundred_thousand_turns_trip_no_detector(long_soak: Callable[[int], Any]) -> None:
     run = long_soak(TURNS)
     if run.failing == {CURRENT_FACTS}:

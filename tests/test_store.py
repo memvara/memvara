@@ -103,6 +103,20 @@ def test_episode_hash_lookup_is_tenant_scoped(store):
     assert store.find_episode_by_hash("other_tenant", ep.hash) is None
 
 
+def test_episode_hash_lookup_returns_the_latest_copy_at_or_before_a_time(store):
+    """A tenant can hold one text several times, and the write path asks for the copy a
+    retry or a replay of a turn repeats: the latest dated at or before it."""
+    first, second, third = (Episode(content="hello", scope=SCOPE, ts=at)
+                            for at in (T0, T1, T2))
+    for ep in (second, third, first):
+        store.add_episode(ep)
+    assert store.find_episode_by_hash("acme", first.hash).id == third.id
+    assert store.find_episode_by_hash("acme", first.hash, at=T1).id == second.id
+    assert store.find_episode_by_hash("acme", first.hash, at=T2).id == third.id
+    assert store.find_episode_by_hash("acme", first.hash,
+                                      at=T0 - timedelta(seconds=1)) is None
+
+
 # --- Claims -----------------------------------------------------------------
 
 def test_claim_round_trips_with_every_field(store):

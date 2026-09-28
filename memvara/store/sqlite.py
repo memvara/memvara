@@ -3380,11 +3380,18 @@ class SQLiteStore:
             r = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
         return self._row_to_episode(r) if r else None
 
-    def find_episode_by_hash(self, tenant: str, ep_hash: str) -> Episode | None:
+    def find_episode_by_hash(self, tenant: str, ep_hash: str, *,
+                             at: datetime | None = None) -> Episode | None:
+        # Latest first, and the last stored of two turns at one instant, so the answer
+        # does not depend on the order the rows come back in.
+        sql = "SELECT * FROM episodes WHERE tenant=? AND hash=?"
+        params: list[Any] = [tenant, ep_hash]
+        if at is not None:
+            sql += " AND ts <= ?"
+            params.append(_ts(at))
         with self._read() as conn:
-            r = conn.execute(
-                "SELECT * FROM episodes WHERE tenant=? AND hash=? LIMIT 1", (tenant, ep_hash)
-            ).fetchone()
+            r = conn.execute(sql + " ORDER BY ts DESC, rowid DESC LIMIT 1",
+                             params).fetchone()
         return self._row_to_episode(r) if r else None
 
     def get_episodes(self, episode_ids: Sequence[str]) -> dict[str, Episode]:

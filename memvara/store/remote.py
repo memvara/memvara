@@ -262,7 +262,8 @@ class RemoteStore:
             why="There is no GET /v1/episodes/{id}. A turn is only reachable indirectly, "
                 "embedded in GET /v1/memories/{id}/why's `sources` list."))
 
-    def find_episode_by_hash(self, tenant: str, ep_hash: str) -> Episode | None:
+    def find_episode_by_hash(self, tenant: str, ep_hash: str, *,
+                             at: datetime | None = None) -> Episode | None:
         raise NotImplementedError(_NO_ENDPOINT.format(
             method="find_episode_by_hash",
             why="No endpoint looks a turn up by content hash; that dedup check is "

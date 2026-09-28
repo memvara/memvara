@@ -17,13 +17,13 @@ T0 = datetime(2026, 3, 1, tzinfo=timezone.utc)
 DAY = timedelta(days=1)
 
 
-# -- B50: a turn repeated word for word after its value changed is dropped ----------------
+# -- B50, fixed: a turn repeated word for word after its value changed was dropped -------
 
-@known_bugs.xfail("B50")
 def test_moving_back_in_the_same_words_makes_the_old_city_current_again() -> None:
     """A user who moves back and says so in the words they used before has moved back
-    (#332). Tier 0 reads the repeat as a restatement of the first turn's claim, which has
-    since ended, so nothing is reinforced and nothing is extracted."""
+    (#332). Tier 0 read the repeat as a restatement of the first turn's claim, which had
+    since ended, so nothing was reinforced and nothing was extracted. A repeat whose
+    earlier claims have all ended by its time is now a new statement."""
     mem = stores.memory(user="u1")
     first = mem.add("I live in Berlin.", ts=T0)
     mem.add("I moved to Paris.", ts=T0 + DAY)
@@ -36,7 +36,6 @@ def test_moving_back_in_the_same_words_makes_the_old_city_current_again() -> Non
     assert live == ["Berlin"]
 
 
-@known_bugs.xfail("B50")
 def test_liking_again_in_the_same_words_after_taking_it_back_is_kept() -> None:
     """A like taken back and then stated again in the same words is held again (#332)."""
     mem = stores.memory(user="u1")

@@ -511,7 +511,20 @@ class Store(Protocol):
     # --- episodes ---------------------------------------------------------
     def add_episode(self, ep: Episode) -> None: ...
     def get_episode(self, episode_id: str) -> Episode | None: ...
-    def find_episode_by_hash(self, tenant: str, ep_hash: str) -> Episode | None: ...
+    def find_episode_by_hash(self, tenant: str, ep_hash: str, *,
+                             at: datetime | None = None) -> Episode | None:
+        """The latest stored turn with this content hash, or `None`.
+
+        With `at`, the latest one dated at or before `at`. The hash (`Episode.hash`)
+        covers the scope, the role and the text but not the time, so a tenant can hold
+        several turns with one hash: `add()` stores a turn again when it is said after the
+        value it stated has ended, and when it is dated before every stored copy. The
+        write path asks with `at` for the copy a retry or a replay of a turn repeats.
+        It passes `at` when this method has a parameter of that name or takes
+        `**kwargs`, and calls a store predating `at` without it. Either way it ignores a
+        turn returned that is dated after the one being written.
+        """
+        ...
 
     def get_episodes(self, episode_ids: Sequence[str]) -> dict[str, Episode]:
         """Bulk fetch, so hydrating a result set is one query rather than one per hit."""
