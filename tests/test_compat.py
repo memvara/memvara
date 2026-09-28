@@ -394,22 +394,22 @@ def test_on_delete_erase_leaves_another_value_of_a_many_valued_fact(mem):
 
 
 def test_on_delete_erase_reaches_no_version_in_a_scope_it_cannot_read(mem):
-    """A retraction written for the user ends the value a session holds for the same
-    fact, so the session's claim is linked into the chain of the user-level tombstone. It
-    is still the session's memory. This `Memory` reads at the user level, which does not
-    see into a session, so erasing the tombstone's memory leaves the session's claim and
-    its turn as they were."""
+    """A retraction written in a session ends the user-level value the session reads, so
+    the session's tombstone is linked into the user-level memory's chain. It is still the
+    session's memory. This `Memory` reads at the user level, which does not see into a
+    session, so erasing the user-level memory leaves the session's tombstone and its turn
+    as they were."""
     api = Memory(mem, on_delete="erase")
-    session = api.add("I live in Paris", filters={"run_id": "s1"})["results"][0]["id"]
-    api.add("I no longer live in Paris")
-    tombstone = mem.get(session, session="s1").invalidated_by
-    assert tombstone is not None and mem.get(tombstone).scope.session is None
+    paris = api.add("I live in Paris")["results"][0]["id"]
+    api.add("I no longer live in Paris", filters={"run_id": "s1"})
+    tombstone = mem.get(paris).invalidated_by
+    assert tombstone is not None and mem.get(tombstone, session="s1").scope.session == "s1"
 
-    response = api.delete(tombstone)
-    assert [(c.id, c.object) for c in mem.history("user", "lives_in")] == [
-        (session, "Paris")]
-    assert len(mem.why(session, session="s1").episodes) == 1
-    assert response["erased"] == [tombstone]
+    response = api.delete(paris)
+    assert [(c.id, c.polarity) for c in mem.history("user", "lives_in")] == [
+        (tombstone, -1)]
+    assert len(mem.why(tombstone, session="s1").episodes) == 1
+    assert response["erased"] == [paris]
 
 
 def test_on_delete_erase_reaches_the_broader_scope_a_session_reads(mem):
@@ -467,26 +467,29 @@ def test_on_delete_erase_erases_every_version_through_a_hosted_deployment():
 def test_a_hosted_erase_reaches_the_broader_scope_a_session_reads():
     """A hosted deployment's `history()` reads the slot only at the client's scope and
     the scopes beneath it, so for a client bound to a session it leaves out the versions
-    held at the user level. The shim finds those through `get()`, for a claim that
-    replaced a version, and `why()`, for the claims a version replaced, because both
-    read the broader scopes too, and erases what a local store would. A retraction links
-    the two scopes: one written for the user ends the value a session holds, and one
-    written in a session ends the user-level value the session reads."""
+    held at the user level or at its agent's level. The shim finds those through
+    `get()`, for a claim that replaced a version, and `why()`, for the claims a version
+    replaced, because both read the broader scopes too, and erases what a local store
+    would. A retraction links two scopes when it ends a value its writer reads from a
+    broader scope: here the agent's retraction ends the user-level value."""
     with FakeV1() as fake:
         everyone = Memory(fake.remote(user="alice"))
-        session = Memory(fake.remote(user="alice", session="s1"), on_delete="erase")
-        paris = session.add("I live in Paris")["results"][0]["id"]
-        everyone.add("I no longer live in Paris")
+        agent = Memory(fake.remote(user="alice", agent="a1"))
+        session = Memory(fake.remote(user="alice", agent="a1", session="s1"),
+                         on_delete="erase")
+        paris = everyone.add("I live in Paris")["results"][0]["id"]
+        agent.add("I no longer live in Paris")
         chain = fake.memvara.history("user", "lives_in", user="alice")
-        assert [(c.object, c.polarity, c.scope.session) for c in chain] == [
-            ("Paris", 1, "s1"), ("Paris", -1, None)]
-        # Forward from the session's value to the user-level tombstone, through `get()`.
+        assert [(c.object, c.polarity, c.scope.agent) for c in chain] == [
+            ("Paris", 1, None), ("Paris", -1, "a1")]
+        # Forward from the user-level value to the agent's tombstone, through `get()`:
+        # neither is in the history the session's client reads.
         assert session.delete(paris)["erased"] == [c.id for c in chain]
 
         berlin = everyone.add("I live in Berlin")["results"][0]["id"]
-        session.add("I no longer live in Berlin")
+        agent.add("I no longer live in Berlin")
         tombstone = fake.memvara.get(berlin, user="alice").invalidated_by
-        # Back from the session's tombstone to the user-level value, through `why()`.
+        # Back from the agent's tombstone to the user-level value, through `why()`.
         assert session.delete(tombstone)["erased"] == [berlin, tombstone]
         assert fake.memvara.history("user", "lives_in", user="alice") == []
 

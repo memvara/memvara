@@ -790,39 +790,14 @@ class Reconciler:
         sees is decided when it reads (`memvara.retrieve.shadow`).
 
         Up to 0.17.0 a write reached its own scope, the broader scopes it reads and the
-        narrower scopes beneath it (`_in_reach`, which retraction still uses). So a
-        session's new value ended the user-wide value for everyone, and only that
-        session could see the new one.
+        narrower scopes beneath it. So a session's new value ended the user-wide value
+        for everyone, and only that session could see the new one.
+
+        A retraction reaches further than a new value, but only as far as the writer can
+        see (`_retract`): a session's retraction ends the user-wide value it reads, and a
+        user-level retraction leaves a session's value alone.
         """
         return [c for c in claims if c.scope == scope]
-
-    @staticmethod
-    def _in_reach(scope: Scope, claims: Iterable[Claim]) -> list[Claim]:
-        """The claims a retraction at `scope` may close: in its own scope, in a broader
-        scope it reads, or in a narrower scope beneath it. Never a sibling's.
-
-        A slot spans every session and agent of its project (`owner_key`), so the claims
-        competing for it include values that sibling sessions and agents hold. Closing
-        one of those changed a record the writer cannot read, and handed it back in the
-        writer's receipt, which is how session s2 could learn what session s1 had
-        stored. Reaching down stays, as it does for `forget()` and `history()`: a
-        user-level retraction still ends a value a session holds.
-
-        Only a retraction uses this. A new value ends only the values at its own scope
-        (`_at_scope`), because a session's value is a local value that leaves the
-        user-wide one in place. A retraction says that a value the writer can read has
-        stopped being true, and it leaves no value of its own behind to answer in its
-        place, so it still ends the value wherever the writer reads it from.
-        """
-        reach: dict[Scope, bool] = {}
-        out: list[Claim] = []
-        for c in claims:
-            ok = reach.get(c.scope)
-            if ok is None:
-                ok = reach[c.scope] = scope.contains(c.scope) or scope.sees(c.scope)
-            if ok:
-                out.append(c)
-        return out
 
     @staticmethod
     def _canonical_of(claims: Sequence[Claim]) -> Claim:
@@ -1128,9 +1103,17 @@ class Reconciler:
     def _retract(self, claim: Claim, t: datetime, owner: str,
                  close: Closure = "ended", reason: str | None = None) -> ReconcileResult:
         tenant = claim.scope.tenant
+        # Only the claims the writer can see: its own scope and the broader ones it reads
+        # (`Scope.visible`). A session's retraction therefore ends the user-wide value it
+        # reads, and a user-level retraction leaves a session's or an agent's own value
+        # alone, as a user-level new value does. A slot's key leaves out the agent and the
+        # session, so without this a user-level retraction, above all one that names no
+        # value, ended every session's and every agent's value in the slot, values the
+        # writer cannot read. `forget()` is the call that reaches down into every scope.
+        #
         # Without a claim whose retirement takes effect later, for the reason `_victims`
         # gives: a retraction cannot end it, so it must not be reported as ended.
-        slot = [c for c in self._in_reach(claim.scope, self.store.competing_claims(
+        slot = [c for c in claim.scope.visible(self.store.competing_claims(
                     tenant, claim.fact_key, valid_at=t, known_at=t))
                 if owner_key(c.scope) == owner and c.invalidated_at is None]
 

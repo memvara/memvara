@@ -25,9 +25,13 @@ or agent, and the user-wide value stays live for everyone else (#266):
   session's value ends, the user-wide value answers there again.
 - A read at another instant (`valid_at`, `known_at`, `as_of`), `count()`, `get()` and
   `why()` are not shadowed, so they can return both values.
-- A retraction ("I no longer live in Berlin") is unchanged. It leaves no value of its own
-  behind, so it still ends the value wherever the writer reads it from, and a user-level
-  retraction still ends a session's value.
+- A retraction ("I no longer live in Berlin") closes only the values its writer can see.
+  A session's or an agent's retraction still ends the user-wide value, because the
+  session reads it. A user-level retraction no longer ends a session's or an agent's own
+  value, whether it names the value or names none (`remember(subject, predicate, "",
+  polarity=-1)`). Before, an untargeted user-level retraction ended every value in the
+  slot, every session's included. To clear a fact in every scope, use `forget()` at the
+  user level.
 - A repeat of a value the writer can see still reinforces that claim, wherever it is
   stored.
 

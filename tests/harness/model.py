@@ -327,11 +327,11 @@ class ReferenceStore:
             return self._add(op, level, slot, live, decide_from, valid_from, clock_start,
                              t, separate)
 
-        # `Reconciler._retract`'s slot: the rows the writer reads or reaches down to,
-        # without a row whose retirement is recorded, which no later closure changes.
-        closable = [r for r in live if r.invalidated_at is None
-                    and (contains(level, r.level) or r.level in reads)]
-        matches = [r for r in closable if r.obj == op.obj]
+        # `Reconciler._retract`'s slot: the rows the writer can see, without a row whose
+        # retirement is recorded, which no later closure changes. A retraction that names
+        # no value matches every one of them.
+        closable = [r for r in live if r.invalidated_at is None and r.level in reads]
+        matches = [r for r in closable if not op.obj or r.obj == op.obj]
         # Only a match the retraction would change: one already ended at or before the
         # retraction's start, by the same retraction dated in the future and sent before,
         # is left alone (#349).
@@ -634,7 +634,8 @@ def filed_at(predicate: str, level: Level) -> Level:
 
 @dataclass(frozen=True)
 class Remember:
-    """`remember()`. `polarity=-1` is a retraction. `expires_at` is written as given.
+    """`remember()`. `polarity=-1` is a retraction, and one whose `obj` is empty names no
+    value, so it retracts every value in the slot. `expires_at` is written as given.
     `valid_to` is the end the caller gives, and one at or before the start is refused.
     `level` names the scope in `LEVELS` the writer is bound to, as on every operation
     below that has one."""

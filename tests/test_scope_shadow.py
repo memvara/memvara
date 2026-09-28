@@ -116,14 +116,58 @@ def test_a_session_repeating_the_user_wide_value_reinforces_it():
     assert receipt.added == []
 
 
-def test_a_retraction_in_a_session_ends_the_user_wide_value_it_reads():
-    """A retraction leaves no value of its own behind, so it still ends the value the
-    session reads, wherever that value is stored."""
+@pytest.mark.parametrize("level,sibling", LEVELS, ids=LEVEL_IDS)
+def test_a_bound_retraction_ends_the_user_wide_value_it_reads(level, sibling):
+    """A retraction closes the claims its writer can see. A session or an agent reads the
+    user-wide value, so its retraction still ends it."""
     mem = make()
     [berlin] = mem.remember("user", "lives_in", "Berlin").added
-    receipt = mem.scope(session="s1").remember("user", "lives_in", "Berlin", polarity=-1)
+    receipt = mem.scope(**level).remember("user", "lives_in", "Berlin", polarity=-1)
     assert [c.id for c in receipt.closed] == [berlin.id]
     assert homes(mem) == []
+
+
+@pytest.mark.parametrize("level,sibling", LEVELS, ids=LEVEL_IDS)
+def test_a_user_level_retraction_leaves_a_bound_value_live(level, sibling):
+    """A user-level reader cannot see a session's or an agent's value, so a user-level
+    retraction that names the same value does not end it. `forget()` is the call that
+    reaches down into every scope."""
+    mem = make()
+    bound = mem.scope(**level)
+    # The session's own Berlin first: written after the user-wide one, it would reinforce
+    # that claim instead of storing its own.
+    [own] = bound.remember("user", "lives_in", "Berlin").added
+    [berlin] = mem.remember("user", "lives_in", "Berlin").added
+    receipt = mem.remember("user", "lives_in", "Berlin", polarity=-1)
+    assert [c.id for c in receipt.closed] == [berlin.id]
+    assert bound.get(own.id).state == "live"
+    assert homes(bound) == ["Berlin"]
+    assert homes(mem) == []
+
+
+@pytest.mark.parametrize("level,sibling", LEVELS, ids=LEVEL_IDS)
+def test_a_user_level_retraction_of_the_whole_slot_leaves_a_bound_value_live(
+        level, sibling):
+    """A retraction that names no value closes every value in the slot the writer can
+    see, and no other."""
+    mem = make()
+    bound = mem.scope(**level)
+    [berlin] = mem.remember("user", "lives_in", "Berlin").added
+    [paris] = bound.remember("user", "lives_in", "Paris").added
+    receipt = mem.remember("user", "lives_in", "", polarity=-1)
+    assert [c.id for c in receipt.closed] == [berlin.id]
+    assert bound.get(paris.id).state == "live"
+    assert homes(bound) == ["Paris"]
+    assert homes(mem) == []
+
+
+def test_forget_at_the_user_level_still_reaches_a_sessions_value():
+    mem = make()
+    mem.remember("user", "lives_in", "Berlin")
+    session = mem.scope(session="s1")
+    session.remember("user", "lives_in", "Paris")
+    assert sorted(c.object for c in mem.forget("user", "lives_in")) == ["Berlin", "Paris"]
+    assert homes(session) == []
 
 
 # -- the present-tense read takes the narrowest value --------------------------------------

@@ -309,7 +309,9 @@ trip.count()                                              # 2: count() is not sh
 ```
 
 Reads at another instant (`valid_at`, `known_at`, `as_of`), `count()`, `get()` and `why()`
-return both values. A retraction still ends the value wherever the writer reads it from.
+return both values. A retraction closes only the values its writer can see: a session's
+retraction ends the user-wide value it reads, and a user-level retraction leaves a
+session's value alone. `forget()` at the user level clears the fact in every scope.
 
 Scope filters fail **closed**: a scope that resolves to nothing matches nothing, rather
 than degrading into an unfiltered query across every user.

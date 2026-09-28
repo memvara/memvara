@@ -1262,8 +1262,8 @@ def test_a_new_value_still_ends_the_value_at_its_own_scope(rec, store):
 
 
 def test_a_retraction_in_a_session_still_ends_the_value_it_reads(rec, store):
-    # A retraction leaves no value of its own to answer in the session, so it still ends
-    # the value the session reads from its agent's level (`Reconciler._in_reach`).
+    # A retraction closes the claims its writer can see, so it still ends the value the
+    # session reads from its agent's level.
     old = rec.apply(claim("lives_in", "Berlin", scope=Scope("acme", "alice", "asst"))).claim
     res = rec.apply(claim("lives_in", "Berlin", polarity=-1,
                           scope=Scope("acme", "alice", "asst", "s2")))

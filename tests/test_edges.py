@@ -1310,14 +1310,16 @@ def test_a_broader_write_leaves_a_session_value_beneath_it_live():
         assert [c.object for c in mem.get_all()] == ["Paris"]
 
 
-def test_a_broader_retraction_still_closes_a_session_value_beneath_it():
-    """A retraction leaves no value of its own, so it still reaches down, as `forget()`
-    does: a user-level retraction ends the value a session holds."""
+def test_a_broader_retraction_leaves_a_session_value_beneath_it_live():
+    """A retraction closes only claims its writer can see. Up to this change a
+    user-level retraction reached down, as `forget()` does, and ended the value a session
+    holds, which the user level cannot read. `forget()` still reaches down."""
     with _alice() as mem:
         mem.remember("user", "lives_in", "Berlin", session="s1")
         receipt = mem.remember("user", "lives_in", "Berlin", polarity=-1)
-        assert [c.object for c in receipt.invalidated] == ["Berlin"]
-        assert mem.get_all(session="s1") == []
+        assert receipt.invalidated == []
+        assert [c.object for c in mem.get_all(session="s1")] == ["Berlin"]
+        assert [c.object for c in mem.forget("user", "lives_in")] == ["Berlin"]
 
 
 def test_remember_cites_only_turns_the_writer_can_see():

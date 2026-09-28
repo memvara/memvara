@@ -572,13 +572,17 @@ a user-level write ended the value a session held. Claims ended that way stay en
 migration reopens them, and restating the value where it was lost restores it
 (`docs/UPGRADING.md`).
 
-**A retraction still reaches what the writer reads, and what lies beneath it.** A
-retraction closes the claims the candidate can reach (`Reconciler._in_reach`): those in its
-own scope, in a broader scope it reads (`Scope.sees`), or in a narrower scope beneath it
-(`Scope.contains`), never a sibling's. It leaves no value of its own to answer in the
-writer's scope, so a session saying "I no longer live in Berlin" ends the user-wide Berlin,
-and a user-level retraction ends the value a session holds, as `forget()` and `history()`
-reach down. The accumulation report still counts every live value in the slot, siblings
+**A retraction closes only the claims its writer can see.** A retraction closes the claims
+in its own scope and in the broader scopes it reads (`Scope.visible`, in
+`Reconciler._retract`), never one in a narrower scope or a sibling's. It leaves no value of
+its own to answer in the writer's scope, so a session saying "I no longer live in Berlin"
+ends the user-wide Berlin the session reads. A user-level retraction leaves a session's or
+an agent's own value alone, whether it names that value or names none, because the user
+level cannot read it, and a user-level new value leaves it alone too. Before this rule a
+retraction also reached down into narrower scopes, as `forget()` and `history()` do, and
+since a session's value became a local value that let an untargeted user-level retraction
+end every session's value in the slot. `forget()` is still the call that reaches down into
+every scope. The accumulation report still counts every live value in the slot, siblings
 included; it is a count and names no value, and counting exactly would mean reading every
 occupant of the slot.
 

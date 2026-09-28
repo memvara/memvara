@@ -21,9 +21,11 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   or an agent's own value either. A present-tense read takes a single-valued fact from the
   narrowest level of the reader's chain that holds one, which is how a repository's own
   value already hid the user-wide one (`memvara/retrieve/shadow.py`). Reads at another
-  instant, `count()`, `get()` and `why()` are not shadowed. A retraction is unchanged: it
-  still ends the value wherever the writer reads it from, and `forget()` and `history()`
-  at a broad scope still reach down into a session. Claims that a session-bound write
+  instant, `count()`, `get()` and `why()` are not shadowed. A retraction closes only the
+  values its writer can see: a session's retraction still ends the user-wide value it
+  reads, but a user-level retraction, named or naming no value, no longer ends a
+  session's or an agent's value. `forget()` and `history()` at a broad scope still reach
+  down into a session. Claims that a session-bound write
   ended before this release stay ended; restate the value to restore it
   (`docs/UPGRADING.md`). `Store.occupied_slots` takes a keyword-only `scopes` argument, and
   a store that implements it must accept it. #266 (B2).

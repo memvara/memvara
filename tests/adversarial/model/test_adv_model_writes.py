@@ -356,6 +356,24 @@ def test_a_retraction_in_a_session_still_ends_the_user_wide_value(pair: Pair) ->
     assert e.closed == ["r1"]
 
 
+def test_a_user_level_retraction_leaves_a_sessions_value_live(pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I0, level="a1/s1"))
+    pair.apply(Remember("u1", "lives_in", "Berlin", valid_from=I0))
+    e = pair.apply(Remember("u1", "lives_in", "Berlin", polarity=-1))
+    assert e.closed == ["r2"] and pair.model.rows["r1"].state == "live"
+
+
+def test_a_retraction_that_names_no_value_ends_only_what_the_writer_sees(
+        pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Paris", valid_from=I0, level="s1"))
+    pair.apply(Remember("u1", "likes", "tea", level="s1"))
+    pair.apply(Remember("u1", "likes", "coffee"))
+    e = pair.apply(Remember("u1", "likes", "", polarity=-1))
+    assert e.closed == ["r3"] and pair.model.rows["r2"].state == "live"
+    e = pair.apply(Remember("u1", "lives_in", "", polarity=-1))
+    assert e.closed == [] and pair.model.rows["r1"].state == "live"
+
+
 def test_a_global_fact_from_a_session_inside_the_project_is_filed_without_it(
         pair: Pair) -> None:
     pair.apply(Remember("u1", "lives_in", "Berlin", level="P/s1"))

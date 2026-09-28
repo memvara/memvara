@@ -112,7 +112,10 @@ class MemoryMachine(RuleBasedStateMachine):
                  valid_from: datetime | None, recorded_at: datetime | None,
                  confidence: float, close: str, expires_at: datetime | None,
                  valid_to: datetime | None, level: str) -> None:
-        obj = data.draw(st.sampled_from(POOLS[predicate]))
+        # A retraction may also name no value, which retracts every value in the slot
+        # the writer can see.
+        values = POOLS[predicate] + (("",) if polarity < 0 else ())
+        obj = data.draw(st.sampled_from(values))
         self._apply(Remember(user, predicate, obj, polarity, valid_from, recorded_at,
                              confidence, close, expires_at, valid_to, level))
 

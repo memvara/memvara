@@ -39,6 +39,7 @@ class KnownBug:
 KNOWN_BUGS: dict[str, KnownBug] = {bug.id: bug for bug in (
 
 
+
     KnownBug("B46", 318, "tier 0 of add() reinforces a restatement dated before the claim, "
              "and the earlier period is lost"),
     KnownBug("B56", 338, 'on Codex, Copilot and OpenCode, "not configured" and "no matching '
