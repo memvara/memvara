@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import pytest
 
-from harness import known_bugs
 from harness.fakes.hosted_mcp import FakeHostedMcp
 
 from . import support
@@ -83,12 +82,11 @@ def test_a_local_store_that_cannot_open_is_not_reported_as_not_configured(
 
 
 @pytest.mark.parametrize("host", support.silent_hosts(support.recall_hosts(FAST_HOSTS)))
-@known_bugs.xfail("B56")
 def test_nothing_matching_is_told_apart_from_nothing_configured_without_a_status_line(
         outcomes: support.Runs, host: str) -> None:
-    """The renderer drops recall's status where a host shows none, and recall logs
-    neither outcome."""
-    support.pin_nothing_matches(outcomes, host)
+    """The renderer drops recall's status where a host shows none, so recall logs both
+    outcomes (#338)."""
+    support.check_nothing_matches_is_logged(outcomes, host)
 
 
 @pytest.mark.parametrize("host", FAST_HOSTS)
