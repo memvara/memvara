@@ -7,6 +7,53 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A write that overlaps part of a stored period stores only the part not yet held
+
+### What changed
+
+A positive write is compared with the stored claims of the same value that the writer can
+see and the store still believes. It used to be a repeat only when one stored claim held
+its whole period, and otherwise it was stored whole, so a period two claims shared was
+stored twice and every read inside it returned the value twice (#435). Now:
+
+- The write reinforces every stored claim that holds part of its period.
+- It stores a new claim only for each part of its period that no stored claim holds.
+  With Rome stored for January to March, Rome written for February to April is stored
+  for March to April. Rome written for January to July, with Rome stored for March to
+  May, is stored in two pieces: January to March and May to July.
+- When stored claims hold the whole period between them, the write stores nothing and
+  reinforces each of them.
+- No stored claim is rewritten, and each piece cites the write's sources.
+
+A write that also closes a different value in a single-valued slot closes it as before:
+at the write's own start, even when the first piece begins later.
+
+Two related cases change as well. A write that begins inside a live claim written with an
+end still to come, and runs past that end, now stores the period after it; it used to be
+a plain repeat, and that period was dropped. And the same write dated in the future, made
+twice, is now a repeat; it used to be stored twice.
+
+### Who this changes
+
+**If you read `receipt.added[0]` as the claim you wrote**, it is now the first piece, and
+its `valid_from` or `valid_to` can differ from the ones you passed. A write can add more
+than one claim, and each piece after one that begins later than your write has no
+`temporal_precision`. `receipt.reinforced` lists the stored claims your write overlapped,
+in the order of their periods.
+
+**If you count `receipt.added` to bill or to report how many facts were written**, a write
+that spans a stored claim now adds two claims where it used to add one.
+
+**If you call `Reconciler.apply` directly**, `ReconcileResult.claim` is the first piece,
+or the first stored claim of a repeat, and the new field `ReconcileResult.also` holds an
+`add` for each further piece and a `reinforce` for each stored claim reinforced for the
+overlap.
+
+### How to find it in your code
+
+Search for `.added[0]` and `len(receipt.added)` next to a `remember(` call that passes
+`valid_from` or `valid_to`, and for `.apply(` on a `Reconciler`.
+
 ## A turn said again after its value ended is stored and extracted again
 
 ### What changed

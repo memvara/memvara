@@ -178,6 +178,26 @@ either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/sto
   ingest ran. `memvara/store/sqlite.py` orders on `value_key` before `id`.
 - **Scope is bound at startup and cannot be widened by a call.** `ScopedMemvara.bind()`
   narrows only.
+- **A backdated write changes belief only from the moment of the call.** `remember()`
+  accepts a `recorded_at` in the past, for replays and imports. When such a write closes
+  claims already on record, as a retraction does or a new value in a single-valued slot
+  does, their belief clock changes at the time of the call and never earlier. With
+  `close="retired"`, each displaced claim's `invalidated_at` is the time of the call, not
+  the write's `recorded_at`, so a read of belief between the two instants still returns
+  it. The belief clock is an audit trail of what the store believed and when, and what it
+  believed in the past is never rewritten (#436). Only the write's own row sits at its
+  `recorded_at`: a new value is believed from there, and a retraction's tombstone closes
+  both of its clocks there (#317). `supersede()` and `remember(replaces=...)` are the
+  exception, because they take the closing instant as an argument (`at`, which for a
+  retirement defaults to the new claim's `recorded_at`) in order to replay a mutation log.
+  INTERNALS.md has the details under *A backdated write changes belief only from the
+  moment of the call*.
+- **A write stores only the part of its period the store does not hold.** A stored claim
+  of the same value that the writer can see and the store believes counts. A write whose
+  whole period such claims hold is a repeat of them; otherwise it is stored once for each
+  part no stored claim holds, and the stored claims that hold the rest are reinforced
+  (#435). No stored claim is rewritten, so the reads of the past stay what they were.
+  [The write pipeline](write-pipeline.md) has the rule.
 - **Each text index row sits at the rowid of the row it indexes.** Erasure deletes a row's
   index entry by rowid, and both lexical legs join the index to its table on rowid, so a
   write that gave a row a new rowid would break both. That is why `put_claim` and

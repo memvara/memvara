@@ -183,10 +183,19 @@ class Pair:
         if expect.new is None:
             assert not added, f"the store added rows the model did not: {sorted(added)}"
             return
-        assert len(added) == 1, f"expected one new row, the store added {len(added)}"
-        real_id = added.pop()
-        self.model.real_ids[expect.new] = real_id
-        self.handles[real_id] = expect.new
+        handles = [expect.new, *expect.more]
+        assert len(added) == len(handles), (
+            f"expected {len(handles)} new rows, the store added {len(added)}")
+        # A write stored in pieces adds one row for each period, and the periods do not
+        # overlap, so the rows pair up with the model's handles in order of their start.
+        # The model lists its pieces in that order already.
+        claims = [self.mem.store.get_claim(real_id) for real_id in added]
+        in_order = sorted((c for c in claims if c is not None),
+                          key=lambda c: c.valid_from)
+        assert len(in_order) == len(handles), "a row the store added cannot be read"
+        for handle, claim in zip(handles, in_order):
+            self.model.real_ids[handle] = claim.id
+            self.handles[claim.id] = handle
 
     def _stamp(self, expect: Expect, before: datetime, after: datetime) -> None:
         # Stamps taken from the clock first; then those equal to another row's start or
@@ -232,17 +241,18 @@ class Pair:
         """I6: a positive write that stores a row live now can be read back at once."""
         if not isinstance(op, Remember) or op.polarity < 0 or expect.new is None:
             return
-        claim = self.mem.store.get_claim(self.real(expect.new))
-        assert claim is not None, f"{expect.new} is missing from the store"
-        now = utcnow()
-        live = (claim.invalidated_at is None and claim.recorded_at <= now
-                and claim.valid_from <= now
-                and (claim.valid_to is None or claim.valid_to > now)
-                and (claim.expires_at is None or claim.expires_at > now))
-        if live:
-            assert claim.id in {c.id for c in self.view(op.user, op.level).get_all()}, (
-                f"{op.user} cannot read back {expect.new}, a live row it has just written "
-                f"bound to the scope {op.level!r}")
+        for handle in [expect.new, *expect.more]:
+            claim = self.mem.store.get_claim(self.real(handle))
+            assert claim is not None, f"{handle} is missing from the store"
+            now = utcnow()
+            live = (claim.invalidated_at is None and claim.recorded_at <= now
+                    and claim.valid_from <= now
+                    and (claim.valid_to is None or claim.valid_to > now)
+                    and (claim.expires_at is None or claim.expires_at > now))
+            if live:
+                assert claim.id in {c.id for c in self.view(op.user, op.level).get_all()}, (
+                    f"{op.user} cannot read back {handle}, a live row it has just "
+                    f"written bound to the scope {op.level!r}")
 
     def _compare_result(self, op: Op, expect: Expect, result: Any) -> None:
         if expect.refused:
@@ -264,7 +274,7 @@ class Pair:
     def _compare_receipt(self, e: Expect, receipt: Any, *, retraction: bool) -> None:
         h = self.handle_of
         added = [h(c.id) for c in receipt.added]
-        want_added = [e.new] if e.added and e.new is not None else []
+        want_added = [e.new, *e.more] if e.added and e.new is not None else []
         assert added == want_added, f"receipt.added is {added}, not {want_added}"
         reinforced = [h(c.id) for c in receipt.reinforced]
         want = e.reinforced if e.reinforced_reported else []

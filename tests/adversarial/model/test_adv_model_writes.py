@@ -88,10 +88,14 @@ def test_restating_from_an_even_earlier_start_adds_only_the_period_not_held(
 
 
 def test_a_restatement_covers_a_gap_between_two_stored_periods(pair: Pair) -> None:
+    """#283 with #435: tea is live from I4 and stored for I1 to I2, so tea from I0 is
+    stored for I0 to I1 and I2 to I4, and not for I1 to I2 a second time."""
     pair.apply(Remember("u1", "likes", "tea", valid_from=I1, valid_to=I2, recorded_at=I1))
     pair.apply(Remember("u1", "likes", "tea", valid_from=I4, recorded_at=I4))
     e = pair.apply(Remember("u1", "likes", "tea", valid_from=I0, recorded_at=I5))
-    assert e.new == "r3" and pair.model.rows["r3"].valid_to == I4
+    assert e.new == "r3" and e.more == ["r4"] and e.reinforced == ["r1"]
+    assert [(pair.model.rows[h].valid_from, pair.model.rows[h].valid_to)
+            for h in ("r3", "r4")] == [(I0, I1), (I2, I4)]
 
 
 def test_a_retired_earlier_period_is_stored_again_when_restated(pair: Pair) -> None:
@@ -181,6 +185,81 @@ def test_a_value_written_twice_with_the_same_end_is_a_repeat(pair: Pair) -> None
                             expires_at=FAR_FUTURE))
     assert e.new is None and e.reinforced == ["r1"]
     assert pair.model.rows["r1"].expires_at == FAR_FUTURE
+
+
+def test_a_write_that_overlaps_part_of_a_stored_period_stores_only_the_rest(
+        pair: Pair) -> None:
+    """#435: the overlap reinforces the stored row, and only the rest is stored."""
+    pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I0, valid_to=I2))
+    e = pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I1, valid_to=I3))
+    assert e.new == "r2" and e.more == [] and e.reinforced == ["r1"]
+    row = pair.model.rows["r2"]
+    assert (row.valid_from, row.valid_to) == (I2, I3)
+    assert (pair.model.rows["r1"].valid_from, pair.model.rows["r1"].valid_to) == (I0, I2)
+
+
+def test_a_write_that_spans_both_sides_of_a_stored_period_is_stored_in_two_pieces(
+        pair: Pair) -> None:
+    pair.apply(Remember("u1", "likes", "tea", valid_from=I2, valid_to=I3))
+    e = pair.apply(Remember("u1", "likes", "tea", valid_from=I0, valid_to=I5))
+    assert e.new == "r2" and e.more == ["r3"] and e.reinforced == ["r1"]
+    assert [(pair.model.rows[h].valid_from, pair.model.rows[h].valid_to)
+            for h in ("r2", "r3")] == [(I0, I2), (I3, I5)]
+
+
+def test_an_open_ended_write_over_a_closed_stored_period_begins_where_it_ends(
+        pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I0, valid_to=I2))
+    e = pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I1))
+    assert e.new == "r2" and e.reinforced == ["r1"]
+    assert (pair.model.rows["r2"].valid_from, pair.model.rows["r2"].valid_to) == (I2, None)
+
+
+def test_a_write_that_outlasts_a_live_row_stores_the_period_after_it(pair: Pair) -> None:
+    pair.apply(Remember("u1", "likes", "tea", valid_from=I0, valid_to=FAR_FUTURE))
+    e = pair.apply(Remember("u1", "likes", "tea"))
+    assert e.new == "r2" and e.reinforced == ["r1"]
+    assert pair.model.rows["r2"].valid_from == FAR_FUTURE
+
+
+def test_a_write_inside_a_stored_period_is_still_a_repeat(pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I0, valid_to=I4))
+    e = pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I1, valid_to=I2))
+    assert e.new is None and e.reinforced == ["r1"]
+
+
+def test_a_write_two_stored_periods_cover_together_is_a_repeat_of_both(pair: Pair) -> None:
+    pair.apply(Remember("u1", "likes", "tea", valid_from=I0, valid_to=I2))
+    pair.apply(Remember("u1", "likes", "tea", valid_from=I2, valid_to=I4))
+    e = pair.apply(Remember("u1", "likes", "tea", valid_from=I1, valid_to=I3))
+    assert e.new is None and e.reinforced == ["r1", "r2"]
+
+
+def test_a_write_that_overlaps_no_stored_period_is_stored_whole(pair: Pair) -> None:
+    pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I0, valid_to=I1))
+    e = pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I2, valid_to=I3))
+    assert e.new == "r2" and e.reinforced == []
+    assert (pair.model.rows["r2"].valid_from, pair.model.rows["r2"].valid_to) == (I2, I3)
+
+
+def test_a_piece_supersedes_what_the_whole_write_would(pair: Pair) -> None:
+    """Paris, live from I1, ends where the write begins, at I2, although the piece stored
+    begins at I3, where the stored Rome ends."""
+    pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I0, valid_to=I3))
+    pair.apply(Remember("u1", "lives_in", "Paris", valid_from=I1))
+    e = pair.apply(Remember("u1", "lives_in", "Rome", valid_from=I2))
+    assert e.new == "r3" and e.closed == ["r2"] and e.reinforced == ["r1"]
+    assert pair.model.rows["r2"].valid_to == I2
+    assert pair.model.rows["r3"].valid_from == I3
+
+
+def test_a_future_value_written_twice_is_a_repeat(pair: Pair) -> None:
+    """A row that begins later is not live, and the check for a stored period used to run
+    only for a write with an end. So the same write dated in the future, made twice,
+    stored its period twice."""
+    pair.apply(Remember("u1", "likes", "tea", valid_from=FAR_FUTURE))
+    e = pair.apply(Remember("u1", "likes", "tea", valid_from=FAR_FUTURE))
+    assert e.new is None and e.reinforced == ["r1"]
 
 
 def test_a_repeated_retraction_reinforces_its_tombstone_and_reports_nothing(

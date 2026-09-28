@@ -1664,6 +1664,19 @@ class WritePipeline:
             # The retraction tombstone is stored but is not an added fact; only the
             # claims it retired belong in the receipt's visible outcome.
             to_embed.append(res.claim)
+        for part in res.also:
+            # A write whose period stored claims of its value already held in part (#435):
+            # each further piece it stored is added, and each stored claim it reinforced
+            # for the overlap is reinforced, in the order of their periods.
+            if part.claim is None:
+                continue
+            if part.action == "add":
+                receipt.added.append(part.claim)
+                to_embed.append(part.claim)
+            elif part.action == "reinforce":
+                receipt.reinforced.append(part.claim)
+            if part.retyped is not None:
+                receipt.retyped.append(part.retyped)
         receipt.invalidated.extend(res.invalidated)
         if res.accumulated is not None:
             # Above the telemetry guard, not inside it: the receipt is the account of

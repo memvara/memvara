@@ -659,8 +659,13 @@ claim:
    tea stored from April, restating it from January stores January to April; restating
    it from January or February again reinforces that claim; and restating it from
    October stores October to January only. A stored claim that ends before the next one
-   begins leaves a gap and does not move the end, so a restatement from before it still
-   covers the gap, and overlaps that claim. Tier 0 of `add()` sends a turn dated before
+   begins leaves a gap and does not move the end. A restatement from before it is stored
+   only for the parts of its period that no stored claim of the value holds, and it
+   reinforces the claim in between, as *A write that overlaps part of a stored period
+   stores only the rest* below describes. With tea stored for February to March and from
+   June, tea from January is stored for January to February and for March to June. Up to
+   #435 it was stored for January to June, and February to March was then held twice.
+   Tier 0 of `add()` sends a turn dated before
    the claim it restates here too, rather than taking it for a repeat (#318); see the
    tier-0 entry under *`memvara/write/`* below.
 
@@ -675,8 +680,55 @@ claim:
    reinforced, and nothing is inserted. A repeat that names an `expires_at` counts only a
    claim in exactly its own scope, as above. Without this, `remember("lives_in", "Rome",
    valid_from=January)` written twice while Paris is live from March stored January to
-   March twice, and every read of February returned Rome twice (#351). A claim that
-   holds only part of the period does not count, and the candidate is stored whole.
+   March twice, and every read of February returned Rome twice (#351). The same check
+   runs for a candidate with no end, and only a claim with no end holds that period, so
+   the same value written twice to begin in the future is a repeat too.
+
+   **A write that overlaps part of a stored period stores only the rest.** When no single
+   claim holds the candidate's whole period, the reconciler works out, from the same
+   claims (believed, visible to the writer, and in its own scope for a repeat that names
+   an `expires_at`), which parts of the period none of them holds (`_uncovered`). A
+   claim holds its own period; a claim the candidate cannot be said to begin before
+   (`_is_after`) holds it from the candidate's start, so precision counts as it does
+   above; a claim of no length holds nothing. Then:
+
+   - With no such part, the stored claims hold the whole period between them. The
+     candidate is a repeat of each claim that holds some of it: each is reinforced, the
+     action is `reinforce`, `claim` is the first of them in the order of their periods,
+     and the rest are in `ReconcileResult.also`. Nothing is inserted and nothing is
+     closed.
+   - Otherwise the candidate is stored once for each such part, and each stored claim
+     that holds some of the period is reinforced. The first part is the candidate itself;
+     each further part is a copy with its own id. Every part keeps the candidate's
+     sources, confidence, type and expiry. A part that begins later than the candidate
+     has no `temporal_precision`, because it begins at the exact instant a stored claim
+     ends. `claim` is the first part, and `also` holds an `add` for each further part and
+     then a `reinforce` for each stored claim, in the order of their periods.
+   - No stored claim is rewritten.
+
+   So with Rome stored for January to March, Rome for February to April is stored for
+   March to April. With Rome stored for March to May, Rome for January to July is stored
+   for January to March and for May to July. Stored whole, the second claim overlapped
+   the first, and every read inside the overlap returned Rome twice (#435).
+
+   **The pieces close exactly what the whole write would.** Step 2's victims are found
+   for the candidate's whole period before it is cut, and they are closed at the
+   candidate's own start, with `invalidated_by` naming the first piece. With Rome stored
+   for January to March and Paris live from 15 January, Rome from February ends Paris on
+   1 February, although the stored piece begins in March: Rome holds February through
+   the claim on record. A different value that begins later still ends the candidate
+   first, so the pieces lie inside that shorter period. A candidate whose whole period is
+   held is a repeat, and a repeat closes nothing, as before. The restatement with an
+   earlier start in step 1 closes nothing either, as before.
+
+   **A live claim that ends later than the write begins is not always a repeat.** A live
+   claim of the value that begins no later than the candidate makes the candidate a plain
+   repeat of it only when the claims of the value hold the candidate's whole period. A
+   live claim written with an end still to come can end before the candidate does, and
+   then the candidate goes on to the steps below, which store only the period after it.
+   Such a piece is not reported as an accumulation, because the value is already live. A
+   caller's write that names an `expires_at` stays a repeat of the live claim in its own
+   scope, as above.
 
    "Can see" is `Scope.sees`: the writer's own scope and the broader ones it reads, such
    as the user-wide scope above a project. `value_key` covers the owner and not the
@@ -693,7 +745,10 @@ claim:
    begins; it was not an error, so nothing on the belief clock moves and
    `get_all(valid_at=<back then>)` still returns it. Under `close="retired"` the axes
    swap: `invalidated_at=now` and `valid_to` untouched, because a correction witnessed
-   no world event. Return `action="supersede"` with the list.
+   no world event. `now` is the time of the call even for a write backdated with
+   `recorded_at`, because past belief is never rewritten (#436); see *A backdated write
+   changes belief only from the moment of the call* under *`memvara/store/`*. Return
+   `action="supersede"` with the list.
 
    Two things about that step are worth stating separately, because both were silent
    until they were not.
@@ -767,7 +822,10 @@ claim:
    The matches are **ended**, not retired:
    every negative form the write path produces is "no longer" / "used to" / "not any
    more", which is the world moving on. `close="retired"` is the caller saying the
-   original was never true.
+   original was never true. For a backdated retraction, the matches are retired at the
+   time of the call, not at the retraction's `recorded_at`; only the tombstone sits at its
+   `recorded_at`. *A backdated write changes belief only from the moment of the call*,
+   under *`memvara/store/`*, has the rule.
 
    **A retraction faces the authority rule** of step 2. A match that the retraction is
    worth less than half of (`AUTHORITY_SHARE`) stays live and is reported as a `Dispute`
@@ -807,7 +865,14 @@ class ReconcileResult:
     restated: Claim | None       # the live claim a restatement with an earlier start
                                  # restated; it is not changed, and a link proposed for
                                  # the candidate is recorded on it
+    also: list[ReconcileResult]  # for a write stored claims hold in part (#435): an
+                                 # "add" for each further piece, then a "reinforce" for
+                                 # each stored claim reinforced for the overlap
 ```
+
+`WritePipeline._absorb` puts `claim` and every `add` in `also` in `receipt.added`, and
+every `reinforce` in `also` in `receipt.reinforced`, so a receipt lists the pieces of a
+write and the stored claims it reinforced, each in the order of their periods.
 
 **Re-filing a claim's `memory_type`.** An identical triple is the same fact, so a
 re-assertion reinforces the record rather than forking it — and until `Retype` existed the
@@ -1940,6 +2005,35 @@ _state_clause(valid_at, known_at, states=None, alias="")        -> tuple[str, li
 _live_clause(valid_at, known_at, include_invalidated, alias="") -> tuple[str, list]
 _happened_clause(valid_at, known_at, alias="")                  -> tuple[str, list]
 ```
+
+### A backdated write changes belief only from the moment of the call
+
+`remember()` accepts a `recorded_at` in the past, for replays and imports (invariant 8).
+Such a write can close other claims: a retraction closes the values it names, and a new
+value in a single-valued slot closes the value it replaces. The rule for those closures is
+that the belief clock of a claim already on record changes only at the moment of the
+call, never earlier:
+
+- With `close="retired"`, each displaced claim's `invalidated_at` is the time of the call
+  (`Reconciler._retire` stamps `t`), not the write's `recorded_at`.
+- With `close="ended"`, the default, the displaced claim's belief clock does not move at
+  all. Its world clock ends at the write's `valid_from`, which may be in the past,
+  because that is when the world changed.
+
+So a read of belief at an instant between the write's `recorded_at` and the call still
+returns the displaced claim. The belief clock is an audit trail of what this store
+believed and when, and what it believed in the past is never rewritten. Retiring from the
+write's `recorded_at` instead was considered and rejected for that reason (#436).
+
+Two things do sit at the write's `recorded_at`. The first is the write's own row: a new
+value is believed from its `recorded_at`, and a retraction's tombstone closes both of its
+clocks there, so that no read at any instant returns it (#317). The second is the one
+exception to the rule: `supersede()` and `remember(replaces=...)` take the closing instant
+as an argument, `at`, and a retirement with no `at` lands at the new claim's
+`recorded_at`, which is in the past for a backdated write. They exist to replay somebody
+else's mutation log, where the instant of each closure is part of the record being
+replayed. `tests/test_reconcile.py` pins the rule for a backdated retraction and a
+backdated supersession, both with `close="retired"`.
 
 ### `ask()` reconstructs an ending the row cannot date
 
