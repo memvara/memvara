@@ -101,9 +101,13 @@ def test_capture_gives_up_on_an_extractor_that_never_answers_and_says_so(
     assert status is not None and status.endswith("capture failing: no reply within 1.0s")
 
 
-def test_capture_on_codex_frees_the_turn_while_its_extractor_hangs(
-        hooks: Make, tmp_path: pathlib.Path) -> None:
-    support.check_capture_frees_the_turn(hooks, tmp_path, "codex")
+@pytest.mark.parametrize("host", ("claude", "codex"))
+def test_capture_frees_the_turn_while_its_extractor_hangs(
+        hooks: Make, tmp_path: pathlib.Path, host: str) -> None:
+    """Claude Code is here because `claude -p` cancelled its capture when capture was an
+    async hook (#398); it now returns at once and leaves its child running, as Codex's
+    does."""
+    support.check_capture_frees_the_turn(hooks, tmp_path, host)
 
 
 def test_the_check_that_capture_frees_the_turn_fails_when_the_child_has_ended(

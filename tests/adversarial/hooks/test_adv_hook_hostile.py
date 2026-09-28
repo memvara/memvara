@@ -6,11 +6,12 @@ time limit, whatever arrives on its stdin: nothing, text that is not JSON, JSON 
 wrong shape, bytes that are not UTF-8, a lone surrogate, missing, extra or wrongly typed
 fields, 8 MB, or nesting 100,000 levels deep.
 
-The fast tier sends every payload to every hook on two hosts that between them cover each
-path through the dispatcher: Claude Code, which nests its replies, has a status line and
-captures in the hook process, and Cursor, which reads a flat reply under snake_case keys,
-has no recall event, and hands capture to a child. The nightly tier sends them to all
-five hosts (nightly/test_adv_hook_matrix_nightly.py).
+The fast tier sends every payload to every hook on three hosts that between them cover each
+path through the dispatcher: Claude Code, which nests its replies and has a status line;
+Cursor, which reads a flat reply under snake_case keys and has no recall event; and
+OpenCode, the one host that captures in the hook process rather than handing capture to
+a child. The nightly tier sends them to all five hosts
+(nightly/test_adv_hook_matrix_nightly.py).
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from harness.hooks import HookRunner
 
 from . import support
 
-FAST_HOSTS = ("claude", "cursor")
+FAST_HOSTS = ("claude", "cursor", "opencode")
 
 
 @pytest.fixture(scope="module")

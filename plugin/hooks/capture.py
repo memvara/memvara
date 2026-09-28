@@ -30,11 +30,13 @@ its watermark past *all* of it, so on a session with large tool outputs most of 
 transcript was skipped unread and could never be reconsidered. Measured on one session:
 630KB consumed, six extractions paid for, and only the tail of each batch ever seen.
 
-**It runs async, and therefore silently.** Extraction shells out to `claude -p` and takes
-12-14 seconds, and a synchronous `Stop` hook holds the turn open for all of it. Async hands
-the turn back immediately -- but the client discards an async hook's output, so the
+**It runs detached, and therefore silently.** Extraction shells out to `claude -p` and takes
+12-14 seconds, and a `Stop` hook that did the work itself would hold the turn open for all
+of it. So `run.py` hands the payload to a child in a session of its own and returns at
+once, on every shell host -- but nothing the child prints reaches the client, so the
 `systemMessage` this used to print could not survive the change and is gone rather than
-merely unread.
+merely unread. (It used to be an async hook on Claude Code, whose output the client
+discards just the same; `claude -p` cancels an async hook when it exits, #398.)
 
 That reverses a rule this repository states in CLAUDE.md, and the reason it was stated is
 still true: a hook nobody can see working is one nobody notices breaking. The compensating
@@ -43,7 +45,7 @@ disappearing -- every path that reaches a decision writes a line, including the 
 decide to do nothing.
 
 `recall.py` and `session_start.py` are the second half of that obligation, not exempt from
-it. Neither is this hook's own async -- both are synchronous, both already speak on every
+it. Neither is detached as this hook is -- both are synchronous, both already speak on every
 event they answer, and `lib.ipc.raise_capture_alert`/`due_capture_alert` are how a failure
 here reaches whichever of them a person is actually watching next: on the terminal, as
 `⋈ Memvara · ... · capture failing: <reason>` riding on a banner that file was printing
