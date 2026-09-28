@@ -24,31 +24,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   the value itself. Both schemas now declare it, so `tools/list` shows it to a client and
   the validator fills it, and the handlers read the filled value. Behaviour is unchanged:
   an empty `extractor` is still read as `api`. #296 (B20).
-- **Capture logs a line on every path where it decides to do nothing.** It returned
-  without a line when a hook had triggered the Stop, when the payload named no
-  transcript, when the transcript path named no file, when the transcript's size could
-  not be read, and when the transcript had not grown since the last capture. Capture's
-  output never reaches the person, so `~/.memvara/.hooks/capture.log` is its only
-  account, and on those paths there was no trace that it had run. Each now logs a
-  `skipped=` line saying why. #342 (B60).
-- **The plugin captures what is said in a headless Claude Code session.** Capture was
-  registered on Claude Code as an async Stop hook, so that a 12 to 14 second extraction
-  never held a turn open. `claude -p` cancels an async hook when the process exits, so a
-  script, a CI job or a scheduled task that ran Claude Code headless stored nothing, and
-  nothing said so. Measured on Claude Code 2.1.281, the Stop hook reported the outcome
-  "cancelled". Capture on Claude Code is now registered as an ordinary hook that hands its
-  work to a process in a session of its own and returns at once, as it already did on
-  Codex, Copilot and Cursor. Measured the same way, the hook reported "success" and the
-  capture finished after `claude -p` had exited. A plugin repository picks this up when it
-  generates `hooks.json` again, which drops `"async": true` from the capture command.
-  #398 (B87).
-- **A capture payload that is not valid UTF-8 is no longer lost when capture detaches.**
-  `run.py` decoded the payload before handing it to the capture child and encoded it
-  again, and a byte that is not UTF-8, read the way Python's UTF-8 mode and the C locale
-  read it, made the encoding fail. The child was never started, and the turn was lost with
-  only a `detach-payload: UnicodeEncodeError` line in `hooks.log`. This affected Codex,
-  Copilot and Cursor, and would have affected Claude Code with the fix above. The payload
-  is now handed on as the bytes that were read.
 
 ## [0.17.0] — 2026-09-28
 
@@ -258,6 +233,31 @@ refuses a store this one has opened.
 
 ### Fixed
 
+- **Capture logs a line on every path where it decides to do nothing.** It returned
+  without a line when a hook had triggered the Stop, when the payload named no
+  transcript, when the transcript path named no file, when the transcript's size could
+  not be read, and when the transcript had not grown since the last capture. Capture's
+  output never reaches the person, so `~/.memvara/.hooks/capture.log` is its only
+  account, and on those paths there was no trace that it had run. Each now logs a
+  `skipped=` line saying why. #342 (B60).
+- **The plugin captures what is said in a headless Claude Code session.** Capture was
+  registered on Claude Code as an async Stop hook, so that a 12 to 14 second extraction
+  never held a turn open. `claude -p` cancels an async hook when the process exits, so a
+  script, a CI job or a scheduled task that ran Claude Code headless stored nothing, and
+  nothing said so. Measured on Claude Code 2.1.281, the Stop hook reported the outcome
+  "cancelled". Capture on Claude Code is now registered as an ordinary hook that hands its
+  work to a process in a session of its own and returns at once, as it already did on
+  Codex, Copilot and Cursor. Measured the same way, the hook reported "success" and the
+  capture finished after `claude -p` had exited. A plugin repository picks this up when it
+  generates `hooks.json` again, which drops `"async": true` from the capture command.
+  #398 (B87).
+- **A capture payload that is not valid UTF-8 is no longer lost when capture detaches.**
+  `run.py` decoded the payload before handing it to the capture child and encoded it
+  again, and a byte that is not UTF-8, read the way Python's UTF-8 mode and the C locale
+  read it, made the encoding fail. The child was never started, and the turn was lost with
+  only a `detach-payload: UnicodeEncodeError` line in `hooks.log`. This affected Codex,
+  Copilot and Cursor, and would have affected Claude Code with the fix above. The payload
+  is now handed on as the bytes that were read.
 - **`docs/API.md` names every method that only one client has.** Its section on a hosted
   deployment did not mention `end()`, `health()` or `whoami()`, which only the hosted client
   has, or `bind()` and `merge_predicate()`, which only the local client has. A caller who
