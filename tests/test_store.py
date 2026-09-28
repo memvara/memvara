@@ -6,6 +6,7 @@ import gc
 import os
 import pathlib
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -2061,20 +2062,49 @@ def test_an_open_waiting_for_the_creation_lock_stops_soon_after_ctrl_c(tmp_path,
     Ctrl-C only between calls into SQLite, so one long wait inside SQLite held an interrupt
     back until the wait ended. The lock is taken in short tries instead. Here the wait is
     five seconds and the interrupt comes after 0.3, so the open must end long before the
-    wait would."""
+    wait would.
+
+    Python raises an interrupt wherever the main thread next runs Python code, and when
+    that is a finalizer, such as a `__del__` or a weakref callback, it prints "Exception
+    ignored" and the interrupt is lost. A long run of the whole suite collects plenty of
+    such objects, so a single interrupt failed this test there now and then, with the store
+    behaving correctly (#440). So the interrupt is sent every try until it lands in
+    `_reserve`, the loop under test: the handler raises `KeyboardInterrupt` there, once,
+    and ignores it anywhere else. A person whose Ctrl-C is lost presses it again."""
     monkeypatch.setattr(sqlite_store, "_SCHEMA_STEP_WAIT", 5.0)
     path = tmp_path / "c.db"
     other = _creating_elsewhere(path)
-    interrupt = threading.Timer(0.3, _thread.interrupt_main)
+    raised = threading.Event()
+
+    def in_the_wait(signum, frame) -> None:
+        if not raised.is_set() and frame is not None and (
+                frame.f_code is SQLiteStore._reserve.__code__):
+            raised.set()
+            raise KeyboardInterrupt
+
+    def interrupt() -> None:
+        if raised.wait(0.3):
+            return
+        while True:
+            _thread.interrupt_main()
+            if raised.wait(sqlite_store._LOCK_TRY):
+                return
+
+    sender = threading.Thread(target=interrupt)
+    previous = signal.signal(signal.SIGINT, in_the_wait)
     started = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):
-            interrupt.start()
+            sender.start()
             SQLiteStore(str(path))
         took = time.monotonic() - started
     finally:
-        interrupt.cancel()
-        interrupt.join()
+        raised.set()
+        sender.join()
+        # Runs the handler for an interrupt still pending, which it ignores, before the
+        # previous handler is back.
+        time.sleep(0)
+        signal.signal(signal.SIGINT, previous)
         other.close()
     assert took < 2.0, f"the open went on for {took:.1f} s after an interrupt at 0.3 s"
 
