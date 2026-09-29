@@ -4472,9 +4472,6 @@ its first open; a build older than this one refuses a store this one has opened.
   mark every claim written before `extractor` existed. The unmarked set is the tuple
   `("", "api")`. The extractor's name is still never rendered.
 
-
-Nothing yet.
-
 ## [npm 0.1.1] — 2026-08-26
 
 The npm package versions independently of the Python one and ships on `npm-v*`. It is
