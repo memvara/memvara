@@ -98,16 +98,22 @@ class Child:
     def stderr_tail(self, lines: int = 20) -> str:
         return "".join(self._stderr[-lines:])
 
-    def wait_for(self, prefix: str) -> str:
+    def wait_for(self, prefix: str, *, timeout: float | None = None) -> str:
         """The rest of the first line that starts with `prefix`. Raises `CrashHarnessError`
-        when the child prints an error, exits first, or prints nothing more in time."""
-        deadline = time.monotonic() + self.timeout
+        when the child prints an error, exits first, or prints nothing more in time.
+
+        `timeout` replaces the child's own timeout for this one wait. A test that expects
+        the wait to time out passes a short one here, so the child's start-up still gets
+        the generous default."""
+        if timeout is None:
+            timeout = self.timeout
+        deadline = time.monotonic() + timeout
         while True:
             try:
                 line = self._lines.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
                 raise CrashHarnessError(
-                    f"no line starting with {prefix!r} within {self.timeout:g} s; the "
+                    f"no line starting with {prefix!r} within {timeout:g} s; the "
                     f"child's stderr ends with:\n{self.stderr_tail()}") from None
             if line is _EOF:
                 code = self.proc.wait()
