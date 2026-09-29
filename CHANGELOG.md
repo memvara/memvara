@@ -355,7 +355,8 @@ release, not with the next wheel.
   `process.exit()` as soon as stdin closed, and Node does not wait for a write to a pipe
   before exiting, so only the first 64 KiB of a reply still being written reached the
   client. A `tools/list` reply grew past that with the `valid_during` arguments of #234, and
-  was cut off mid-string. The bridge now exits once stdout has flushed.
+  was cut off mid-string. The bridge now exits once stdout has flushed, or after five
+  seconds if the reader stops reading without closing its end.
 
 ## [0.17.0] — 2026-09-28
 
