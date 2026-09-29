@@ -487,3 +487,125 @@ def test_the_fake_hosted_server_answers_a_windowed_read_as_the_library_does():
                                                                             "Lisbon"}
         assert [r.claim.object for r in mem.search("team office", query_rewrite=False,
                                                    valid_at=MAR_31)] == ["Lisbon"]
+
+
+# --- review findings on #444 ----------------------------------------------------------
+
+
+class _FailingSelector:
+    """A selector whose call fails, so a ranked read falls back to the plain read."""
+
+    top_n = 40
+
+    def admit(self):
+        from contextlib import nullcontext
+        return nullcontext()
+
+    def select(self, question, candidates, *, asked_on=None, usage=None):
+        raise RuntimeError("the model is down")
+
+
+def test_a_ranked_read_that_falls_back_keeps_the_window():
+    """The plain read a failed ranked read runs again used to drop the window and read
+    only its end, so Porto, which held only inside March, was lost."""
+    from memvara import Memvara, NullLLM
+
+    mem = Memvara(store=SQLiteStore(":memory:"), llm=NullLLM(), user="alice",
+                  embedder=HashingEmbedder(dim=512), query_rewrite=False,
+                  read_selector=_FailingSelector())
+    mem.remember("team", "office_in", "Porto", valid_from=MAR_3, valid_to=MAR_10)
+    mem.remember("team", "office_in", "Lisbon", valid_from=MAR_10)
+    mem.add("the team office question came up", ts=MAR_3)
+    hits = mem.search("team office", valid_during=MARCH, include_episodes=True,
+                      ranked=True)
+    assert hits.selection is not None and hits.selection.outcome != "applied"
+    assert {r.claim.object for r in hits if hasattr(r, "claim")} == {"Porto", "Lisbon"}
+
+
+def test_a_window_is_a_dated_read_even_when_it_reaches_now(monkeypatch):
+    """A rewrite window that reaches now leaves `valid_at` unset, which is the only way a
+    window reaches the retriever without it. The read still gets the weights a dated
+    read gets, and is not shadowed as a read of the present."""
+    import memvara.retrieve.hybrid as hybrid
+    from test_read_stages import FakeChat, memory, rewrite_reply
+
+    mem = memory(FakeChat(rewrite_reply(start="2026-01-01", end="2999-12-31")))
+    mem.remember("team", "office_in", "Lisbon", valid_from=MAR_10)
+    timed: list[bool] = []
+    original = mem.reader._weights
+
+    def spy(query, **kw):
+        timed.append(kw["timed"])
+        return original(query, **kw)
+
+    monkeypatch.setattr(mem.reader, "_weights", spy)
+    shadowed: list[int] = []
+    real = hybrid.shadowed
+    monkeypatch.setattr(hybrid, "shadowed",
+                        lambda *a, **kw: shadowed.append(1) or real(*a, **kw))
+    hits = mem.search("where is the team office this year")
+    assert hits.rewrite.valid_during is not None and hits.rewrite.valid_at is None
+    assert timed and all(timed) and shadowed == []
+
+
+def test_the_async_clients_take_a_window():
+    import asyncio
+
+    from memvara import AsyncMemvara
+
+    async def main():
+        amem = AsyncMemvara(_memory())
+        found = await amem.search("team office", valid_during=MARCH)
+        block = await amem.recall("team office", valid_during=MARCH)
+        scoped = amem.scope(user="alice")
+        scoped_found = await scoped.search("team office", valid_during=MARCH)
+        scoped_block = await scoped.recall("team office", valid_during=MARCH)
+        return found, block, scoped_found, scoped_block
+
+    found, block, scoped_found, scoped_block = asyncio.run(main())
+    assert {r.claim.object for r in found} == {"Leeds", "Porto", "Lisbon"}
+    assert {r.claim.object for r in scoped_found} == {"Leeds", "Porto", "Lisbon"}
+    assert block.startswith("Known about the user at any time from 1 March 2026")
+    assert scoped_block == block
+
+
+def test_a_cut_range_names_the_days_read_and_says_up_to_now_on_the_same_day():
+    """The range's last day is today and the read stopped at noon: the reply says the
+    range was read up to now, and a miss names the days read."""
+    from datetime import date
+
+    from memvara.select.base import Rewrite
+    from memvara.server.tools import _rewrite_cut, _rewrite_line, _rewrite_period
+
+    same_day = Rewrite(outcome="applied", date_from=date(2026, 9, 1),
+                       date_to=date(2026, 9, 29),
+                       valid_during=(datetime(2026, 9, 1, tzinfo=timezone.utc),
+                                     datetime(2026, 9, 29, 12, tzinfo=timezone.utc)))
+    assert _rewrite_cut(same_day)
+    assert _rewrite_line(same_day).endswith("in that range, up to now.")
+    far = Rewrite(outcome="applied", date_from=date(2026, 1, 1), date_to=date(2999, 12, 31),
+                  valid_during=(datetime(2026, 1, 1, tzinfo=timezone.utc),
+                                datetime(2026, 9, 29, 12, tzinfo=timezone.utc)))
+    assert _rewrite_period(far) == ("2026-01-01", "2026-09-29")
+    whole = Rewrite(outcome="applied", date_from=date(2024, 3, 1), date_to=date(2024, 3, 31),
+                    valid_during=MARCH_2024)
+    assert not _rewrite_cut(whole)
+
+
+MARCH_2024 = (datetime(2024, 3, 1, tzinfo=timezone.utc),
+              datetime(2024, 3, 31, 23, 59, 59, tzinfo=timezone.utc))
+
+
+def test_a_window_that_is_not_a_sequence_is_a_value_error():
+    with pytest.raises(ValueError, match="must be a pair"):
+        time_window(t for t in MARCH)
+
+
+@pytest.mark.parametrize("window", [{"start": None, "end": "2026-03-31T00:00:00Z"},
+                                    {"start": "2026-03-01T00:00:00Z", "end": None}])
+def test_the_fake_refuses_a_window_with_a_missing_end_as_a_422(window):
+    from harness.fakes.fake_v1 import ApiError, _window_in
+
+    with pytest.raises(ApiError) as caught:
+        _window_in(window)
+    assert caught.value.status == 422

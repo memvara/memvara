@@ -361,6 +361,7 @@ class AsyncMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -375,6 +376,7 @@ class AsyncMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -389,6 +391,7 @@ class AsyncMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -402,6 +405,7 @@ class AsyncMemvara:
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
+                     valid_during: Sequence[datetime] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType] | None = None,
                      filters: Mapping[str, FilterValue] | None = None,
@@ -414,7 +418,7 @@ class AsyncMemvara:
             query_rewrite=query_rewrite,
             tenant=tenant,
             user=user, agent=agent, session=session, as_of=as_of, valid_at=valid_at,
-            known_at=known_at, states=states,
+            known_at=known_at, states=states, valid_during=valid_during,
             include_invalidated=include_invalidated,
             memory_types=memory_types, filters=filters,
             filepath_prefix=filepath_prefix, include_episodes=include_episodes)
@@ -432,6 +436,7 @@ class AsyncMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
                      filepath_prefix: str | None = ...,
                      with_ids: Literal[False] = ...) -> str: ...
@@ -446,6 +451,7 @@ class AsyncMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
                      filepath_prefix: str | None = ...,
                      with_ids: Literal[True]) -> RecallResult: ...
@@ -460,6 +466,7 @@ class AsyncMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
                      filepath_prefix: str | None = ...,
                      with_ids: bool) -> str | RecallResult: ...
@@ -476,6 +483,7 @@ class AsyncMemvara:
                      budget: int | None = None,
                      counter: Callable[[str], int] = _approx_tokens,
                      valid_at: datetime | None = None,
+                     valid_during: Sequence[datetime] | None = None,
                      filters: Mapping[str, FilterValue] | None = None,
                      filepath_prefix: str | None = None,
                      with_ids: bool = False) -> Any:
@@ -489,8 +497,8 @@ class AsyncMemvara:
             memory_types=memory_types, include_episodes=include_episodes,
             episode_header=episode_header, include_history=include_history,
             history_header=history_header, budget=budget, counter=counter,
-            valid_at=valid_at, filters=filters, filepath_prefix=filepath_prefix,
-            with_ids=with_ids)
+            valid_at=valid_at, valid_during=valid_during, filters=filters,
+            filepath_prefix=filepath_prefix, with_ids=with_ids)
 
     async def ask(self, question: str, *, at: datetime | None = None, k: int = 3,
                   min_score: float = 0.0, anchored: bool = False, tenant=None, user=None,
@@ -886,6 +894,7 @@ class AsyncScopedMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -899,6 +908,7 @@ class AsyncScopedMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -912,6 +922,7 @@ class AsyncScopedMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -924,6 +935,7 @@ class AsyncScopedMemvara:
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
+                     valid_during: Sequence[datetime] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType] | None = None,
                      filters: Mapping[str, FilterValue] | None = None,
@@ -933,7 +945,7 @@ class AsyncScopedMemvara:
             query, k=k, min_score=min_score, anchored=anchored, ranked=ranked,
             query_rewrite=query_rewrite,
             as_of=as_of, valid_at=valid_at,
-            known_at=known_at, states=states,
+            known_at=known_at, states=states, valid_during=valid_during,
             include_invalidated=include_invalidated,
             memory_types=memory_types, filters=filters,
             filepath_prefix=filepath_prefix, include_episodes=include_episodes,
@@ -950,6 +962,7 @@ class AsyncScopedMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
                      filepath_prefix: str | None = ...,
                      with_ids: Literal[False] = ...) -> str: ...
@@ -964,6 +977,7 @@ class AsyncScopedMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
                      filepath_prefix: str | None = ...,
                      with_ids: Literal[True]) -> RecallResult: ...
@@ -978,6 +992,7 @@ class AsyncScopedMemvara:
                      include_history: bool = ..., history_header: str | None = ...,
                      budget: int | None = ..., counter: Callable[[str], int] = ...,
                      valid_at: datetime | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
                      filepath_prefix: str | None = ...,
                      with_ids: bool) -> str | RecallResult: ...
@@ -994,6 +1009,7 @@ class AsyncScopedMemvara:
                      budget: int | None = None,
                      counter: Callable[[str], int] = _approx_tokens,
                      valid_at: datetime | None = None,
+                     valid_during: Sequence[datetime] | None = None,
                      filters: Mapping[str, FilterValue] | None = None,
                      filepath_prefix: str | None = None,
                      with_ids: bool = False) -> Any:
@@ -1004,7 +1020,8 @@ class AsyncScopedMemvara:
             memory_types=memory_types,
             include_episodes=include_episodes, episode_header=episode_header,
             include_history=include_history, history_header=history_header,
-            budget=budget, counter=counter, valid_at=valid_at, filters=filters,
+            budget=budget, counter=counter, valid_at=valid_at,
+            valid_during=valid_during, filters=filters,
             filepath_prefix=filepath_prefix, with_ids=with_ids, **self._kw)
 
     async def ask(self, question: str, *, at: datetime | None = None, k: int = 3,

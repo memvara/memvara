@@ -919,7 +919,8 @@ def _window_in(value: Any) -> tuple[datetime, datetime] | None:
                        "valid_during must be an object with start and end")
     start = _instant_in(value["start"], "valid_during.start")
     end = _instant_in(value["end"], "valid_during.end")
-    assert start is not None and end is not None
+    if start is None or end is None:
+        raise ApiError(422, "invalid_request", "valid_during needs both start and end")
     if end < start:
         raise ApiError(422, "invalid_request", "valid_during ends before it starts")
     return start, end

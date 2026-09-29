@@ -234,6 +234,13 @@ def _window(args: dict[str, Any], tool: str) -> tuple[datetime, datetime] | None
     return start, end
 
 
+def _asked_period(args: dict[str, Any]) -> tuple[str, str] | None:
+    """The period a caller sent as `valid_during`, as it was written, for a reply to
+    name, or `None`."""
+    raw = args.get("valid_during")
+    return None if raw is None else (raw["start"], raw["end"])
+
+
 def _memory_types(values: Sequence[str] | None) -> list[MemoryType] | None:
     return None if values is None else [MemoryType(v) for v in values]
 
@@ -918,15 +925,26 @@ def _rewrite_day(rewrite: Rewrite | None) -> str | None:
 
 
 def _rewrite_period(rewrite: Rewrite | None) -> tuple[str, str] | None:
-    """The range a rewrite read this read over, as two `YYYY-MM-DD` dates, or `None`.
+    """The days a rewrite read this read over, as two `YYYY-MM-DD` dates, or `None`.
 
     Set when the claim searches read the range as a window (#234), and only for a
-    complete range, the rule `_rewrite_line` follows.
+    complete range, the rule `_rewrite_line` follows. The last day is the window's, which
+    is today when the range reached past now, so a miss names the days actually read.
     """
     if (rewrite is None or rewrite.valid_during is None or rewrite.date_from is None
             or rewrite.date_to is None):
         return None
-    return rewrite.date_from.isoformat(), rewrite.date_to.isoformat()
+    return rewrite.date_from.isoformat(), rewrite.valid_during[1].date().isoformat()
+
+
+def _rewrite_cut(rewrite: Rewrite) -> bool:
+    """Whether the window stopped before the last second of the range the query named,
+    which it does when the range reached past the moment of the read."""
+    if rewrite.valid_during is None or rewrite.date_to is None:
+        return False
+    last = datetime(rewrite.date_to.year, rewrite.date_to.month, rewrite.date_to.day,
+                    23, 59, 59, tzinfo=timezone.utc)
+    return rewrite.valid_during[1] < last
 
 
 def _rewrite_line(rewrite: Rewrite | None) -> str | None:
@@ -946,8 +964,7 @@ def _rewrite_line(rewrite: Rewrite | None) -> str | None:
     # can check.
     if (_rewrite_period(rewrite) is not None and rewrite.valid_during is not None
             and rewrite.date_to is not None):
-        # Cut when the range reached past now, which is as far as the window reads.
-        cut = rewrite.valid_during[1].date() < rewrite.date_to
+        cut = _rewrite_cut(rewrite)
         parts.append(f"The query names {rewrite.date_from} to {rewrite.date_to}, so "
                      "this includes what was true at any time in that range"
                      f"{', up to now' if cut else ''}.")
@@ -995,8 +1012,7 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
         ))
     except FilterError as exc:
         raise _filter_refusal("memory_search", exc) from None
-    during = ((args["valid_during"]["start"], args["valid_during"]["end"])
-              if window is not None else None)
+    during = _asked_period(args)
     if not results:
         return _no_match(args["query"], day=_rewrite_day(results.rewrite),
                          period=during or _rewrite_period(results.rewrite))
@@ -1100,8 +1116,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "memvara's ranked reads are at capacity right now. Retry in a few seconds, "
             "or call memory_recall again without ranked for an ordinary read."
         ) from exc
-    during = ((args["valid_during"]["start"], args["valid_during"]["end"])
-              if window is not None else None)
+    during = _asked_period(args)
     if isinstance(block, RecallResult):
         text, day = block.text, valid_at or _rewrite_day(block.rewrite)
         during = during or _rewrite_period(block.rewrite)

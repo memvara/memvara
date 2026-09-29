@@ -1051,7 +1051,9 @@ class HybridRetriever:
         limit = max(depth * self.candidate_multiplier, depth)
         wanted = set(memory_types) if memory_types is not None else None
 
-        weights = self._weights(query, timed=valid_at is not None or known_at is not None)
+        # A window is a dated read even when it reaches now, which leaves `valid_at` unset.
+        weights = self._weights(query, timed=(valid_at is not None or known_at is not None
+                                              or window is not None))
 
         results, saturated = self._gather(
             query, scope, limit, valid_at, known_at, wanted_states, wanted, now,
@@ -1107,7 +1109,7 @@ class HybridRetriever:
                         include_episodes=include_episodes, now=now, ranked=False,
                         observe=False,
                         rerank_final=rerank_final and selection.outcome not in _NO_RERANK,
-                        where=where))
+                        where=where, window=window))
                     if rec is not None and observe:
                         self._observe(rec, query, plain, (perf_counter() - t0) * 1000.0)
                     return SearchResults(plain, selection=selection)
@@ -1444,8 +1446,9 @@ class HybridRetriever:
         # A present-tense read bound to a project leaves out a user-wide value its own
         # value shadows (`retrieve/shadow.py`). Last, so only a claim every other filter
         # kept costs a slot lookup, and after the walk, so a shadowed claim the graph leg
-        # reached is left out as surely as one the lookup legs found.
-        if valid_at is None and known_at is None and results:
+        # reached is left out as surely as one the lookup legs found. A window is not the
+        # present, even one that reaches now, so it is not shadowed either.
+        if valid_at is None and known_at is None and window is None and results:
             hidden = shadowed(self.store, self.registry, (r.claim for r in results), scope)
             results = [r for r in results if r.claim.id not in hidden]
         return results, saturated

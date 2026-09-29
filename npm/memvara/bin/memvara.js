@@ -177,15 +177,21 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   return 0;
 }
 
+/** How long exit waits for stdout to drain before it gives up, in milliseconds. */
+const FLUSH_WAIT_MS = 5000;
+
 /**
  * Exit once everything written to stdout has left the process.
  *
  * `process.exit()` does not wait for a write to a pipe, and Node sends at most one pipe
  * buffer, 64 KiB, before it stops. A `tools/list` reply longer than that was cut off
  * mid-string when stdin ended right after the request. An empty write is queued behind
- * every earlier one, so its callback runs when they have all been flushed.
+ * every earlier one, so its callback runs when they have all been flushed. A reader that
+ * stops reading without closing its end would keep that callback from ever running, so
+ * the bridge exits after `FLUSH_WAIT_MS` regardless, as it used to at once.
  */
 function exitWhenFlushed(code) {
+  setTimeout(() => process.exit(code), FLUSH_WAIT_MS);
   process.stdout.write("", () => process.exit(code));
 }
 

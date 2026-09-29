@@ -134,7 +134,8 @@ def time_window(valid_during: Sequence[datetime] | None, *,
             f"valid_during cannot be combined with {' or '.join(clash)}. Both set the "
             "world clock: valid_at=T asks the same question as valid_during=(T, T). "
             "Pass one of them.")
-    if isinstance(valid_during, (str, bytes)) or len(valid_during) != 2:
+    if (isinstance(valid_during, (str, bytes)) or not isinstance(valid_during, Sequence)
+            or len(valid_during) != 2):
         raise ValueError(
             "valid_during must be a pair (start, end) of datetimes, got "
             f"{valid_during!r}.")
