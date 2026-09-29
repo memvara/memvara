@@ -109,8 +109,10 @@ from ..types import (
     Result,
     Scope,
     SearchResults,
+    TimeWindow,
     owner_key,
     time_axes,
+    time_window,
     utcnow,
 )
 from .anchor import PATH, SUBJECT, anchor_of, query_tokens
@@ -599,6 +601,7 @@ class HybridRetriever:
         self, query: str, scope: Scope, *, k: int = ...,
         as_of: datetime | None = ..., valid_at: datetime | None = ...,
         known_at: datetime | None = ..., states: Collection[str] | None = ...,
+        valid_during: Sequence[datetime] | None = ...,
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         anchored: bool = ..., include_episodes: Literal[False] = ...,
@@ -612,6 +615,7 @@ class HybridRetriever:
         self, query: str, scope: Scope, *, k: int = ...,
         as_of: datetime | None = ..., valid_at: datetime | None = ...,
         known_at: datetime | None = ..., states: Collection[str] | None = ...,
+        valid_during: Sequence[datetime] | None = ...,
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         anchored: bool = ..., include_episodes: Literal[True],
@@ -625,6 +629,7 @@ class HybridRetriever:
         self, query: str, scope: Scope, *, k: int = ...,
         as_of: datetime | None = ..., valid_at: datetime | None = ...,
         known_at: datetime | None = ..., states: Collection[str] | None = ...,
+        valid_during: Sequence[datetime] | None = ...,
         include_invalidated: bool | None = ...,
         memory_types: Sequence[MemoryType] | None = ..., min_score: float = ...,
         anchored: bool = ..., include_episodes: bool, now: datetime | None = ...,
@@ -642,6 +647,7 @@ class HybridRetriever:
         valid_at: datetime | None = None,
         known_at: datetime | None = None,
         states: Collection[str] | None = None,
+        valid_during: Sequence[datetime] | None = None,
         include_invalidated: bool | None = None,
         memory_types: Sequence[MemoryType] | None = None,
         min_score: float = 0.0,
@@ -661,6 +667,15 @@ class HybridRetriever:
         August about June becomes reachable at all. `as_of` sets both and is exact
         sugar for `valid_at=known_at=T`; passing it alongside either raises. See
         `memvara.types.time_axes`.
+
+        `valid_during=(start, end)` asks about a window of the world clock instead of
+        an instant: a claim is returned when it was true at any moment from `start` to
+        `end`, both included, so a value that held from 3 to 10 March is returned to a
+        question about March. It applies to the claim searches, inside their limits.
+        The turns and the graph leg read the window's end as `valid_at`, which already
+        includes every turn said during the window. It cannot be passed with `valid_at`
+        or `as_of`; `known_at` still sets the belief clock. See
+        `memvara.types.time_window`.
 
         `states` names the population, as any non-empty subset of
         `("live", "ended", "retired")`. `include_invalidated` is its two-valued alias -
@@ -730,11 +745,13 @@ class HybridRetriever:
         rises. A row's own `score` and `Explanation` are those from the first list that
         found it, the original query's list first. On a ranked read only the original
         query goes to the selector, and the turns it kept stay at the front, ahead of
-        the fused rows. The date range becomes this read's `valid_at`, set to the last
-        second of the range's final day, unless the caller passed `valid_at` or
-        `as_of`, which always win, or the range ends today or later. `.rewrite` on the
-        result records what happened, with the five outcomes `ranked` uses; every
-        outcome but `applied` serves the plain read. It is `False` here, on the engine,
+        the fused rows. The date range becomes this read's `valid_during`, from the
+        start of its first day to the last second of its final day or to now, whichever
+        comes first, and the turns and the graph leg read its end as `valid_at` when that
+        end is in the past. The caller's own `valid_at`, `as_of` or `valid_during` always
+        wins, and a range that starts after today is not used. `.rewrite` on the result
+        records what happened, with the five outcomes `ranked` uses; every outcome but
+        `applied` serves the plain read. It is `False` here, on the engine,
         and `True` on `Memvara.search`. A plain read with `k <= 0` returns nothing,
         makes no call and reports no rewrite.
 
@@ -754,7 +771,11 @@ class HybridRetriever:
         # Resolved once, here, and handed down, so no inner call can disagree about which
         # instant or which population was asked for. Also checked before the model is
         # asked anything, so a call that is going to raise does not pay for a rewrite.
+        window = time_window(valid_during, as_of=as_of, valid_at=valid_at)
         valid_at, known_at = time_axes(as_of, valid_at, known_at)
+        if window is not None:
+            # Everything but the claim searches reads the window's end as its instant.
+            valid_at = window[1]
         wanted_states = resolve_states(states, include_invalidated)
         once = partial(self._search_once, scope=scope, k=k, known_at=known_at,
                        wanted_states=wanted_states, memory_types=memory_types,
@@ -762,7 +783,7 @@ class HybridRetriever:
                        include_episodes=include_episodes, where=where)
         # A read that returns nothing by construction is not worth a model call.
         if not query_rewrite or (k <= 0 and not ranked):
-            return once(query, valid_at=valid_at, now=now, ranked=ranked)
+            return once(query, valid_at=valid_at, window=window, now=now, ranked=ranked)
         rec = self.telemetry
         # Started before the rewrite, because the caller waited through it too.
         t0 = perf_counter() if rec is not None else 0.0
@@ -774,16 +795,25 @@ class HybridRetriever:
         alternatives: tuple[str, ...] = ()
         if rewrite.outcome == "applied":
             alternatives = rewrite.queries
-            # `valid_at` is already `as_of` folded in, so `None` means the caller named
-            # no instant at all.
-            if rewrite.date_to is not None and valid_at is None:
+            # `valid_at` is already `as_of` and a window's end folded in, so `None`
+            # means the caller named no time at all.
+            if (rewrite.date_from is not None and rewrite.date_to is not None
+                    and valid_at is None):
+                start = datetime(rewrite.date_from.year, rewrite.date_from.month,
+                                 rewrite.date_from.day, tzinfo=timezone.utc)
                 end = datetime(rewrite.date_to.year, rewrite.date_to.month,
                                rewrite.date_to.day, 23, 59, 59, tzinfo=timezone.utc)
+                if start <= asked:
+                    # The claim searches read the whole range, up to now at the
+                    # latest; the rest read its end, if that is in the past (#234).
+                    window = (start, min(end, asked))
+                    rewrite = replace(rewrite, valid_during=window)
                 if end < asked:
                     valid_at = end
                     rewrite = replace(rewrite, valid_at=end)
         if not alternatives:
-            main = once(query, valid_at=valid_at, now=asked, ranked=ranked, observe=False)
+            main = once(query, valid_at=valid_at, window=window, now=asked, ranked=ranked,
+                        observe=False)
             hits: list[Retrieved] = list(main)
         else:
             # Every phrasing in one call: an embedder behind a network pays a round trip
@@ -791,11 +821,11 @@ class HybridRetriever:
             vectors = encode_queries(self.embedder, [query, *alternatives])
             pending = [
                 self._phrasing_pool().submit(
-                    once, q, valid_at=valid_at, now=asked, ranked=False, observe=False,
-                    rerank_final=False, qvec=vec)
+                    once, q, valid_at=valid_at, window=window, now=asked, ranked=False,
+                    observe=False, rerank_final=False, qvec=vec)
                 for q, vec in zip(alternatives, vectors[1:])]
-            main = once(query, valid_at=valid_at, now=asked, ranked=ranked, observe=False,
-                        rerank_final=False, qvec=vectors[0])
+            main = once(query, valid_at=valid_at, window=window, now=asked, ranked=ranked,
+                        observe=False, rerank_final=False, qvec=vectors[0])
             kept, fused = self._fuse(main, [f.result() for f in pending])
             # The reranker runs once, on the fused list, rather than once per phrasing.
             # A ranked read whose outcome is in `_NO_RERANK` never runs it here, exactly
@@ -911,6 +941,7 @@ class HybridRetriever:
     def _search_once(
         self, query: str, *, scope: Scope, k: int, valid_at: datetime | None,
         known_at: datetime | None, wanted_states: tuple[str, ...],
+        window: TimeWindow | None = None,
         memory_types: Sequence[MemoryType] | None, min_score: float, anchored: bool,
         include_episodes: bool, now: datetime | None, ranked: bool,
         observe: bool = True, rerank_final: bool = True, qvec: Any = None,
@@ -918,7 +949,8 @@ class HybridRetriever:
     ) -> SearchResults:
         """One retrieval of one query: everything `search` does except the rewrite.
 
-        The time axes and the states arrive resolved. `observe=False` skips the
+        The time axes, the window and the states arrive resolved. With a window,
+        `valid_at` is its end. `observe=False` skips the
         retrieval telemetry, for a rewritten read, which is observed once as a whole.
         `rerank_final=False` skips the final reranker pass, which a rewritten read runs
         once over the fused list instead. `qvec` is this query's vector when the caller
@@ -929,6 +961,7 @@ class HybridRetriever:
         try:
             return self._retrieve(query, scope=scope, k=k, valid_at=valid_at,
                                   known_at=known_at, wanted_states=wanted_states,
+                                  window=window,
                                   memory_types=memory_types, min_score=min_score,
                                   anchored=anchored, include_episodes=include_episodes,
                                   now=now, ranked=ranked, observe=observe,
@@ -949,6 +982,7 @@ class HybridRetriever:
     def _retrieve(
         self, query: str, *, scope: Scope, k: int, valid_at: datetime | None,
         known_at: datetime | None, wanted_states: tuple[str, ...],
+        window: TimeWindow | None = None,
         memory_types: Sequence[MemoryType] | None, min_score: float, anchored: bool,
         include_episodes: bool, now: datetime | None, ranked: bool, observe: bool,
         rerank_final: bool, where: SearchFilter | None = None,
@@ -1021,7 +1055,7 @@ class HybridRetriever:
 
         results, saturated = self._gather(
             query, scope, limit, valid_at, known_at, wanted_states, wanted, now,
-            min_score, anchored, weights, where)
+            min_score, anchored, weights, where, window)
 
         # Filter starvation. `memory_types` is applied after fusion truncated the pool,
         # so a rejected candidate has already consumed a slot and a narrow filter can
@@ -1037,7 +1071,7 @@ class HybridRetriever:
         if (wanted is not None or anchored) and saturated and len(results) < depth:
             results, _ = self._gather(
                 query, scope, limit * self.filter_retry_multiplier, valid_at, known_at,
-                wanted_states, wanted, now, min_score, anchored, weights, where)
+                wanted_states, wanted, now, min_score, anchored, weights, where, window)
 
         claims: list[Retrieved] = list(self._rank(results, depth))
         selection: Selection | None = None
@@ -1233,6 +1267,7 @@ class HybridRetriever:
         anchored: bool,
         weights: _Weights,
         where: SearchFilter | None = None,
+        window: TimeWindow | None = None,
     ) -> tuple[list[Result], bool]:
         """Run the legs at `limit` and return the surviving results, unsorted.
 
@@ -1249,9 +1284,10 @@ class HybridRetriever:
         """
         scopes = scope.ancestors()
         vector = self._beside(query, partial(
-            self._vector_search, query, scopes, limit, valid_at, known_at, states, where))
+            self._vector_search, query, scopes, limit, valid_at, known_at, states, where,
+            window))
         lexical_hits, lexical_terms = self._lexical_search(
-            query, scopes, limit, valid_at, known_at, states, where)
+            query, scopes, limit, valid_at, known_at, states, where, window)
         vector_hits = vector()
 
         fused = reciprocal_rank_fusion(
@@ -1983,6 +2019,7 @@ class HybridRetriever:
         known_at: datetime | None,
         states: Sequence[str],
         where: SearchFilter | None = None,
+        window: TimeWindow | None = None,
     ) -> list[tuple[str, float]]:
         """Vector leg, skipped when the query embeds to nothing.
 
@@ -1998,8 +2035,8 @@ class HybridRetriever:
         if float(np.linalg.norm(qvec)) <= 0.0:
             return []
         return list(self.store.vector_search(
-            qvec, scopes, limit, valid_at=valid_at, known_at=known_at, states=states,
-            **_narrowed(where)))
+            qvec, scopes, limit, known_at=known_at, states=states,
+            **_world(valid_at, window), **_narrowed(where)))
 
     def _lexical_search(
         self,
@@ -2010,6 +2047,7 @@ class HybridRetriever:
         known_at: datetime | None,
         states: Sequence[str],
         where: SearchFilter | None = None,
+        window: TimeWindow | None = None,
     ) -> tuple[list[tuple[str, float]], int]:
         """Lexical leg, reduced to content terms and skipped when none survive.
 
@@ -2026,8 +2064,8 @@ class HybridRetriever:
         if reduced.abstains:
             return [], 0
         hits = self.store.lexical_search(
-            reduced.text, scopes, limit, valid_at=valid_at, known_at=known_at,
-            states=states, **_narrowed(where))
+            reduced.text, scopes, limit, known_at=known_at, states=states,
+            **_world(valid_at, window), **_narrowed(where))
         return list(hits), len(reduced.terms)
 
     @staticmethod
@@ -2115,6 +2153,16 @@ def _narrowed(where: SearchFilter | None) -> dict[str, Any]:
     `TypeError` naming `where` rather than returning rows the filter would have excluded.
     """
     return {} if where is None else {"where": where}
+
+
+def _world(valid_at: datetime | None, window: TimeWindow | None) -> dict[str, Any]:
+    """The world clock as keyword arguments for a claim search: the window, or the instant.
+
+    The window is passed only on a windowed read, for the reason `_narrowed` gives: a
+    store written before `valid_during` existed keeps serving every other read, and a
+    windowed read against it raises a `TypeError` naming the argument.
+    """
+    return {"valid_at": valid_at} if window is None else {"valid_during": window}
 
 
 def _positions(hits: Sequence[tuple[str, float]]) -> dict[str, tuple[int, float]]:

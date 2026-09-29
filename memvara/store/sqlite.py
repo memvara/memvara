@@ -90,6 +90,7 @@ from ..types import (
     Link,
     MemoryType,
     Scope,
+    TimeWindow,
     as_utc,
     resolved_entity,
     stored_scope,
@@ -3236,7 +3237,8 @@ class SQLiteStore:
 
     def _state_clause(self, valid_at: datetime | None, known_at: datetime | None,
                       states: Collection[str] | None = None,
-                      alias: str = "") -> tuple[str, list]:
+                      alias: str = "", valid_during: TimeWindow | None = None
+                      ) -> tuple[str, list]:
         """SQL and binds for "in one of `states` at these two instants".
 
         The general filter every read here routes through. `_live_clause` below is this
@@ -3250,12 +3252,22 @@ class SQLiteStore:
         the pair is not a mistake this method can express any more, whatever subset of the
         states is asked for and however many markers that subset happens to need.
         """
-        return self._bind_axes(state_predicate("?", states=states, alias=alias),
-                               valid_at, known_at, alias)
+        if valid_during is None:
+            return self._bind_axes(state_predicate("?", states=states, alias=alias),
+                                   valid_at, known_at, alias)
+        # A window: the markers that read `"valid"` take its end, and the one that reads
+        # `"valid_start"` takes its start. See `state_predicate(window=True)`.
+        if valid_at is not None:
+            raise ValueError(
+                "valid_during cannot be combined with valid_at: both set the world clock.")
+        start, end = valid_during
+        return self._bind_axes(
+            state_predicate("?", states=states, alias=alias, window=True),
+            end, known_at, alias, start=start)
 
     def _bind_axes(self, predicate: tuple[str, tuple[str, ...]],
                    valid_at: datetime | None, known_at: datetime | None,
-                   alias: str = "") -> tuple[str, list]:
+                   alias: str = "", start: datetime | None = None) -> tuple[str, list]:
         """Bind a predicate's markers from its axis list, and add the expiry clause.
 
         `predicate` is the pair `state_predicate` and `unended_predicate` return: the SQL
@@ -3264,8 +3276,10 @@ class SQLiteStore:
         `unended_claims` alike, so both read the axis list rather than knowing it.
         """
         v, k = _clock(valid_at, known_at)
+        s = v if start is None else _ts(start)
         clause, axes = predicate
-        params = [k if axis == "known" else v for axis in axes]
+        params = [k if axis == "known" else s if axis == "valid_start" else v
+                  for axis in axes]
         if not self.hide_expired:
             return clause, params
         # A claim whose `expires_at` has passed is left out of every read at once, on
@@ -4949,6 +4963,7 @@ class SQLiteStore:
     def candidate_ids(self, scopes: Sequence[Scope], *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
+                      valid_during: TimeWindow | None = None,
                       states: Collection[str] | None = None,
                       include_invalidated: bool | None = None,
                       where: SearchFilter | None = None) -> list[str]:
@@ -4960,7 +4975,8 @@ class SQLiteStore:
         fell past the page boundary and is told nothing about it.
         """
         lv, lp = self._state_clause(
-            valid_at, known_at, resolve_states(states, include_invalidated))
+            valid_at, known_at, resolve_states(states, include_invalidated),
+            valid_during=valid_during)
         wc, wp = _where_clause(where, "claims", _CLAIM_DOCUMENTS, self._json_functions)
         # One index range per scope rather than an `OR` over them; see `_scoped_union`.
         # 84 ms to 69 ms for 100,000 claims in one user's scope.
@@ -5044,6 +5060,7 @@ class SQLiteStore:
     def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int, *,
                        valid_at: datetime | None = None,
                        known_at: datetime | None = None,
+                       valid_during: TimeWindow | None = None,
                        states: Collection[str] | None = None,
                        include_invalidated: bool | None = None,
                        where: SearchFilter | None = None
@@ -5055,7 +5072,8 @@ class SQLiteStore:
         # Inside the `LIMIT`, like the scope filter beside it and for the same reason: a
         # state filter applied to the returned page cannot see what the page cut off.
         lv, lp = self._state_clause(
-            valid_at, known_at, resolve_states(states, include_invalidated), alias="c")
+            valid_at, known_at, resolve_states(states, include_invalidated), alias="c",
+            valid_during=valid_during)
         # The caller's filter goes inside the `LIMIT` too, for the same reason.
         wc, wp = _where_clause(where, "c", _CLAIM_DOCUMENTS, self._json_functions)
         sql = (
@@ -5177,6 +5195,7 @@ class SQLiteStore:
     def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int, *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
+                      valid_during: TimeWindow | None = None,
                       states: Collection[str] | None = None,
                       include_invalidated: bool | None = None,
                       where: SearchFilter | None = None
@@ -5186,13 +5205,14 @@ class SQLiteStore:
 
         A read of the present, without a filter and outside `batch()`, takes its
         candidates from `_scope_claims` instead of from SQL: the same claims in the same
-        order, so the same rows come back. A read pinned to an instant still asks SQL, and
-        so do a filtered read and a read inside `batch()`, for the reasons
-        `vector_search_episodes` gives.
+        order, so the same rows come back. A read pinned to an instant or to a window
+        still asks SQL, and so do a filtered read and a read inside `batch()`, for the
+        reasons `vector_search_episodes` gives.
         """
         wanted = resolve_states(states, include_invalidated)
         # `dim` is None until this process has seen a vector; see `vector_search_episodes`.
         if (where is None and valid_at is None and known_at is None
+                and valid_during is None
                 and not self._batch_depth and self._vec.dim is not None):
             hits = self._cached_claim_search(qvec, scopes, limit, wanted)
             if hits is not None:
@@ -5200,7 +5220,8 @@ class SQLiteStore:
         # The filter narrows the candidate set the index ranks inside, so the cap counts
         # only rows that match it.
         allowed = self.candidate_ids(
-            scopes, valid_at=valid_at, known_at=known_at, states=wanted, where=where)
+            scopes, valid_at=valid_at, known_at=known_at, valid_during=valid_during,
+            states=wanted, where=where)
         if not allowed:
             return []
         self._ensure_index()

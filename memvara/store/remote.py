@@ -50,7 +50,7 @@ from ..filters import SearchFilter
 from ..remote.client import HttpClient
 from ..remote.errors import refuse_project_purge
 from ..types import (Claim, Derivation, Document, DocumentChunk, Episode, Link, MemoryType,
-                     Scope, stored_scope)
+                     Scope, TimeWindow, stored_scope)
 
 if TYPE_CHECKING:
     import httpx
@@ -551,6 +551,7 @@ class RemoteStore:
     def candidate_ids(self, scopes: Sequence[Scope], *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
+                      valid_during: TimeWindow | None = None,
                       states: Collection[str] | None = None,
                       include_invalidated: bool | None = None,
                       where: SearchFilter | None = None) -> list[str]:
@@ -564,6 +565,7 @@ class RemoteStore:
     def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int, *,
                        valid_at: datetime | None = None,
                        known_at: datetime | None = None,
+                       valid_during: TimeWindow | None = None,
                        states: Collection[str] | None = None,
                        include_invalidated: bool | None = None,
                        where: SearchFilter | None = None
@@ -579,6 +581,7 @@ class RemoteStore:
     def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int, *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
+                      valid_during: TimeWindow | None = None,
                       states: Collection[str] | None = None,
                       include_invalidated: bool | None = None,
                       where: SearchFilter | None = None

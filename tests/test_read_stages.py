@@ -443,6 +443,53 @@ def test_a_range_that_has_not_ended_yet_is_a_present_tense_read() -> None:
     assert [r.claim.object for r in hits] == ["Porto"]
 
 
+def test_a_value_that_held_only_inside_the_range_is_returned() -> None:
+    """Before #234 the range became `valid_at` at its last second, so a value that held
+    from 5 to 20 March 2024 was not returned for March. The claim searches now read the
+    whole range."""
+    mem = two_homes(FakeChat(rewrite_reply(start="2024-03-01", end="2024-03-31")))
+    mem.remember("user", "stayed_in", "Faro", valid_from=datetime(2024, 3, 5, tzinfo=UTC),
+                 valid_to=datetime(2024, 3, 20, tzinfo=UTC))
+    hits = mem.search("where did I live and stay in March 2024")
+    assert {r.claim.object for r in hits} >= {"Lisbon", "Faro"}
+    assert "Porto" not in {r.claim.object for r in hits}
+    assert hits.rewrite.valid_during == (datetime(2024, 3, 1, tzinfo=UTC),
+                                         datetime(2024, 3, 31, 23, 59, 59, tzinfo=UTC))
+    assert "Faro" not in {r.claim.object for r in mem.search(
+        "where did I live and stay in March 2024", query_rewrite=False)}
+
+
+def test_a_range_that_reaches_today_is_read_up_to_now() -> None:
+    """A range that has not ended is read from its start to the moment of the read, so a
+    value that started and ended earlier in it is found. Before #234 such a range was a
+    present-tense read and missed it."""
+    mem = two_homes(FakeChat(rewrite_reply(start="2026-01-01", end="2999-12-31")))
+    mem.remember("user", "stayed_in", "Faro", valid_from=datetime(2026, 2, 1, tzinfo=UTC),
+                 valid_to=datetime(2026, 3, 1, tzinfo=UTC))
+    hits = mem.search("where did I live and stay this year")
+    assert {r.claim.object for r in hits} >= {"Porto", "Faro"}
+    assert hits.rewrite.valid_at is None
+    start, end = hits.rewrite.valid_during
+    assert start == datetime(2026, 1, 1, tzinfo=UTC)
+    assert end <= datetime.now(UTC)
+
+
+def test_a_range_that_starts_after_today_is_not_used() -> None:
+    mem = two_homes(FakeChat(rewrite_reply(start="2998-01-01", end="2999-12-31")))
+    hits = mem.search("where will I live")
+    assert hits.rewrite.valid_during is None and hits.rewrite.valid_at is None
+    assert [r.claim.object for r in hits] == ["Porto"]
+
+
+@pytest.mark.covers("inv:RT4")
+def test_the_callers_valid_during_wins_over_the_models_range() -> None:
+    mem = two_homes(FakeChat(rewrite_reply(start="2024-03-01", end="2024-03-31")))
+    hits = mem.search("where did I live", valid_during=(datetime(2026, 1, 1, tzinfo=UTC),
+                                                        datetime(2026, 2, 1, tzinfo=UTC)))
+    assert hits.rewrite.valid_during is None and hits.rewrite.valid_at is None
+    assert [r.claim.object for r in hits] == ["Porto"]
+
+
 def test_recall_uses_the_range_too() -> None:
     mem = two_homes(FakeChat(rewrite_reply(start="2024-03-01", end="2024-03-31")))
     block = mem.recall("where did I live in March 2024", with_ids=True)
