@@ -79,6 +79,7 @@ class MemoryAPI(Protocol):
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
+               valid_during: Sequence[datetime] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType] | None = None,
                filters: Mapping[str, FilterValue] | None = None,
@@ -93,6 +94,11 @@ class MemoryAPI(Protocol):
 
         `filters` and `filepath_prefix` are declared because `_search` passes both on
         every call, as `None` unless the model asked for a filter.
+
+        `valid_during` is declared because `_search` passes it when the model sent one.
+        `ScopedRemoteMemvara` sends it only then, so a deployment from before the field
+        sees the request it always saw, and refuses a windowed read with a 422 rather
+        than answering it with the present.
         """
 
     def recall(self, query: str, *, k: int = 8, min_score: float = 0.0,
@@ -102,6 +108,7 @@ class MemoryAPI(Protocol):
                include_episodes: bool = False,
                budget: int | None = None,
                valid_at: datetime | None = None,
+               valid_during: Sequence[datetime] | None = None,
                filters: Mapping[str, FilterValue] | None = None,
                filepath_prefix: str | None = None) -> str:
         """Retrieval already rendered for a system prompt.
@@ -115,7 +122,8 @@ class MemoryAPI(Protocol):
         `valid_at` is declared because `_recall` passes it on every call too. Against a
         hosted deployment `ScopedRemoteMemvara.recall` sends it to `POST /v1/recall`,
         which takes it, and a deployment from before the field refuses a dated read with
-        a 422 rather than answering it with the present. Only `valid_at`, never `as_of`:
+        a 422 rather than answering it with the present. `valid_during` is the same for a
+        period, sent only when the model sent one. Only those two, never `as_of`:
         `memory_recall` renders into a prompt, and rewinding the belief clock would render
         records retired since.
 

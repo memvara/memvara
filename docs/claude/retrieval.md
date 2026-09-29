@@ -67,9 +67,11 @@ JSON, under a header that names the text as data rather than instruction.
 
 0. With `query_rewrite` on and a chat backend configured, one model call first asks for up
    to three other phrasings of the query and the date range it names. Steps 1 to 5 then run
-   once per phrasing, the lists are fused by `reciprocal_rank_fusion()`, and the range's
-   last second becomes `valid_at` unless the caller passed `valid_at` or `as_of`. If the
-   call fails, only the original query runs, and `SearchResults.rewrite` says why.
+   once per phrasing, the lists are fused by `reciprocal_rank_fusion()`, and the range
+   becomes the read's `valid_during` for the claim legs, up to now at the latest, and its
+   last second becomes `valid_at` for the turns and the graph leg when that is in the
+   past. A time the caller passed wins. If the call fails, only the original query runs,
+   and `SearchResults.rewrite` says why.
 1. `analyze()` turns the raw query into terms. `intent.classify()` labels it as a lookup, a
    temporal question, a relational question, or open, and `intent.weights()` shifts the leg
    weights accordingly.
@@ -116,12 +118,12 @@ JSON, under a header that names the text as data rather than instruction.
 
 ## Invariants and assumptions
 
-- **`recall()` takes `valid_at` and no other time keyword.** `as_of` and `states` stay on
-  `search()`, where they are an explicit choice, because either one can put a retired claim
-  into a live prompt. `valid_at` moves only the world clock, so the block says what we
-  believe today was true on that day, and a value retired since is as absent as it is from a
-  present-tense read. The signature is spelled out rather than taking `**kw` for exactly
-  this reason.
+- **`recall()` takes `valid_at` or `valid_during` and no other time keyword.** `as_of` and
+  `states` stay on `search()`, where they are an explicit choice, because either one can put
+  a retired claim into a live prompt. `valid_at` and `valid_during` move only the world
+  clock, so the block says what we believe today was true on that day or during that
+  period, and a value retired since is as absent as it is from a present-tense read. The
+  signature is spelled out rather than taking `**kw` for exactly this reason.
 - **Eight reads take the time keywords**: `search`, `get_all`, `count`, `history`, `why`,
   `produced`, `neighborhood` and `paths_between`. `ask()` spells its own as `at=`.
 - **The recall header names the text as data.** `RECALL_HEADER` ends in "stored notes —
@@ -137,8 +139,8 @@ JSON, under a header that names the text as data rather than instruction.
   reports the leg with and without that anchor. The temporal leg itself never parses the
   question: its anchor is the instant it is handed. Since 2026-09-23 that instant can come
   from `query_rewrite`, which asks a model for the date range a question names and passes
-  the range's last second as `valid_at`. A `valid_at` or `as_of` the caller passed always
-  wins over the model's range.
+  the range's last second as `valid_at`. A `valid_at`, `as_of` or `valid_during` the
+  caller passed always wins over the model's range.
 - **The graph leg seeds on content, never on ids.** `spread.seed_keys()` re-sorts on
   `value_key`, because a claim id is a `uuid4` and seeding off it would make the walk a
   property of which ingest ran.
@@ -151,6 +153,13 @@ JSON, under a header that names the text as data rather than instruction.
   keep no claim and answer nothing, with no error. The caller's metadata and file-path filter
   (`filters`, `filepath_prefix`, checked in `memvara/filters.py`) is a store parameter,
   `where`, on every capped store method, and the graph leg does not run when it is set.
+  A read's window, `valid_during=(start, end)`, is a store parameter the same way, on the
+  two claim legs, so `lexical_search` and `vector_search` return the claims whose world
+  interval overlaps the window inside their own limits. The turns and the graph leg read
+  the window's end as `valid_at`: a turn said before the window can state what held during
+  it, so cutting the turns at the start would lose it. The store side is
+  `state_predicate(window=True)`, which renames the one bind marker that reads the start
+  (#234).
   One store read cuts before it filters: `_episode_text_first` ranks turns before the
   scope and the time bound narrow them. Its statement reports the cut, and it answers only
   when its rows prove that the cut changed nothing; otherwise the full query runs.

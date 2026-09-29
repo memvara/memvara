@@ -747,8 +747,28 @@ def test_memory_search_says_what_the_rewrite_added() -> None:
     out = tool_text(mcp(mem), "memory_search", {"query": "where did I live in March 2024"})
     lines = out.splitlines()
     assert lines[1] == ("Also searched as: 'home ［city］'. The query names 2024-03-01 to "
-                        "2024-03-31, so this is as things were on 2024-03-31.")
+                        "2024-03-31, so this includes what was true at any time in that "
+                        "range.")
     assert "lives in Lisbon" in out and "Porto" not in out
+
+
+def test_a_rewrite_from_a_deployment_before_the_window_keeps_its_dated_sentence() -> None:
+    """A hosted deployment from before #234 reports the range's last second and no
+    window, and the line still says which day the read was dated to."""
+    from memvara.server.tools import _rewrite_line
+    older = Rewrite(outcome="applied", date_from=date(2024, 3, 1),
+                    date_to=date(2024, 3, 31),
+                    valid_at=datetime(2024, 3, 31, 23, 59, 59, tzinfo=UTC))
+    assert _rewrite_line(older) == ("The query names 2024-03-01 to 2024-03-31, so this is "
+                                    "as things were on 2024-03-31.")
+
+
+def test_a_range_cut_at_now_says_so() -> None:
+    from memvara.server.tools import _rewrite_line
+    cut = Rewrite(outcome="applied", date_from=date(2026, 1, 1), date_to=date(2999, 12, 31),
+                  valid_during=(datetime(2026, 1, 1, tzinfo=UTC),
+                                datetime(2026, 9, 29, tzinfo=UTC)))
+    assert _rewrite_line(cut).endswith("at any time in that range, up to now.")
 
 
 def test_memory_search_adds_no_line_when_the_rewrite_added_nothing() -> None:
@@ -1348,13 +1368,14 @@ def test_a_hosted_client_accepts_the_default_switches_and_refuses_switching_off(
 # --- the MCP no-match reply ------------------------------------------------------------
 
 
-def test_a_dated_miss_names_the_day_the_rewrite_used() -> None:
+def test_a_dated_miss_names_the_period_the_rewrite_used() -> None:
     mem = memory(FakeChat(rewrite_reply(start="2019-03-01", end="2019-03-31")))
     mem.remember("user", "lives_in", "Porto", valid_from=datetime(2025, 1, 1, tzinfo=UTC))
     srv = mcp(mem)
     for tool in ("memory_search", "memory_recall"):
         out = tool_text(srv, tool, {"query": "where did I live in March 2019"})
-        assert "as things were on 2019-03-31" in out, tool
+        assert "at any time from 2019-03-01 to 2019-03-31" in out, tool
+        assert "Nothing recorded held during that period" in out, tool
 
 
 # --- invariant 1, enforced -------------------------------------------------------------------

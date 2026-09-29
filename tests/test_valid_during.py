@@ -232,6 +232,7 @@ def test_search_refuses_a_window_with_another_world_clock(extra):
         _memory().search("team office", valid_during=MARCH, **extra)
 
 
+@pytest.mark.covers("inv:RT1")
 def test_recall_names_the_period_and_lists_every_value_that_held_in_it():
     block = _memory().recall("team office", valid_during=MARCH)
     lines = block.splitlines()
@@ -299,3 +300,190 @@ def test_a_store_that_predates_the_window_refuses_a_windowed_read_by_name():
     assert [r.claim.object for r in mem.search("team office")] == ["Lisbon"]
     with pytest.raises(TypeError, match="valid_during"):
         mem.search("team office", valid_during=MARCH)
+
+
+# --- the MCP tools --------------------------------------------------------------------
+
+
+@pytest.fixture()
+def srv():
+    from memvara.server import MemvaraMCPServer
+
+    server = MemvaraMCPServer(_memory(), user="alice")
+    yield server
+    server.close()
+
+
+def _call(server, name, arguments):
+    from test_server import call
+
+    return call(server, name, arguments)
+
+
+def test_memory_search_takes_a_period_and_names_it(srv):
+    out, error = _call(srv, "memory_search", {
+        "query": "team office", "valid_during": {"start": "2026-03-01", "end": "2026-03-31"}})
+    assert not error, out
+    assert out.splitlines()[0].startswith(
+        "3 match(es) as true at any time from 2026-03-01 to 2026-03-31, as far as we know "
+        "today.")
+    assert {"Leeds", "Porto", "Lisbon"} <= {w.strip(".") for w in out.split()}
+
+
+def test_an_end_given_as_a_date_includes_that_whole_day():
+    """A value that starts at noon is found by a window whose end is that date, written
+    as a date alone, because the end means the whole day."""
+    from memvara.server import MemvaraMCPServer
+
+    mem = _memory()
+    mem.remember("team", "lunch_at", "noon cafe",
+                 valid_from=datetime(2026, 4, 30, 12, tzinfo=timezone.utc))
+    server = MemvaraMCPServer(mem, user="alice")
+    try:
+        out, error = _call(server, "memory_search", {
+            "query": "team lunch",
+            "valid_during": {"start": "2026-04-30", "end": "2026-04-30"}})
+    finally:
+        server.close()
+    assert not error and "noon cafe" in out, out
+
+
+def test_memory_recall_takes_a_period_and_names_both_days(srv):
+    out, error = _call(srv, "memory_recall", {
+        "query": "team office", "valid_during": {"start": "2026-03-01", "end": "2026-03-31"}})
+    assert not error, out
+    assert out.startswith("Known about the user at any time from 1 March 2026 to "
+                          "31 March 2026")
+
+
+@pytest.mark.parametrize("tool, extra, message", [
+    ("memory_search", {"valid_at": "2026-03-31"}, "takes valid_during or one instant"),
+    ("memory_search", {"as_of": "2026-03-31"}, "takes valid_during or one instant"),
+    ("memory_recall", {"valid_at": "2026-03-31"}, "takes valid_during or valid_at"),
+])
+def test_a_period_with_an_instant_is_refused_with_the_reason(srv, tool, extra, message):
+    out, error = _call(srv, tool, {"query": "team office", **extra,
+                                   "valid_during": {"start": "2026-03-01",
+                                                    "end": "2026-03-31"}})
+    assert error and message in out, out
+
+
+@pytest.mark.parametrize("window, message", [
+    ({"start": "2026-03-01"}, "needs both start and end, and end is missing"),
+    ({"end": "2026-03-31"}, "needs both start and end, and start is missing"),
+    ({"start": "2026-03-31", "end": "2026-03-01"}, "ends before it starts"),
+    ({"start": "March", "end": "2026-03-31"}, "valid_during.start must be an ISO-8601"),
+    ({"begin": "2026-03-01", "end": "2026-03-31"}, "must be one of 'start', 'end'"),
+])
+@pytest.mark.parametrize("tool", ["memory_search", "memory_recall"])
+def test_a_malformed_period_is_refused_with_the_reason(srv, tool, window, message):
+    out, error = _call(srv, tool, {"query": "team office", "valid_during": window})
+    assert error and message in out, out
+
+
+def test_a_period_that_matches_nothing_says_so(srv):
+    out, error = _call(srv, "memory_search", {
+        "query": "team office", "valid_during": {"start": "2020-01-01", "end": "2020-01-31"}})
+    assert not error
+    assert "at any time from 2020-01-01 to 2020-01-31" in out
+    assert "Nothing recorded held during that period" in out
+
+
+# --- the hosted client ----------------------------------------------------------------
+
+
+def _hosted(handler):
+    import httpx
+
+    from memvara.remote.api import RemoteMemvara
+
+    mem = RemoteMemvara(api_key="k", base_url="https://example.test")
+    mem._http._client._transport = httpx.MockTransport(handler)
+    return mem
+
+
+def test_the_hosted_client_sends_the_window_only_when_given():
+    import json
+
+    import httpx
+
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        if request.url.path == "/v1/recall":
+            return httpx.Response(200, json={"text": "", "empty": True})
+        return httpx.Response(200, json={"results": []})
+
+    mem = _hosted(handler)
+    mem.search("q", query_rewrite=False)
+    mem.search("q", query_rewrite=False, valid_during=MARCH)
+    mem.recall("q", query_rewrite=False, valid_during=MARCH)
+    assert "valid_during" not in sent[0]
+    window = {"start": "2026-03-01T00:00:00+00:00", "end": "2026-03-31T23:59:59+00:00"}
+    assert sent[1]["valid_during"] == window and sent[2]["valid_during"] == window
+
+
+def test_the_hosted_client_refuses_a_bad_window_before_sending_anything():
+    sent = []
+    mem = _hosted(lambda request: sent.append(request))
+    with pytest.raises(ValueError, match="ends before it starts"):
+        mem.search("q", valid_during=(MAR_31, MAR_1))
+    with pytest.raises(ValueError, match="valid_during cannot be combined"):
+        mem.recall("q", valid_during=MARCH, valid_at=MAR_31)
+    assert sent == []
+
+
+def test_a_deployment_before_the_window_refuses_it_rather_than_answering_for_now():
+    """The field is not retried without, as `query_rewrite` is: an answer about the
+    present to a question about March is a wrong answer, not a degraded one."""
+    import httpx
+
+    from memvara.remote.errors import InvalidRequest
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(422, json={"error": {"code": "invalid_request",
+                                                   "message": "valid_during: extra"}})
+
+    with pytest.raises(InvalidRequest):
+        _hosted(handler).search("q", valid_during=MARCH)
+    assert len(calls) == 1
+    # A read that also opted out of query rewrite is sent once more without that field,
+    # which is `query_rewrite`'s own retry, and the window is still in it.
+    calls.clear()
+    with pytest.raises(InvalidRequest):
+        _hosted(handler).search("q", query_rewrite=False, valid_during=MARCH)
+    assert [b"valid_during" in r.content for r in calls] == [True, True]
+
+
+def test_a_rewrite_window_survives_the_wire():
+    from memvara.remote import hydrate
+
+    got = hydrate.rewrite({"outcome": "applied", "date_from": "2026-03-01",
+                           "date_to": "2026-03-31", "valid_at": "2026-03-31T23:59:59Z",
+                           "valid_during": {"start": "2026-03-01T00:00:00Z",
+                                            "end": "2026-03-31T23:59:59Z"}})
+    assert got.valid_during == MARCH
+    assert hydrate.rewrite({"outcome": "applied", "date_from": "2026-03-01",
+                            "date_to": "2026-03-31"}).valid_during is None
+    with pytest.raises(ValueError):
+        hydrate.rewrite({"outcome": "applied",
+                         "valid_during": {"start": "2026-03-01T00:00:00Z",
+                                          "end": "2026-03-31T23:59:59Z"}})
+
+
+def test_the_fake_hosted_server_answers_a_windowed_read_as_the_library_does():
+    from harness.fakes.fake_v1 import FakeV1
+
+    with FakeV1() as fake:
+        mem = fake.remote()
+        mem.remember("team", "office_in", "Porto", valid_from=MAR_3, valid_to=MAR_10)
+        mem.remember("team", "office_in", "Lisbon", valid_from=MAR_10)
+        assert {r.claim.object for r in mem.search("team office", query_rewrite=False,
+                                                   valid_during=MARCH)} == {"Porto",
+                                                                            "Lisbon"}
+        assert [r.claim.object for r in mem.search("team office", query_rewrite=False,
+                                                   valid_at=MAR_31)] == ["Lisbon"]

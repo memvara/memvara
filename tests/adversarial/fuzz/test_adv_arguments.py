@@ -142,12 +142,15 @@ def _surrogate_cases() -> list[Any]:
                                           id=f"{label} item"))
             if "object" in kinds:
                 values = spec["additionalProperties"]
+                # A key the schema allows, so that the lone surrogate is the only thing
+                # wrong: `valid_during` names its two keys.
+                key = spec.get("propertyNames", {}).get("enum", ["team"])[0]
                 if "string" in _types(values):
-                    cases.append(pytest.param(tool, name, {"team": LONE}, f"{label}.team",
+                    cases.append(pytest.param(tool, name, {key: LONE}, f"{label}.{key}",
                                               id=f"{label} value"))
                 elif "array" in _types(values):
-                    cases.append(pytest.param(tool, name, {"team": [LONE]},
-                                              f"{label}.team[0]", id=f"{label} value item"))
+                    cases.append(pytest.param(tool, name, {key: [LONE]},
+                                              f"{label}.{key}[0]", id=f"{label} value item"))
                 cases.append(pytest.param(tool, name, {LONE: "tea"},
                                           f"{label} key {LONE!r}", id=f"{label} key"))
     return cases

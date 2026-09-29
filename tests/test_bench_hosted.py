@@ -784,16 +784,17 @@ class RemoteShaped:
 
     def search(self, query, *, k=10, min_score=0.0, anchored=False, ranked=False,
                query_rewrite=True, as_of=None, valid_at=None, known_at=None,
-               states=None, include_invalidated=None, memory_types=None, filters=None,
-               filepath_prefix=None, include_episodes=False):
+               states=None, valid_during=None, include_invalidated=None,
+               memory_types=None, filters=None, filepath_prefix=None,
+               include_episodes=False):
         self.search_calls.append({"k": k, "min_score": min_score})
         return [_Row(cid, score) for cid, score in self.rows
                 if score >= min_score][:k]
 
     def recall(self, query, *, k=8, min_score=0.0, anchored=False, ranked=False,
                query_rewrite=True, synthesize=False, memory_types=None,
-               include_episodes=False, budget=None, valid_at=None, filters=None,
-               filepath_prefix=None):
+               include_episodes=False, budget=None, valid_at=None, valid_during=None,
+               filters=None, filepath_prefix=None):
         self.recall_calls.append({"k": k, "min_score": min_score})
         return "MEMORY\n- a rendered memory"
 

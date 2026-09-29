@@ -177,12 +177,24 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   return 0;
 }
 
+/**
+ * Exit once everything written to stdout has left the process.
+ *
+ * `process.exit()` does not wait for a write to a pipe, and Node sends at most one pipe
+ * buffer, 64 KiB, before it stops. A `tools/list` reply longer than that was cut off
+ * mid-string when stdin ended right after the request. An empty write is queued behind
+ * every earlier one, so its callback runs when they have all been flushed.
+ */
+function exitWhenFlushed(code) {
+  process.stdout.write("", () => process.exit(code));
+}
+
 if (require.main === module) {
   main().then(
-    (code) => process.exit(code),
+    (code) => exitWhenFlushed(code),
     (err) => {
       process.stderr.write(`memvara: ${err && err.stack ? err.stack : err}\n`);
-      process.exit(1);
+      exitWhenFlushed(1);
     },
   );
 }

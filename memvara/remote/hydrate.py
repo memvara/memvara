@@ -384,11 +384,12 @@ def rewrite(body: dict[str, Any] | None) -> Rewrite | None:
     `None` when the response carries no `rewrite`, which is what a deployment from
     before the field sends, and what a read that passed `query_rewrite=False` gets. The
     wire shape is `{"outcome", "reason", "status", "queries", "date_from", "date_to",
-    "valid_at"}`, with the two dates as `YYYY-MM-DD` and `valid_at` as an instant; every
-    field but `outcome` may be absent or null.
+    "valid_at", "valid_during"}`, with the two dates as `YYYY-MM-DD`, `valid_at` as an
+    instant and `valid_during` as `{"start", "end"}` instants; every field but `outcome`
+    may be absent or null. A deployment from before `valid_during` does not send it.
 
-    The date range is all or nothing: both dates or neither, and a `valid_at` only beside
-    both. A body that breaks that raises `ValueError` rather than being decoded into a
+    The date range is all or nothing: both dates or neither, and a `valid_at` or a
+    `valid_during` only beside both. A body that breaks that raises `ValueError` rather than being decoded into a
     range with a missing end, because a caller reading `valid_at` would otherwise be told
     the read was dated by a range nobody can state.
 
@@ -402,11 +403,16 @@ def rewrite(body: dict[str, Any] | None) -> Rewrite | None:
         return None
     raw_from, raw_to = body.get("date_from"), body.get("date_to")
     valid_at = _dt(body.get("valid_at"))
-    if (raw_from is None) != (raw_to is None) or (valid_at is not None and raw_to is None):
+    raw_window = body.get("valid_during")
+    window = (None if not raw_window else
+              (_required_dt("valid_during.start", raw_window["start"]),
+               _required_dt("valid_during.end", raw_window["end"])))
+    if (raw_from is None) != (raw_to is None) or (
+            (valid_at is not None or window is not None) and raw_to is None):
         raise ValueError(
-            "a rewrite's date_from, date_to and valid_at come together: both dates or "
-            f"neither, and valid_at only beside them; got {raw_from!r}, {raw_to!r}, "
-            f"{body.get('valid_at')!r}")
+            "a rewrite's date_from, date_to, valid_at and valid_during come together: "
+            "both dates or neither, and valid_at or valid_during only beside them; got "
+            f"{raw_from!r}, {raw_to!r}, {body.get('valid_at')!r}, {raw_window!r}")
     return Rewrite(
         outcome=body["outcome"],
         reason=body.get("reason"),
@@ -415,6 +421,7 @@ def rewrite(body: dict[str, Any] | None) -> Rewrite | None:
         date_from=None if raw_from is None else parse_day(raw_from),
         date_to=None if raw_to is None else parse_day(raw_to),
         valid_at=valid_at,
+        valid_during=window,
     )
 
 

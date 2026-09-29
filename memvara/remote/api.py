@@ -45,7 +45,7 @@ from ..types import (
     Answer, Claim, DeleteResult, Delta, Document, DocumentStatus, Episode,
     ForgetPreview, ForgetResult, Link, MemoryType, Page, Profile, Provenance, Result,
     Scope, SearchResults, WriteReceipt, closure, closure_reason, link_relation,
-    one_source, refuse_self_link,
+    one_source, refuse_self_link, time_window,
 )
 from ..types import PROJECT_META, PROJECT_META_REFUSAL
 from . import hydrate
@@ -94,6 +94,20 @@ def _as_local_refusal(claim_id: str) -> Iterator[None]:
 
 def _iso(value: datetime | None) -> str | None:
     return None if value is None else value.isoformat()
+
+
+def _window(valid_during: Sequence[datetime] | None, *, as_of: datetime | None = None,
+            valid_at: datetime | None = None) -> dict[str, str] | None:
+    """`valid_during` as the wire spells it, `{"start", "end"}` as instants, or `None`.
+
+    Checked here, with the library's own words, before anything is sent: a window that
+    ends before it starts, or one sent beside `valid_at` or `as_of`, raises `ValueError`
+    (`types.time_window`). `None` stays `None`, so the transport drops the field and a
+    deployment from before it sees the request it always saw.
+    """
+    window = time_window(valid_during, as_of=as_of, valid_at=valid_at)
+    return None if window is None else {"start": window[0].isoformat(),
+                                        "end": window[1].isoformat()}
 
 
 def _types(memory_types: Sequence[MemoryType | str] | None) -> list[str] | None:
@@ -499,6 +513,7 @@ class RemoteMemvara:
                query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
@@ -511,6 +526,7 @@ class RemoteMemvara:
                query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
@@ -523,6 +539,7 @@ class RemoteMemvara:
                query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
@@ -535,6 +552,7 @@ class RemoteMemvara:
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
+               valid_during: Sequence[datetime] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType | str] | None = None,
                filters: Mapping[str, FilterValue] | None = None,
@@ -565,6 +583,8 @@ class RemoteMemvara:
                         "anchored": anchored or None, "ranked": ranked or None,
                         "query_rewrite": None if query_rewrite else False,
                         "as_of": _iso(as_of), "valid_at": _iso(valid_at),
+                        "valid_during": _window(valid_during, as_of=as_of,
+                                                valid_at=valid_at),
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
                         "memory_types": _types(memory_types),
@@ -580,6 +600,7 @@ class RemoteMemvara:
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None,
                valid_at: datetime | None = None,
+               valid_during: Sequence[datetime] | None = None,
                filters: Mapping[str, FilterValue] | None = None,
                filepath_prefix: str | None = None) -> str:
         """Retrieval already formatted for a system prompt: prose, not rows.
@@ -595,7 +616,8 @@ class RemoteMemvara:
         block's header names the day. `POST /v1/recall` takes it (memvara-cloud's
         `RecallRequest`). It is sent only when set, so a deployment from before the field
         refuses a dated read with a 422 rather than answering it with the present, and
-        sees every other read as it always did.
+        sees every other read as it always did. `valid_during` is sent the same way, as
+        `{"start", "end"}`, for a block about a period.
 
         `budget` is refused rather than ignored. `POST /v1/recall` renders server-side
         and takes no budget, and this client cannot re-derive the local truncation from
@@ -628,6 +650,7 @@ class RemoteMemvara:
                         "synthesize": synthesize or None,
                         "memory_types": _types(memory_types),
                         "valid_at": _iso(valid_at),
+                        "valid_during": _window(valid_during, valid_at=valid_at),
                         **_filter_fields(filters, filepath_prefix, self.metadata_filters),
                         "include_episodes": include_episodes}))
         return str(body["text"])
@@ -1315,6 +1338,7 @@ class ScopedRemoteMemvara:
                query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
@@ -1327,6 +1351,7 @@ class ScopedRemoteMemvara:
                query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
@@ -1339,6 +1364,7 @@ class ScopedRemoteMemvara:
                query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType | str] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
@@ -1351,6 +1377,7 @@ class ScopedRemoteMemvara:
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
+               valid_during: Sequence[datetime] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType | str] | None = None,
                filters: Mapping[str, FilterValue] | None = None,
@@ -1360,6 +1387,7 @@ class ScopedRemoteMemvara:
                                 anchored=anchored, ranked=ranked,
                                 query_rewrite=query_rewrite,
                                 valid_at=valid_at, known_at=known_at, states=states,
+                                valid_during=valid_during,
                                 include_invalidated=include_invalidated,
                                 memory_types=memory_types, filters=filters,
                                 filepath_prefix=filepath_prefix,
@@ -1371,6 +1399,7 @@ class ScopedRemoteMemvara:
                memory_types: Sequence[MemoryType | str] | None = None,
                include_episodes: bool = False, budget: int | None = None,
                valid_at: datetime | None = None,
+               valid_during: Sequence[datetime] | None = None,
                filters: Mapping[str, FilterValue] | None = None,
                filepath_prefix: str | None = None) -> str:
         return self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
@@ -1378,8 +1407,8 @@ class ScopedRemoteMemvara:
                                 query_rewrite=query_rewrite, synthesize=synthesize,
                                 memory_types=memory_types,
                                 include_episodes=include_episodes, budget=budget,
-                                valid_at=valid_at, filters=filters,
-                                filepath_prefix=filepath_prefix)
+                                valid_at=valid_at, valid_during=valid_during,
+                                filters=filters, filepath_prefix=filepath_prefix)
 
     def get(self, claim_id: str) -> Claim | None:
         return self._mem.get(claim_id)

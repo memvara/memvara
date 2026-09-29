@@ -1476,10 +1476,22 @@ That rule still holds for this leg: `temporal.py` reads only the instant it is h
 never looks at the words of the question. Since 2026-09-23 there is a model-backed way to
 get an instant out of the words, and it sits in front of this leg rather than inside it.
 `query_rewrite` (invariant 1, `memvara.select.stages`) asks a model for the date range a
-question refers to, and `HybridRetriever.search` turns the range's last second into the
-read's `valid_at`, which then anchors this leg like any caller's `valid_at`. A `valid_at`
-or `as_of` the caller passed always wins over the model's range, and without a chat
-backend nothing is parsed at all.
+question refers to. `HybridRetriever.search` turns the range's last second into the read's
+`valid_at`, when that is in the past, and that anchors this leg like any caller's
+`valid_at`. The claim legs read the whole range instead, as `valid_during`, up to now at
+the latest (#234), so a value that held for part of the range is found. A `valid_at`,
+`as_of` or `valid_during` the caller passed always wins over the model's range, and
+without a chat backend nothing is parsed at all.
+
+**A window is a claim filter and not a turn filter.** `valid_during=(start, end)` is a
+store argument on `candidate_ids`, `lexical_search` and `vector_search` only, so each
+query returns the claims whose world interval overlaps the window inside its own limit
+(invariant 7). A claim counts when `valid_from <= end` and it had not stopped by `start`,
+which is the live predicate with one bind marker moved: `state_predicate(window=True)`
+names that marker `"valid_start"`. The turn searches and the graph walk read the window's
+end as `valid_at`, which keeps every turn said before or during the window. A turn said
+earlier can state what held during it, so cutting the turns at the window's start would
+lose the evidence the question needs.
 
 Episodes and not claims: a claim carries a predicate-keyed half-life, which knows what raw
 proximity cannot — whether a fact from 2019 is stale. A `born_in` from 2019 is as current

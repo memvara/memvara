@@ -371,6 +371,18 @@ Eight reads take all three — `search`, `get_all`, `count`, `history`, `why`, `
 a prompt and the world clock is the one that reaches no retired record. `get()` and
 `since()` take none of them, and `ask()` spells it `at=`.
 
+A question about a period needs more than one instant. A value that held from 3 to 10 March
+is not true on 31 March, so `valid_at=March 31` does not return it. `search()` and
+`recall()` also take `valid_during=(start, end)`, which returns the facts that were true at
+any time in that period:
+
+```python
+mem.search("where was the office", valid_during=(datetime(2026, 3, 1),
+                                                 datetime(2026, 3, 31, 23, 59, 59)))
+```
+
+It moves the world clock only, so it cannot be combined with `valid_at` or `as_of`.
+
 `ask()` composes the difference into an answer, which is the question the two clocks exist
 for:
 
@@ -585,8 +597,9 @@ reporting on the result whether it ran, so a failure serves the ordinary read in
 - **Query rewrite**, on by default when `llm=` is a backend that can chat
   (`OpenAILLM`, `AnthropicLLM`). One call before retrieval asks for up to three other
   phrasings of the query and the dates it names. Every phrasing is searched and the lists
-  are fused, and the dates become `valid_at` unless you passed `valid_at` yourself. Pass
-  `query_rewrite=False` to a read, or to the constructor, to turn it off.
+  are fused, and the facts are read over those dates, up to now at the latest, unless you
+  passed a time yourself. Pass `query_rewrite=False` to a read, or to the constructor, to
+  turn it off.
 - **Synthesis**, when you call `recall(synthesize=True)`. One call writes a short summary
   of the recalled notes and puts it above them; every note is still returned.
 - **Model ranking**, when you call `search(ranked=True)` against a retriever configured

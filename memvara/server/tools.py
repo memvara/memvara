@@ -70,6 +70,7 @@ model chooses between them exactly as it chooses between `memory_end` and `memor
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 from dataclasses import dataclass, field, replace
@@ -199,6 +200,38 @@ def _timestamp(raw: str, label: str) -> datetime:
             f"{label} must be an ISO-8601 timestamp such as '2024-06-01T10:00:00Z' or "
             f"'2024-06-01', got {shown(raw)} ({reason})") from exc
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+#: A date with no time, which `_window` reads as the whole day when it ends a window.
+_DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _window(args: dict[str, Any], tool: str) -> tuple[datetime, datetime] | None:
+    """`valid_during` from tool input as two instants, or `None` when it was not sent.
+
+    The schema limits the keys to `start` and `end` and cannot require both, so the
+    missing one is refused here. An `end` given as a date alone, `'2024-03-31'`, means
+    the whole of that day, which is what a caller writing a month as two dates means;
+    a `start` given as a date alone is that day's first moment already.
+    """
+    raw = args.get("valid_during")
+    if raw is None:
+        return None
+    missing = [key for key in ("start", "end") if key not in raw]
+    if missing:
+        raise ToolError(
+            f"{tool}.valid_during needs both start and end, and {' and '.join(missing)} "
+            "is missing. For March 2024 send {\"start\": \"2024-03-01\", "
+            "\"end\": \"2024-03-31\"}.")
+    start = _timestamp(raw["start"], f"{tool}.valid_during.start")
+    end = _timestamp(raw["end"], f"{tool}.valid_during.end")
+    if _DATE_ONLY.fullmatch(raw["end"].strip()):
+        end = end.replace(hour=23, minute=59, second=59)
+    if end < start:
+        raise ToolError(
+            f"{tool}.valid_during ends before it starts: {shown(raw['start'])} to "
+            f"{shown(raw['end'])}.")
+    return start, end
 
 
 def _memory_types(values: Sequence[str] | None) -> list[MemoryType] | None:
@@ -843,11 +876,19 @@ def _filter_refusal(tool: str, exc: FilterError) -> ToolError:
 
 # -- handlers ----------------------------------------------------------------
 
-def _no_match(query: str, day: str | None = None) -> str:
+def _no_match(query: str, day: str | None = None,
+              period: tuple[str, str] | None = None) -> str:
     # The query is the caller's own text, so quoting it leaks nothing, but a query of any
     # length would be copied whole into the model's context a second time (#313), so a
     # long one is shortened the way a refusal shortens a value (`validate.shown`).
     quoted = shown(safe_line(query))
+    if period is not None:
+        return (
+            f"No stored memory matched {quoted} at any time from "
+            f"{safe_line(period[0])} to {safe_line(period[1])}. Nothing recorded held "
+            "during that period, so answer from the conversation instead of retrying "
+            "with a reworded query."
+        )
     if day is not None:
         # A dated miss is not the same fact as a present one: something may well be
         # recorded about it now, and the block is empty because nothing held that day.
@@ -866,12 +907,26 @@ def _rewrite_day(rewrite: Rewrite | None) -> str | None:
     """The day a rewrite dated this read to, as `YYYY-MM-DD`, or `None` if it did not.
 
     Only a complete range counts, the rule `_rewrite_line` follows, so a no-match reply
-    and a match reply name the same day for the same read.
+    and a match reply name the same day for the same read. Only a rewrite that read its
+    range's last day and no window has one: a hosted deployment that predates
+    `valid_during` reports that shape. See `_rewrite_period` for the rest.
     """
-    if (rewrite is None or rewrite.valid_at is None or rewrite.date_from is None
-            or rewrite.date_to is None):
+    if (rewrite is None or rewrite.valid_at is None or rewrite.valid_during is not None
+            or rewrite.date_from is None or rewrite.date_to is None):
         return None
     return rewrite.date_to.isoformat()
+
+
+def _rewrite_period(rewrite: Rewrite | None) -> tuple[str, str] | None:
+    """The range a rewrite read this read over, as two `YYYY-MM-DD` dates, or `None`.
+
+    Set when the claim searches read the range as a window (#234), and only for a
+    complete range, the rule `_rewrite_line` follows.
+    """
+    if (rewrite is None or rewrite.valid_during is None or rewrite.date_from is None
+            or rewrite.date_to is None):
+        return None
+    return rewrite.date_from.isoformat(), rewrite.date_to.isoformat()
 
 
 def _rewrite_line(rewrite: Rewrite | None) -> str | None:
@@ -887,8 +942,16 @@ def _rewrite_line(rewrite: Rewrite | None) -> str | None:
     if rewrite.queries:
         parts.append("Also searched as: " +
                      "; ".join(repr(safe_line(q)) for q in rewrite.queries) + ".")
-    # All three or no sentence: a range with a missing end is not one a reader can check.
-    if _rewrite_day(rewrite) is not None:
+    # A complete range or no sentence: a range with a missing end is not one a reader
+    # can check.
+    if (_rewrite_period(rewrite) is not None and rewrite.valid_during is not None
+            and rewrite.date_to is not None):
+        # Cut when the range reached past now, which is as far as the window reads.
+        cut = rewrite.valid_during[1].date() < rewrite.date_to
+        parts.append(f"The query names {rewrite.date_from} to {rewrite.date_to}, so "
+                     "this includes what was true at any time in that range"
+                     f"{', up to now' if cut else ''}.")
+    elif _rewrite_day(rewrite) is not None:
         parts.append(f"The query names {rewrite.date_from} to {rewrite.date_to}, so "
                      f"this is as things were on {rewrite.date_to}.")
     return " ".join(parts) or None
@@ -896,6 +959,13 @@ def _rewrite_line(rewrite: Rewrite | None) -> str | None:
 
 def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
     as_of, valid_at = args.get("as_of"), args.get("valid_at")
+    if args.get("valid_during") is not None and (as_of is not None or valid_at is not None):
+        raise ToolError(
+            "memory_search takes valid_during or one instant, not both. valid_during "
+            "asks what was true at any time in a period and valid_at what was true at "
+            "one moment; as_of moves both clocks to one moment. Send the one that is the "
+            "question.")
+    window = _window(args, "memory_search")
     # `time_axes` refuses this combination too, with a good message — but as a bare
     # `ValueError` from inside the library, which reaches the model through `mcp.py`'s
     # catch-all rather than as an argument error phrased like every other one here.
@@ -919,14 +989,18 @@ def _search(ctx: ToolContext, args: dict[str, Any]) -> str:
             as_of=_timestamp(as_of, "memory_search.as_of") if as_of is not None else None,
             valid_at=(_timestamp(valid_at, "memory_search.valid_at")
                       if valid_at is not None else None),
+            valid_during=window,
             # Absent from the schema when the feature is switched off, and then off here.
             query_rewrite=bool(args.get("query_rewrite", False)),
         ))
     except FilterError as exc:
         raise _filter_refusal("memory_search", exc) from None
+    during = ((args["valid_during"]["start"], args["valid_during"]["end"])
+              if window is not None else None)
     if not results:
-        return _no_match(args["query"], day=_rewrite_day(results.rewrite))
-    when = _when(as_of, valid_at)
+        return _no_match(args["query"], day=_rewrite_day(results.rewrite),
+                         period=during or _rewrite_period(results.rewrite))
+    when = _when(as_of, valid_at, during)
     lines = [f"{len(results)} match(es){when}. {STORED_HEADER}"]
     rewritten = _rewrite_line(results.rewrite)
     if rewritten is not None:
@@ -984,6 +1058,12 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "retrieved, so the model would be handed nothing to rank. Send "
             "include_episodes=true without memory_types, or leave ranked off.")
     valid_at = args.get("valid_at")
+    if args.get("valid_during") is not None and valid_at is not None:
+        raise ToolError(
+            "memory_recall takes valid_during or valid_at, not both. valid_during asks "
+            "what was true at any time in a period and valid_at what was true on one "
+            "day. Send the one that is the question.")
+    window = _window(args, "memory_recall")
     # A local store is asked for its `RecallResult`, whose `text` is byte for byte the
     # string above, so that a block that came back empty can say which day a query
     # rewrite dated it to. No id reaches the reply; only `.text` and `.rewrite` are read.
@@ -1005,6 +1085,7 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             include_episodes=bool(args["include_episodes"]),
             valid_at=(_timestamp(valid_at, "memory_recall.valid_at")
                       if valid_at is not None else None),
+            valid_during=window,
             filters=args.get("filters"),
             filepath_prefix=args.get("filepath_prefix"),
             **extra,
@@ -1019,11 +1100,14 @@ def _recall(ctx: ToolContext, args: dict[str, Any]) -> str:
             "memvara's ranked reads are at capacity right now. Retry in a few seconds, "
             "or call memory_recall again without ranked for an ordinary read."
         ) from exc
+    during = ((args["valid_during"]["start"], args["valid_during"]["end"])
+              if window is not None else None)
     if isinstance(block, RecallResult):
         text, day = block.text, valid_at or _rewrite_day(block.rewrite)
+        during = during or _rewrite_period(block.rewrite)
     else:
         text, day = block, valid_at
-    return text or _no_match(args["query"], day=day)
+    return text or _no_match(args["query"], day=day, period=during)
 
 
 #: The bracket field saying a machine derived the row: one more metadata token beside
@@ -2557,7 +2641,8 @@ def _render_paths(paths: Sequence[Any], header: str) -> str:
     return "\n".join(lines)
 
 
-def _when(as_of: str | None, valid_at: str | None) -> str:
+def _when(as_of: str | None, valid_at: str | None,
+          during: tuple[str, str] | None = None) -> str:
     """The clock this answer was evaluated at, as a phrase to hang on a header.
 
     `memory_search` has said this since time travel existed; the two walk tools took the
@@ -2576,7 +2661,12 @@ def _when(as_of: str | None, valid_at: str | None) -> str:
     ' as believed on 2019-06-01'
     >>> _when(None, "2019-06-01")
     ' as true on 2019-06-01, as far as we know today'
+    >>> _when(None, None, ("2019-06-01", "2019-06-30"))
+    ' as true at any time from 2019-06-01 to 2019-06-30, as far as we know today'
     """
+    if during is not None:
+        return (f" as true at any time from {safe_line(during[0])} to "
+                f"{safe_line(during[1])}, as far as we know today")
     if as_of is not None:
         return f" as believed on {safe_line(as_of)}"
     if valid_at is not None:
@@ -2875,6 +2965,24 @@ TOOLS: tuple[Tool, ...] = (
                     "for the present."
                 ),
             },
+            "valid_during": {
+                "type": "object",
+                "propertyNames": {"enum": ["start", "end"]},
+                "additionalProperties": {"type": "string"},
+                "description": (
+                    "A period instead of one day: {\"start\": \"2024-03-01\", "
+                    "\"end\": \"2024-03-31\"}, each an ISO-8601 date or instant. The "
+                    "notes that were true at any time in that period, judged by "
+                    "everything known now, so a value that held only from 3 to 10 "
+                    "March is included for March, where valid_at on 31 March leaves it "
+                    "out. An end given as a date alone includes that whole day. The "
+                    "header names both days. Both keys are required, the end cannot be "
+                    "before the start, and valid_at cannot be sent with it; each is "
+                    "refused with the reason. With include_episodes, excerpts said "
+                    "before the period are still included, because a turn said earlier "
+                    "can state what held during it. Omit for the present."
+                ),
+            },
             "as_of": {
                 "type": "string",
                 "description": (
@@ -2999,6 +3107,21 @@ TOOLS: tuple[Tool, ...] = (
                     "what this system used to think. It is also the only way to find a "
                     "fact written with true_since and true_until already in the past, "
                     "which no as_of can reach. Passing both is refused."
+                ),
+            },
+            "valid_during": {
+                "type": "object",
+                "propertyNames": {"enum": ["start", "end"]},
+                "additionalProperties": {"type": "string"},
+                "description": (
+                    "A period instead of one instant: {\"start\": \"2024-03-01\", "
+                    "\"end\": \"2024-03-31\"}, each an ISO-8601 date or instant. "
+                    "Returns what was true at any time in that period, judged by "
+                    "everything known now, so a question about March finds a value that "
+                    "held only from 3 to 10 March, which valid_at on 31 March does not. "
+                    "An end given as a date alone includes that whole day. Both keys are "
+                    "required, the end cannot be before the start, and it cannot be sent "
+                    "with valid_at or as_of; each is refused with the reason."
                 ),
             },
         },
