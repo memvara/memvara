@@ -71,14 +71,14 @@ def test_a_point_the_action_never_reaches_is_reported_when_the_child_exits(
 
 def test_a_line_that_never_comes_is_reported_after_the_timeout(
         tmp_path: pathlib.Path, home: pathlib.Path) -> None:
-    spec = program(tmp_path / "s.db", point="before-claim", hold=True,
-                   action=remember("likes", "tea"))
     """Only the wait for DONE has the 1-second limit. The child's start-up gets the default
     limit, because under coverage with several workers, starting Python and importing
     memvara can take longer than a second on its own."""
+    spec = program(tmp_path / "s.db", point="before-claim", hold=True,
+                   action=remember("likes", "tea"))
     with Child(spec, home=home) as child:
         child.wait_for("POINT before-claim")
-        with pytest.raises(CrashHarnessError, match="no line starting with 'DONE' within 1"):
+        with pytest.raises(CrashHarnessError, match="no line starting with 'DONE' within 1 s;"):
             child.wait_for("DONE", timeout=1.0)
 
 
