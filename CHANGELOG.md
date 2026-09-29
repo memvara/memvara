@@ -73,12 +73,6 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Fixed
 
-- **The npm bridge no longer cuts off a long reply when its input ends.** `npx memvara`
-  called `process.exit()` as soon as stdin closed, and Node does not wait for a write to a
-  pipe before exiting, so only the first 64 KiB of a reply still being written reached the
-  client. A `tools/list` reply grew past that with the `valid_during` arguments, and was
-  cut off mid-string. The bridge now exits once stdout has flushed. #234.
-
 - **A session or agent bound inside a repository reads the global facts it writes.** A
   predicate declared global, such as `lives_in`, is filed at the writer's scope with only
   the project cleared, so a session inside a repository filed it at that session with no
@@ -348,6 +342,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   stores it for the period before the claim begins, with no model call. A turn whose text
   is exactly that of a turn said later is no longer taken for that turn: it is stored and
   extracted, and its earlier date is kept the same way. #318 (B46).
+
+## [npm Unreleased]
+
+The npm package versions independently of the Python one and ships on an `npm-v*` tag
+(`docs/RELEASING.md`, *The npm train*). These changes reach `npx memvara` with the next npm
+release, not with the next wheel.
+
+### Fixed
+
+- **The bridge no longer cuts off a long reply when its input ends.** `npx memvara` called
+  `process.exit()` as soon as stdin closed, and Node does not wait for a write to a pipe
+  before exiting, so only the first 64 KiB of a reply still being written reached the
+  client. A `tools/list` reply grew past that with the `valid_during` arguments of #234, and
+  was cut off mid-string. The bridge now exits once stdout has flushed.
 
 ## [0.17.0] — 2026-09-28
 
