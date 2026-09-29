@@ -581,7 +581,7 @@ def test_a_cut_range_names_the_days_read_and_says_up_to_now_on_the_same_day():
                        date_to=date(2026, 9, 29),
                        valid_during=(datetime(2026, 9, 1, tzinfo=timezone.utc),
                                      datetime(2026, 9, 29, 12, tzinfo=timezone.utc)))
-    assert _rewrite_cut(same_day)
+    assert _rewrite_cut(same_day.valid_during[1], same_day.date_to)
     assert _rewrite_line(same_day).endswith("in that range, up to now.")
     far = Rewrite(outcome="applied", date_from=date(2026, 1, 1), date_to=date(2999, 12, 31),
                   valid_during=(datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -589,7 +589,7 @@ def test_a_cut_range_names_the_days_read_and_says_up_to_now_on_the_same_day():
     assert _rewrite_period(far) == ("2026-01-01", "2026-09-29")
     whole = Rewrite(outcome="applied", date_from=date(2024, 3, 1), date_to=date(2024, 3, 31),
                     valid_during=MARCH_2024)
-    assert not _rewrite_cut(whole)
+    assert not _rewrite_cut(whole.valid_during[1], whole.date_to)
 
 
 MARCH_2024 = (datetime(2024, 3, 1, tzinfo=timezone.utc),

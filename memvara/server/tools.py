@@ -74,7 +74,7 @@ import re
 import sqlite3
 import sys
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Callable, Collection, Mapping, Sequence, cast
 
 from ..confirm import ConfirmationRefused
@@ -937,14 +937,12 @@ def _rewrite_period(rewrite: Rewrite | None) -> tuple[str, str] | None:
     return rewrite.date_from.isoformat(), rewrite.valid_during[1].date().isoformat()
 
 
-def _rewrite_cut(rewrite: Rewrite) -> bool:
-    """Whether the window stopped before the last second of the range the query named,
-    which it does when the range reached past the moment of the read."""
-    if rewrite.valid_during is None or rewrite.date_to is None:
-        return False
-    last = datetime(rewrite.date_to.year, rewrite.date_to.month, rewrite.date_to.day,
-                    23, 59, 59, tzinfo=timezone.utc)
-    return rewrite.valid_during[1] < last
+def _rewrite_cut(end: datetime, date_to: date) -> bool:
+    """Whether a window ending at `end` stopped before the last second of `date_to`, the
+    range the query named, which it does when the range reached past the moment of the
+    read."""
+    return end < datetime(date_to.year, date_to.month, date_to.day, 23, 59, 59,
+                          tzinfo=timezone.utc)
 
 
 def _rewrite_line(rewrite: Rewrite | None) -> str | None:
@@ -964,7 +962,7 @@ def _rewrite_line(rewrite: Rewrite | None) -> str | None:
     # can check.
     if (_rewrite_period(rewrite) is not None and rewrite.valid_during is not None
             and rewrite.date_to is not None):
-        cut = _rewrite_cut(rewrite)
+        cut = _rewrite_cut(rewrite.valid_during[1], rewrite.date_to)
         parts.append(f"The query names {rewrite.date_from} to {rewrite.date_to}, so "
                      "this includes what was true at any time in that range"
                      f"{', up to now' if cut else ''}.")
