@@ -9,6 +9,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-09-29
+
+Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so
+opening an existing store needs no migration. The `Store` protocol changed in three places,
+and a third-party store has to follow them: `occupied_slots` takes a keyword-only `scopes`,
+`find_episode_by_hash` takes a keyword-only `at`, and `candidate_ids`, `lexical_search` and
+`vector_search` take a keyword-only `valid_during`. Connected MCP sessions keep the old
+tool arguments until they reconnect, so an open editor session does not offer
+`valid_during` on `memory_search` and `memory_recall` until then.
+
 ### Added
 
 - **A read can ask for the facts that were true at any time during a period.** `search()`
@@ -25,6 +35,23 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `Store` protocol's `candidate_ids`, `lexical_search` and `vector_search` take a
   keyword-only `valid_during`, passed only on a windowed read (`docs/UPGRADING.md`). A
   hosted deployment from before the field refuses a windowed read with a 422. #234.
+- **The benchmark readers take `--timeout SECONDS`.** It sets how long the Anthropic or
+  OpenAI client waits for one request; without it the client library's default applies.
+  The report header prints it. It is not part of the checkpoint key, so a rerun with a
+  longer timeout replays the answers it already has. It is shared by `demo/harness.py` and
+  the `bench/` runners.
+- **A hosted demo run can write its scopes now and read them a day later.**
+  `demo/harness.py --memory hosted --write-only` writes every scope the two memvara arms
+  read, records each in the run's manifest, and exits without building a reader. A later
+  run with the same `--hosted-run-id` reads them. The hosted service extracts claims in the
+  background and does not say when it has finished, and a run that read its scopes
+  straight away on 2026-09-23 found no claims in them.
+- **The answer-quality demo has recorded runs with a model as the reader.** Three runs
+  from 2026-09-28 are in `demo/runs/`, with Qwen3.8-27B as reader and judge, at both corpus
+  sizes, against the hosted service. `memvara_structured` scored 80% at scale 1 and 75% at
+  scale 10, where `naive_rag` fell from 75% to 35%. The plain `memvara` arm's rows are not
+  a result, because its hosted scopes held almost no extracted claims when they were read.
+  `demo/README.md` and `docs/BENCHMARKS.md` have the tables and what they do not show.
 
 ### Changed
 
@@ -70,6 +97,28 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   receipt a deployment sends, and reads 0 from a deployment that does not send it yet;
   such a deployment still counts its repeats in `skipped` (`docs/UPGRADING.md`).
   `bench/evalkit.py` reports the repeated turns on a row of their own. #439.
+- **A hosted demo read refuses scopes younger than `--min-scope-age` hours, 24 by
+  default.** It also refuses a scope the write step never finished, instead of writing it
+  and reading it at once. The report prints each scope's age and claim count at read time,
+  and says the wait is a fixed delay, not a confirmation that extraction finished. Pass
+  `--min-scope-age 0` for the old one-step run. The write step records the minimum age it
+  used, and a read asking for less is refused unless it passes `--override-min-scope-age`.
+- **A hosted demo report flags a plain `memvara` scope the service barely extracted
+  from.** When such a scope holds fewer claims than half the facts its structured sibling
+  was given, the report names it in a warning and marks the `memvara` arm's rows
+  `[NOT A RESULT]` in every results table.
+
+- **`scripts/test_changed.py` runs the tests a change can affect, before you push.** It
+  runs the changed test files, the tests that import a changed file (directly or through a
+  `conftest.py` above them), the tests that name it in a string or match it with a pattern
+  such as `*.md`, and the tests that failed last time, and it runs the full suite when a
+  change touches something it cannot follow, such as a `conftest.py` or `pyproject.toml`.
+  It runs them in parallel with pytest-xdist, which the `dev` extra now installs, and gives
+  each run a base temporary directory of its own. It replaces running the full suite with
+  coverage and mypy locally before every push; CI still runs all of that on every pull
+  request, and again on `main` after each merge, where a failure now opens an issue in the
+  private repository memvara/build-health. `docs/claude/working-here.md` describes the
+  five testing tiers. None of it changes the library.
 
 ### Fixed
 
@@ -342,6 +391,19 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   stores it for the period before the claim begins, with no model call. A turn whose text
   is exactly that of a turn said later is no longer taken for that turn: it is stored and
   extracted, and its earlier date is kept the same way. #318 (B46).
+- **A test run given paths from several folders keeps `tests/adversarial`'s
+  `conftest.py`.** Given a path in a subfolder of `tests/adversarial`, then a whole file
+  outside it, then a file directly in `tests/adversarial`, pytest 9.1 collected the last
+  file without that folder's fixtures, and its tests errored with "fixture not found".
+  The root `conftest.py` now groups the paths a person gives by folder. A run given no
+  paths keeps the order of `testpaths`. #430.
+- **The test of Ctrl-C during a store open no longer fails when the interrupt is lost.**
+  An interrupt that landed in a finalizer was dropped, so the open waited its whole 5
+  seconds and raised `StoreInUseError`, which the test read as a failure. The store was
+  behaving correctly. The test now raises the interrupt only inside the lock loop and
+  sends it again until the open ends. `docs/INTERNALS.md` now says Python loses an
+  interrupt that arrives while it runs a finalizer, and that a second Ctrl-C then ends the
+  wait. #441.
 
 ## [npm Unreleased]
 
@@ -367,23 +429,6 @@ refuses a store this one has opened.
 
 ### Added
 
-- **The benchmark readers take `--timeout SECONDS`.** It sets how long the Anthropic or
-  OpenAI client waits for one request; without it the client library's default applies.
-  The report header prints it. It is not part of the checkpoint key, so a rerun with a
-  longer timeout replays the answers it already has. It is shared by `demo/harness.py` and
-  the `bench/` runners.
-- **A hosted demo run can write its scopes now and read them a day later.**
-  `demo/harness.py --memory hosted --write-only` writes every scope the two memvara arms
-  read, records each in the run's manifest, and exits without building a reader. A later
-  run with the same `--hosted-run-id` reads them. The hosted service extracts claims in the
-  background and does not say when it has finished, and a run that read its scopes
-  straight away on 2026-09-23 found no claims in them.
-- **The answer-quality demo has recorded runs with a model as the reader.** Three runs
-  from 2026-09-28 are in `demo/runs/`, with Qwen3.8-27B as reader and judge, at both corpus
-  sizes, against the hosted service. `memvara_structured` scored 80% at scale 1 and 75% at
-  scale 10, where `naive_rag` fell from 75% to 35%. The plain `memvara` arm's rows are not
-  a result, because its hosted scopes held almost no extracted claims when they were read.
-  `demo/README.md` and `docs/BENCHMARKS.md` have the tables and what they do not show.
 - **`bench/mutation.py` measures how many deliberate bugs in a module the tests catch.**
   It runs mutmut 3.8.0 in a throwaway clone of the checkout, selects the tests that import
   the module or a public name it defines, and reports a score per module with the diff of
@@ -404,16 +449,13 @@ refuses a store this one has opened.
   repositories gets a pull request with the change at its next sync, and the change
   reaches that repository when the pull request is merged. #171.
 - **`scripts/test_changed.py` runs the tests a change can affect, before you push.** It
-  runs the changed test files, the tests that import a changed file (directly or through a
-  `conftest.py` above them), the tests that name it in a string or match it with a pattern
-  such as `*.md`, and the tests that failed last time, and it runs the full suite when a
-  change touches something it cannot follow, such as a `conftest.py` or `pyproject.toml`.
-  It runs them in parallel with pytest-xdist, which the `dev` extra now installs, and gives
-  each run a base temporary directory of its own. It replaces running the full suite with coverage and mypy locally before every push; CI
-  still runs all of that on every pull request, and again on `main` after each merge, where
-  a failure now opens an issue in the private repository memvara/build-health.
-  `docs/claude/working-here.md` describes the five testing tiers. None of it changes the
-  library.
+  runs the changed test files, the tests that import or name a changed file, and the tests
+  that failed last time, and it runs the full suite when a change touches something it
+  cannot follow, such as a `conftest.py` or `pyproject.toml`. It replaces running the full
+  suite with coverage and mypy locally before every push; CI still runs all of that on every
+  pull request, and again on `main` after each merge, where a failure now opens an issue in
+  the private repository memvara/build-health. `docs/claude/working-here.md` describes the
+  five testing tiers. None of it changes the library.
 - **An adversarial test suite that tries to break memvara the way agents use it.** It
   lives in `tests/adversarial/`, with its support code in `tests/harness/` and its
   scenarios in `tests/scenarios/`, and `docs/claude/testing.md` describes it. This entry
@@ -583,19 +625,6 @@ refuses a store this one has opened.
   see, deciding `Scope.sees` once per distinct scope. `why()` uses it on a claim's source
   turns, which keeps `why()` on a claim citing 365 turns at 1.7 ms instead of the 6.1 ms a
   per-turn check cost.
-
-### Changed
-
-- **A hosted demo read refuses scopes younger than `--min-scope-age` hours, 24 by
-  default.** It also refuses a scope the write step never finished, instead of writing it
-  and reading it at once. The report prints each scope's age and claim count at read time,
-  and says the wait is a fixed delay, not a confirmation that extraction finished. Pass
-  `--min-scope-age 0` for the old one-step run. The write step records the minimum age it
-  used, and a read asking for less is refused unless it passes `--override-min-scope-age`.
-- **A hosted demo report flags a plain `memvara` scope the service barely extracted
-  from.** When such a scope holds fewer claims than half the facts its structured sibling
-  was given, the report names it in a warning and marks the `memvara` arm's rows
-  `[NOT A RESULT]` in every results table.
 
 ### Fixed
 
