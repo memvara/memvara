@@ -9,6 +9,8 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-09-29
+
 ### Added
 
 - **A read can ask for the facts that were true at any time during a period.** `search()`
