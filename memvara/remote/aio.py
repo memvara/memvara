@@ -39,7 +39,7 @@ from ..types import (
 from . import hydrate
 from .api import (PROJECT_HEADER, _as_local_refusal, _document_body,
                   _document_path, _expire_reason, _filter_fields, _hit,
-                  _iso, _refuse_project_meta, _sent, _states, _type, _types)
+                  _iso, _refuse_project_meta, _sent, _states, _type, _types, _window)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
 from .creds import resolve
 from .errors import Conflict, InvalidRequest, NotFound, refuse_project_purge
@@ -205,6 +205,7 @@ class AsyncRemoteMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -218,6 +219,7 @@ class AsyncRemoteMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -231,6 +233,7 @@ class AsyncRemoteMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -243,6 +246,7 @@ class AsyncRemoteMemvara:
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
+                     valid_during: Sequence[datetime] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType | str] | None = None,
                      filters: Mapping[str, FilterValue] | None = None,
@@ -254,6 +258,8 @@ class AsyncRemoteMemvara:
                         "anchored": anchored or None, "ranked": ranked or None,
                         "query_rewrite": None if query_rewrite else False,
                         "as_of": _iso(as_of), "valid_at": _iso(valid_at),
+                        "valid_during": _window(valid_during, as_of=as_of,
+                                                valid_at=valid_at),
                         "known_at": _iso(known_at), "states": _states(states),
                         "include_invalidated": include_invalidated,
                         "memory_types": _types(memory_types),
@@ -270,6 +276,7 @@ class AsyncRemoteMemvara:
                      include_episodes: bool = False,
                      budget: int | None = None,
                      valid_at: datetime | None = None,
+                     valid_during: Sequence[datetime] | None = None,
                      filters: Mapping[str, FilterValue] | None = None,
                      filepath_prefix: str | None = None) -> str:
         if budget is not None:
@@ -285,6 +292,7 @@ class AsyncRemoteMemvara:
                         "synthesize": synthesize or None,
                         "memory_types": _types(memory_types),
                         "valid_at": _iso(valid_at),
+                        "valid_during": _window(valid_during, valid_at=valid_at),
                         **_filter_fields(filters, filepath_prefix, self.metadata_filters),
                         "include_episodes": include_episodes}))
         return str(body["text"])
@@ -719,6 +727,7 @@ class AsyncScopedRemoteMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -732,6 +741,7 @@ class AsyncScopedRemoteMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -745,6 +755,7 @@ class AsyncScopedRemoteMemvara:
                      as_of: datetime | None = ..., valid_at: datetime | None = ...,
                      known_at: datetime | None = ...,
                      states: Collection[str] | None = ...,
+                     valid_during: Sequence[datetime] | None = ...,
                      include_invalidated: bool | None = ...,
                      memory_types: Sequence[MemoryType | str] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
@@ -757,6 +768,7 @@ class AsyncScopedRemoteMemvara:
                      as_of: datetime | None = None, valid_at: datetime | None = None,
                      known_at: datetime | None = None,
                      states: Collection[str] | None = None,
+                     valid_during: Sequence[datetime] | None = None,
                      include_invalidated: bool | None = None,
                      memory_types: Sequence[MemoryType | str] | None = None,
                      filters: Mapping[str, FilterValue] | None = None,
@@ -766,7 +778,7 @@ class AsyncScopedRemoteMemvara:
                                       anchored=anchored, ranked=ranked,
                                       query_rewrite=query_rewrite,
                                       valid_at=valid_at, known_at=known_at,
-                                      states=states,
+                                      states=states, valid_during=valid_during,
                                       include_invalidated=include_invalidated,
                                       memory_types=memory_types, filters=filters,
                                       filepath_prefix=filepath_prefix,
@@ -779,6 +791,7 @@ class AsyncScopedRemoteMemvara:
                      include_episodes: bool = False,
                      budget: int | None = None,
                      valid_at: datetime | None = None,
+                     valid_during: Sequence[datetime] | None = None,
                      filters: Mapping[str, FilterValue] | None = None,
                      filepath_prefix: str | None = None) -> str:
         return await self._mem.recall(query, k=k, min_score=min_score, anchored=anchored,
@@ -787,6 +800,7 @@ class AsyncScopedRemoteMemvara:
                                       memory_types=memory_types,
                                       include_episodes=include_episodes,
                                       budget=budget, valid_at=valid_at,
+                                      valid_during=valid_during,
                                       filters=filters, filepath_prefix=filepath_prefix)
 
     async def get(self, claim_id: str) -> Claim | None:

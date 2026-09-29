@@ -70,7 +70,10 @@ nothing saying the filter was ignored.
 signature so that `None` — what every current caller passes — works, and a value raises,
 because a budget silently ignored is an oversized prompt with no signal. `valid_at` used to
 be refused the same way; `POST /v1/recall` takes it now, and the client sends it, only when
-set (#298).
+set (#298). `valid_during` is sent to `/v1/search` and `/v1/recall` the same way, as
+`{"start", "end"}`, and only when set (#234). A deployment from before it refuses the read
+with a 422, and unlike `query_rewrite` the read is not sent again without it: an answer
+about the present to a question about a period would be wrong, not degraded.
 
 Two write divergences are real and documented rather than hidden. `consolidate()` returns a
 job handle rather than per-operation counts, because the endpoint answers 202 before the pass

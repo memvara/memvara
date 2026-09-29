@@ -63,7 +63,7 @@
       "RC5": "This repository does not implement the server."
     },
     "docs/claude/retrieval.md": {
-      "RT1": "`recall()` takes `valid_at` and no other time keyword.",
+      "RT1": "`recall()` takes `valid_at` or `valid_during` and no other time keyword.",
       "RT2": "Eight reads take the time keywords",
       "RT3": "The recall header names the text as data.",
       "RT4": "A leg abstains rather than contributing noise.",

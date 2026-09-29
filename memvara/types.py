@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from enum import Enum
 from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Iterable, Literal, Protocol,
-                    TypeVar, cast)
+                    Sequence, TypeVar, cast)
 
 from .entities import (OWNER_SEP, entity_key, entity_type_of,
                        split_entity_type, typed_entity_key)
@@ -98,6 +98,58 @@ def time_axes(as_of: datetime | None, valid_at: datetime | None,
         "instant and is exactly valid_at=known_at=as_of, so the two spellings "
         "disagree about the question being asked; drop as_of to move the clocks apart."
     )
+
+
+#: A window on the world clock, `(start, end)`, both ends included. See `time_window`.
+TimeWindow = tuple[datetime, datetime]
+
+
+def time_window(valid_during: Sequence[datetime] | None, *,
+                as_of: datetime | None = None,
+                valid_at: datetime | None = None) -> TimeWindow | None:
+    """Check a read's `valid_during` and return it as a pair of UTC instants.
+
+    `valid_during=(start, end)` asks for the claims that were true at any moment from
+    `start` to `end`, both included: a claim counts when it started on or before `end`
+    and had not stopped by `start`. It is the world clock only, like `valid_at`, and
+    `known_at` still sets the belief clock. `valid_at=T` asks the same question as
+    `valid_during=(T, T)`, so the two cannot be passed together, and neither can `as_of`,
+    which sets `valid_at`. A naive datetime is read as UTC, as everywhere else.
+
+    >>> march = time_window((datetime(2026, 3, 1), datetime(2026, 3, 31, 23, 59, 59)))
+    >>> [t.isoformat() for t in march]
+    ['2026-03-01T00:00:00+00:00', '2026-03-31T23:59:59+00:00']
+    >>> time_window(None) is None
+    True
+    >>> time_window((datetime(2026, 3, 2), datetime(2026, 3, 1)))  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+    ValueError: valid_during ends before it starts...
+    """
+    if valid_during is None:
+        return None
+    clash = [name for name, value in (("as_of", as_of), ("valid_at", valid_at))
+             if value is not None]
+    if clash:
+        raise ValueError(
+            f"valid_during cannot be combined with {' or '.join(clash)}. Both set the "
+            "world clock: valid_at=T asks the same question as valid_during=(T, T). "
+            "Pass one of them.")
+    if (isinstance(valid_during, (str, bytes)) or not isinstance(valid_during, Sequence)
+            or len(valid_during) != 2):
+        raise ValueError(
+            "valid_during must be a pair (start, end) of datetimes, got "
+            f"{valid_during!r}.")
+    start, end = valid_during
+    if not isinstance(start, datetime) or not isinstance(end, datetime):
+        raise ValueError(
+            "valid_during must be a pair (start, end) of datetimes, got "
+            f"{type(start).__name__} and {type(end).__name__}.")
+    start, end = as_utc(start), as_utc(end)
+    if end < start:
+        raise ValueError(
+            f"valid_during ends before it starts: {start.isoformat()} to "
+            f"{end.isoformat()}.")
+    return start, end
 
 
 # --- memory dynamics -----------------------------------------------------------

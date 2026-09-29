@@ -12,17 +12,25 @@ On the **library and REST**:
 - `known_at=T` — what we believed at T, about the world as it is now
 - `as_of=T` — both clocks at T. Sugar for `valid_at=known_at=T`. Passing it
   alongside either axis raises rather than picking one.
+- `valid_during=(start, end)` — every fact that held for some part of that
+  period, on `search` and `recall`. It cannot be passed with `valid_at` or
+  `as_of`.
 
-On **MCP**: `memory_search` takes `as_of` and `valid_at`, not `known_at`.
-Passing both of the two it has is refused. `memory_recall` takes `valid_at`
-only, and its header then names the day; it refuses `as_of`, because its
-output is a prompt and rewinding belief would put a since-retired record in it.
+On **MCP**: `memory_search` takes `as_of`, `valid_at` and `valid_during`, not
+`known_at`. Passing more than one of them is refused. `memory_recall` takes
+`valid_at` or `valid_during`, and its header then names the day or the
+period; it refuses `as_of`, because its output is a prompt and rewinding
+belief would put a since-retired record in it.
 
 Reach for `valid_at`. Asking about someone's earlier city, job or year is
 asking about the world, and `as_of` answers something else: it rewinds
 belief as well, so every later correction disappears — including one that
 was made about exactly the period being asked about. `as_of` earns its
 place only when they want what you *used to think*.
+
+When they ask about a period rather than a day, such as what happened in
+March, pass `valid_during` with its first and last day. `valid_at` on the
+last day leaves out anything that stopped being true earlier in the period.
 
 A server that has a model set up also reads dates out of the question itself,
 so "where did I live in 2019" can come back dated without you passing

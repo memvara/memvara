@@ -9,8 +9,34 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **A read can ask for the facts that were true at any time during a period.** `search()`
+  and `recall()` take `valid_during=(start, end)`, on the library, the hosted client and
+  the async client, and the MCP tools `memory_search` and `memory_recall` take
+  `valid_during: {"start", "end"}`. A fact counts when it started on or before `end` and
+  had not stopped by `start`, so a value that held from 3 to 10 March is returned for
+  March, where `valid_at` on 31 March leaves it out. It moves the world clock only: it
+  cannot be combined with `valid_at` or `as_of`, and `known_at` still sets the belief
+  clock. The window is applied inside the store, before `k` (invariant 7), on the claim
+  searches only; the turns and the graph leg read its end as `valid_at`. `recall()`
+  names both days in its header and lists as history the values that ended before the
+  period. On the MCP tools an end given as a date alone includes that whole day. The
+  `Store` protocol's `candidate_ids`, `lexical_search` and `vector_search` take a
+  keyword-only `valid_during`, passed only on a windowed read (`docs/UPGRADING.md`). A
+  hosted deployment from before the field refuses a windowed read with a 422. #234.
+
 ### Changed
 
+- **Query rewrite reads a question's date range as a period, not at its last second.** A
+  question about March read the store as of 31 March, 23:59:59, so a value that held only
+  from 3 to 10 March was not returned. The claim searches now read the whole range, up to
+  the moment of the read at the latest, which also means a range that includes today is
+  read from its start rather than as a present-tense read. The turns and the graph leg
+  still read the range's last second when it is in the past. `Rewrite.valid_during`
+  records the window used, and the `memory_search` line says "this includes what was true
+  at any time in that range". A hosted deployment from before the field sends no window
+  and keeps its old sentence. #234.
 - **A value written in a session, or by an agent, no longer ends the user-wide value.** It
   is a local value: it answers inside that session or agent, and the user-wide value stays
   live for every other reader. Before, a session-bound or agent-bound write of a
@@ -316,6 +342,21 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   stores it for the period before the claim begins, with no model call. A turn whose text
   is exactly that of a turn said later is no longer taken for that turn: it is stored and
   extracted, and its earlier date is kept the same way. #318 (B46).
+
+## [npm Unreleased]
+
+The npm package versions independently of the Python one and ships on an `npm-v*` tag
+(`docs/RELEASING.md`, *The npm train*). These changes reach `npx memvara` with the next npm
+release, not with the next wheel.
+
+### Fixed
+
+- **The bridge no longer cuts off a long reply when its input ends.** `npx memvara` called
+  `process.exit()` as soon as stdin closed, and Node does not wait for a write to a pipe
+  before exiting, so only the first 64 KiB of a reply still being written reached the
+  client. A `tools/list` reply grew past that with the `valid_during` arguments of #234, and
+  was cut off mid-string. The bridge now exits once stdout has flushed, or after five
+  seconds if the reader stops reading without closing its end.
 
 ## [0.17.0] — 2026-09-28
 
@@ -4431,9 +4472,6 @@ its first open; a build older than this one refuses a store this one has opened.
   other described it as "marked unless the extractor is api", which drops `""` and would
   mark every claim written before `extractor` existed. The unmarked set is the tuple
   `("", "api")`. The extractor's name is still never rendered.
-
-
-Nothing yet.
 
 ## [npm 0.1.1] — 2026-08-26
 

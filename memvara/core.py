@@ -110,7 +110,9 @@ from .types import (
     refuse_self_link,
     owner_key,
     planned_end,
+    TimeWindow,
     time_axes,
+    time_window,
     utcnow,
 )
 from .documents import DocumentService
@@ -2709,6 +2711,7 @@ class Memvara:
                anchored: bool = ..., ranked: bool = ..., query_rewrite: bool = ...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
@@ -2721,6 +2724,7 @@ class Memvara:
                anchored: bool = ..., ranked: bool = ..., query_rewrite: bool = ...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
@@ -2733,6 +2737,7 @@ class Memvara:
                anchored: bool = ..., ranked: bool = ..., query_rewrite: bool = ...,
                user=..., agent=..., session=..., as_of: datetime | None = ...,
                valid_at: datetime | None = ..., known_at: datetime | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                states: Collection[str] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
@@ -2744,6 +2749,7 @@ class Memvara:
                anchored: bool = False, ranked: bool = False, query_rewrite: bool = True,
                user=None, agent=None, session=None, as_of: datetime | None = None,
                valid_at: datetime | None = None, known_at: datetime | None = None,
+               valid_during: Sequence[datetime] | None = None,
                states: Collection[str] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType] | None = None,
@@ -2761,6 +2767,25 @@ class Memvara:
 
         `as_of` remains exact sugar for `valid_at=known_at=T`. Passing it with either
         axis raises rather than picking one.
+
+        `valid_during=(start, end)` asks about a period instead of an instant: it
+        returns the facts that were true at any moment from `start` to `end`, both
+        included. A value that held from 3 to 10 March is returned for
+        `valid_during=(March 1, March 31)`, where `valid_at=March 31` does not see it. It
+        moves the world clock only, so it cannot be passed with `valid_at` or `as_of`,
+        and `known_at` still sets what we had heard by then. The window applies to the
+        facts; with `include_episodes=True`, the raw turns read its end as `valid_at`,
+        which already includes every turn said during it.
+
+        >>> from datetime import datetime
+        >>> mem = Memvara(llm=NullLLM(), user="alice")
+        >>> _ = mem.remember("team", "office_in", "Porto",
+        ...                  valid_from=datetime(2026, 3, 3), valid_to=datetime(2026, 3, 10))
+        >>> [r.claim.object for r in mem.search(
+        ...     "team office", valid_during=(datetime(2026, 3, 1), datetime(2026, 3, 31)))]
+        ['Porto']
+        >>> mem.search("team office", valid_at=datetime(2026, 3, 31))
+        []
 
         `states` names the population, as any non-empty subset of
         `("live", "ended", "retired")` — `Claim.state`'s own three words. It replaces the
@@ -2820,8 +2845,8 @@ class Memvara:
         `query_rewrite` is on by default. When `llm=` is a backend that can chat, one
         model call before retrieval asks for up to three other phrasings of the query and
         the date range it refers to; every phrasing is searched and the lists are fused,
-        and the range becomes `valid_at` unless you passed `valid_at` or `as_of`, which
-        always win. With no such backend, which includes the default `NullLLM`, no call
+        and the range becomes `valid_during`, up to now at the latest, unless you passed
+        `valid_at`, `as_of` or `valid_during`, which always win. With no such backend, which includes the default `NullLLM`, no call
         is made and `.rewrite.outcome` is `unconfigured`. If the call fails or times out
         after 10 seconds, the plain read is served and `.rewrite` says why. Pass
         `query_rewrite=False` for a read that must not call a model, and the constructor's
@@ -2852,8 +2877,8 @@ class Memvara:
         scope = self._scope(tenant, user, agent, session)
         return self.reader.search(
             query, scope, k=k, as_of=as_of, valid_at=valid_at, known_at=known_at,
-            min_score=min_score, anchored=anchored, ranked=ranked,
-            states=resolve_states(states, include_invalidated),
+            valid_during=valid_during, min_score=min_score, anchored=anchored,
+            ranked=ranked, states=resolve_states(states, include_invalidated),
             memory_types=memory_types, include_episodes=include_episodes,
             query_rewrite=query_rewrite, where=where,
         )
@@ -3441,6 +3466,12 @@ class Memvara:
     RECALL_HEADER_AT = (
         "Known about the user as things were on {day}, as far as we know today"
         + _RECALL_FRAMING)
+    #: Header for `recall(valid_during=(start, end))`, for the same reason: it names the
+    #: two days, so a block of facts that held at some time in March is not read as a
+    #: block about today. `{start}` and `{end}` are filled by `_recall_header`.
+    RECALL_HEADER_DURING = (
+        "Known about the user at any time from {start} to {end}, as far as we know today"
+        + _RECALL_FRAMING)
     #: Header for `recall(include_history=True)`. It says "no longer" in the first three
     #: words because the failure this block can cause is a model reading a superseded
     #: value as current — the opposite of the one `recall()` normally guards against.
@@ -3518,6 +3549,7 @@ class Memvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
                with_ids: Literal[False] = ...) -> str: ...
@@ -3532,6 +3564,7 @@ class Memvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
                with_ids: Literal[True]) -> RecallResult: ...
@@ -3546,6 +3579,7 @@ class Memvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
                with_ids: bool) -> str | RecallResult: ...
@@ -3562,6 +3596,7 @@ class Memvara:
                budget: int | None = None,
                counter: Callable[[str], int] = _approx_tokens,
                valid_at: datetime | None = None,
+               valid_during: Sequence[datetime] | None = None,
                filters: Mapping[str, FilterValue] | None = None,
                filepath_prefix: str | None = None,
                with_ids: bool = False) -> Any:
@@ -3589,6 +3624,13 @@ class Memvara:
         itself reads as current.
         With `include_history=True` the tail lists only values that had already ended by
         that day.
+
+        `valid_during=(start, end)` is the same for a period: the facts that were true
+        at any moment from `start` to `end`, under a header that names both days, and a
+        history tail of the values that had ended before `start`. A value that ended
+        during the period is one of the facts, not history. It moves the world clock
+        only, for the same reason `valid_at` is safe here, and cannot be passed with
+        `valid_at`.
 
         `min_score` is here because this output goes into a prompt: a weak match is not
         neutral there, it is a confident-looking irrelevant fact the model will use.
@@ -3728,8 +3770,9 @@ class Memvara:
         the same fact at an earlier time, so they belong with it.
 
         It resurrects nothing. The signature above is explicit so that `as_of`, `states`
-        and `include_invalidated` cannot be forwarded into a live prompt. `valid_at` is
-        allowed because it moves the world clock only and reaches no retired claim. Ids
+        and `include_invalidated` cannot be forwarded into a live prompt. `valid_at` and
+        `valid_during` are allowed because they move the world clock only and reach no
+        retired claim. Ids
         are allowed because they name claims this same call has *already rendered into
         the prompt*. The text was the disclosure. Handing back the handle to
         text the caller is holding forwards no claim, no state and no instant that the
@@ -3746,9 +3789,11 @@ class Memvara:
         >>> block.claim_ids == (mem.get_all()[0].id,)
         True
         """
+        window = time_window(valid_during, valid_at=valid_at)
         results = cast(SearchResults, self.search(
             query, k=k, min_score=min_score, tenant=tenant, user=user,
             anchored=anchored, ranked=ranked, valid_at=valid_at,
+            valid_during=window,
             agent=agent, session=session, memory_types=memory_types,
             filters=filters, filepath_prefix=filepath_prefix,
             include_episodes=include_episodes, query_rewrite=query_rewrite))
@@ -3764,10 +3809,12 @@ class Memvara:
         # Fetched for every claim, not just the surviving ones: the slot lookups are the
         # same ones the unbudgeted call already makes, and grouping them per claim is
         # what lets the fit below take a prefix without re-reading the store per trial.
+        # Over a window, a value that ended inside it is one of the facts above, so the
+        # history is what had ended by its start.
         past = (self._past_by_claim(claims, tenant, user, agent, session,
-                                    before=valid_at)
+                                    before=window[0] if window is not None else valid_at)
                 if include_history else [[] for _ in claims])
-        headers = (header or self._recall_header(valid_at),
+        headers = (header or self._recall_header(valid_at, window),
                    history_header or self.RECALL_HISTORY_HEADER,
                    episode_header or self.RECALL_EPISODE_HEADER)
         # `applied` is the one outcome that *is* the ranking the caller asked for, so it
@@ -4002,8 +4049,13 @@ class Memvara:
         """
         return cls.RECALL_INFERRED if is_derived(claim) else ""
 
-    def _recall_header(self, valid_at: datetime | None) -> str:
-        """The default fact header: the present one, or the dated one for a past read."""
+    def _recall_header(self, valid_at: datetime | None,
+                       window: TimeWindow | None = None) -> str:
+        """The default fact header: the present one, or the dated one for a past read or
+        a period."""
+        if window is not None:
+            return self.RECALL_HEADER_DURING.format(start=_day(window[0]),
+                                                    end=_day(window[1]))
         if valid_at is None:
             return self.RECALL_HEADER
         return self.RECALL_HEADER_AT.format(day=_day(valid_at))
@@ -5238,6 +5290,7 @@ class ScopedMemvara:
                query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
@@ -5250,6 +5303,7 @@ class ScopedMemvara:
                query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
@@ -5262,6 +5316,7 @@ class ScopedMemvara:
                query_rewrite: bool = ...,
                as_of: datetime | None = ..., valid_at: datetime | None = ...,
                known_at: datetime | None = ..., states: Collection[str] | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                include_invalidated: bool | None = ...,
                memory_types: Sequence[MemoryType] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
@@ -5274,6 +5329,7 @@ class ScopedMemvara:
                as_of: datetime | None = None, valid_at: datetime | None = None,
                known_at: datetime | None = None,
                states: Collection[str] | None = None,
+               valid_during: Sequence[datetime] | None = None,
                include_invalidated: bool | None = None,
                memory_types: Sequence[MemoryType] | None = None,
                filters: Mapping[str, FilterValue] | None = None,
@@ -5283,6 +5339,7 @@ class ScopedMemvara:
                                 anchored=anchored, ranked=ranked,
                                 query_rewrite=query_rewrite,
                                 valid_at=valid_at, known_at=known_at, states=states,
+                                valid_during=valid_during,
                                 include_invalidated=include_invalidated,
                                 memory_types=memory_types, filters=filters,
                                 filepath_prefix=filepath_prefix,
@@ -5300,6 +5357,7 @@ class ScopedMemvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
                with_ids: Literal[False] = ...) -> str: ...
@@ -5313,6 +5371,7 @@ class ScopedMemvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
                with_ids: Literal[True]) -> RecallResult: ...
@@ -5326,6 +5385,7 @@ class ScopedMemvara:
                include_history: bool = ..., history_header: str | None = ...,
                budget: int | None = ..., counter: Callable[[str], int] = ...,
                valid_at: datetime | None = ...,
+               valid_during: Sequence[datetime] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
                with_ids: bool) -> str | RecallResult: ...
@@ -5342,6 +5402,7 @@ class ScopedMemvara:
                budget: int | None = None,
                counter: Callable[[str], int] = _approx_tokens,
                valid_at: datetime | None = None,
+               valid_during: Sequence[datetime] | None = None,
                filters: Mapping[str, FilterValue] | None = None,
                filepath_prefix: str | None = None,
                with_ids: bool = False) -> Any:
@@ -5354,6 +5415,7 @@ class ScopedMemvara:
                                 include_history=include_history,
                                 history_header=history_header, budget=budget,
                                 counter=counter, valid_at=valid_at,
+                                valid_during=valid_during,
                                 filters=filters, filepath_prefix=filepath_prefix,
                                 with_ids=with_ids, **self._kw)
 

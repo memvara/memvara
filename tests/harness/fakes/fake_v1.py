@@ -154,10 +154,11 @@ _CODES = {400: "bad_request", 401: "unauthorized", 402: "quota_exhausted",
 # field, so an unknown one is a 422, which is what lets the client detect a deployment
 # that predates a field it sends.
 _SEARCH = {"query", "k", "min_score", "anchored", "ranked", "query_rewrite", "as_of",
-           "valid_at", "known_at", "states", "include_invalidated", "memory_types",
-           "filters", "filepath_prefix", "include_episodes"}
+           "valid_at", "valid_during", "known_at", "states", "include_invalidated",
+           "memory_types", "filters", "filepath_prefix", "include_episodes"}
 _RECALL = {"query", "k", "min_score", "anchored", "ranked", "query_rewrite", "synthesize",
-           "memory_types", "include_episodes", "valid_at", "filters", "filepath_prefix"}
+           "memory_types", "include_episodes", "valid_at", "valid_during", "filters",
+           "filepath_prefix"}
 _ASK = {"question", "at", "k", "min_score", "anchored"}
 _PROFILE = {"query", "k", "since", "buckets"}
 _ADD = {"messages", "role", "ts"}
@@ -406,6 +407,7 @@ class FakeV1(HttpFake):
                 anchored=bool(body.get("anchored")), ranked=bool(body.get("ranked")),
                 query_rewrite=body.get("query_rewrite", True), valid_at=valid_at,
                 known_at=known_at, states=states,
+                valid_during=_window_in(body.get("valid_during")),
                 memory_types=_memory_types(body.get("memory_types")),
                 filters=body.get("filters"), filepath_prefix=body.get("filepath_prefix"),
                 include_episodes=bool(body.get("include_episodes")))
@@ -428,6 +430,7 @@ class FakeV1(HttpFake):
                 synthesize=bool(body.get("synthesize")),
                 memory_types=_memory_types(body.get("memory_types")),
                 include_episodes=bool(body.get("include_episodes")), valid_at=valid_at,
+                valid_during=_window_in(body.get("valid_during")),
                 filters=body.get("filters"), filepath_prefix=body.get("filepath_prefix"),
                 with_ids=True)
         except FilterError as exc:
@@ -906,6 +909,23 @@ def _fields(value: Any, allowed: Collection[str], required: Sequence[str],
     return value
 
 
+def _window_in(value: Any) -> tuple[datetime, datetime] | None:
+    """`valid_during` from a request, `{"start", "end"}`, or None when it was not sent. A
+    window that is not those two timestamps, or that ends before it starts, is a 422."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"start", "end"}:
+        raise ApiError(422, "invalid_request",
+                       "valid_during must be an object with start and end")
+    start = _instant_in(value["start"], "valid_during.start")
+    end = _instant_in(value["end"], "valid_during.end")
+    if start is None or end is None:
+        raise ApiError(422, "invalid_request", "valid_during needs both start and end")
+    if end < start:
+        raise ApiError(422, "invalid_request", "valid_during ends before it starts")
+    return start, end
+
+
 def _instant_in(value: Any, name: str) -> datetime | None:
     """A timestamp from a request, in UTC, or None when it was not sent."""
     if value is None:
@@ -1168,7 +1188,10 @@ def _rewrite(value: Rewrite | None) -> dict[str, Any] | None:
             "queries": list(value.queries),
             "date_from": None if value.date_from is None else value.date_from.isoformat(),
             "date_to": None if value.date_to is None else value.date_to.isoformat(),
-            "valid_at": _instant(value.valid_at)}
+            "valid_at": _instant(value.valid_at),
+            "valid_during": (None if value.valid_during is None else
+                             {"start": _instant(value.valid_during[0]),
+                              "end": _instant(value.valid_during[1])})}
 
 
 def _synthesis(value: Synthesis | None) -> dict[str, Any] | None:

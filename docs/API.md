@@ -91,10 +91,17 @@ mem.reset()                                       -> dict[str, int] # scope + sc
 # the first three also take `states=`, any non-empty subset of ("live", "ended",
 # "retired"), defaulting to ["live"]; `include_invalidated=` is its two-valued alias.
 mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False,
-           query_rewrite=True, T=None, memory_types=None, states=None,
-           include_invalidated=None, filters=None, filepath_prefix=None,
+           query_rewrite=True, T=None, valid_during=None, memory_types=None,
+           states=None, include_invalidated=None, filters=None, filepath_prefix=None,
            include_episodes=False)
                                      -> SearchResults  # a list, plus .selection, .rewrite
+#   valid_during=(start, end) reads a period of the world clock instead of an instant:
+#     the facts that were true at any moment from start to end, both included, so a
+#     value that held from 3 to 10 March is returned for March where valid_at=March 31
+#     does not return it. It runs inside the store, before k is applied. It cannot be
+#     passed with valid_at= or as_of= (ValueError); known_at= still sets the belief
+#     clock. With include_episodes=True the turns read the window's end as valid_at,
+#     which keeps every turn said before or during it.
 #   filters={"team": "web"} keeps only rows whose metadata has that value; a list means
 #     any one of its values, and every key must match. Keys are 1 to 64 characters of
 #     [A-Za-z0-9_.-]. A string matches only the same string, a number any equal number,
@@ -124,16 +131,19 @@ mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False,
 #     else an outcome of applied | fallback | unconfigured | disabled | key_rejected.
 #   query_rewrite=True (the default) asks the chat backend, when llm= has one, for up to
 #     three other phrasings of the query and the dates it names, in one call with a 10 s
-#     deadline. Every phrasing is searched and the lists are fused by rank; the dates
-#     become valid_at unless you passed valid_at or as_of. SearchResults.rewrite records
+#     deadline. Every phrasing is searched and the lists are fused by rank; the facts are
+#     read over the dates as valid_during, up to now at the latest, and the turns at
+#     their last second when that is in the past, unless you passed valid_at, as_of or
+#     valid_during. A range that starts after today is not used. SearchResults.rewrite
+#     records its .valid_during and .valid_at and
 #     what happened (None when you passed False), with the same five outcomes; every
 #     outcome but applied serves the plain read. Memvara(query_rewrite=False) switches it
 #     off for every read. Against a hosted deployment it is sent only as false.
 mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False,
            query_rewrite=True, synthesize=False, header=None, include_episodes=False,
            episode_header=None, include_history=False, history_header=None,
-           budget=None, counter=<internal>, valid_at=None, filters=None,
-           filepath_prefix=None, memory_types=None, with_ids=False)
+           budget=None, counter=<internal>, valid_at=None, valid_during=None,
+           filters=None, filepath_prefix=None, memory_types=None, with_ids=False)
                                                   -> str | RecallResult
 #   memory_types= keeps only claims of those types, as on search(), and refuses an
 #     unknown name with ValueError before anything is read.
@@ -143,7 +153,9 @@ mem.recall(query, *, k=8, min_score=0.0, anchored=False, ranked=False,
 #   valid_at= only: the world clock. No `as_of=`, no `known_at=`, no `states=`, no
 #     `include_invalidated=` — deliberately; see recall() below. With valid_at the
 #     default header names the day, and include_history lists only values that had
-#     ended by then.
+#     ended by then. valid_during=(start, end) is the same for a period: the header
+#     names both days, and include_history lists the values that had ended before start.
+#     It cannot be passed with valid_at.
 #   budget= caps the block by size rather than by count: `k` bounds how many notes,
 #     this bounds how much text. Notes drop whole and the block says how many did not
 #     fit. `counter=` is any `(str) -> int`; pass `tiktoken`'s or Anthropic's to
@@ -473,7 +485,10 @@ than an omission: it stays in `recall()`'s signature so that `None` works, and a
 raises `ValueError`, because a budget silently ignored is an oversized prompt with no
 signal. `recall(valid_at=...)` is sent to `POST /v1/recall`, which takes it as the world
 clock alone. A deployment from before the field refuses a dated read with a 422, which the
-client raises as `InvalidRequest`.
+client raises as `InvalidRequest`. `search(valid_during=...)` and `recall(valid_during=...)`
+are sent the same way, as `{"start", "end"}`, only when set; a deployment from before that
+field refuses the read with a 422 rather than answering it for the present, and the client
+does not send it again without the window.
 
 `search()` and `recall()` send `filters` and `filepath_prefix` only when you set them, and
 check them first with the rules the local engine uses. `RemoteMemvara(metadata_filters=False)`

@@ -30,7 +30,7 @@ from typing import (TYPE_CHECKING, Any, Collection, Iterable, Literal, Protocol,
 import numpy as np
 
 from ..filters import SearchFilter
-from ..types import Claim, Document, DocumentChunk, Episode, Link, Scope
+from ..types import Claim, Document, DocumentChunk, Episode, Link, Scope, TimeWindow
 
 if TYPE_CHECKING:
     # Only for annotations: a `Store` implementation should not have to import
@@ -162,7 +162,7 @@ def _not_ended_by(a: str, at: str) -> str:
 
 
 def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
-                    alias: str = "") -> tuple[str, tuple[str, ...]]:
+                    alias: str = "", window: bool = False) -> tuple[str, tuple[str, ...]]:
     """SQL for "in one of `states` at `at`", plus the axis each bind marker reads.
 
     The general form of `live_predicate`, which is this called with one state. `at` is
@@ -198,6 +198,17 @@ def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
     ('(recorded_at <= ? AND invalidated_at IS NOT NULL AND invalidated_at <= ?)', ('known', 'known'))
     >>> state_predicate("%s", states=STATES, alias="c")
     ('(c.recorded_at <= %s)', ('known',))
+
+    **`window=True` is the same SQL for a read over a window** (`valid_during`), with one
+    marker renamed. A claim was live at some moment of `[start, end]` when it had started
+    by `end` and had not stopped by `start`, so the marker in "not ended by" reads
+    `"valid_start"` and every other world marker reads `"valid"`, which a windowed read
+    binds to `end`. Ended at some moment of the window is ended by `end`, and started by
+    then is started by `end`, so only the live state has a marker that moves. With
+    `start == end` the window is the instant, and the SQL answers as `valid_at` does.
+
+    >>> state_predicate("?", window=True)[1]
+    ('known', 'known', 'valid', 'valid_start')
     """
     a = f"{alias}." if alias else ""
     wanted = resolve_states(states)
@@ -211,7 +222,7 @@ def state_predicate(at: str = "?", *, states: Collection[str] | None = None,
     # and the two intervals between them cover everything that had started by `V`.
     world, world_axes = {
         ("live",): (f"{a}valid_from <= {at} AND {_not_ended_by(a, at)}",
-                    ("valid", "valid")),
+                    ("valid", "valid_start" if window else "valid")),
         ("ended",): (f"{a}valid_to IS NOT NULL AND {a}valid_to <= {at}", ("valid",)),
         ("live", "ended"): (f"{a}valid_from <= {at}", ("valid",)),
         (): ("", ()),
@@ -907,6 +918,16 @@ class Store(Protocol):
     # `resolve_states`, which is the one place either is interpreted.
 
     #
+    # **`valid_during` asks about a window of the world clock instead of an instant**, on
+    # these three and nowhere else: a claim counts when it was in its states at any moment
+    # of `(start, end)`, see `state_predicate(window=True)`. It cannot be passed with
+    # `valid_at`, and the store raises `ValueError` if it is. It is here, on the methods
+    # that cap rows, for the reason `states` is. The retriever passes it only on a
+    # windowed read, so a store written before it existed still serves every other read,
+    # and a windowed read against it fails with a `TypeError` naming the argument. The
+    # turn searches and the graph walk do not take it: they read the window's end as
+    # `valid_at`, which already includes every turn said during the window (#234).
+    #
     # **`where` is the caller's metadata and file-path filter** (`memvara.filters`), and it
     # is a store parameter for the reason `states` is: each of these methods caps its rows,
     # so a filter applied to what one returned would find a match only when it happened to
@@ -919,6 +940,7 @@ class Store(Protocol):
     def candidate_ids(self, scopes: Sequence[Scope], *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
+                      valid_during: TimeWindow | None = None,
                       states: Collection[str] | None = None,
                       include_invalidated: bool | None = None,
                       where: SearchFilter | None = None) -> list[str]: ...
@@ -926,6 +948,7 @@ class Store(Protocol):
     def lexical_search(self, query: str, scopes: Sequence[Scope], limit: int, *,
                        valid_at: datetime | None = None,
                        known_at: datetime | None = None,
+                       valid_during: TimeWindow | None = None,
                        states: Collection[str] | None = None,
                        include_invalidated: bool | None = None,
                        where: SearchFilter | None = None
@@ -934,6 +957,7 @@ class Store(Protocol):
     def vector_search(self, qvec: np.ndarray, scopes: Sequence[Scope], limit: int, *,
                       valid_at: datetime | None = None,
                       known_at: datetime | None = None,
+                      valid_during: TimeWindow | None = None,
                       states: Collection[str] | None = None,
                       include_invalidated: bool | None = None,
                       where: SearchFilter | None = None
@@ -1332,7 +1356,8 @@ class SQLStore(Protocol):
 
     def _state_clause(self, valid_at: datetime | None, known_at: datetime | None,
                       states: Collection[str] | None = None,
-                      alias: str = "") -> tuple[str, list]:
+                      alias: str = "", valid_during: TimeWindow | None = None
+                      ) -> tuple[str, list]:
         """SQL and bind parameters for "in one of `states` at (`valid_at`, `known_at`)".
 
         The parameterised form of `state_predicate`, and the method every read filter in
@@ -1343,6 +1368,11 @@ class SQLStore(Protocol):
         the belief floor alone rather than the union of its parts.
 
         `_live_clause` below is this with the two-valued alias applied.
+
+        With `valid_during`, the world half reads a window instead of `valid_at`, and
+        the predicate comes from `state_predicate(window=True)`: its `"valid"` markers
+        bind the window's end and its `"valid_start"` marker binds the window's start.
+        Passing `valid_at` as well raises `ValueError`.
         """
         ...
 

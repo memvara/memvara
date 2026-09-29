@@ -7,6 +7,51 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## A question about a period reads the whole period, and a store takes `valid_during`
+
+### What changed
+
+Query rewrite used to read a date range at its last second. A question about March read the
+store as of 31 March 23:59:59, so a value that held from 3 to 10 March was not returned. The
+claim searches now read the whole range: every fact that was true at any moment of it, up
+to the moment of the read at the latest. A range that includes today is now read from its
+start, so "this year" also finds a value that started and ended earlier this year. A range
+that starts after today is still not used. The turns and the graph leg still read the
+range's last second, as before.
+
+The same window is public. `search()` and `recall()`, on the library, the hosted client and
+the async client, take `valid_during=(start, end)`, and the MCP tools `memory_search` and
+`memory_recall` take `valid_during: {"start", "end"}`. `Rewrite` has a new field,
+`valid_during`.
+
+The `Store` protocol's `candidate_ids`, `lexical_search` and `vector_search` take a
+keyword-only `valid_during`. The retriever passes it only on a windowed read, so a store
+written before it still serves every other read, and a windowed read against it raises a
+`TypeError` naming the argument.
+
+### Who this changes
+
+**If you ask dated questions with query rewrite on**, a result can now hold several values
+of one fact, one for each value that held during the range, where it used to hold only the
+value at the range's end.
+
+**If you implement `Store` yourself**, add `valid_during` to those three methods before a
+windowed read reaches them, including one from query rewrite. The window's SQL is the live
+predicate with its `"valid_start"` marker bound to the window's start: see
+`state_predicate(window=True)`.
+
+**If you run against a hosted deployment**, a windowed read needs a deployment that accepts
+the field. One from before it refuses the read with a 422, raised as `InvalidRequest`,
+rather than answering it for the present. memvara-cloud accepts it once its matching change
+is deployed.
+
+### How to find it in your code
+
+Search for classes that define `lexical_search` or `vector_search`:
+`grep -rn "def lexical_search\|def vector_search\|def candidate_ids" --include="*.py" .`
+
+---
+
 ## A write that overlaps part of a stored period stores only the part not yet held
 
 ### What changed

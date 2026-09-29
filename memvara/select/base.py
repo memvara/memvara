@@ -127,12 +127,19 @@ class Rewrite(StageOutcome):
     there was no range, when the caller passed `valid_at` or `as_of` (the caller's
     instant always wins), or when the range ends today or later, which is a
     present-tense read anyway.
+
+    `valid_during` is the window the claim searches read because of that range: from the
+    start of `date_from` to the last second of `date_to` or to the moment of the read,
+    whichever comes first, in UTC (#234). It is `None` when the range was not used: when
+    there was no range, when the caller passed `valid_at`, `as_of` or `valid_during`, or
+    when the range starts after today.
     """
 
     queries: tuple[str, ...] = ()
     date_from: date | None = None
     date_to: date | None = None
     valid_at: datetime | None = None
+    valid_during: tuple[datetime, datetime] | None = None
 
 
 @dataclass(slots=True, frozen=True)
