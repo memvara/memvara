@@ -108,3 +108,86 @@ def test_splits_keep_given_test_ids_test_only_sources_and_whole_scenarios() -> N
         assert len({splits[f"syn-coding-agent-{s:04d}-q{q}"] for q in range(3)}) == 1
     assert {"train", "validation", "test"} <= set(splits.values())
     assert splits == sp.assign_splits(pools, test_ids={"l0", "l1"}, seed=0)
+
+
+import selector_metrics as sm  # noqa: E402
+
+from memvara.select.local import Calibration  # noqa: E402
+
+WORDS = lambda text: len(text.split())  # noqa: E731 - a token counter for small tests
+
+
+def _turn(text: str, role: str = "user", gold: bool = False, paid=None) -> sp.PoolTurn:
+    return sp.PoolTurn(id=text, role=role, text=text, ts="", fused=0.0, gold=gold,
+                       paid_kept=paid)
+
+
+def _toy(question: str = "where did I park?") -> sp.Pool:
+    return sp.Pool(source="toy", qid="toy1", question=question, qtype="t", asked_on=None,
+                   abstention=False, turns=[
+                       _turn("a1 a1 a1 a1", role="assistant"),
+                       _turn("u1 u1", gold=False),
+                       _turn("u2 u2 u2", gold=True),
+                       _turn("u3", gold=False)])
+
+
+def test_replay_reranks_routes_and_renders_kept_turns_first() -> None:
+    pool = _toy()
+    rerank = [4.0, 3.0, 2.0, 1.0]
+    plain = sm.replay(pool, rerank, None)
+    assert plain.order == [0, 1, 2, 3]
+    assert plain.scope == [1, 2, 3]                 # the question is the user's: user turns only
+    assert plain.rendered == plain.order
+    kept = sm.replay(pool, rerank, {2, 0})          # 0 is outside the scope and is ignored
+    assert kept.rendered == [2, 0, 1, 3]
+
+
+def test_replay_hands_over_every_role_when_the_routed_one_has_no_turn() -> None:
+    pool = _toy("remind me what you said about dinner")  # routed to the assistant
+    pool.turns[0].role = "user"                           # ... who said nothing here
+    assert sm.replay(pool, [4.0, 3.0, 2.0, 1.0], None).scope == [0, 1, 2, 3]
+
+
+def test_coverage_fills_the_budget_greedily_and_skips_what_does_not_fit() -> None:
+    pool = _toy()
+    assert sm.coverage(pool, [0, 1, 2, 3], WORDS, budget=6) == (0, 1)     # 4 + 2 fill it
+    assert sm.coverage(pool, [0, 2, 1, 3], WORDS, budget=8) == (1, 1)     # 4 + 3, then 1 fits
+
+
+def test_local_replay_keeps_by_the_shipped_rule() -> None:
+    pool = _toy()
+    cal = Calibration(scale=1.0, shift=0.0, threshold=0.5, max_keep=1)
+    rep, kept = sm.local_replay(pool, [4.0, 3.0, 2.0, 1.0], [None, -2.0, 3.0, 1.0], cal)
+    assert kept == {2}
+    assert rep.rendered[0] == 2
+    with pytest.raises(ValueError, match="do not cover every candidate"):
+        sm.local_replay(pool, [4.0, 3.0, 2.0, 1.0], [None, None, 3.0, 1.0], cal)
+
+
+def test_kept_recall_counts_gold_kept_among_gold_shown() -> None:
+    assert sm.kept_recall(_toy(), [1, 2, 3], {2}) == (1, 1)
+    assert sm.kept_recall(_toy(), [1, 2, 3], set()) == (0, 1)
+
+
+def test_paired_bootstrap_is_deterministic_and_counts_wins() -> None:
+    a = {"q1": (1, 1), "q2": (2, 2), "q3": (0, 1)}
+    b = {"q1": (0, 1), "q2": (2, 2), "q3": (0, 1)}
+    first = sm.paired_bootstrap(a, b, resamples=200, seed=0)
+    assert first == sm.paired_bootstrap(a, b, resamples=200, seed=0)
+    assert (first.better, first.worse) == (1, 0)
+    assert first.diff == pytest.approx(0.25)
+    assert first.low <= first.diff <= first.high
+
+
+def test_evaluate_reports_plain_routed_paid_and_local_orderings() -> None:
+    pool = _toy()
+    for turn, paid in zip(pool.turns, [None, False, True, False]):
+        turn.paid_kept = paid
+    cal = Calibration(scale=1.0, shift=0.0, threshold=0.5, max_keep=1)
+    results = sm.evaluate([pool], {"toy1": [4.0, 3.0, 2.0, 1.0]},
+                          {"local": ({"toy1": [None, -2.0, 3.0, 1.0]}, cal)}, WORDS,
+                          paid=True, budget=8)
+    assert set(results) == {"plain", "routed", "paid", "local"}
+    assert results["local"]["toy1"] == (1, 1, 1, 1, 1)
+    assert "| local | 1 |" in sm.table(results, baseline="routed")
+    assert "| t | 1 |" in sm.type_table([pool], results)
