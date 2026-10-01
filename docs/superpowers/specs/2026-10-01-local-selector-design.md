@@ -479,6 +479,12 @@ chosen there too, from a grid wider than G0's:
 the result. The other arm's test number is reported beside it, but it is not chosen after
 the fact.
 
+*Tie-break, added after training and before any test score was computed.* Both arms
+printed a validation coverage of 0.931, so the rule above did not decide. The comparison
+uses the exact fraction of gold turns covered on validation. If that is also equal, the
+arm that keeps fewer turns on average on validation is chosen, which is the same tie-break
+the keep-rule grid uses.
+
 **Gate (G1 under the faithful replay).**
 - **Pass:** test coverage of at least 0.93.
 - **Partial:** between 0.903 (keeping every routed candidate) and 0.93. The model is then a
