@@ -294,3 +294,42 @@ def test_the_keep_rule_search_can_reach_low_thresholds_and_keep_every_candidate(
     cal, cov, _ = sc.choose_keep([pool], {"t": [3.0, 2.0, 1.0]}, {"t": [-9.0, -9.0, -4.3]},
                                  1.0, 0.0, WORDS, budget=11)
     assert (cal.threshold, cov) == (0.01, 1.0)
+
+
+import hashlib  # noqa: E402
+
+import selector_train as st  # noqa: E402
+
+
+def _labelled_pool(qid: str, source: str = "toy") -> sp.Pool:
+    turns = [_turn(f"{qid} gold", gold=True, paid=True)] + [
+        _turn(f"{qid} other {i}", paid=False if i < 3 else None) for i in range(8)]
+    return sp.Pool(source=source, qid=qid, question="q", qtype="t", asked_on=None,
+                   abstention=False, turns=turns)
+
+
+def test_training_pairs_use_the_train_split_candidates_and_cap_negatives() -> None:
+    pools = [_labelled_pool("a"), _labelled_pool("b"), _labelled_pool("c", source="held")]
+    splits = {"a": "train", "b": "validation", "c": "train"}
+    rerank = {p.qid: [float(-i) for i in range(len(p.turns))] for p in pools}
+    pairs = st.training_pairs(pools, splits, rerank, negatives=3, seed=0, hold_out="held")
+    assert {text.split()[0] for _q, text, _y in pairs} == {"a"}
+    assert sum(y for _q, _t, y in pairs) == 1.0 and len(pairs) == 4
+    assert pairs == st.training_pairs(pools, splits, rerank, negatives=3, seed=0, hold_out="held")
+
+
+def test_training_pairs_can_use_the_model_selectors_labels_for_the_comparison() -> None:
+    pools = [_labelled_pool("a")]
+    rerank = {"a": [float(-i) for i in range(9)]}
+    pairs = st.training_pairs(pools, {"a": "train"}, rerank, label="paid", negatives=10)
+    assert len(pairs) == 4                       # one kept, three omitted; unshown turns unused
+    assert sum(y for _q, _t, y in pairs) == 1.0
+
+
+def test_write_selector_json_records_the_weights_digest(tmp_path) -> None:
+    (tmp_path / "model.safetensors").write_bytes(b"trained")
+    cal = Calibration(scale=1.2, shift=-2.0, threshold=0.4, max_keep=6, max_length=256)
+    st.write_selector_json(tmp_path, cal, base_model="m", seed=0)
+    read, digest = Calibration.read(tmp_path)
+    assert read == cal
+    assert digest == hashlib.sha256(b"trained").hexdigest()
