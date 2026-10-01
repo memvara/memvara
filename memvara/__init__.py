@@ -116,7 +116,7 @@ from .write.reconcile import (
     MergeReport, SplitReport, backfill_entities, backfill_predicates, split_entity,
 )
 
-__version__ = "0.18.0"
+__version__ = "0.19.0"
 
 __all__ = [
     "Memvara", "ScopedMemvara", "AsyncMemvara", "AsyncScopedMemvara",

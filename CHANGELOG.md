@@ -9,6 +9,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-01
+
+Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so
+opening an existing store needs no migration. The `Store` protocol changed in one place:
+`batch()` takes an optional keyword-only `tenant`, so a store can lock one tenant instead of
+the whole database. A third-party store does not have to change its signature, because the
+library calls a `batch()` that does not declare the keyword as it always did, and
+`SQLiteStore` accepts the keyword and ignores it. One behaviour changed:
+`erase_claim(sources=True)` erases only source turns of the claim's own tenant, and a
+third-party store that erases a source turn of another tenant should stop doing that too.
+
 ### Changed
 
 - **`Store.batch()` takes an optional `tenant`, so a store can lock one tenant.**
@@ -19,9 +30,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   for `reembed()` and for a write that names two tenants. `SQLiteStore` and `RemoteStore`
   accept the keyword and ignore it. A third-party store whose `batch()` lacks the keyword
   keeps working: the library reads the signature and calls it as `batch()`, which includes a
-  wrapper that only takes `**kwargs`. All the call
-  sites now go through `memvara.store.transaction(store, tenant)`, and `memvara.store`
-  exports `sole_tenant()`. memvara-cloud #298 uses this for a per-tenant Postgres lock.
+  wrapper that only takes `**kwargs`. All the call sites now go through
+  `memvara.store.transaction(store, tenant)`, and `memvara.store` exports `sole_tenant()`.
+  memvara-cloud #298 uses this for a per-tenant Postgres lock.
   `docs/UPGRADING.md` has the details for a store that implements the protocol.
 
 ### Fixed
