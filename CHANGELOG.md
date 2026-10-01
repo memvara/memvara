@@ -9,6 +9,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **A ranked read can run without a model provider.** `memvara.select.LocalSelector` is
+  a second `Selector`: it scores the ranked stage's candidate turns with a cross-encoder
+  in this process, turns each score into a probability with a calibration measured on
+  labelled data, and keeps the turns that reach a threshold. It needs the `rerank` extra,
+  sends nothing anywhere, and gives the same answer every time for the same input.
+  `Memvara(read_selector=LocalSelector(...))` uses it. Design:
+  `docs/superpowers/specs/2026-10-01-local-selector-design.md`.
+
 ## [0.18.0] — 2026-09-29
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so
