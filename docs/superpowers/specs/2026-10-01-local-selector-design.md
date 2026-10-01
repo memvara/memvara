@@ -443,3 +443,49 @@ None blocks Step 1.
 - **memorybench.** The LoCoMo loader reads `answer`, but 444 of the 446 category-5
   questions carry only `adversarial_answer`, so their ground truth becomes the string
   "undefined". G3 skips category 5, but a judged LoCoMo run needs the loader fixed first.
+
+## 12. Step 2a: train the selector to keep more turns (pre-registered 2026-10-01)
+
+Written before any model in this section was trained. The user chose decision 6's option
+(b) after G0 failed.
+
+**Question.** G0 failed because the stock model keeps three or four turns. The gold turns it
+leaves out then lose the 720 tokens to long assistant turns, which the ranked read renders
+after the kept ones. The question here is whether a MiniLM fine-tuned on gold labels keeps
+enough of the gold turns to cover well under the server's real rendering.
+
+**Data.** LongMemEval-S only, with the frozen splits from G0:
+- 256 questions to train on;
+- 45 to calibrate and choose on;
+- the 199 parity questions as the test set.
+
+The synthetic sources are not used, because the generator model (decision 2) is not chosen
+yet. A result here is in-distribution only. It cannot ship Step 2 by itself: G2 and G3
+still apply.
+
+**Arms.** Both arms start from the stock model at its pinned commit. Both train for one
+epoch, with learning rate 2e-5, 256 tokens, batches of 16 and seed 0. Both use gold labels
+on the 40 routed candidates, with three non-gold turns per gold one.
+- **A:** the loss is unweighted.
+- **B:** a gold turn's loss is weighted 3, so missing a gold turn costs three times as much
+  as keeping a wrong one.
+
+**Calibration.** Platt scaling is fitted on the 45 validation questions. The keep rule is
+chosen there too, from a grid wider than G0's:
+- thresholds 0.01, 0.02, then 0.05 to 0.95 in steps of 0.05;
+- `max_keep` of 4, 6, 8, 10, 12, 16, 24 or 40.
+
+**Choice.** The arm with the higher validation coverage is the one this section reports as
+the result. The other arm's test number is reported beside it, but it is not chosen after
+the fact.
+
+**Gate (G1 under the faithful replay).**
+- **Pass:** test coverage of at least 0.93.
+- **Partial:** between 0.903 (keeping every routed candidate) and 0.93. The model is then a
+  free-tier improvement, not a stand-in for the model selector.
+- **Fail:** below 0.903.
+
+**Prediction:** 0.91, with a range of 0.89 to 0.93.
+
+**Also reported:** kept recall, mean turns kept, coverage by question type, and the
+paired bootstrap against the model selector and against keeping every routed candidate.
