@@ -62,7 +62,8 @@ from .select.base import PLAIN_READ, Synthesis
 from .select.stages import QueryRewriter, Synthesizer, gate, run_stage
 from .schema import (Cardinality, PredicatePackError, PredicateRegistry, _slugify,
                      load_specs)
-from .store import SQLiteStore, Store, bulk_claims, resolve_states, transaction
+from .store import (SQLiteStore, Store, bulk_claims, resolve_states, sole_tenant,
+                    transaction)
 from .telemetry import WRITE_LLM_CALLS, WRITE_TOKENS_IN, WRITE_TOKENS_OUT, Recorder
 from dataclasses import replace
 
@@ -1505,7 +1506,9 @@ class Memvara:
         # findable by BM25 and by `why()` — only its *vector* is missing — and because
         # `_index_episodes` skips turns that already have one, so a retry converges.
         receipt = self.writer.add(episodes)
-        with transaction(self.store):
+        # The turns this call stored or found: one tenant unless the caller handed in
+        # `Episode` objects scoped to several.
+        with transaction(self.store, sole_tenant(ep.scope.tenant for ep in episodes)):
             self._index_episodes(receipt.episode_ids)
         return receipt
 
@@ -2044,6 +2047,18 @@ class Memvara:
                 ep.scope = claim.scope
         return fresh
 
+    @staticmethod
+    def _tenants_of(scope: Scope, sources: Sequence[str | Episode] | None) -> list[str]:
+        """The tenants a claim at `scope` and the new turns it cites are stored under.
+
+        A turn named by id is stored already and is visible to the claim's scope, so it is
+        in the claim's tenant. A new `Episode` keeps the scope it names, except that one
+        naming none takes the claim's (`_cite`), so it can be in another tenant only when
+        the caller said so.
+        """
+        return [scope.tenant] + [(s.scope if s.scope != Scope() else scope).tenant
+                                 for s in sources or () if isinstance(s, Episode)]
+
     def _citable(self, scope: Scope, sources: Sequence[str | Episode] | None,
                  ) -> Sequence[str | Episode] | None:
         """The caller's sources that a claim at `scope` may cite.
@@ -2117,7 +2132,11 @@ class Memvara:
             for ep in episodes:
                 redact_episode(self.redactor, ep,
                                telemetry=self.writer.telemetry)
-        with transaction(self.store):
+        # Every tenant this write touches: the claim's, each new turn's, and the tenant of
+        # the claim it closes. Two or more leave the lock as wide as the store can make it.
+        tenant = sole_tenant([*self._tenants_of(claim.scope, episodes),
+                              *([retire.scope.tenant] if retire is not None else [])])
+        with transaction(self.store, tenant):
             # On `SQLiteStore` the transaction holds the write lock from its first
             # statement, so from this instant no other writer can commit before this one.
             now = utcnow()
@@ -2294,7 +2313,13 @@ class Memvara:
         checks the new claim's `expires_at` again at that instant, as `remember()` does
         for every write. See `_write_claim`."""
         how, why = closure(close), closure_reason(reason)
-        with transaction(self.store):
+        # The old claim is in the caller's tenant, because `get` below refuses any other.
+        # The new claim and its new turns may name another scope on purpose; see below.
+        caller = self._scope(tenant, user, agent, session)
+        with transaction(self.store, sole_tenant([
+                caller.tenant,
+                *self._tenants_of(new_claim.scope if new_claim.scope != Scope() else caller,
+                                  sources)])):
             old = self.get(old_claim_id, tenant=tenant, user=user, agent=agent,
                            session=session)
             if old is None:
@@ -2467,12 +2492,12 @@ class Memvara:
         # A claim whose retirement is recorded but takes effect later is still believed,
         # so that lookup returns it. It is retired all the same, and `close_out` leaves a
         # retired claim as it is, so it is left out rather than reported as closed.
-        with transaction(self.store):
+        with transaction(self.store, scope.tenant):
             clock = utcnow()
             now = at or clock
             retired = [c for c in self._unended(scope.tenant, probe.fact_key, clock)
                        if slot.contains(c.scope) and c.invalidated_at is None]
-            self._close_all(retired, now, how, why)
+            self._close_all(retired, now, how, why, tenant=scope.tenant)
         return retired
 
     def _unended(self, tenant: str, fact_key: str, at: datetime) -> list[Claim]:
@@ -2491,7 +2516,7 @@ class Memvara:
                 if c.is_unended(at) and not self._gone(c, at)]
 
     def _close_all(self, claims: Sequence[Claim], at: datetime, how: Closure,
-                   why: str | None) -> None:
+                   why: str | None, *, tenant: str) -> None:
         """Close every claim in `claims` the same way, in one transaction.
 
         One transaction because the callers close a set that means something as a whole:
@@ -2504,7 +2529,7 @@ class Memvara:
         the copies written back are the rows as they stood under the write lock, on a
         store whose `batch()` takes it (`Store.batch`).
         """
-        with transaction(self.store):
+        with transaction(self.store, tenant):
             for c in claims:
                 close_out(c, at, None, how, why)
                 self.store.put_claim(c)
@@ -2950,7 +2975,7 @@ class Memvara:
         and the write; see `Store.batch`.
         """
         how, why = closure(close), closure_reason(reason)
-        with transaction(self.store):
+        with transaction(self.store, self._scope(tenant, user, agent, session).tenant):
             claim = self.get(claim_id, tenant=tenant, user=user, agent=agent,
                              session=session)
             if claim is None:
@@ -3040,7 +3065,7 @@ class Memvara:
         # Checked, read and closed in one transaction, which holds the write lock from
         # before the read: a claim another writer closed or erased while this call waited
         # is refused, rather than closed again from a copy read before that write.
-        with transaction(self.store):
+        with transaction(self.store, scope.tenant):
             now = utcnow()
             ids = self._confirmer.check(confirm, how, now=now)
             found = self._visible(ids, scope)
@@ -3058,7 +3083,7 @@ class Memvara:
                         f"{now_is}. Nothing was changed. Run the call again without "
                         "confirm to see what matches now.")
                 doomed.append(claim)
-            self._close_all(doomed, now, how, why)
+            self._close_all(doomed, now, how, why, tenant=scope.tenant)
         return ForgetResult(close=how, closed=doomed, reason=why)
 
     def link(self, from_id: str, to_id: str, relation: str, *, by: str = "api",
@@ -3088,7 +3113,7 @@ class Memvara:
         rel = link_relation(relation)
         refuse_self_link(from_id, to_id)
         scope = self._scope(tenant, user, agent, session)
-        with transaction(self.store):
+        with transaction(self.store, scope.tenant):
             found = self._visible([from_id, to_id], scope)
             for claim_id in (from_id, to_id):
                 if claim_id not in found:
@@ -3180,11 +3205,11 @@ class Memvara:
         and the write; see `Store.batch`.
         """
         scope = self._scope(tenant, user, agent, session)
-        done = self._erase_proved(claim_id, sources=sources,
+        done = self._erase_proved(claim_id, sources=sources, tenant=scope.tenant,
                                   wanted=lambda claim: scope.sees(claim.scope))
         return done is not None
 
-    def _erase_proved(self, claim_id: str, *, sources: bool,
+    def _erase_proved(self, claim_id: str, *, sources: bool, tenant: str,
                       wanted: Callable[[Claim], bool]) -> tuple[Claim, ErasureProof] | None:
         """Erase one claim if `wanted` says so, and prove it against the disk. Returns the
         claim as it was read and the proof, or `None` if nothing was erased.
@@ -3196,8 +3221,12 @@ class Memvara:
         (`Store.batch`). Read outside it, the claim could be changed or erased by
         another writer before the delete. `prove_erased` runs after that transaction
         commits. Raises `ErasureIncomplete` when the proof fails.
+
+        `tenant` is the tenant of the claim to erase, which the caller `wanted` checks
+        again once the claim is read: `erase()` passes its scope's tenant and refuses a
+        claim in any other, and the expiry sweep passes the tenant of the claim it listed.
         """
-        with transaction(self.store):
+        with transaction(self.store, tenant):
             # Not `get()`, which hides a claim whose expiry has passed: erasing one of
             # those by name is still an erasure, and must not report that nothing was
             # there.
@@ -3287,7 +3316,7 @@ class Memvara:
             # erased the claim. `_erase_proved` reads it under the write lock, in the same
             # transaction as the delete, so no write can land between the check and it.
             done = self._erase_proved(
-                due.id, sources=False,
+                due.id, sources=False, tenant=due.scope.tenant,
                 wanted=lambda c: c.expires_at is not None and as_utc(c.expires_at) <= at)
             if done is None:
                 continue
@@ -4961,6 +4990,7 @@ class Memvara:
             self.reader.embedder = embedder
             self.consolidator.embedder = embedder
 
+        # No tenant: this walks every claim and every turn in the store.
         with transaction(self.store):
             embedded = self._reencode(
                 self.store.iter_claims(include_invalidated=True),

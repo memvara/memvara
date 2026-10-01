@@ -322,8 +322,8 @@ class RemoteStore:
                 "the caller — using it here would silently discard or reinterpret most "
                 "of what the caller set on `claim`."))
 
-    def batch(self) -> AbstractContextManager["RemoteStore"]:
-        """A trivial passthrough, not a transaction.
+    def batch(self, *, tenant: str | None = None) -> AbstractContextManager["RemoteStore"]:
+        """A trivial passthrough, not a transaction. `tenant` is accepted and ignored.
 
         `SQLiteStore.batch()` defers commits so bulk writes land in one transaction; the
         facade has no equivalent — every `/v1` write call commits on its own and there is

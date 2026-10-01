@@ -7,6 +7,44 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `Store.batch()` takes an optional `tenant`
+
+### What changed
+
+`Store.batch()` has a new keyword-only parameter, `tenant: str | None = None`. A store may use
+it to lock one tenant instead of the whole database, so that writes for two customers do not
+wait for each other. `Memvara` passes the tenant whenever everything a batch reads and writes
+belongs to one tenant: `remember()`, `add()`, `supersede()`, `delete()`, `forget()`,
+`forget_matching()`, `link()`, `erase()`, the expiry sweep (one batch per expired claim, for
+that claim's tenant), consolidation, the backfills and the document writes. It passes nothing
+when a batch may touch several tenants: `reembed()`, and a write whose turns or claims name
+more than one tenant. `None` means "any tenant", so a store must then lock as broadly as it
+does today.
+
+Nothing changes for `SQLiteStore`, which accepts the keyword and ignores it, or for the hosted
+client. A batch nested inside another joins it, and the outermost batch decides the lock.
+
+### Who this changes
+
+**If you implement `Store` yourself**, nothing breaks. `Memvara` passes `tenant=` only to a store
+whose `batch` has a parameter named `tenant` or takes `**kwargs`, and calls any other store as
+`batch()`. The check reads the signature, so a `TypeError` raised inside your `batch` is not
+retried and not hidden. To narrow your lock, add `*, tenant: str | None = None` to `batch`, take
+a lock for that tenant when it is given, and take the broadest lock you have when it is `None`.
+Take it as the batch begins, before the first read: the library names the tenant up front
+because a batch cannot learn it from its reads. While a tenant batch is open, it must not
+change another tenant's rows, and that includes the source turns that
+`erase_claim(sources=True)` removes.
+
+**If you run memvara-cloud**, its Postgres store takes advantage of the keyword from the
+release that requires core 0.19.0.
+
+### How to find it in your code
+
+Search for classes that define `batch`: `grep -rn "def batch" --include="*.py" .`
+
+---
+
 ## A question about a period reads the whole period, and a store takes `valid_during`
 
 ### What changed

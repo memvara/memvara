@@ -3110,8 +3110,14 @@ class SQLiteStore:
                 self._changed()
 
     @contextmanager
-    def batch(self) -> Iterator["SQLiteStore"]:
+    def batch(self, *, tenant: str | None = None) -> Iterator["SQLiteStore"]:
         """Defer commits until the block exits, then commit once.
+
+        `tenant` is accepted and ignored. It is part of the `Store.batch` signature so that
+        a store can narrow its lock to one tenant, and SQLite's write lock covers the whole
+        database file whatever the tenant is. A batch for one tenant therefore takes the
+        same lock as a batch for any tenant, and behaves exactly as it did before the
+        keyword existed.
 
         Per-statement commits are the right default for a memory store, but bulk paths
         (ingesting a transcript, a consolidation sweep) pay a commit per claim for no

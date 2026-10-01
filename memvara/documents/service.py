@@ -260,7 +260,7 @@ class DocumentService:
         # two concurrent adds of one `custom_id` cannot both miss the lookup and race to
         # insert; the second waits, finds the first, and becomes an update of it.
         # Indexing and extraction run after it, so no model call holds the write lock.
-        with transaction(store):
+        with transaction(store, scope.tenant):
             stored = self._store_add(scope, text, custom_id=custom_id, title=title,
                                      found_title=found_title, filepath=filepath, url=url,
                                      mime=mime, found_mime=found_mime, meta=meta,
@@ -328,7 +328,7 @@ class DocumentService:
             if mime is None and isinstance(content, str) and is_plain_text(doc.mime):
                 mime = doc.mime
             text, found_title, mime = self._text(doc.scope, content, None, mime)
-        with transaction(store):
+        with transaction(store, doc.scope.tenant):
             current = store.get_document(doc.scope.tenant, doc.id)
             if current is None:
                 raise KeyError(f"no document {ref!r} in scope {scope.key()}")
@@ -388,7 +388,7 @@ class DocumentService:
 
         doc.content_hash = content_hash(text)
         doc.status, doc.error, doc.updated_at = "queued", None, now
-        with transaction(store):
+        with transaction(store, doc.scope.tenant):
             store.put_document(doc)
             for ep in fresh:
                 store.add_episode(ep)
@@ -410,7 +410,7 @@ class DocumentService:
         # A transaction of its own, after the rows are durable, as `Memvara.add` does:
         # encoding must not hold the write lock, and a turn without a vector is still
         # found by text search until a retry fills it in.
-        with transaction(store):
+        with transaction(store, doc.scope.tenant):
             self.mem._index_episodes([ep.id for ep in fresh])
         if not extract:
             # Nothing is read. A new chunk left unread makes the document `stored`; an
@@ -438,7 +438,7 @@ class DocumentService:
         describes, so a document with new content keeps the status its own write gives it.
         """
         store = self.store
-        with transaction(store):
+        with transaction(store, doc.scope.tenant):
             current = store.get_document(doc.scope.tenant, doc.id)
             if current is None or current.content_hash != doc.content_hash:
                 return False
@@ -475,7 +475,7 @@ class DocumentService:
         """
         store = self.store
         out: list[Episode] = []
-        with transaction(store):
+        with transaction(store, doc.scope.tenant):
             cited = {s for c in store.claims_citing_any(doc.scope.tenant, episode_ids)
                      for s in c.sources}
             found = store.get_episodes([e for e in dict.fromkeys(episode_ids)
@@ -562,7 +562,7 @@ class DocumentService:
         belonging to no document, after the delete had reported success.
         """
         store = self.store
-        with transaction(store):
+        with transaction(store, scope.tenant):
             doc = self.resolve(scope, ref)
             if doc is None:
                 return DeleteResult(id=ref, deleted=False)

@@ -20,11 +20,12 @@ below the facade sees it. See `memvara.types.time_axes`.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import fields
 from datetime import datetime
 from contextlib import AbstractContextManager, nullcontext
-from typing import (TYPE_CHECKING, Any, Collection, Iterable, Literal, Protocol, Sequence,
+from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Literal, Protocol, Sequence,
                     runtime_checkable)
 
 import numpy as np
@@ -425,16 +426,66 @@ def claim_digest(claim: Claim) -> bytes:
     return hashlib.blake2b(repr(values).encode(), digest_size=16).digest()
 
 
-def transaction(store: object) -> AbstractContextManager[Any]:
+def sole_tenant(tenants: Iterable[str]) -> str | None:
+    """The one tenant in `tenants`, or `None` when it holds none or more than one.
+
+    What a caller hands to `transaction` as `tenant=` when it can list every tenant the
+    transaction will touch. `None` is the answer that locks as broadly as a store can, so a
+    caller that cannot name its tenants, or finds two, ends up on the safe side.
+
+    >>> sole_tenant(["acme", "acme"])
+    'acme'
+    >>> sole_tenant(["acme", "globex"]) is None
+    True
+    >>> sole_tenant([]) is None
+    True
+    """
+    found = set(tenants)
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def batch_takes_tenant(batch: Callable[..., Any]) -> bool:
+    """Whether a store's `batch` can be called with `tenant=`.
+
+    True when it has a parameter named `tenant` that can be passed by keyword, or takes
+    `**kwargs`. Decided from the signature rather than by catching `TypeError`, so that a
+    `TypeError` raised inside the batch stays a visible fault. A signature that cannot be
+    read counts as not taking it.
+
+    >>> from contextlib import nullcontext
+    >>> batch_takes_tenant(lambda: nullcontext())
+    False
+    >>> batch_takes_tenant(lambda *, tenant=None: nullcontext())
+    True
+    """
+    try:
+        params = inspect.signature(batch).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any((p.name == "tenant" and p.kind is not inspect.Parameter.POSITIONAL_ONLY)
+               or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+
+
+def transaction(store: object, tenant: str | None = None) -> AbstractContextManager[Any]:
     """`store.batch()` where the store has one, and a context that does nothing where it
     does not.
 
     The one spelling of "run this in one transaction if the store can", for the callers
     that must also work with a store predating `batch()`. A store without it commits
     each statement, which is correct and slower.
+
+    `tenant` is passed on as `batch(tenant=...)` when the batch touches rows of that one
+    tenant and no other, so a store may narrow its lock to it (see `Store.batch`). It is
+    left out of the call when it is `None`, and also when the store's `batch` does not
+    take it, so a `Store` written before the keyword existed keeps working: it is called
+    as `batch()`.
     """
     batch = getattr(store, "batch", None)
-    return batch() if batch is not None else nullcontext()
+    if batch is None:
+        return nullcontext()
+    if tenant is not None and batch_takes_tenant(batch):
+        return batch(tenant=tenant)  # type: ignore[no-any-return]
+    return batch()  # type: ignore[no-any-return]
 
 
 #: Members a backend may leave out, and what it costs to leave each one out.
@@ -570,7 +621,7 @@ class Store(Protocol):
         result count rather than with the query."""
         ...
 
-    def batch(self) -> AbstractContextManager["Store"]:
+    def batch(self, *, tenant: str | None = None) -> AbstractContextManager["Store"]:
         """Context manager that runs a block as one transaction, committed once at the end.
 
         Every guarantee `Memvara` gives about a read followed by a write depends on the
@@ -582,6 +633,27 @@ class Store(Protocol):
         against another writer only because no other writer can commit between that read
         and the write. `SQLiteStore.batch()` takes the lock: it begins with
         `BEGIN IMMEDIATE`.
+
+        **`tenant` lets a store narrow that lock.** `Memvara` passes the tenant when
+        everything the batch reads and writes belongs to that one tenant, and leaves it
+        `None` when the batch may touch several or all of them: `reembed()`, a sweep over
+        every tenant, an expiry sweep listing claims of every tenant, and a write whose
+        turns or claims name two tenants. A store whose lock covers the whole database,
+        as `SQLiteStore`'s does, ignores it. A store that can lock one tenant takes the
+        lock for that tenant only, so two batches for different tenants run at the same
+        time, and treats `None` as "any tenant" by locking as broadly as it did before
+        this keyword existed, which also excludes every batch for a single tenant. Nothing
+        in the batch may touch another tenant's rows when a tenant was passed.
+
+        A batch nested inside another joins it, and the outermost batch decides the lock:
+        a tenant passed to the inner one changes nothing. `Memvara` passes the same
+        tenant to a nested batch as to the one around it, or a tenant the outer one
+        covers.
+
+        The parameter is keyword-only and optional. `Memvara` passes it only to a store
+        whose `batch` has a parameter named `tenant` or takes `**kwargs`, and calls a
+        store written before it existed as `batch()`, so such a store keeps working with
+        the lock it always took.
 
         A store whose `batch()` only defers commits, or that has no `batch()` at all, runs
         the same code without that guarantee: another writer can commit between a read and

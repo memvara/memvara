@@ -503,6 +503,26 @@ def test_a_note_claim_under_our_prefix_with_no_blob_is_still_not_ours(store, mem
     assert store.search(()) == []
 
 
+def test_a_batch_of_puts_opens_one_transaction_for_the_stores_tenant(mem, clock,
+                                                                     monkeypatch):
+    """A `put` writes only inside the tenant the adapter is bound to, so every transaction
+    it opens names that tenant, and a store that locks per tenant need not lock the
+    others."""
+    install(monkeypatch)
+    opened: list[str | None] = []
+    real = mem.store.batch
+
+    def spy(*, tenant=None):
+        opened.append(tenant)
+        return real(tenant=tenant)
+
+    monkeypatch.setattr(mem.store, "batch", spy)
+    bound = lg.MemvaraStore(mem, tenant="acme", user="alice", clock=clock)
+    opened.clear()
+    bound.put(NS, "m1", {"city": "Berlin"})
+    assert opened and set(opened) == {"acme"}
+
+
 def test_two_stores_on_one_memvara_cannot_see_each_other(mem, monkeypatch, clock):
     """The scope binding is what isolates them, and nothing LangGraph passes in can widen
     it — a namespace is an address inside a store, not a way out of one."""

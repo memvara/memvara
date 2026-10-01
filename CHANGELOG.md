@@ -9,6 +9,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Changed
+
+- **`Store.batch()` takes an optional `tenant`, so a store can lock one tenant.**
+  `Store.batch(*, tenant=None)` is new on the `Store` protocol. `Memvara` passes the tenant
+  whenever everything a batch reads and writes is in one tenant, which covers `remember()`,
+  `add()`, `supersede()`, `delete()`, `forget()`, `forget_matching()`, `link()`, `erase()`,
+  the expiry sweep, consolidation, the backfills and the document writes. It passes `None`
+  for `reembed()` and for a write that names two tenants. `SQLiteStore` and `RemoteStore`
+  accept the keyword and ignore it. A third-party store whose `batch()` lacks the keyword
+  keeps working: the library reads the signature and calls it as `batch()`. All the call
+  sites now go through `memvara.store.transaction(store, tenant)`, and `memvara.store`
+  exports `sole_tenant()`. memvara-cloud #298 uses this for a per-tenant Postgres lock.
+  `docs/UPGRADING.md` has the details for a store that implements the protocol.
+
 ## [0.18.0] — 2026-09-29
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so
