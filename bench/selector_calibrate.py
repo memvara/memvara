@@ -40,7 +40,14 @@ def fit_platt(scores: Sequence[float], labels: Sequence[bool], *, l2: float = 1e
     y = np.asarray(labels, dtype=float)
     if x.size == 0 or y.min() == y.max():
         raise ValueError("calibration needs both gold and non-gold candidates")
+    def loss(a: float, b: float) -> float:
+        # Mean log loss plus the L2 term, written with logaddexp so it stays finite.
+        z = a * x + b
+        return float(np.mean(np.logaddexp(0.0, -z) * y + np.logaddexp(0.0, z) * (1.0 - y))
+                     + 0.5 * l2 * a * a / x.size)
+
     a, b = 1.0, 0.0
+    current = loss(a, b)
     for _ in range(iterations):
         p = 1.0 / (1.0 + np.exp(-np.clip(a * x + b, -50.0, 50.0)))
         w = p * (1.0 - p)
@@ -48,8 +55,14 @@ def fit_platt(scores: Sequence[float], labels: Sequence[bool], *, l2: float = 1e
         hess = np.array([[np.dot(w, x * x) + l2, np.dot(w, x)],
                          [np.dot(w, x), np.sum(w) + 1e-9]])
         step = np.linalg.solve(hess, grad)
-        a, b = a - step[0], b - step[1]
-        if np.max(np.abs(step)) < 1e-10:
+        # A full Newton step overshoots when the scores span a wide range and few are gold,
+        # which is exactly a reranker's shape: halve the step until the loss goes down.
+        t = 1.0
+        while t > 1e-8 and loss(a - t * step[0], b - t * step[1]) > current:
+            t /= 2
+        a, b = a - t * step[0], b - t * step[1]
+        previous, current = current, loss(a, b)
+        if abs(previous - current) < 1e-12:
             break
     if not a > 0:
         raise ValueError(f"the fitted slope is {a:.3f}: on this data a higher score does not "

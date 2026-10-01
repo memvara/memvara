@@ -251,3 +251,33 @@ def test_write_calibration_is_read_back_by_the_selector(tmp_path) -> None:
     path = sc.write_calibration(tmp_path, cal, base_model="m")
     assert path == tmp_path / CALIBRATION_FILE
     assert Calibration.read(tmp_path) == (cal, None)
+
+
+def _log_loss(scale: float, shift: float, xs, ys) -> float:
+    total = 0.0
+    for x, y in zip(xs, ys):
+        z = scale * x + shift
+        # log(1 + exp(-z)) for gold, log(1 + exp(z)) otherwise, written to stay finite.
+        m = -z if y else z
+        total += max(m, 0.0) + math.log1p(math.exp(-abs(m)))
+    return total / len(xs)
+
+
+def test_fit_platt_converges_on_wide_imbalanced_scores_like_a_real_reranker() -> None:
+    # The shape that broke the first stock-model fit, as 25 quantiles of each class from
+    # the stock model's scores on LongMemEval's 301 calibration questions (2026-10-01):
+    # gold spread from -11 to +9, the rest packed near -11, 4% gold. Undamped Newton from
+    # (1, 0) diverged to a slope of -26,900 on exactly these numbers.
+    gold = [-11.0, -10.1, -9.3, -8.6, -7.6, -6.9, -5.7, -4.8, -4.0, -3.0, -2.2, -1.5, -0.8,
+            0.0, 0.7, 1.2, 2.0, 2.9, 3.8, 4.3, 5.1, 5.8, 6.6, 7.4, 8.8]
+    other = [-11.4, -11.4, -11.3, -11.3, -11.3, -11.3, -11.2, -11.2, -11.2, -11.1, -11.1,
+             -11.0, -11.0, -10.9, -10.8, -10.7, -10.5, -10.3, -10.1, -9.7, -9.3, -8.7, -7.8,
+             -6.1, 1.4]
+    xs = other * 22 + gold
+    ys = [False] * (len(other) * 22) + [True] * len(gold)
+    scale, shift = sc.fit_platt(xs, ys)
+    assert scale > 0
+    # The fit must be at least as good as a brute-force search over a grid of slopes and
+    # intercepts, which is the reference this test trusts.
+    best = min(_log_loss(a / 20, b / 4, xs, ys) for a in range(1, 61) for b in range(-60, 21))
+    assert _log_loss(scale, shift, xs, ys) <= best + 1e-6
