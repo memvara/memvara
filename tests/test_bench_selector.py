@@ -333,3 +333,70 @@ def test_write_selector_json_records_the_weights_digest(tmp_path) -> None:
     read, digest = Calibration.read(tmp_path)
     assert read == cal
     assert digest == hashlib.sha256(b"trained").hexdigest()
+
+
+import selector_public as pub  # noqa: E402
+
+
+def _hotpot_row() -> dict:
+    return {"id": "h1", "question": "who built it?",
+            "context": {"title": ["A", "B"],
+                        "sentences": [[" A was built.", " By Ann."], ["B is far.", "  "]]},
+            "supporting_facts": {"title": ["A", "A", "B"], "sent_id": [1, 7, 0]}}
+
+
+def test_supporting_facts_mark_sentences_and_ignore_facts_past_the_paragraph() -> None:
+    ex = pub.from_supporting_facts("hotpot", _hotpot_row())
+    assert ex is not None
+    assert ex.candidates == ["A was built.", "By Ann.", "B is far."]   # blank sentence dropped
+    assert ex.gold == {1, 2}                                           # (A, 7) does not exist
+    row = _hotpot_row()
+    row["supporting_facts"] = {"title": ["C"], "sent_id": [0]}
+    assert pub.from_supporting_facts("hotpot", row) is None
+
+
+def test_musique_uses_paragraphs_and_skips_questions_with_no_support() -> None:
+    row = {"id": "m1", "question": "q", "paragraphs": [
+        {"paragraph_text": "p0", "is_supporting": False},
+        {"paragraph_text": "p1", "is_supporting": True}]}
+    ex = pub.from_musique(row)
+    assert ex is not None and ex.candidates == ["p0", "p1"] and ex.gold == {1}
+    row["paragraphs"][1]["is_supporting"] = False
+    assert pub.from_musique(row) is None
+
+
+def test_quac_marks_the_sentence_where_the_answer_starts_and_skips_unanswerable() -> None:
+    context = "Ann was born in Rome. She moved to Oslo in 1990! Why? Nobody knows. CANNOTANSWER"
+    start = context.index("Oslo")
+    article = {"paragraphs": [{"context": context, "qas": [
+        {"id": "q1", "question": "where did she move?",
+         "orig_answer": {"text": "Oslo", "answer_start": start}},
+        {"id": "q2", "question": "her dog?",
+         "orig_answer": {"text": "CANNOTANSWER", "answer_start": len(context) - 12}}]}]}
+    [ex] = list(pub.from_quac(article))
+    assert ex.candidates == ["Ann was born in Rome.", "She moved to Oslo in 1990!", "Why?",
+                             "Nobody knows."]
+    assert ex.gold == {1} and ex.qid == "q1"
+
+
+def test_build_draws_per_dataset_and_three_negatives_per_gold(tmp_path) -> None:
+    examples = [pub.Example("hotpot", f"h{i}", f"q{i}", [f"c{j}" for j in range(10)], {0, 1})
+                for i in range(20)]
+    rows = pub.build({"hotpot": examples}, {"hotpot": 5}, negatives=3, seed=0)
+    assert len({r["qid"] for r in rows}) == 5
+    assert len(rows) == 5 * 8 and sum(r["label"] for r in rows) == 10
+    assert rows == pub.build({"hotpot": examples}, {"hotpot": 5}, negatives=3, seed=0)
+    # Adding another dataset does not change this one's draws.
+    other = [pub.Example("quac", "x", "q", ["a", "b"], {0})]
+    both = pub.build({"hotpot": examples, "quac": other}, {"hotpot": 5}, seed=0)
+    assert [r for r in both if r["source"] == "hotpot"] == rows
+    path = tmp_path / "pairs.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    assert pub.read_pairs(path)[0] == (rows[0]["query"], rows[0]["text"], rows[0]["label"])
+
+
+def test_take_accepts_known_datasets_only() -> None:
+    assert pub.parse_take(["quac=5"])["quac"] == 5
+    assert pub.parse_take([]) == pub.DEFAULT_TAKE
+    with pytest.raises(ValueError):
+        pub.parse_take(["nq=5"])

@@ -3,7 +3,9 @@
     PYTHONPATH=. python3 bench/selector_train.py --pools P.jsonl [...] --splits S.json \
         --rerank STOCK.jsonl [...] --out local/selector/models/NAME [--hold-out SOURCE] \
         [--label gold|paid] [--epochs 1] [--lr 2e-5] [--max-length 256] [--batch-size 16] \
-        [--negatives 3] [--pos-weight 1.0] [--seed 0] [--device mps]
+        [--negatives 3] [--pos-weight 1.0] [--seed 0] [--device mps] \
+        [--pairs PUBLIC.jsonl [...]] [--no-pool-pairs] [--base MODEL_DIR] \
+        [--calibrate-on validation [--calibrate-on train]]
 
 **Training pairs** come from the `train` split only. For each question, the script takes
 the candidates the selector would be handed: the stock reranker's order, routed, first 40.
@@ -14,6 +16,13 @@ kept turns instead; that label is used only to measure what gold labels lose (Ta
 **Calibration.** The negatives are subsampled, so the trained model's raw probability is
 not calibrated. After training, the model scores the candidates of the `validation` split,
 and Platt scaling and the keep-rule search run there.
+
+**Public pairs.** `--pairs` adds pairs that selector_public.py wrote from public datasets,
+and `--no-pool-pairs` trains on those alone (step 2b, arm C). `--base` starts from an
+already fine-tuned model directory instead of the stock model (arm D continues from C).
+
+**Calibrating on more questions.** A model that saw no pool during training can be
+calibrated on the `train` split as well: `--calibrate-on validation --calibrate-on train`.
 
 **Leaving a source out.** `--hold-out SOURCE` leaves that source out of training and
 calibration both, for the leave-one-source-out gate.
@@ -35,6 +44,7 @@ from typing import Any, Mapping, Sequence
 from selector_calibrate import choose_keep, fit_platt, scope_examples, write_calibration
 from selector_metrics import replay, tiktoken_counter
 from selector_pools import Pool, full_scores, read_pools, read_scores
+from selector_public import read_jsonl, read_pairs
 from selector_score import encoder_predict, score_pools
 
 from memvara.select.local import STOCK_MODEL, STOCK_REVISION, Calibration
@@ -131,7 +141,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--pos-weight", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device")
+    parser.add_argument("--pairs", type=Path, nargs="*", default=[])
+    parser.add_argument("--no-pool-pairs", action="store_true")
+    parser.add_argument("--base", type=Path)
+    parser.add_argument("--calibrate-on", action="append")
     args = parser.parse_args(argv)
+    calibrate_on = set(args.calibrate_on or ["validation"])
 
     splits = json.loads(args.splits.read_text(encoding="utf-8"))
     pools = [p for path in args.pools for p in read_pools(path)]
@@ -139,14 +154,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     for path in args.rerank:
         raw.update(read_scores(path))
     rerank = full_scores(raw)
-    pairs = training_pairs(pools, splits, rerank, label=args.label, negatives=args.negatives,
-                           seed=args.seed, hold_out=args.hold_out)
-    print(f"{len(pairs)} training pairs, {int(sum(y for *_x, y in pairs))} positive", flush=True)
-    train(pairs, STOCK_MODEL, STOCK_REVISION, args.out, epochs=args.epochs, lr=args.lr,
+    pairs = [] if args.no_pool_pairs else training_pairs(
+        pools, splits, rerank, label=args.label, negatives=args.negatives, seed=args.seed,
+        hold_out=args.hold_out)
+    public = [pair for path in args.pairs for pair in read_pairs(path)]
+    pairs += public
+    print(f"{len(pairs)} training pairs ({len(public)} public), "
+          f"{int(sum(y for *_x, y in pairs))} positive", flush=True)
+    base, revision = (str(args.base), None) if args.base else (STOCK_MODEL, STOCK_REVISION)
+    train(pairs, base, revision, args.out, epochs=args.epochs, lr=args.lr,
           max_length=args.max_length, batch_size=args.batch_size, seed=args.seed,
           device=args.device, pos_weight=args.pos_weight)
     validation = [p for p in pools
-                  if splits.get(p.qid) == "validation" and p.source != args.hold_out]
+                  if splits.get(p.qid) in calibrate_on and p.source != args.hold_out]
     predict = encoder_predict(str(args.out), max_length=args.max_length, device=args.device)
     select = score_pools(validation, predict, scope_of=rerank)
     xs, ys = scope_examples(validation, rerank, select)
@@ -155,13 +175,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                                               tiktoken_counter(), max_length=args.max_length)
     sources: dict[str, int] = {}
     for p in pools:
-        if splits.get(p.qid) == "train" and p.source != args.hold_out:
+        if (not args.no_pool_pairs and splits.get(p.qid) == "train"
+                and p.source != args.hold_out):
             sources[p.source] = sources.get(p.source, 0) + 1
+    for path in args.pairs:
+        for row in {(r["source"], r["qid"]) for r in read_jsonl(path)}:
+            sources[row[0]] = sources.get(row[0], 0) + 1
     write_selector_json(args.out, calibration, base_model=STOCK_MODEL,
                         base_revision=STOCK_REVISION, sources=sources, label=args.label,
                         hold_out=args.hold_out, seed=args.seed, epochs=args.epochs,
-                        lr=args.lr, negatives=args.negatives, pos_weight=args.pos_weight)
-    print(f"validation coverage {cov:.3f} at {mean_kept:.1f} kept; {calibration!r}")
+                        lr=args.lr, negatives=args.negatives, pos_weight=args.pos_weight,
+                        started_from=str(args.base) if args.base else None,
+                        calibrated_on=sorted(calibrate_on))
+    print(f"{'+'.join(sorted(calibrate_on))} coverage {cov:.3f} at {mean_kept:.1f} kept; {calibration!r}")
     return 0
 
 
