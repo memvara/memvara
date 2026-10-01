@@ -19,7 +19,12 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `Memvara(read_selector=LocalSelector(...))` uses it. Design:
   `docs/superpowers/specs/2026-10-01-local-selector-design.md`. Its reads are counted as
   `retrieval.local_query`, `retrieval.local_select_ms` and `retrieval.local_fallback`,
-  never as the model series a quota sums.
+  never as the model series a quota sums. After the turns it keeps, a local selection
+  shows the other candidates in its own model's order, through the optional
+  `select_ordered()` method; a model selection's order is unchanged. On 191 LongMemEval-S
+  questions, a model fine-tuned on gold labels put 0.928 of the answer-bearing turns in a
+  720-token block this way, against 0.905 with the reranker's order and 0.958 for the
+  model selector.
 
 ## [0.18.0] — 2026-09-29
 

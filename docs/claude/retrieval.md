@@ -46,7 +46,12 @@ JSON, under a header that names the text as data rather than instruction.
   `calibration_of()`, the cosine thresholds measured for each embedding space, and
   `bench/embedder_calibration.py`, the measurement.
 - Optional model-ranked reads: `memvara/select/base.py` — the `Selector` protocol,
-  `Candidate`, `Selection`, `SelectorRefused`; `memvara/select/model.py` — `ModelSelector`.
+  `Candidate`, `Selection`, `SelectorRefused`; `memvara/select/model.py` — `ModelSelector`;
+  `memvara/select/local.py` — `LocalSelector`, which ranks with a cross-encoder in this
+  process. A selector that also has `select_ordered()`, as `LocalSelector` does, hands the
+  ranked stage its order of every candidate, and the candidates it did not keep are shown
+  in that order ahead of the rest of the reranked list (`HybridRetriever._run_ranked_stage`).
+  `ModelSelector` has no such method, so a model selection's order is unchanged.
 - Query rewrite and synthesis: `memvara/select/stages.py` — `QueryRewriter` and
   `Synthesizer`; `memvara/select/base.py` — the `Rewrite` and `Synthesis` records;
   `HybridRetriever.search(query_rewrite=)` and `Memvara.recall(synthesize=)`.

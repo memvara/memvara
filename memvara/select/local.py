@@ -245,8 +245,26 @@ class LocalSelector:
         `asked_on` and `usage` are accepted for the protocol and not used: the scores do
         not depend on the date, and no tokens are billed.
         """
+        return self.select_ordered(question, candidates)[0]
+
+    def select_ordered(self, question: str, candidates: Sequence[Candidate], *,
+                       asked_on: datetime | None = None,
+                       usage: Usage | None = None) -> tuple[list[Selected], list[str]]:
+        """`select()`'s kept turns, and every candidate's id from the highest score to the
+        lowest, a tie keeping the order the candidates were handed in.
+
+        The ranked stage calls this instead of `select()` when a selector has it, and
+        shows the candidates this selector did not keep in this order, ahead of the rest
+        of the reranked list. A fine-tuned model orders the candidates better than the
+        reranker does, and without this its order would reach the reader only through the
+        few turns it keeps: on 191 LongMemEval-S questions, coverage at 720 tokens was
+        0.905 with the reranker's order for the unkept turns and 0.928 with this one
+        (docs/BENCHMARKS.md, "The local selector").
+        """
         if not candidates:
-            return []
-        kept = keep_positions(self.scores(question, [c.text for c in candidates]),
-                              self.calibration)
-        return [Selected(id=candidates[i].id, span=None) for i in kept]
+            return [], []
+        scores = self.scores(question, [c.text for c in candidates])
+        kept = keep_positions(scores, self.calibration)
+        order = sorted(range(len(candidates)), key=lambda i: (-scores[i], i))
+        return ([Selected(id=candidates[i].id, span=None) for i in kept],
+                [candidates[i].id for i in order])

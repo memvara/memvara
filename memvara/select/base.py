@@ -169,7 +169,10 @@ class Selector(Protocol):
 
     `select()` sees the candidates already in reranked order and returns only the ones
     it kept, in that same order — it does not reorder, and does not filter by `k`; that
-    is the caller's job. `ModelSelector.select()`, the implementation this package
+    is the caller's job. A selector may also offer `select_ordered()`, which returns the
+    same kept turns together with every candidate's id in its own order; the ranked stage
+    then shows the unkept candidates in that order. It is optional and not part of this
+    protocol: `LocalSelector` has it and `ModelSelector` does not. `ModelSelector.select()`, the implementation this package
     ships, raises rather than returns for everything short of a clean answer — see its
     docstring for exactly what and why.
 

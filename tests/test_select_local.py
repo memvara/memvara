@@ -371,3 +371,60 @@ def test_recall_says_when_a_local_ranking_failed() -> None:
                      with_ids=True)
     assert out.selection.outcome == "fallback"
     assert Memvara.RECALL_UNRANKED.format(outcome="fallback") in out.text
+
+
+def test_select_ordered_returns_the_kept_turns_and_every_candidate_by_score() -> None:
+    sel = _selector({"b": 3.0, "c": 1.0, "a": -1.0})
+    kept, order = sel.select_ordered("q", _candidates("a", "b", "c", "d"))
+    assert [s.id for s in kept] == ["ep1", "ep2"]            # probability >= 0.5
+    assert order == ["ep1", "ep2", "ep0", "ep3"]             # "d" ties nothing; -5.0 last
+    assert sel.select("q", _candidates("a", "b", "c", "d")) == kept
+    assert sel.select_ordered("q", []) == ([], [])
+
+
+def test_a_tie_keeps_the_order_the_candidates_were_handed_in() -> None:
+    _kept, order = _selector({}).select_ordered("q", _candidates("x", "y", "z"))
+    assert order == ["ep0", "ep1", "ep2"]
+
+
+def test_a_local_selection_shows_its_unkept_candidates_in_its_own_order() -> None:
+    # The reranker here is absent, so the turn order is the episode leg's own; the local
+    # model keeps "kayak one" and ranks "kayak three" above "kayak two".
+    texts = ["kayak one", "kayak two", "kayak three"]
+    engine, _ = _engine(_selector({"kayak one": 2.0, "kayak three": -0.5, "kayak two": -1.0}),
+                        texts)
+    engine.max_episodes = 3
+    result = engine.search("kayak", SCOPE, k=5, include_episodes=True, ranked=True)
+    episodes = [x.text for x in result if isinstance(x, EpisodeResult)]
+    assert episodes == ["kayak one", "kayak three", "kayak two"]
+
+
+def test_a_selector_without_select_ordered_keeps_the_reranked_tail() -> None:
+    class KeepFirst:
+        top_n = 40
+
+        def admit(self):
+            from contextlib import nullcontext
+            return nullcontext()
+
+        def select(self, question, candidates, *, asked_on=None, usage=None):
+            return [Selected(id=candidates[0].id, span=None)]
+
+    texts = ["kayak one", "kayak two", "kayak three"]
+    engine, _ = _engine(KeepFirst(), texts)
+    plain = engine.search("kayak", SCOPE, k=5, include_episodes=True)
+    ranked = engine.search("kayak", SCOPE, k=5, include_episodes=True, ranked=True)
+    order = [x.text for x in plain if isinstance(x, EpisodeResult)]
+    shown = [x.text for x in ranked if isinstance(x, EpisodeResult)]
+    assert shown[1:] == [t for t in order if t != shown[0]]
+
+
+def test_candidates_a_selector_leaves_out_of_its_order_follow_the_ones_it_names() -> None:
+    sel = _selector({})
+    sel.select_ordered = lambda q, c, **kw: ([], [c[2].id])        # names one candidate
+    engine, _ = _engine(sel, ["kayak one", "kayak two", "kayak three"])
+    plain = [x.text for x in engine.search("kayak", SCOPE, k=5, include_episodes=True)
+             if isinstance(x, EpisodeResult)]
+    result = engine.search("kayak", SCOPE, k=5, include_episodes=True, ranked=True)
+    shown = [x.text for x in result if isinstance(x, EpisodeResult)]
+    assert len(shown) == 3 and set(shown) == set(plain)

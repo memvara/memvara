@@ -134,7 +134,9 @@ mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False,
 #     cross-encoder in this process: no key, no call, nothing sent anywhere. It needs
 #     pip install 'memvara[rerank]'. LocalSelector(model) takes a Hugging Face id or a
 #     directory written by bench/selector_train.py; calibration= overrides the
-#     calibration that ships with the model.
+#     calibration that ships with the model. After its kept turns, a LocalSelector
+#     read shows the other candidates in the local model's own order, then the rest
+#     in reranked order; a ModelSelector read shows the rest in reranked order.
 #   query_rewrite=True (the default) asks the chat backend, when llm= has one, for up to
 #     three other phrasings of the query and the dates it names, in one call with a 10 s
 #     deadline. Every phrasing is searched and the lists are fused by rank; the facts are

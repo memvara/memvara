@@ -1742,8 +1742,10 @@ class HybridRetriever:
         `applied`. `tail` is the reranked turn list minus whatever was kept, when the
         reranker actually ran (every outcome but `disabled`, since admission — and so the
         reranker call inside it — never happened there), or `episodes` unchanged when it
-        did not. The caller interleaves `tail` with the claims only on `applied`; on
-        every other outcome it serves the plain read instead (#308).
+        did not. On `applied`, when the selector has `select_ordered`, the unkept
+        candidates come first in `tail`, in the selector's own order. The caller
+        interleaves `tail` with the claims only on `applied`; on every other outcome it
+        serves the plain read instead (#308).
 
         **Admission wraps the reranker call as well as the model call**, deliberately —
         the thread the cap exists to bound is the whole ~5-6s a ranked read can hold one
@@ -1779,8 +1781,17 @@ class HybridRetriever:
                     for e in scope]
                 t0 = perf_counter()
                 usage = Usage()
+                # A selector with `select_ordered` (`LocalSelector`) also hands back its
+                # order of every candidate, and the unkept candidates are shown in it.
+                # `ModelSelector` has none, so a model selection's tail is unchanged.
+                ordered = getattr(selector, "select_ordered", None)
+                order: list[str] | None = None
                 try:
-                    chosen = selector.select(query, candidates, asked_on=now, usage=usage)
+                    if ordered is not None:
+                        chosen, order = ordered(query, candidates, asked_on=now, usage=usage)
+                    else:
+                        chosen = selector.select(query, candidates, asked_on=now,
+                                                 usage=usage)
                 except SelectorRefused as exc:
                     # From `select()`: the provider answered 401 or 403. Distinct from
                     # `disabled` below, which never reaches `select()` at all.
@@ -1841,6 +1852,15 @@ class HybridRetriever:
                     else:
                         e.explain.selected = False
                 tail = [e for e in turn_order if e.episode.id not in spans]
+                if order is not None:
+                    # The unkept candidates in the selector's order, then everything the
+                    # selector was not shown. A candidate missing from `order` goes after
+                    # the ones it names, in candidate order, rather than being dropped.
+                    rank = {cid: n for n, cid in enumerate(order)}
+                    shown = {e.episode.id for e in scope}
+                    unkept = sorted((e for e in scope if e.episode.id not in spans),
+                                    key=lambda e: rank.get(e.episode.id, len(rank)))
+                    tail = unkept + [e for e in turn_order if e.episode.id not in shown]
                 return (Selection(outcome="applied", candidates=len(candidates),
                                   kept=len(kept)),
                         kept, tail)
