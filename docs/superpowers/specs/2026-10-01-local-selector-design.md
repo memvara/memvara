@@ -624,3 +624,20 @@ the primary result.
   (a) is the simpler change.
 - **Fail:** option (c) is the one left. It ships the routed order with no keep rule, under
   a different name.
+
+**Result (2026-10-02): partial, and (e) beats (a).** Step 2a's model under (e) covers 0.928
+of the test gold turns: +0.025 against keeping every routed candidate (+0.008 to +0.045;
+7 questions better, none worse) and −0.031 against the paid selector (−0.057 to −0.006).
+That is inside the predicted range and just under the pass line. The same model covers
+0.908 under (a), so the rule written above says (e) is the one to build. It would ship as
+a free-tier improvement over the plain routed read, not as a stand-in for the paid
+selector. Step 2b's D reached 0.930 under (e) but was not the primary model.
+
+Under (e) the keep rule does not change coverage, and the grid kept nothing. `memory_recall`
+shows only kept turns whole and cuts the rest to 280 characters, so a shipped (e) keeps the
+rule fitted under the server rendering (about five turns), which gives the same 0.928.
+
+Building (e) means the ranked stage must accept a full order from a local selector, which
+the `Selector` protocol cannot express today: `select()` returns only the kept turns. That
+design, and gates G2 and G3 for the fine-tuned model, are the next steps. The numbers are
+in `docs/BENCHMARKS.md`, "The local selector".

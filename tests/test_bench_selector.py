@@ -400,3 +400,22 @@ def test_take_accepts_known_datasets_only() -> None:
     assert pub.parse_take([]) == pub.DEFAULT_TAKE
     with pytest.raises(ValueError):
         pub.parse_take(["nq=5"])
+
+
+def test_renderings_reorder_only_a_local_selection() -> None:
+    # Candidates are the user turns in reranked order; the assistant turn is not routed.
+    turns = [_turn("u0"), _turn("u1", gold=True), _turn("u2"), _turn("a0", role="assistant")]
+    pool = sp.Pool(source="toy", qid="r", question="where did I park?", qtype="t",
+                   asked_on=None, abstention=False, turns=turns)
+    rerank = [4.0, 3.0, 2.0, 5.0]
+    select = [0.0, 1.0, 9.0, None]
+    cal = Calibration(scale=1.0, shift=0.0, threshold=0.99, max_keep=1)   # keeps u2 only
+    server, kept = sm.local_replay(pool, rerank, select, cal)
+    assert kept == {2}
+    assert server.rendered == [2, 3, 0, 1]           # kept, then everything in reranked order
+    first, _ = sm.local_replay(pool, rerank, select, cal, render="routed-first")
+    assert first.rendered == [2, 0, 1, 3]            # kept, unkept candidates, then the rest
+    ordered, _ = sm.local_replay(pool, rerank, select, cal, render="selector-order")
+    assert ordered.rendered == [2, 1, 0, 3]          # candidates by the selector's score
+    with pytest.raises(ValueError):
+        sm.local_replay(pool, rerank, select, cal, render="sideways")

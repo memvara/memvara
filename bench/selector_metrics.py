@@ -22,6 +22,14 @@ The orderings in a report:
 - `paid`: the order a MemoryBench ranked run returned (`--paid`, MemoryBench pools only).
 - one row per `--local`: a local selector's keep decisions, replayed with
   `memvara.select.local.keep_positions`, the function the selector itself uses.
+
+`--render` changes how a local selection is rendered (the spec's section 14). The paid and
+routed rows never change:
+- `server`: today's rendering, described above.
+- `routed-first`: the kept candidates, then the unkept candidates in candidate order, then
+  every other turn in reranked order.
+- `selector-order`: every candidate in the local model's score order, then every other turn
+  in reranked order.
 """
 
 from __future__ import annotations
@@ -41,6 +49,7 @@ from memvara.select.local import Calibration, keep_positions
 TokenCounter = Callable[[str], int]
 TOP_N = 40
 BUDGET = 720
+RENDERINGS = ("server", "routed-first", "selector-order")
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,8 +73,8 @@ def replay(pool: Pool, rerank: Sequence[float], kept: Collection[int] | None, *,
 
 
 def local_replay(pool: Pool, rerank: Sequence[float], select: Sequence[float | None],
-                 calibration: Calibration, *, route: bool = True,
-                 top_n: int = TOP_N) -> tuple[Replay, set[int]]:
+                 calibration: Calibration, *, route: bool = True, top_n: int = TOP_N,
+                 render: str = "server") -> tuple[Replay, set[int]]:
     scope = replay(pool, rerank, None, route=route, top_n=top_n).scope
     values = [select[i] for i in scope]
     if any(v is None for v in values):
@@ -73,7 +82,18 @@ def local_replay(pool: Pool, rerank: Sequence[float], select: Sequence[float | N
                          "Score with --scope-of the same reranker scores.")
     scores = [float(v) for v in values]      # every value is set: checked just above
     kept = {scope[p] for p in keep_positions(scores, calibration)}
-    return replay(pool, rerank, kept, route=route, top_n=top_n), kept
+    rep = replay(pool, rerank, kept, route=route, top_n=top_n)
+    if render == "server":
+        return rep, kept
+    if render == "routed-first":
+        head = [i for i in scope if i in kept] + [i for i in scope if i not in kept]
+    elif render == "selector-order":
+        # A stable sort, so tied scores keep the candidate order.
+        head = [scope[p] for p in sorted(range(len(scope)), key=lambda p: -scores[p])]
+    else:
+        raise ValueError(f"unknown rendering {render!r}; expected one of {RENDERINGS}")
+    inside = set(scope)
+    return Replay(rep.order, scope, head + [i for i in rep.order if i not in inside]), kept
 
 
 def coverage(pool: Pool, rendered: Sequence[int], count: TokenCounter,
@@ -140,8 +160,8 @@ Row = tuple[int, int, int, int, int]  # gold rendered, gold in pool, gold kept, 
 
 def evaluate(pools: Sequence[Pool], rerank: Mapping[str, Sequence[float]],
              selectors: Mapping[str, tuple[Mapping[str, Sequence[float | None]], Calibration]],
-             count: TokenCounter, *, paid: bool = False,
-             budget: int = BUDGET) -> dict[str, dict[str, Row]]:
+             count: TokenCounter, *, paid: bool = False, budget: int = BUDGET,
+             render: str = "server") -> dict[str, dict[str, Row]]:
     """Per ordering, per question with a gold turn in its pool, a `Row`."""
     out: dict[str, dict[str, Row]] = {}
 
@@ -164,7 +184,8 @@ def evaluate(pools: Sequence[Pool], rerank: Mapping[str, Sequence[float]],
             kept = {i for i, t in enumerate(pool.turns) if t.paid_kept}
             put("paid", pool, list(range(len(pool.turns))), shown, kept)
         for name, (scores, calibration) in selectors.items():
-            rep, kept = local_replay(pool, stock, scores[pool.qid], calibration)
+            rep, kept = local_replay(pool, stock, scores[pool.qid], calibration,
+                                     render=render)
             put(name, pool, rep.rendered, rep.scope, kept)
     return out
 
@@ -215,6 +236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--paid", action="store_true")
     parser.add_argument("--baseline", default="routed")
     parser.add_argument("--by-type", action="store_true")
+    parser.add_argument("--render", choices=RENDERINGS, default="server")
     args = parser.parse_args(argv)
 
     splits = json.loads(args.splits.read_text(encoding="utf-8"))
@@ -230,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         calibration, _digest = Calibration.read(Path(calibration_dir))
         selectors[name] = (read_scores(Path(scores_path)), calibration)
     results = evaluate(pools, full_scores(rerank), selectors, tiktoken_counter(),
-                       paid=args.paid)
+                       paid=args.paid, render=args.render)
     print(table(results, baseline=args.baseline))
     if args.by_type:
         print()

@@ -2,7 +2,7 @@
 
     PYTHONPATH=. python3 bench/selector_calibrate.py --pools P.jsonl [...] --splits S.json \
         --split validation [--split train] --rerank STOCK.jsonl [...] --select MODEL.jsonl [...] \
-        [--max-length N] --out-dir DIR
+        [--max-length N] [--render server|routed-first|selector-order] --out-dir DIR
 
 The fit has two steps:
 
@@ -25,7 +25,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
-from selector_metrics import BUDGET, TokenCounter, coverage, local_replay, replay, tiktoken_counter
+from selector_metrics import (
+    BUDGET, RENDERINGS, TokenCounter, coverage, local_replay, replay, tiktoken_counter,
+)
 from selector_pools import Pool, full_scores, read_pools, read_scores
 
 from memvara.select.local import CALIBRATION_FILE, CALIBRATION_FORMAT, Calibration
@@ -91,7 +93,7 @@ def scope_examples(pools: Sequence[Pool], rerank: Mapping[str, Sequence[float]],
 def choose_keep(pools: Sequence[Pool], rerank: Mapping[str, Sequence[float]],
                 select: Mapping[str, Sequence[float | None]], scale: float, shift: float,
                 count: TokenCounter, *, max_length: int | None = None,
-                budget: int = BUDGET) -> tuple[Calibration, float, float]:
+                budget: int = BUDGET, render: str = "server") -> tuple[Calibration, float, float]:
     answerable = [p for p in pools if p.gold_count]
     if not answerable:
         raise ValueError("no pool has a gold turn to cover")
@@ -101,7 +103,8 @@ def choose_keep(pools: Sequence[Pool], rerank: Mapping[str, Sequence[float]],
             calibration = Calibration(scale, shift, threshold, max_keep, max_length)
             got = total = kept = 0
             for pool in answerable:
-                rep, chosen = local_replay(pool, rerank[pool.qid], select[pool.qid], calibration)
+                rep, chosen = local_replay(pool, rerank[pool.qid], select[pool.qid], calibration,
+                                           render=render)
                 g, n = coverage(pool, rep.rendered, count, budget)
                 got, total, kept = got + g, total + n, kept + len(chosen)
             key = (got / total, -kept)
@@ -130,6 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--rerank", type=Path, nargs="+", required=True)
     parser.add_argument("--select", type=Path, nargs="+", required=True)
     parser.add_argument("--max-length", type=int)
+    parser.add_argument("--render", choices=RENDERINGS, default="server")
     parser.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args(argv)
 
@@ -145,8 +149,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     xs, ys = scope_examples(pools, rerank, select)
     scale, shift = fit_platt(xs, ys)
     calibration, cov, mean_kept = choose_keep(pools, rerank, select, scale, shift,
-                                              tiktoken_counter(), max_length=args.max_length)
+                                              tiktoken_counter(), max_length=args.max_length,
+                                              render=args.render)
     write_calibration(args.out_dir, calibration, fitted_on=sorted(set(args.split)),
+                      render=args.render,
                       questions=len(pools), candidates=len(xs), gold=int(sum(ys)))
     print(f"fitted on {len(pools)} questions, {len(xs)} candidates, {int(sum(ys))} gold")
     print(f"coverage {cov:.3f} at {mean_kept:.1f} turns kept on average")

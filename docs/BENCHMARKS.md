@@ -365,6 +365,53 @@ than the stock model (0.858 against 0.812 in the first five), yet its coverage i
 other turn follows the stock reranker's order across both roles. So a better ordering
 reaches the reader only through the few turns kept, which is decision 6 in the spec's §10.
 
+**Decision 6: rendering a local selection differently.** After steps 2a and 2b, the spec's
+§14 (fixed before any number below was computed) replayed two new renderings. Each applies
+only to a local selection; the paid selector's reads are unchanged.
+
+- **server:** today's rendering. The kept turns, then every other turn in reranked order
+  across both roles.
+- **(a) routed first:** the kept turns, then the unkept candidates, then everything else.
+- **(e) selector order:** all 40 candidates in the local model's own score order, then
+  everything else.
+
+```bash
+PYTHONPATH=. python3 bench/selector_calibrate.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --split validation --rerank local/selector/scores/stock_lme.jsonl --select local/selector/scores/step2a-B_lme.jsonl --max-length 256 --render selector-order --out-dir local/selector/cal/d6-B2a-selector-order
+PYTHONPATH=. python3 bench/selector_metrics.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --split test --rerank local/selector/scores/stock_lme.jsonl --local B2a=local/selector/scores/step2a-B_lme.jsonl,local/selector/cal/d6-B2a-selector-order --paid --render selector-order --by-type
+```
+
+Each keep rule was fitted again under each rendering, on the same questions as before.
+Test coverage on the same 191 questions (routed 0.903, paid 0.958):
+
+| Model | server | (a) routed first | (e) selector order |
+|---|---|---|---|
+| stock | 0.900 | 0.903 | 0.903 |
+| **step 2a's B (primary)** | 0.905 | 0.908 | **0.928** |
+| step 2b's C | 0.883 | 0.911 | 0.869 |
+| step 2b's D | 0.894 | 0.908 | 0.930 |
+
+The primary result, step 2a's model under (e), is **0.928: partial**, just under the 0.93
+pass line and inside the predicted range of 0.92 to 0.95. Against keeping every routed
+candidate it is +0.025 [+0.008, +0.045], better on 7 questions and worse on none. Against
+the paid selector it is −0.031 [−0.057, −0.006]. It beats rendering (a) for the same model
+(0.908), which is the condition the spec set for building (e) after a partial result. Step
+2b's D reaches 0.930 under (e), but D was not the pre-registered primary model and is
+reported only.
+
+By question type, under (e), step 2a's model is level with the paid selector on
+knowledge-update (1.000) and multi-session (0.936). It trails on temporal-reasoning (0.908
+against 0.959), single-session-preference (0.938 against 1.000), single-session-user (0.926
+against 1.000) and single-session-assistant (0.773 against 0.909). The last is the one type
+where routing hides the answer, because the gold turn is the assistant's.
+
+**The keep rule under (e).** Under (e) every candidate is rendered before the rest, so the
+keep rule does not change coverage, and the grid's tie-break chose to keep nothing. That
+matters outside this benchmark: `memory_recall`'s text block shows kept turns whole and
+cuts every other turn to 280 characters (`Memvara.RECALL_EPISODE_CHARS`), while MemoryBench
+reads whole turns. With the keep rule fitted under the server rendering (about five turns
+kept), (e) still covers 0.928 for step 2a's model and 0.930 for D. So a shipped (e) keeps
+that rule, and the highest-scoring turns are still shown whole.
+
 The spec's §10 records what has to be decided before this work goes on.
 
 ## LOCOMO and LongMemEval — retrieval, measured
