@@ -504,3 +504,55 @@ its range. On validation, raising `max_keep` above 6 lowered coverage, so keepin
 is not the lever: every wrong turn kept spends budget a gold turn needed. The lever is a
 better ordering, which needs far more training data than 256 questions. The numbers and the
 commands are in `docs/BENCHMARKS.md`, "The local selector".
+
+## 13. Step 2b: train on large public datasets first (pre-registered 2026-10-01)
+
+Written before any model in this section was trained and before the public data was
+converted. The user asked for public datasets of about 100,000 questions or more, and
+approved this step.
+
+**Question.** Step 2a showed that the selector is limited by how well it orders the
+candidates, not by how many it keeps, and that 256 LongMemEval questions are too few to
+teach the ordering. The question here is whether about 100,000 questions from public
+datasets, whose labels mark the sentence or paragraph holding the answer, teach an ordering
+that carries over to conversation turns.
+
+**Public data.** Each dataset's licence allows training a model for commercial use. The
+licences were checked against primary sources on 2026-10-01; the research report is in
+`local/selector/datasets-2026-10-01.md`. Every file is pinned to a revision.
+
+| Dataset | Questions used | A candidate is | Gold is | Licence |
+|---|---|---|---|---|
+| HotpotQA, distractor setting, train | 30,000 drawn at random | one sentence of the 10 paragraphs | a sentence in `supporting_facts` | CC BY-SA 4.0 |
+| 2WikiMultihopQA, train | 30,000 drawn at random | one sentence of the 10 paragraphs | a sentence in `supporting_facts` | Apache-2.0 |
+| MuSiQue, answerable, train | all 19,938 | one of the 20 paragraphs | `is_supporting` | CC BY 4.0 |
+| QuAC, train | 20,000 questions drawn at random, skipping unanswerable ones | one sentence of the section | the sentence where the answer starts | CC BY-SA 4.0 |
+
+That is 99,938 questions. The query is the question alone, with no earlier dialogue turns
+and no paragraph title, because a real read has only the question and the turn. For each
+gold candidate, three non-gold candidates are drawn at random from the same question's
+context, the same ratio as step 2a. The random draws use seed 0. Natural Questions is left
+out for now because its download is about 40 GB and the disk does not have the space.
+
+**Arms.** Both start from the stock model at its pinned commit and train with the step 2a
+settings: one epoch, learning rate 2e-5, 256 tokens, batches of 16, seed 0.
+- **C:** the public pairs only, with an unweighted loss. It sees no LongMemEval data during
+  training, so its keep rule is chosen on the 301 LongMemEval train and validation
+  questions together, as the stock model's was.
+- **D:** arm C's model, then one more epoch on the LongMemEval train split with step 2a
+  arm B's recipe (gold weighted 3). Its keep rule is chosen on the 45 validation questions.
+
+**Choice.** The arm with the higher coverage on the 45 validation questions is the result.
+A tie goes to the arm that keeps fewer turns there. The other arm's test number is
+reported beside it.
+
+**Gate.** The same as step 2a, on the same 191 test questions:
+- **Pass:** test coverage of at least 0.93.
+- **Partial:** between 0.903 and 0.93.
+- **Fail:** below 0.903.
+
+**Prediction:** 0.92, with a range of 0.90 to 0.94.
+
+**Also reported:** kept recall, mean turns kept, coverage by question type, and the paired
+bootstrap against the paid selector, against keeping every routed candidate, and against
+step 2a's chosen model (0.905).
