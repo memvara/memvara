@@ -6,6 +6,17 @@ sits", "The protocol", "The outcomes") is assumed knowledge here. The build is p
 [`docs/superpowers/plans/2026-10-01-local-selector.md`](../plans/2026-10-01-local-selector.md).
 Line numbers are from agent-memory `origin/main` at `50ccd6bd` (release 0.18.0).
 
+> **Correction, 2026-10-01, after gate G0 ran.** §1 and §3 overstate what a local
+> selector achieves. The 94.7% to 95.0% figures come from orderings that put *every*
+> routed candidate first. A real ranked read renders only the kept turns first, and then
+> the rest of both roles in reranked order. Replayed that way:
+> - the stock model reaches 0.833, and G0 failed;
+> - the 2026-09-27 fine-tuned model reaches 0.889;
+> - the model selector reaches 0.958.
+>
+> Step 1 did not ship. `docs/BENCHMARKS.md`, "The local selector", has the tables. The
+> choices this leaves are in §10, decision 6.
+
 Terms used throughout:
 
 - A **ranked read** is `search()` or `recall()` with `ranked=True`.
@@ -400,6 +411,19 @@ None blocks Step 1.
    The second question changes #308. Blocks the cloud plan.
 5. **memvara-mcp:** should the local selector become the default once Step 2 ships, or stay
    opt-in? Blocks Task 16's docs.
+6. **After G0 failed (2026-10-01): how should a local selector's read be rendered?** The
+   keep rule leaves too many gold turns to a tail where long assistant turns crowd them
+   out. The options:
+   - **(a)** Have the ranked stage render the unkept *routed* candidates before the other
+     role's turns. This changes the paid selector's rendering too, so it needs its own
+     measurement.
+   - **(b)** Train the selector to keep more of the gold, measuring with the faithful
+     replay from the start.
+   - **(c)** Ship the keep-everything-routed order (0.903, judged 171 of 199) under a
+     different name, without the keep rule.
+   - **(d)** Stop here.
+
+   Blocks everything after Task 5.
 
 ## 11. Follow-up plans in other repositories
 

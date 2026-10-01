@@ -219,6 +219,58 @@ different measurement, made without a reader, and the next section is exactly th
 
 ---
 
+## The local selector
+
+`memvara.select.LocalSelector` ranks a read's candidate turns with a cross-encoder in the
+Memvara process (design: `docs/superpowers/specs/2026-10-01-local-selector-design.md`).
+Gate G0 asked whether the stock reranker model, with a calibrated keep rule, could ship as
+an opt-in selector. **It failed, and the stock-model step did not ship.**
+
+**What was measured.** Coverage is the share of answer-bearing turns rendered whole inside a
+720-token block, on the 199 LongMemEval-S questions of MemoryBench run
+`memvara-ranked-parity2` (191 have a gold turn in their pool). `bench/selector_metrics.py`
+replays the ranked stage as the server renders it: the kept turns first, in candidate order,
+then every other turn of both roles in reranked order. The pools come from run
+`memvara-ranked-500`; the calibration was fitted on its other 301 questions.
+
+```bash
+PYTHONPATH=. python3 bench/selector_pools.py memorybench --run-dir $MB/data/runs/memvara-ranked-500 --data $LME --out local/selector/pools/lme.jsonl
+PYTHONPATH=. python3 bench/selector_pools.py splits --pools local/selector/pools/lme.jsonl --test-ids local/selector/lme_test_ids.txt --out local/selector/splits_lme.json
+PYTHONPATH=. python3 bench/selector_score.py --pools local/selector/pools/lme.jsonl --model cross-encoder/ms-marco-MiniLM-L-6-v2 --revision 233902d25c440f23af6f7d6e94d2946bac0bee0a --device mps --out local/selector/scores/stock_lme.jsonl
+PYTHONPATH=. python3 bench/selector_calibrate.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --split train --split validation --rerank local/selector/scores/stock_lme.jsonl --select local/selector/scores/stock_lme.jsonl --out-dir local/selector/cal/stock
+PYTHONPATH=. python3 bench/selector_metrics.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --split test --rerank local/selector/scores/stock_lme.jsonl --local stock=local/selector/scores/stock_lme.jsonl,local/selector/cal/stock --paid --baseline routed --by-type
+```
+
+The stock calibration, fitted on 12,040 candidates (524 gold), is
+`Calibration(scale=0.3766, shift=-0.4322, threshold=0.05, max_keep=8)`. Scoring took 4.2 ms
+a pair on Apple MPS.
+
+| Ordering | Coverage | Kept recall | Mean kept | Against `routed` |
+|---|---|---|---|---|
+| `plain` (the plain read) | 0.674 | — | — | −0.228 [−0.284, −0.177] |
+| `routed` (reranked, routed, all 40 candidates first) | 0.903 | 1.000 | 40 | — |
+| `paid` (gpt-5.4-mini, the shipped ranked read) | 0.958 | 0.935 | 4.3 | +0.056 [+0.029, +0.083] |
+| `stock` (the local selector, stock model) | **0.833** | **0.761** | 3.4 | −0.070 [−0.111, −0.032] |
+
+G0 needed coverage of at least 0.89 and kept recall of at least 0.80. The first three rows
+reproduce the 2026-09-27 measurements exactly, so the replay is sound.
+
+**Why it failed.** A ranked read renders what the selector kept, then the rest of the
+reranked list *across both roles*. The stock model's calibrated probability falls below even
+the lowest threshold tried (0.05) after about three or four turns, so it keeps few. The long
+assistant turns that follow then fill the 720 tokens before the unkept user turns that hold
+the answer. Raising `max_keep` to 40 changes nothing (0.833), because the threshold, not the
+cap, is what stops it.
+
+**The same replay also corrects an earlier reading.** The fine-tuned model from 2026-09-27
+(trained on the model selector's decisions) was reported at 0.947 to 0.950. Those figures
+came from orderings that put *all* routed candidates first, which the server never renders.
+Calibrated on the 45 validation questions and replayed faithfully, the same model reaches
+**0.889** (kept recall 0.852, 3.3 kept), 0.070 below the model selector
+[−0.102, −0.039]. These two rows are diagnostics added after G0 failed, not gates.
+
+The spec's §10 records what has to be decided before this work goes on.
+
 ## LOCOMO and LongMemEval — retrieval, measured
 
 Not answer accuracy — that number is judged, separately, [above](#answer-accuracy-judged-in-the-memorybench-harness)
