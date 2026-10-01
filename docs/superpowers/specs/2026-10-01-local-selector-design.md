@@ -571,3 +571,56 @@ orders the candidates clearly better than the stock model, yet covers only 0.002
 because the ranked read uses the selector's order only for the turns it keeps. That makes
 decision 6, how a local selection is rendered, the next thing to settle. The numbers are in
 `docs/BENCHMARKS.md`, "The local selector".
+
+## 14. Decision 6: render a local selection differently (pre-registered 2026-10-02)
+
+Written before any number in this section was computed. The user chose this after steps 2a
+and 2b. Only option (a) has been measured before, on the stock model and on the 2026-09-27
+fine-tuned model, and those numbers are known (0.903 and 0.919). Nothing else here has been.
+
+**Question.** Steps 2a and 2b showed that the server's rendering throws away most of what a
+better model knows: the selector's order is used only for the few turns it keeps, and every
+other turn follows the stock reranker's order across both roles. Does a rendering that uses
+more of the selector's information cover more of the gold?
+
+**The renderings.** Each applies only when the selector is local. The paid selector's
+rendering does not change.
+- **server:** today's rendering. The kept turns come first, in candidate order, then every
+  other turn in reranked order.
+- **(a) routed first:** the kept turns first, in candidate order, then the unkept
+  candidates in candidate order, then every other turn in reranked order.
+- **(e) selector order:** all 40 candidates first, in the local model's score order, then
+  every other turn in reranked order. The kept turns are the highest-scoring candidates, so
+  they still come first.
+
+For the stock model, (e) is the same order as keeping every routed candidate, because the
+stock model's scores are the reranker's scores. It is reported as a check on the replay.
+
+**Keep rule.** The Platt fit of each model is unchanged. The threshold and `max_keep` are
+chosen again under each rendering, from the same grid and on the same questions as before:
+train and validation together for the stock model and step 2b's arm C, validation alone
+for step 2a's B and step 2b's D. Under (e) every candidate is rendered before the rest
+whatever the keep rule says, so the grid's tie-break picks the fewest turns kept.
+
+**Primary result.** Step 2a's model B, rendered by (e), on the same 191 test questions. It
+was chosen before this section because it orders the candidates best of the models that a
+pre-registered rule selected. The gate has the same bands as steps 2a and 2b:
+- **Pass:** test coverage of at least 0.93.
+- **Partial:** between 0.903 and 0.93.
+- **Fail:** below 0.903.
+
+**Prediction:** 0.935, with a range of 0.92 to 0.95.
+
+**Also reported:** every model (stock, step 2a's B, step 2b's C and D) under each of the
+three renderings, with kept recall, mean turns kept, the paired bootstrap against keeping
+every routed candidate and against the paid selector, and coverage by question type for
+the primary result.
+
+**What each outcome leads to.**
+- **Pass:** the ranked stage gets a rendering hook that a local selector can use to hand
+  back its full order. The paid selector's path is unchanged. The fine-tuned model then
+  goes on to gates G2 and G3.
+- **Partial:** (e) is worth building only if it also beats (a) on the test set. Otherwise
+  (a) is the simpler change.
+- **Fail:** option (c) is the one left. It ships the routed order with no keep rule, under
+  a different name.
