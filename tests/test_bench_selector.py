@@ -191,3 +191,63 @@ def test_evaluate_reports_plain_routed_paid_and_local_orderings() -> None:
     assert results["local"]["toy1"] == (1, 1, 1, 1, 1)
     assert "| local | 1 |" in sm.table(results, baseline="routed")
     assert "| t | 1 |" in sm.type_table([pool], results)
+
+
+import math  # noqa: E402
+import random  # noqa: E402
+
+import selector_calibrate as sc  # noqa: E402
+import selector_score as ss  # noqa: E402
+
+from memvara.select.local import CALIBRATION_FILE  # noqa: E402
+
+
+def test_score_pools_scores_only_the_candidates_when_given_a_scope() -> None:
+    pool = _toy()
+    seen: list = []
+
+    def predict(pairs):
+        seen.extend(pairs)
+        return [float(len(text)) for _q, text in pairs]
+
+    full = ss.score_pools([pool], predict)
+    assert full["toy1"] == [11.0, 5.0, 8.0, 2.0]
+    seen.clear()
+    scoped = ss.score_pools([pool], predict, scope_of={"toy1": [4.0, 3.0, 2.0, 1.0]})
+    assert scoped["toy1"] == [None, 5.0, 8.0, 2.0]
+    assert [text for _q, text in seen] == ["u1 u1", "u2 u2 u2", "u3"]
+
+
+def test_fit_platt_recovers_a_known_logistic() -> None:
+    rng = random.Random(0)
+    xs = [i / 100 for i in range(-400, 401)]
+    ys = [rng.random() < 1 / (1 + math.exp(-(2 * x - 1))) for x in xs]
+    scale, shift = sc.fit_platt(xs, ys)
+    assert scale == pytest.approx(2.0, abs=0.35)
+    assert shift == pytest.approx(-1.0, abs=0.35)
+
+
+def test_fit_platt_refuses_data_it_cannot_calibrate() -> None:
+    with pytest.raises(ValueError, match="both gold and non-gold"):
+        sc.fit_platt([1.0, 2.0], [True, True])
+    with pytest.raises(ValueError, match="slope"):
+        sc.fit_platt([float(x) for x in range(-50, 50)], [x < 0 for x in range(-50, 50)])
+
+
+def test_choose_keep_prefers_the_threshold_that_lets_the_gold_turn_in() -> None:
+    pool = sp.Pool(source="toy", qid="t", question="q", qtype="t", asked_on=None,
+                   abstention=False, turns=[_turn("n " * 10), _turn("m " * 10),
+                                            _turn("g g", gold=True)])
+    rerank = {"t": [3.0, 2.0, 1.0]}
+    select = {"t": [0.0, -5.0, 5.0]}      # the first non-gold turn sits at probability 0.5
+    cal, cov, mean_kept = sc.choose_keep([pool], rerank, select, 1.0, 0.0, WORDS, budget=11)
+    assert cov == 1.0
+    assert cal.threshold == 0.55          # the first grid value above 0.5 keeps only the gold
+    assert mean_kept == 1.0
+
+
+def test_write_calibration_is_read_back_by_the_selector(tmp_path) -> None:
+    cal = Calibration(scale=1.5, shift=-0.5, threshold=0.35, max_keep=8, max_length=256)
+    path = sc.write_calibration(tmp_path, cal, base_model="m")
+    assert path == tmp_path / CALIBRATION_FILE
+    assert Calibration.read(tmp_path) == (cal, None)
