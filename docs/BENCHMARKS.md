@@ -309,6 +309,62 @@ every wrong turn kept spends budget that an unkept gold turn needed. What limits
 selector is how well it orders the candidates, not how many it keeps. With 256 training
 questions it orders them barely better than the stock reranker does.
 
+**Step 2b: about 100,000 public questions first.** Step 2a's model was limited by its
+ordering, so step 2b (spec §13, fixed before training) first trained on public datasets
+whose labels mark the sentence or paragraph holding the answer. Their licences all allow
+commercial use. `bench/selector_public.py` turned 99,938 questions into 842,161 pairs:
+
+| Dataset | Questions | Pairs |
+|---|---|---|
+| HotpotQA (distractor, train) | 30,000 | 285,893 |
+| 2WikiMultihopQA (train) | 30,000 | 289,816 |
+| MuSiQue (answerable, train) | 19,938 | 186,452 |
+| QuAC (train, answerable) | 20,000 | 80,000 |
+
+```bash
+PYTHONPATH=. python3 bench/selector_public.py --hotpot H0.parquet H1.parquet --twowiki W0.parquet W1.parquet --musique musique_ans_v1.0_train.jsonl --quac train_v0.2.json --out local/selector/public/pairs-step2b.jsonl
+PYTHONPATH=. python3 bench/selector_train.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --rerank local/selector/scores/stock_lme.jsonl --out local/selector/models/step2b-C --pairs local/selector/public/pairs-step2b.jsonl --no-pool-pairs --calibrate-on train --calibrate-on validation --device mps
+PYTHONPATH=. python3 bench/selector_train.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --rerank local/selector/scores/stock_lme.jsonl --out local/selector/models/step2b-D --base local/selector/models/step2b-C --pos-weight 3 --device mps
+```
+
+Arm C trained on the public pairs alone, in 3 hours 12 minutes on Apple MPS. Arm D
+continued from C with one epoch on the LongMemEval train split, using step 2a's recipe. D
+covered 0.931 on validation against C's 0.917, so D is the result.
+
+| Ordering | Coverage | Kept recall | Mean kept | Against `routed` | Against step 2a's B |
+|---|---|---|---|---|---|
+| `routed` | 0.903 | 1.000 | 40 | — | −0.003 [−0.025, +0.019] |
+| `paid` | 0.958 | 0.935 | 4.3 | +0.056 [+0.029, +0.083] | +0.053 [+0.026, +0.082] |
+| step 2a's B | 0.905 | 0.886 | 5.1 | +0.003 [−0.019, +0.025] | — |
+| **D (chosen)** | **0.894** | 0.852 | 4.3 | −0.008 [−0.040, +0.023] | −0.011 [−0.035, +0.010] |
+| C | 0.883 | 0.866 | 9.5 | −0.019 [−0.052, +0.011] | −0.022 [−0.049, +0.005] |
+
+**The gate failed:** 0.894 is below 0.903, and below the predicted range of 0.90 to 0.94.
+Against the paid selector D is −0.064 [−0.099, −0.031].
+
+**Why the public data did not help.** A diagnostic added after the result orders the 40
+routed candidates of each test question by each model's score, and counts the gold turns
+in the first k:
+
+| Model | @1 | @3 | @5 | @10 | MRR |
+|---|---|---|---|---|---|
+| stock | 0.366 | 0.710 | 0.812 | 0.909 | 0.806 |
+| step 2a's B (LongMemEval only) | 0.398 | 0.753 | 0.858 | 0.946 | 0.847 |
+| C (public only) | 0.352 | 0.668 | 0.770 | 0.875 | 0.786 |
+| D (public, then LongMemEval) | 0.386 | 0.759 | 0.852 | 0.952 | 0.838 |
+
+Training on Wikipedia question answering alone made the ordering of conversation turns
+*worse* than the stock model's, and D only recovers what LongMemEval training gives on its
+own. Finding a sentence that states a fact is a different task from finding the turn of a
+chat where somebody mentioned it, and 100,000 questions of the first do not teach the
+second.
+
+The same table shows a second limit. Step 2a's model already orders the candidates better
+than the stock model (0.858 against 0.812 in the first five), yet its coverage is only
+0.002 higher. The ranked read uses the selector's order only for the turns it keeps; every
+other turn follows the stock reranker's order across both roles. So a better ordering
+reaches the reader only through the few turns kept, which is decision 6 in the spec's §10.
+
 The spec's §10 records what has to be decided before this work goes on.
 
 ## LOCOMO and LongMemEval — retrieval, measured

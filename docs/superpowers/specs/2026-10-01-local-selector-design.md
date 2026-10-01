@@ -556,3 +556,18 @@ reported beside it.
 **Also reported:** kept recall, mean turns kept, coverage by question type, and the paired
 bootstrap against the paid selector, against keeping every routed candidate, and against
 step 2a's chosen model (0.905).
+
+**Result (2026-10-01): fail.** Arm D, chosen on validation (0.931 against C's 0.917),
+covers 0.894 of the test gold turns, below the gate's 0.903 and below the predicted range.
+Arm C covers 0.883. Against step 2a's model, D is −0.011 (−0.035 to +0.010). A diagnostic
+added after the result shows why: trained on the public data alone, the model orders
+conversation turns worse than the stock model does (0.770 of gold turns in its first five,
+against 0.812), and continuing on LongMemEval only brings it back to where LongMemEval
+training alone gets (0.852 against 0.858). The public datasets teach finding a sentence that
+states a fact, which is not the same task as finding the chat turn where something was said.
+
+The diagnostic also shows that a better ordering barely reaches the reader. Step 2a's model
+orders the candidates clearly better than the stock model, yet covers only 0.002 more,
+because the ranked read uses the selector's order only for the turns it keeps. That makes
+decision 6, how a local selection is rendered, the next thing to settle. The numbers are in
+`docs/BENCHMARKS.md`, "The local selector".
