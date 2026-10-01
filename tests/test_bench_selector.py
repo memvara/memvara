@@ -281,3 +281,16 @@ def test_fit_platt_converges_on_wide_imbalanced_scores_like_a_real_reranker() ->
     # intercepts, which is the reference this test trusts.
     best = min(_log_loss(a / 20, b / 4, xs, ys) for a in range(1, 61) for b in range(-60, 21))
     assert _log_loss(scale, shift, xs, ys) <= best + 1e-6
+
+
+def test_the_keep_rule_search_can_reach_low_thresholds_and_keep_every_candidate() -> None:
+    # Step 2a's grid (spec section 12): a gold turn whose calibrated probability is only
+    # 0.013 is kept at threshold 0.01, and max_keep can go up to all 40 candidates.
+    assert sc.GRID_THRESHOLDS[:3] == (0.01, 0.02, 0.05)
+    assert sc.GRID_MAX_KEEP[-2:] == (24, 40)
+    pool = sp.Pool(source="toy", qid="t", question="q", qtype="t", asked_on=None,
+                   abstention=False, turns=[_turn("n " * 10), _turn("m " * 10),
+                                            _turn("g g", gold=True)])
+    cal, cov, _ = sc.choose_keep([pool], {"t": [3.0, 2.0, 1.0]}, {"t": [-9.0, -9.0, -4.3]},
+                                 1.0, 0.0, WORDS, budget=11)
+    assert (cal.threshold, cov) == (0.01, 1.0)

@@ -30,8 +30,12 @@ from selector_pools import Pool, full_scores, read_pools, read_scores
 
 from memvara.select.local import CALIBRATION_FILE, CALIBRATION_FORMAT, Calibration
 
-GRID_THRESHOLDS = tuple(round(0.05 * i, 2) for i in range(1, 20))
-GRID_MAX_KEEP = (4, 6, 8, 10, 12, 16)
+#: The keep-rule grid. Step 2a (the spec's section 12) widened it after G0, where the
+#: stock model's calibrated probabilities fell below 0.05 after three or four turns:
+#: 0.01 and 0.02 let a model keep turns it is unsure of, and a max_keep of 24 or 40 lets
+#: it keep most or all of the 40 candidates.
+GRID_THRESHOLDS = (0.01, 0.02) + tuple(round(0.05 * i, 2) for i in range(1, 20))
+GRID_MAX_KEEP = (4, 6, 8, 10, 12, 16, 24, 40)
 
 
 def fit_platt(scores: Sequence[float], labels: Sequence[bool], *, l2: float = 1e-3,
