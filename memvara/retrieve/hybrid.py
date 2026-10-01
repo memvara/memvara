@@ -85,6 +85,9 @@ from ..select.stages import MAX_QUERIES, run_stage
 from ..store.base import Store, bulk_claims, resolve_states
 from ..telemetry import (
     RETRIEVAL_LATENCY_MS,
+    RETRIEVAL_LOCAL_FALLBACK,
+    RETRIEVAL_LOCAL_QUERY,
+    RETRIEVAL_LOCAL_SELECT_MS,
     RETRIEVAL_MODEL_FALLBACK,
     RETRIEVAL_MODEL_QUERY,
     RETRIEVAL_MODEL_REFUSED,
@@ -1714,16 +1717,17 @@ class HybridRetriever:
         return self._above_floor(out)[:(self.max_episodes if cap is None else cap)]
 
     @staticmethod
-    def _select_ms(rec: "Recorder | None", t0: float) -> None:
-        """`RETRIEVAL_SELECT_MS`, on every call the ranked stage actually makes.
+    def _select_ms(rec: "Recorder | None", t0: float, name: str = RETRIEVAL_SELECT_MS) -> None:
+        """`RETRIEVAL_SELECT_MS`, or a local selector's `RETRIEVAL_LOCAL_SELECT_MS`, on
+        every call the ranked stage actually makes.
 
         A separate method because every branch below emits it, including every one that
-        then raises past this frame — the model call's own latency, whatever it returned.
-        See the design spec's Counting table: this is the `write.extract_ms` rule, "a
+        then raises past this frame — the call's own latency, whatever it returned. See
+        the design spec's Counting table: this is the `write.extract_ms` rule, "a
         provider timeout is latency the caller waited through."
         """
         if rec is not None:
-            rec.timing(RETRIEVAL_SELECT_MS, (perf_counter() - t0) * 1000.0)
+            rec.timing(name, (perf_counter() - t0) * 1000.0)
 
     def _run_ranked_stage(
         self, rec: "Recorder | None", selector: Selector, query: str,
@@ -1748,6 +1752,12 @@ class HybridRetriever:
         method can still emit for it — the caller's `_observe` never runs on that path, so
         nothing else about this read is counted.
         """
+        # A local selector's reads are counted on series of their own: the model series
+        # count calls a provider answered, and a quota sums them by name (telemetry.py).
+        local = getattr(selector, "kind", None) == "local"
+        answered = RETRIEVAL_LOCAL_QUERY if local else RETRIEVAL_MODEL_QUERY
+        failed = RETRIEVAL_LOCAL_FALLBACK if local else RETRIEVAL_MODEL_FALLBACK
+        timed = RETRIEVAL_LOCAL_SELECT_MS if local else RETRIEVAL_SELECT_MS
         try:
             with selector.admit():
                 turn_order = episodes
@@ -1774,36 +1784,36 @@ class HybridRetriever:
                 except SelectorRefused as exc:
                     # From `select()`: the provider answered 401 or 403. Distinct from
                     # `disabled` below, which never reaches `select()` at all.
-                    self._select_ms(rec, t0)
+                    self._select_ms(rec, t0, timed)
                     if rec is not None:
                         rec.counter(RETRIEVAL_MODEL_REFUSED, reason="key_rejected")
                     return (Selection(outcome="key_rejected", status=exc.status,
                                       candidates=len(candidates)),
                             [], turn_order)
                 except TimeoutError:
-                    self._select_ms(rec, t0)
+                    self._select_ms(rec, t0, timed)
                     if rec is not None:
-                        rec.counter(RETRIEVAL_MODEL_FALLBACK, reason="timeout")
+                        rec.counter(failed, reason="timeout")
                     return (Selection(outcome="fallback", reason="timeout",
                                       candidates=len(candidates)),
                             [], turn_order)
                 except ValueError:
-                    self._select_ms(rec, t0)
+                    self._select_ms(rec, t0, timed)
                     if rec is not None:
-                        rec.counter(RETRIEVAL_MODEL_FALLBACK, reason="malformed")
+                        rec.counter(failed, reason="malformed")
                     return (Selection(outcome="fallback", reason="malformed",
                                       candidates=len(candidates)),
                             [], turn_order)
                 except Exception as exc:                      # noqa: BLE001 - deliberate
-                    self._select_ms(rec, t0)
+                    self._select_ms(rec, t0, timed)
                     status = getattr(exc, "status_code", None)
                     reason = "provider" if status is not None else "error"
                     if rec is not None:
                         if status is not None:
-                            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=reason,
+                            rec.counter(failed, reason=reason,
                                        status=str(status))
                         else:
-                            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=reason)
+                            rec.counter(failed, reason=reason)
                     return (Selection(outcome="fallback", reason=reason, status=status,
                                       candidates=len(candidates)),
                             [], turn_order)
@@ -1815,9 +1825,9 @@ class HybridRetriever:
                 # *made*; neither happened here, so neither is emitted, even though
                 # `select()` returned normally and the outcome below is still `applied`.
                 if candidates:
-                    self._select_ms(rec, t0)
+                    self._select_ms(rec, t0, timed)
                     if rec is not None:
-                        rec.counter(RETRIEVAL_MODEL_QUERY)
+                        rec.counter(answered)
                         if usage.reported > 0:
                             rec.counter(RETRIEVAL_TOKENS_IN, usage.input_tokens)
                             rec.counter(RETRIEVAL_TOKENS_OUT, usage.output_tokens)

@@ -17,7 +17,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   labelled data, and keeps the turns that reach a threshold. It needs the `rerank` extra,
   sends nothing anywhere, and gives the same answer every time for the same input.
   `Memvara(read_selector=LocalSelector(...))` uses it. Design:
-  `docs/superpowers/specs/2026-10-01-local-selector-design.md`.
+  `docs/superpowers/specs/2026-10-01-local-selector-design.md`. Its reads are counted as
+  `retrieval.local_query`, `retrieval.local_select_ms` and `retrieval.local_fallback`,
+  never as the model series a quota sums.
 
 ## [0.18.0] — 2026-09-29
 

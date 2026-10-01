@@ -458,6 +458,23 @@ RETRIEVAL_TOKENS_OUT = "retrieval.tokens_out"
 #: carries both, is the reranker's own cost.
 RETRIEVAL_SELECT_MS = "retrieval.select_ms"
 
+#: One per ranked read a local selector answered (`memvara.select.local.LocalSelector`).
+#: Counted apart from `retrieval.model_query` because no model provider was called: a
+#: quota that sums `retrieval.model_query` by name must not count a read that cost
+#: nothing. Untagged, for the same reason that one is.
+RETRIEVAL_LOCAL_QUERY = "retrieval.local_query"
+
+#: How long a local selector took to score its candidates, on every ranked read that
+#: reached it, whatever it returned. The local twin of `retrieval.select_ms`.
+RETRIEVAL_LOCAL_SELECT_MS = "retrieval.local_select_ms"
+
+#: A ranked read a local selector failed, served as the plain read. Tagged `reason`:
+#: `malformed` (the encoder returned the wrong number of scores, or one that is not
+#: finite) or `error` (anything else it raised); `timeout` only for a third-party local
+#: selector that raises `TimeoutError`. Nothing was billed, which is why this is not
+#: `retrieval.model_fallback`.
+RETRIEVAL_LOCAL_FALLBACK = "retrieval.local_fallback"
+
 #: The query rewrite's model call alone, and the synthesis's, on every call that was
 #: made, by the rule `retrieval.select_ms` follows. The two stages also emit
 #: `retrieval.model_query`, `retrieval.model_fallback`, `retrieval.model_refused` and the

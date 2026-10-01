@@ -276,3 +276,98 @@ def test_a_missing_extra_is_named(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "sentence_transformers", None)
     with pytest.raises(ImportError, match=r"memvara\[rerank\]"):
         load_encoder(STOCK_MODEL)
+
+
+# --- the ranked stage --------------------------------------------------------------------
+
+from memvara import Memvara  # noqa: E402
+from memvara.embed import HashingEmbedder  # noqa: E402
+from memvara.llm import NullLLM  # noqa: E402
+from memvara.retrieve import EpisodeResult, HybridRetriever  # noqa: E402
+from memvara.schema import PredicateRegistry  # noqa: E402
+from memvara.select import Selection  # noqa: E402
+from memvara.store import SQLiteStore  # noqa: E402
+from memvara.telemetry import (  # noqa: E402
+    RETRIEVAL_LOCAL_FALLBACK, RETRIEVAL_LOCAL_QUERY, RETRIEVAL_LOCAL_SELECT_MS,
+    RETRIEVAL_MODEL_FALLBACK, RETRIEVAL_MODEL_QUERY, RETRIEVAL_SELECT_MS, MemoryRecorder,
+)
+from memvara.types import Episode, Scope  # noqa: E402
+
+SCOPE = Scope("acme", "alice")
+
+
+def _engine(selector, texts):
+    store = SQLiteStore(":memory:")
+    embedder = HashingEmbedder(dim=64)
+    for text in texts:
+        episode = Episode(content=text, scope=SCOPE)
+        store.add_episode(episode)
+        store.set_episode_embedding(episode.id, embedder.encode([text])[0])
+    telemetry = MemoryRecorder()
+    engine = HybridRetriever(store, embedder, PredicateRegistry(), selector=selector,
+                             rerank_top_n=20, max_episodes=3, telemetry=telemetry)
+    return engine, telemetry
+
+
+@pytest.mark.covers("inv:TB9")
+def test_a_local_selection_is_counted_on_the_local_series_only() -> None:
+    engine, telemetry = _engine(_selector({"booked the kayak trip": 2.0}),
+                                ["booked the kayak trip", "kayak shop opens late"])
+    result = engine.search("kayak trip", SCOPE, k=5, include_episodes=True, ranked=True)
+    assert result.selection == Selection(outcome="applied", candidates=2, kept=1)
+    assert telemetry.total(RETRIEVAL_LOCAL_QUERY) == 1
+    assert len(telemetry.values(RETRIEVAL_LOCAL_SELECT_MS)) == 1
+    assert telemetry.total(RETRIEVAL_MODEL_QUERY) == 0
+    assert telemetry.values(RETRIEVAL_SELECT_MS) == []
+
+
+def test_keeping_nothing_is_applied_and_shows_every_turn_unkept() -> None:
+    engine, telemetry = _engine(_selector({}), ["alpha kayak", "beta kayak"])
+    result = engine.search("kayak", SCOPE, k=5, include_episodes=True, ranked=True)
+    assert result.selection == Selection(outcome="applied", candidates=2, kept=0)
+    episodes = [x for x in result if isinstance(x, EpisodeResult)]
+    assert {x.text for x in episodes} == {"alpha kayak", "beta kayak"}
+    assert all(x.explain.selected is False for x in episodes)
+    assert telemetry.total(RETRIEVAL_LOCAL_QUERY) == 1
+
+
+@pytest.mark.parametrize("scores", [[1.0], [1.0, float("nan")]])
+def test_a_misbehaving_encoder_serves_the_plain_read_as_a_local_fallback(scores) -> None:
+    engine, telemetry = _engine(_selector(result=scores), ["alpha kayak", "beta kayak"])
+    result = engine.search("kayak", SCOPE, k=5, include_episodes=True, ranked=True)
+    assert result.selection == Selection(outcome="fallback", reason="malformed", candidates=2)
+    assert telemetry.total(RETRIEVAL_LOCAL_FALLBACK, reason="malformed") == 1
+    assert telemetry.total(RETRIEVAL_MODEL_FALLBACK) == 0
+    assert len(telemetry.values(RETRIEVAL_LOCAL_SELECT_MS)) == 1
+
+
+def test_an_encoder_that_raises_is_counted_as_a_local_error() -> None:
+    class Broken(FakeEncoder):
+        def predict(self, pairs, batch_size=32, show_progress_bar=None):
+            raise RuntimeError("out of memory")
+
+    engine, telemetry = _engine(LocalSelector(encoder=Broken(), calibration=CAL),
+                                ["alpha kayak"])
+    result = engine.search("kayak", SCOPE, k=5, include_episodes=True, ranked=True)
+    assert (result.selection.outcome, result.selection.reason) == ("fallback", "error")
+    assert telemetry.total(RETRIEVAL_LOCAL_FALLBACK, reason="error") == 1
+
+
+def test_recall_with_nothing_kept_is_still_a_ranked_block() -> None:
+    mem = Memvara(llm=NullLLM(), user="alice", embedder=HashingEmbedder(dim=8),
+                  read_selector=_selector({}))
+    mem.add("Loved the trip to Lisbon last spring", user="alice")
+    out = mem.recall("the trip", user="alice", ranked=True, include_episodes=True,
+                     with_ids=True)
+    assert (out.selection.outcome, out.selection.kept) == ("applied", 0)
+    assert "model ranking not applied" not in out.text
+
+
+def test_recall_says_when_a_local_ranking_failed() -> None:
+    mem = Memvara(llm=NullLLM(), user="alice", embedder=HashingEmbedder(dim=8),
+                  read_selector=_selector(result=[float("inf")]))
+    mem.add("Loved the trip to Lisbon last spring", user="alice")
+    out = mem.recall("the trip", user="alice", ranked=True, include_episodes=True,
+                     with_ids=True)
+    assert out.selection.outcome == "fallback"
+    assert Memvara.RECALL_UNRANKED.format(outcome="fallback") in out.text
