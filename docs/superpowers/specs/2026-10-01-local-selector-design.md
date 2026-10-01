@@ -495,3 +495,12 @@ the keep-rule grid uses.
 
 **Also reported:** kept recall, mean turns kept, coverage by question type, and the
 paired bootstrap against the model selector and against keeping every routed candidate.
+
+**Result (2026-10-01): partial, at the bottom of the band.** The chosen arm, B, covers 0.905
+of the test gold turns. That is +0.003 against keeping every routed candidate (95% interval
+−0.019 to +0.025) and −0.053 against the model selector (−0.082 to −0.026). Arm A covers
+0.908. Both kept about five turns. The result is below the prediction of 0.91 and inside
+its range. On validation, raising `max_keep` above 6 lowered coverage, so keeping more turns
+is not the lever: every wrong turn kept spends budget a gold turn needed. The lever is a
+better ordering, which needs far more training data than 256 questions. The numbers and the
+commands are in `docs/BENCHMARKS.md`, "The local selector".

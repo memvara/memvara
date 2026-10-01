@@ -269,6 +269,46 @@ Calibrated on the 45 validation questions and replayed faithfully, the same mode
 **0.889** (kept recall 0.852, 3.3 kept), 0.070 below the model selector
 [−0.102, −0.039]. These two rows are diagnostics added after G0 failed, not gates.
 
+**Step 2a: training on gold labels to keep more turns.** After G0 the selector was trained
+on LongMemEval's own gold labels, with the plan, arms and gate fixed in the spec's §12
+before any model was trained. The training set has 256 questions (1,816 pairs, 454 gold),
+the calibration and keep rule were chosen on 45 validation questions, and the test set is
+the same 191 questions. `bench/selector_train.py` trains and calibrates in one command:
+
+```bash
+PYTHONPATH=. python3 bench/selector_train.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --rerank local/selector/scores/stock_lme.jsonl --out local/selector/models/step2a-B --pos-weight 3 --device mps
+PYTHONPATH=. python3 bench/selector_score.py --pools local/selector/pools/lme.jsonl --model local/selector/models/step2a-B --max-length 256 --device mps --scope-of local/selector/scores/stock_lme.jsonl --out local/selector/scores/step2a-B_lme.jsonl
+```
+
+Arm A used an unweighted loss and arm B weighted a gold turn's loss by 3. Both covered 67 of
+72 gold turns on validation, so the tie-break recorded before testing chose B, which kept
+fewer turns (4.9 against 5.0). Both chose `threshold=0.01, max_keep=6`.
+
+| Ordering | Coverage | Kept recall | Mean kept | Against `routed` | Against `paid` |
+|---|---|---|---|---|---|
+| `routed` | 0.903 | 1.000 | 40 | — | −0.056 [−0.083, −0.029] |
+| `paid` | 0.958 | 0.935 | 4.3 | +0.056 [+0.029, +0.083] | — |
+| **B (chosen)** | **0.905** | 0.886 | 5.1 | +0.003 [−0.019, +0.025] | −0.053 [−0.082, −0.026] |
+| A | 0.908 | 0.889 | 5.2 | +0.006 [−0.017, +0.029] | −0.050 [−0.079, −0.023] |
+
+The pre-registered gate was pass at 0.93 or more, partial between 0.903 and 0.93, and fail
+below 0.903, with a prediction of 0.91. **The result is partial, at the bottom of the band:**
+0.905 cannot be told apart from keeping every routed candidate, and it is 5.3 points below
+the paid selector. The 0.931 seen on validation did not carry over to the test set, because
+45 questions are too few to choose a keep rule reliably.
+
+By question type, B matches or beats the paid selector only on single-session-user (1.000)
+and comes close on knowledge-update (0.982 against 1.000). Its largest gaps are
+temporal-reasoning (0.857 against 0.959), single-session-preference (0.812 against 1.000)
+and single-session-assistant (0.864 against 0.909).
+
+**Keeping more turns does not help by itself.** On validation, with B's calibration and
+threshold 0.01, coverage by `max_keep` was 0.889 at 4, 0.931 at 6, 0.917 at 8 and 0.903 at
+12 or more (up to 9.7 turns kept). A kept turn is rendered whole before anything else, so
+every wrong turn kept spends budget that an unkept gold turn needed. What limits the
+selector is how well it orders the candidates, not how many it keeps. With 256 training
+questions it orders them barely better than the stock reranker does.
+
 The spec's §10 records what has to be decided before this work goes on.
 
 ## LOCOMO and LongMemEval — retrieval, measured
