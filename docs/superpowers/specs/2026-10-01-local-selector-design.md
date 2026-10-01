@@ -641,3 +641,54 @@ Building (e) means the ranked stage must accept a full order from a local select
 the `Selector` protocol cannot express today: `select()` returns only the kept turns. That
 design, and gates G2 and G3 for the fine-tuned model, are the next steps. The numbers are
 in `docs/BENCHMARKS.md`, "The local selector".
+
+## 15. The weakest link: show the part of a long turn that answers (pre-registered 2026-10-02)
+
+Written before any number in this section was computed. The user asked to strengthen the
+weakest question type before rendering (e) is built.
+
+**What the weak link is.** Under (e), questions about what the assistant said cover 0.773
+against the paid selector's 0.909. The diagnosis used the 301 train and validation
+questions only, never the test set. On those, the stock routed order misses 40 of 532 gold
+turns. 30 of the 40 are crowded out: they are candidates, but longer turns ranked above
+them fill the 720 tokens first. 4 are longer than 720 tokens on their own, all of them on
+questions about the assistant, 6 are not among the 40 candidates. Routing is right for 29
+of the 34 questions about the assistant. Assistant turns are long (median 368 tokens), so
+only about two of them fit in the block. The lever is length, not routing.
+
+**What is built.** An *answer window*: a turn longer than 280 characters is shown as the
+part of it that answers the question, not whole. 280 characters is
+`Memvara.RECALL_EPISODE_CHARS`, the length `recall()` already cuts an unkept turn to. The
+windows of a turn are runs of whole consecutive sentences of at most 280 characters, one
+starting at each sentence; a single sentence longer than that is cut to its first 279
+characters and an ellipsis. The local model scores each window against the question and the
+best one is shown.
+
+**Renderings compared.** All three use rendering (e) with step 2a's model B, the primary
+model of section 14, and fill a 720-token block greedily in the same order:
+- **whole:** every turn whole, as in section 14.
+- **lexical:** every turn longer than 280 characters shown as `retrieve/excerpt.py`'s
+  window, the one `recall()` uses today.
+- **model:** every turn longer than 280 characters shown as its best answer window,
+  chosen by step 2a's model B.
+
+**Measure.** Whole-turn coverage cannot credit a window, so the measure changes to the one
+`bench/recall_window.py` uses: an answer is *shown* when at least 60% of the gold answer's
+content words (`evalkit.content_tokens`) appear in the block. It is a proxy for whether a
+reader could answer, not a judged answer. Abstention questions are left out. The paid
+selector's row renders its own order with whole turns, as MemoryBench saw it.
+
+**Gate,** on the non-abstention questions of the same 199-question test set:
+- **Pass:** *model* shows the answer at least 0.03 more often than *whole*, the 95% paired
+  bootstrap interval is above zero, and on questions about the assistant *model* is at least
+  as good as *whole*.
+- **Partial:** *model* is above *whole* but one of those conditions fails.
+- **Fail:** *model* is not above *whole*.
+
+*Model* windows are worth their extra scoring only if they also show the answer more often
+than *lexical* windows. If they do not, the existing lexical window is used.
+
+**Prediction:** *whole* about 0.80, *lexical* about 0.84, *model* about 0.86 overall; on
+questions about the assistant, *model* about 0.15 above *whole*.
+
+**Cost reported:** how many windows the model scores per read.
