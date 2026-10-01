@@ -27,14 +27,25 @@ client. A batch nested inside another joins it, and the outermost batch decides 
 ### Who this changes
 
 **If you implement `Store` yourself**, nothing breaks. `Memvara` passes `tenant=` only to a store
-whose `batch` has a parameter named `tenant` or takes `**kwargs`, and calls any other store as
-`batch()`. The check reads the signature, so a `TypeError` raised inside your `batch` is not
-retried and not hidden. To narrow your lock, add `*, tenant: str | None = None` to `batch`, take
-a lock for that tenant when it is given, and take the broadest lock you have when it is `None`.
-Take it as the batch begins, before the first read: the library names the tenant up front
-because a batch cannot learn it from its reads. While a tenant batch is open, it must not
-change another tenant's rows, and that includes the source turns that
-`erase_claim(sources=True)` removes.
+whose `batch` declares a parameter named `tenant`, and calls any other store as `batch()`. The
+check reads the signature, so a `TypeError` raised inside your `batch` is not retried and not
+hidden. A wrapper whose `batch` only takes `**kwargs` is called as `batch()` too, because it may
+forward the call to a store that cannot take the keyword; declare `tenant` on the wrapper to
+have it passed.
+
+To narrow your lock, add `*, tenant: str | None = None` to `batch`, take a lock for that tenant
+when it is given, and take the broadest lock you have when it is `None`. Take it as the batch
+begins, before the first read: the library names the tenant up front because a batch cannot
+learn it from its reads. While a tenant batch is open, it must not change another tenant's
+rows. Your own erasure methods open their own batches and should do the same: `purge(scope)`
+touches `scope.tenant`, and `erase_claim` and `erase_episodes` can look up the tenant of what
+they erase before they open the batch. `erase_claim(sources=True)` must erase only source turns
+of the claim's own tenant, as `SQLiteStore` now does.
+
+**If you rely on `erase(sources=True)` removing a source turn of another tenant**, it no longer
+does. `SQLiteStore.erase_claim` used to erase any uncited source turn by id, whatever its
+tenant, which let one tenant delete another's turn by citing its id. It now leaves a turn of
+another tenant where it is.
 
 **If you run memvara-cloud**, its Postgres store takes advantage of the keyword from the
 release that requires core 0.19.0.

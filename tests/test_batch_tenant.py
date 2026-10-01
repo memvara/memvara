@@ -213,6 +213,15 @@ def test_a_document_passes_its_tenant_when_it_is_added_updated_and_deleted(store
     assert seen and set(seen) == {ACME}, "delete_document"
 
 
+def test_a_document_retry_passes_its_tenant(store, mem):
+    """A document stored without extraction is read again on the next add of it, in a batch
+    of its own (`_unread`)."""
+    mem.add_document("The office is in Lisbon.", custom_id="office", extract=False)
+    seen = opened_by(store, lambda: mem.add_document("The office is in Lisbon.",
+                                                     custom_id="office"))
+    assert len(seen) >= 4 and set(seen) == {ACME}
+
+
 def test_a_note_import_passes_the_tenant_of_the_note_and_the_note_it_replaces(store, mem):
     scope = Scope(ACME, user="alice")
     when = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -246,6 +255,25 @@ def test_turns_in_two_tenants_open_batches_with_no_tenant(store, mem):
     turns = [Episode(content="I live in Lisbon.", scope=Scope(ACME, user="alice")),
              Episode(content="I work at Initech.", scope=Scope(GLOBEX, user="bob"))]
     seen = opened_by(store, lambda: mem.add(turns))
+    assert seen and set(seen) == {None}
+
+
+def test_a_note_whose_turn_is_in_another_tenant_passes_no_tenant(store, mem):
+    when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    note, turn = build_note(memory_id="m2", text="Likes tea", scope=Scope(ACME, user="alice"),
+                            ts=when)
+    turn.scope = Scope(GLOBEX, user="alice")
+    seen = opened_by(store, lambda: write_note(mem, note, turn))
+    assert seen == [None]
+
+
+def test_a_replacement_citing_a_turn_in_another_tenant_passes_no_tenant(store, mem):
+    """The outer batch of `supersede` has to name the tenant of the turns its new claim
+    cites, not only the claim's: the inner write stores them."""
+    old = mem.remember("user", "lives_in", "Berlin").added[0]
+    new = Claim(subject="user", predicate="lives_in", object="Lisbon", scope=old.scope)
+    turn = Episode(content="Alice moved.", scope=Scope(GLOBEX, user="alice"))
+    seen = opened_by(store, lambda: mem.supersede(old.id, new, sources=[turn]))
     assert seen and set(seen) == {None}
 
 
@@ -314,27 +342,52 @@ def test_a_store_with_no_batch_at_all_still_works():
     store.close()
 
 
-def test_a_store_taking_kwargs_is_given_the_tenant():
-    seen: list[dict] = []
+def test_a_wrapper_that_only_takes_kwargs_is_called_without_the_tenant():
+    """A `**kwargs` wrapper may forward to a store written before the keyword, which would
+    raise on it. Leaving the tenant out only makes a store lock as broadly as it did."""
+    legacy = LegacyStore()
 
-    class Star:
+    class Wrapper:
         @contextmanager
-        def batch(self, **kwargs):
-            seen.append(kwargs)
+        def batch(self, *args, **kwargs):
+            with legacy.batch(*args, **kwargs):
+                yield self
+
+    with transaction(Wrapper(), ACME):
+        pass
+    assert legacy.opened == 1
+    legacy.inner.close()
+
+
+def test_a_wrapper_that_declares_the_tenant_is_given_it():
+    seen: list = []
+
+    class Declared:
+        @contextmanager
+        def batch(self, *, tenant=None, **kwargs):
+            seen.append(tenant)
             yield self
 
-    with transaction(Star(), ACME):
+    with transaction(Declared(), ACME):
         pass
-    with transaction(Star(), None):
+    assert seen == [ACME]
+
+
+def test_an_autospecced_legacy_store_is_called_without_the_tenant():
+    from unittest import mock
+
+    legacy = mock.create_autospec(LegacyStore(), instance=True)
+    with transaction(legacy, ACME):
         pass
-    assert seen == [{"tenant": ACME}, {}]
+    legacy.batch.assert_called_once_with()
 
 
 def test_the_keyword_is_decided_from_the_signature():
     assert not batch_takes_tenant(lambda: nullcontext())
     assert batch_takes_tenant(lambda *, tenant=None: nullcontext())
     assert batch_takes_tenant(lambda tenant=None: nullcontext())
-    assert batch_takes_tenant(lambda **kw: nullcontext())
+    assert not batch_takes_tenant(lambda **kw: nullcontext())
+    assert not batch_takes_tenant(lambda *args: nullcontext())
     assert not batch_takes_tenant(lambda tenant, /: nullcontext())
 
 
@@ -362,12 +415,23 @@ def test_a_type_error_inside_a_batch_that_takes_the_keyword_is_not_retried_witho
     assert calls == [ACME]
 
 
-def test_a_tenant_is_not_passed_when_there_is_none_to_pass():
-    store = RecordingStore()
-    with transaction(store):
+def test_no_tenant_is_passed_when_there_is_none_to_pass():
+    """Not even `tenant=None`: the store sees the keyword's own default, so a store that
+    uses a different marker for "not given" can tell the two apart."""
+    given: list = []
+    marker = object()
+
+    class Marked:
+        @contextmanager
+        def batch(self, *, tenant=marker):
+            given.append(tenant)
+            yield self
+
+    with transaction(Marked()):
         pass
-    assert store.opened == [None]
-    store.inner.close()
+    with transaction(Marked(), None):
+        pass
+    assert given == [marker, marker]
 
 
 # --- SQLite behaves exactly as before ------------------------------------------------
@@ -404,3 +468,23 @@ def test_sqlite_commits_one_batch_for_a_tenant_exactly_as_one_for_none():
         s.put_claim(claim)
     assert s.get_claim(claim.id) is not None
     s.close()
+
+
+# -- erasure stays inside the claim's tenant ----------------------------------------------
+
+
+def test_erasing_a_claim_with_sources_leaves_a_turn_of_another_tenant_where_it_is(store, mem):
+    """A claim can cite another tenant's turn by id, and erasing it must not erase that
+    turn: the erasure holds the claim's tenant and no other. A cited id that names no turn
+    is skipped too."""
+    foreign = Episode(content="I live in Porto.", scope=Scope(GLOBEX, user="bob"))
+    store.add_episode(foreign)      # no claim cites it, so only the tenant keeps it
+    theirs = foreign.id
+    turn = Episode(content="Alice likes tea.", scope=Scope(ACME, user="alice"))
+    mine = turn.id
+    cited = mem.remember("user", "likes", "tea", sources=[turn]).added[0]
+    cited.sources = [mine, theirs, "ep_nothing_by_this_name"]
+    store.put_claim(cited)
+    assert mem.erase(cited.id, sources=True) is True
+    assert store.get_episode(mine) is None, "its own source turn is erased"
+    assert store.get_episode(theirs) is not None, "another tenant's turn is not"

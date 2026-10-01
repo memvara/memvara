@@ -2968,8 +2968,9 @@ keeps out every batch that named one tenant. The calls, by what they pass:
   `supersede()` and `remember(replaces=...)` when the new claim and its turns stay in the
   caller's tenant, `delete()`, `forget()`, `forget_matching()`, `link()`, `erase()`, the
   consolidation sweep over one tenant, `merge_predicate()`, `backfill_entities()`,
-  `backfill_predicates()`, `split_entity()`, the four document writes, the note import's
-  `write_note()` and the LangGraph store's `put` batch.
+  `backfill_predicates()`, `split_entity()`, the document writes (add, update and delete,
+  and the status and retry steps they run), the note import's `write_note()` and the
+  LangGraph store's `put` batch.
 - *The tenant of the claim.* The expiry sweep erases each expired claim in a batch for that
   claim's tenant, whichever tenant the sweeping handle is bound to.
 - *Nothing.* `reembed()`, which walks every claim and turn in the store; a sweep started
@@ -2982,23 +2983,30 @@ keeps out every batch that named one tenant. The calls, by what they pass:
 A batch nested inside another joins it, and the outermost batch decides the lock, so the
 outermost call has to cover everything inside it. `_supersede` opens the outer batch and
 `_write_claim` the inner one, and both work out the tenant from the same inputs, so they
-agree. Inside a batch the library reads claims by `Scope.sees`, which never crosses a
-tenant, and by tenant-keyed lookups such as `competing_claims(tenant, ...)`. Nothing else
-in a batch is keyed on anything wider than a tenant.
+agree. Inside a batch the library reads claims through `Scope.sees`, which never crosses a
+tenant, and through tenant-keyed lookups such as `competing_claims(tenant, ...)`. A few
+reads go by id alone (`get_claim` in `erase()` and in a model's proposed ends, `get_episodes`
+when it checks which turns are still stored), and each result is checked against the scope
+or the tenant before anything is written.
 
-The library calls `batch(tenant=...)` only on a store whose `batch` has a parameter named
-`tenant` or takes `**kwargs`. A store written before the keyword is called as `batch()`.
+The library calls `batch(tenant=...)` only on a store whose `batch` declares a parameter
+named `tenant`. A store written before the keyword is called as `batch()`, and so is a
+wrapper that only takes `**kwargs`: forwarding `tenant=` through it to a store that cannot
+take it would raise, and not passing it only makes the store lock as broadly as before.
 The check is `inspect.signature` and not `except TypeError`, for the reason
 `find_episode_by_hash`'s `at` is checked that way: a `TypeError` raised inside the store
 must stay visible. `memvara.store.transaction(store, tenant)` is the one place that does
 it, and every call site above goes through it. It used to be `getattr(store, "batch")`
 repeated in five modules.
 
-One case the keyword cannot cover. `erase(claim_id, sources=True)` passes the claim's
-tenant, and the store then erases the source turns no other claim cites. A claim can cite a
-turn in another tenant only through the hand-built `Episode` case above. A store that narrows
-its lock must therefore leave a source turn of another tenant alone when it erases under a
-tenant batch.
+**`erase(claim_id, sources=True)` erases only source turns of the claim's own tenant.** It
+passes the claim's tenant, and a claim can cite a turn of another tenant: through a
+hand-built `Episode` as above, or through a hand-built `Claim` whose `sources` name that
+turn's id. `SQLiteStore.erase_claim` used to erase that turn too, so a tenant could delete
+another tenant's text by citing its id and then erasing its own claim, and a store that locks
+per tenant would have written rows its batch held no lock for. It now leaves such a turn where
+it is. A store that narrows its lock has to do the same, and has to open the batches of its own
+erasure methods for the tenant they erase.
 
 `tests/test_batch_tenant.py` records the tenant of every batch each of the calls above opens,
 and checks a store with no keyword, a store with `**kwargs` and SQLite.

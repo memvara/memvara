@@ -3175,6 +3175,8 @@ class Memvara:
         still cites. Right for a memory that *is* its source text, wrong for a fact
         extracted from a conversation turn holding much else besides, so the caller
         chooses; see `Store.erase_claim`.
+        Only turns of the claim's own tenant are erased; a turn of another tenant that the
+        claim cites is left where it is.
 
         Scope-checked like `why()`, and `False` rather than an exception for an unknown
         or out-of-scope id, so the method cannot be used to test whether an id exists in

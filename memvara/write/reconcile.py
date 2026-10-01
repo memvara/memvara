@@ -944,6 +944,8 @@ class Reconciler:
         ([(1, 3), (5, 7)], 1)
         >>> Reconciler._uncovered(c(mar), [c(jan, may)], None)[0] == [(may, None)]
         True
+        >>> Reconciler._uncovered(c(mar), [c(may, may)], None) == ([(mar, None)], [])
+        True
         """
         start = as_utc(claim.valid_from)
         stop = as_utc(end) if end is not None else None
