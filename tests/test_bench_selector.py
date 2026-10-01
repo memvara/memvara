@@ -419,3 +419,46 @@ def test_renderings_reorder_only_a_local_selection() -> None:
     assert ordered.rendered == [2, 1, 0, 3]          # candidates by the selector's score
     with pytest.raises(ValueError):
         sm.local_replay(pool, rerank, select, cal, render="sideways")
+
+
+import selector_windows as sw  # noqa: E402
+
+
+def test_answer_windows_start_at_each_sentence_and_respect_the_limit() -> None:
+    text = "Hello there. " + "The hotel was the Ritz. " * 3 + "x" * 50
+    windows = sw.answer_windows(sw.flatten(text), limit=60)
+    assert all(len(w) <= 60 for w in windows)
+    assert windows[0].startswith("Hello there.") and windows[0].endswith("…")
+    assert windows[1].startswith("…The hotel was the Ritz.")
+    long = sw.answer_windows("y" * 100 + ". Short.", limit=20)
+    assert long[0] == "y" * 18 + "…" and len(long[0]) <= 20
+
+
+def test_shown_text_keeps_short_turns_whole_and_lets_the_model_choose() -> None:
+    long = "Greetings to you. " * 10 + "The answer is Oslo."
+    pick_last = lambda q, ws: ws[-1]                          # noqa: E731
+    assert sw.shown_text("short", "q", "model", pick_last) == "short"
+    assert sw.shown_text(long, "q", "whole", None) == long
+    assert sw.shown_text(long, "q", "model", pick_last).endswith("Oslo.")
+    assert "Oslo" in sw.shown_text(long, "where is the answer Oslo", "lexical", None)
+
+
+def test_model_chooser_counts_windows_and_picks_the_top_score() -> None:
+    tally: list[int] = []
+    choose = sw.model_chooser(lambda pairs: [len(w) for _q, w in pairs], tally)
+    assert choose("q", ["a", "bbb", "cc"]) == "bbb" and tally == [3]
+    assert choose("q", ["only"]) == "only" and tally == [3]
+
+
+def test_fill_skips_what_does_not_fit_and_answer_shown_uses_the_presence_rule() -> None:
+    words = lambda t: len(t.split())                          # noqa: E731
+    assert sw.fill(["a b c", "d e f g", "h"], words, budget=4) == "a b c\nh"
+    assert sw.answer_shown("we met in Oslo last May", "Oslo")
+    assert not sw.answer_shown("we met in Bergen", "Oslo")
+
+
+def test_selector_order_puts_candidates_in_model_order_then_the_rest() -> None:
+    turns = [_turn("u0"), _turn("u1"), _turn("a0", role="assistant")]
+    pool = sp.Pool(source="toy", qid="o", question="where did I park?", qtype="t",
+                   asked_on=None, abstention=False, turns=turns)
+    assert sw.selector_order(pool, [2.0, 1.0, 3.0], [0.1, 0.9, None]) == [1, 0, 2]

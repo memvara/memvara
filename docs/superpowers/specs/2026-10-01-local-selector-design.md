@@ -692,3 +692,17 @@ than *lexical* windows. If they do not, the existing lexical window is used.
 questions about the assistant, *model* about 0.15 above *whole*.
 
 **Cost reported:** how many windows the model scores per read.
+
+**Result (2026-10-02): fail.** On the 188 non-abstention test questions, *model* windows
+show the answer for 0.585, *whole* turns for 0.628 and *lexical* windows for 0.601. *Model*
+is −0.043 against *whole* (−0.074 to −0.011), and on questions about the assistant it shows
+the answer 13 times in 22 against 21 for *whole*. The prediction was wrong in direction. A
+280-character window loses the list or recipe context an assistant's answer sits in, and
+scoring the windows cost about 1,570 model pairs per read. Answer windows are not built.
+
+Under this measure the weak link mostly disappears: with whole turns, (e) shows the answer
+to a question about the assistant 21 times in 22, as the paid selector does, and overall
+0.628 against the paid selector's 0.612. Neither comparison was the gate, and the proxy
+cannot see answers that are not stated word for word. So the next step is rendering (e)
+with whole turns, as section 14 concluded, and the judged run in gate G3 is where its
+distance from the paid selector gets settled.

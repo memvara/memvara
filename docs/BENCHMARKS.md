@@ -412,6 +412,40 @@ reads whole turns. With the keep rule fitted under the server rendering (about f
 kept), (e) still covers 0.928 for step 2a's model and 0.930 for D. So a shipped (e) keeps
 that rule, and the highest-scoring turns are still shown whole.
 
+**Answer windows, for the weakest question type.** Under (e), questions about what the
+assistant said had the lowest whole-turn coverage (0.773 against the paid selector's
+0.909). On the train and validation questions the cause was turn length, so the spec's §15
+(fixed before this was run) tested showing a long turn as the 280-character part that
+answers the question, chosen by the local model, against whole turns and against the
+lexical window `recall()` already uses. Whole-turn coverage cannot credit a window, so the
+measure is whether at least 60% of the gold answer's content words reach the 720-token
+block, the rule `bench/recall_window.py` uses. It is a proxy, not a judged answer.
+
+```bash
+PYTHONPATH=. python3 bench/selector_windows.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --split test --rerank local/selector/scores/stock_lme.jsonl --select local/selector/scores/step2a-B_lme.jsonl --model local/selector/models/step2a-B --data ~/.cache/memvara-bench/longmemeval_s_cleaned.json --device mps
+```
+
+On the 188 non-abstention test questions, with step 2a's model under (e):
+
+| Rendering | Answer shown | Against `whole` | About the assistant (22) |
+|---|---|---|---|
+| whole turns | 0.628 | — | 0.955 |
+| lexical window (`recall()` today) | 0.601 | −0.027 [−0.053, +0.000] | 0.727 |
+| model's answer window | 0.585 | −0.043 [−0.074, −0.011] | 0.591 |
+| paid selector, whole turns | 0.612 | −0.016 [−0.053, +0.021] | 0.955 |
+
+**It failed.** The model's windows show the answer less often than whole turns, and much
+less often on the very questions they were built for. Assistant answers are often an item
+in a list or a step in a recipe, and a 280-character window loses the context that makes the
+answer findable. Scoring the windows also cost about 1,570 extra model pairs per read.
+
+The measurement also showed that the weak link was smaller than whole-turn coverage made it
+look. With whole turns under (e), the answer to a question about the assistant reaches the
+block 21 times in 22, the same as with the paid selector, and overall (e) is level with the
+paid selector on this proxy (0.628 against 0.612). These comparisons were not the gate, and
+the proxy cannot see answers that are not stated word for word, which rules out most
+multi-session and preference questions. A judged run is the measure that can settle it.
+
 The spec's §10 records what has to be decided before this work goes on.
 
 ## LOCOMO and LongMemEval — retrieval, measured
