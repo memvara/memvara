@@ -41,6 +41,7 @@ from typing import Any, Mapping
 
 from ..core import Memvara
 from ..schema import Cardinality, PredicateSpec, Volatility
+from ..store import sole_tenant, transaction
 from ..types import (
     NOTE_PREDICATE, Claim, Closure, Derivation, Episode, MemoryType, Scope, WriteReceipt,
     close_out,
@@ -179,7 +180,8 @@ def write_note(mem: Memvara, claim: Claim, episode: Episode, *,
     that is gone or no longer live is not retired at all: writing back the caller's copy
     would undo the other writer's closure, or bring an erased claim back.
     """
-    with mem.store.batch():
+    with transaction(mem.store, sole_tenant([claim.scope.tenant, episode.scope.tenant,
+                                             *([retire.scope.tenant] if retire else [])])):
         mem.store.add_episode(episode)
         if retire is not None:
             current = mem.store.get_claim(retire.id)

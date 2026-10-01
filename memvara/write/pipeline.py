@@ -56,7 +56,6 @@ import inspect
 import math
 import re
 import warnings
-from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime
 from time import perf_counter
@@ -72,7 +71,7 @@ from ..llm.guidance import Guidance
 from ..redact import Redactor, redact_claim, redact_episode
 from . import pollution, split
 from ..schema import Cardinality, PredicateRegistry, PredicateSpec, Volatility
-from ..store.base import Store, bulk_claims
+from ..store.base import Store, bulk_claims, sole_tenant, transaction
 from ..telemetry import (
     FAST_HIT,
     FAST_MISS,
@@ -426,7 +425,7 @@ class WritePipeline:
 
         # Episodes commit on their own, first. See the module docstring for the trade.
         if fresh:
-            with self._transaction():
+            with self._transaction(sole_tenant(ep.scope.tenant for ep in fresh)):
                 for ep in fresh:
                     self.store.add_episode(ep)
 
@@ -460,7 +459,13 @@ class WritePipeline:
         # durability round trip on each costs far more than the work. What changed is
         # that nothing inside it can block on a network.
         lock_t0 = perf_counter() if rec is not None else 0.0
-        with self._transaction():
+        # Every tenant the transaction reads or writes: the turns', the candidates' and the
+        # tenants of the claims tier 0 queued for reinforcement. A model's proposals name
+        # claims only in the write's own scope (`_apply_proposals`).
+        tenant = sole_tenant([*(ep.scope.tenant for ep in episodes),
+                              *(c.scope.tenant for c in candidates),
+                              *(queued.scope.tenant for queued, _s, _at in pending)])
+        with self._transaction(tenant):
             gone = self._erased(candidates, pending, plan)
             # Tier 0 read each queued claim before this transaction, and another writer
             # can have ended, retired or erased it since. So each is read again here,
@@ -580,7 +585,9 @@ class WritePipeline:
                 redact_claim(self.redactor, claim, telemetry=rec)
 
         lock_t0 = perf_counter() if rec is not None else 0.0
-        with self._transaction():
+        tenant = sole_tenant([*(ep.scope.tenant for ep in episodes),
+                              *(c.scope.tenant for c in candidates)])
+        with self._transaction(tenant):
             gone = self._erased(candidates, [], plan)
             to_embed: list[Claim] = []
             self._reconcile(self._sourced(candidates, gone), plan, receipt, now, to_embed,
@@ -715,14 +722,15 @@ class WritePipeline:
             for refusal in plan.refused:
                 self.telemetry.counter(WRITE_AGENTIC_REFUSED, reason=refusal.reason)
 
-    def _transaction(self):
+    def _transaction(self, tenant: str | None):
         """Batch commits when the store supports it; a no-op otherwise.
 
-        Kept behind `getattr` so third-party `Store` implementations that never heard of
-        batching keep working — they just commit per statement as before.
+        Kept behind `transaction` so third-party `Store` implementations that never heard
+        of batching, or of its `tenant` keyword, keep working — they just commit per
+        statement, or take the lock they always took. `tenant` is the one tenant the
+        transaction touches, or `None` when it may touch several.
         """
-        batch = getattr(self.store, "batch", None)
-        return batch() if batch is not None else nullcontext()
+        return transaction(self.store, tenant)
 
     def assert_claim(self, claim: Claim, *, close: Closure = "ended",
                      asserted_type: MemoryType | None = None,

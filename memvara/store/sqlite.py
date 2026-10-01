@@ -3110,8 +3110,14 @@ class SQLiteStore:
                 self._changed()
 
     @contextmanager
-    def batch(self) -> Iterator["SQLiteStore"]:
+    def batch(self, *, tenant: str | None = None) -> Iterator["SQLiteStore"]:
         """Defer commits until the block exits, then commit once.
+
+        `tenant` is accepted and ignored. It is part of the `Store.batch` signature so that
+        a store can narrow its lock to one tenant, and SQLite's write lock covers the whole
+        database file whatever the tenant is. A batch for one tenant therefore takes the
+        same lock as a batch for any tenant, and behaves exactly as it did before the
+        keyword existed.
 
         Per-statement commits are the right default for a memory store, but bulk paths
         (ingesting a transcript, a consolidation sweep) pay a commit per claim for no
@@ -4097,6 +4103,15 @@ class SQLiteStore:
                 # Orphan-checked after the claim is gone, so it cannot count itself a citer.
                 episodes = 0
                 for episode_id in cited:
+                    # Only turns of this claim's own tenant. A claim can cite a turn of
+                    # another tenant, and erasing that turn would reach outside the
+                    # tenant this erasure is for: it would let one tenant delete another's
+                    # text by naming its id, and on a store that locks per tenant it would
+                    # write rows this batch holds no lock for. It stays where it is.
+                    owner = self._db.execute("SELECT tenant FROM episodes WHERE id=?",
+                                             (episode_id,)).fetchone()
+                    if owner is None or owner["tenant"] != tenant:
+                        continue
                     if self._orphan(episode_id):
                         gone, vecs = self._erase_row(
                             "episodes", "episodes_fts", _EPISODE_VECS, episode_id)

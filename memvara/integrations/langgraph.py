@@ -107,7 +107,6 @@ from __future__ import annotations
 import asyncio
 import json
 import warnings
-from contextlib import nullcontext
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -116,7 +115,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence, cast
 
 from ..compat import NOTE_PREDICATE, ensure_note_predicate
 from ..select import PLAIN_READ
-from ..store import STATES
+from ..store import STATES, transaction
 from ..types import Claim, Result, content_hash, utcnow
 from ._common import IntegrationError, bind, require, scope_kw
 
@@ -895,8 +894,7 @@ class _Store:
                 raise ValueError(f"Unknown operation type: {type(op)}")
         if puts:
             at = self._instant()
-            batch = getattr(self.memory.store, "batch", None)
-            with (batch() if batch is not None else nullcontext()):
+            with transaction(self.memory.store, self.scope.tenant):
                 for address, op in puts.items():
                     self._apply_put(by_address.get(address), op, at)
         return results

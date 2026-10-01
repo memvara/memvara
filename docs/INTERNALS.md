@@ -2952,6 +2952,65 @@ The write path keeps model calls and hosted-embedder calls outside its transacti
 thread outside a batch reads through its own connection, which sees the last commit while
 another writer holds the lock.
 
+**A batch can say which tenant it is for.** `Store.batch(*, tenant=None)` takes an optional
+keyword. `SQLiteStore` and `RemoteStore` accept it and ignore it, because SQLite's write lock
+covers the whole file and the hosted client holds no lock. It exists for a store that can lock
+one tenant, such as memvara-cloud's Postgres store, so that two customers' writes do not wait
+for each other. That store has to take its lock as the batch begins, before the batch's first
+read, so it cannot learn the tenant from the reads: the library has to say.
+
+`Memvara` passes the tenant when everything the batch reads and writes belongs to it, and
+passes nothing when the batch may touch several tenants or all of them. A store treats
+`None` as "any tenant" and locks as broadly as it did before the keyword existed, which also
+keeps out every batch that named one tenant. The calls, by what they pass:
+
+- *The tenant of the handle or call.* `remember()`, `add()` (all three of its batches),
+  `supersede()` and `remember(replaces=...)` when the new claim and its turns stay in the
+  caller's tenant, `delete()`, `forget()`, `forget_matching()`, `link()`, `erase()`, the
+  consolidation sweep over one tenant, `merge_predicate()`, `backfill_entities()`,
+  `backfill_predicates()`, `split_entity()`, the document writes (add, update and delete,
+  and the status and retry steps they run), the note import's `write_note()` and the
+  LangGraph store's `put` batch.
+- *The tenant of the claim.* The expiry sweep erases each expired claim in a batch for that
+  claim's tenant, whichever tenant the sweeping handle is bound to.
+- *Nothing.* `reembed()`, which walks every claim and turn in the store; a sweep started
+  with `tenant=None`; and a write that names two tenants. That last case needs a hand-built
+  object: an `add()` given `Episode` objects whose scopes name different tenants, a
+  `supersede()` whose new claim is filed in another tenant, or a `remember()` whose
+  `sources` include an `Episode` scoped to another tenant. `sole_tenant()` makes the
+  decision from every tenant the write names, and answers `None` for two or more.
+
+A batch nested inside another joins it, and the outermost batch decides the lock, so the
+outermost call has to cover everything inside it. `_supersede` opens the outer batch and
+`_write_claim` the inner one, and both work out the tenant from the same inputs, so they
+agree. Inside a batch the library reads claims through `Scope.sees`, which never crosses a
+tenant, and through tenant-keyed lookups such as `competing_claims(tenant, ...)`. A few
+reads go by id alone (`get_claim` in `erase()` and in a model's proposed ends, `get_episodes`
+when it checks which turns are still stored), and each result is checked against the scope
+or the tenant before anything is written.
+
+The library calls `batch(tenant=...)` only on a store whose `batch` declares a parameter
+named `tenant`. A store written before the keyword is called as `batch()`, and so is a
+wrapper that only takes `**kwargs`: forwarding `tenant=` through it to a store that cannot
+take it would raise, and not passing it only makes the store lock as broadly as before.
+The check is `inspect.signature` and not `except TypeError`, for the reason
+`find_episode_by_hash`'s `at` is checked that way: a `TypeError` raised inside the store
+must stay visible. `memvara.store.transaction(store, tenant)` is the one place that does
+it, and every call site above goes through it. It used to be `getattr(store, "batch")`
+repeated in five modules.
+
+**`erase(claim_id, sources=True)` erases only source turns of the claim's own tenant.** It
+passes the claim's tenant, and a claim can cite a turn of another tenant: through a
+hand-built `Episode` as above, or through a hand-built `Claim` whose `sources` name that
+turn's id. `SQLiteStore.erase_claim` used to erase that turn too, so a tenant could delete
+another tenant's text by citing its id and then erasing its own claim, and a store that locks
+per tenant would have written rows its batch held no lock for. It now leaves such a turn where
+it is. A store that narrows its lock has to do the same, and has to open the batches of its own
+erasure methods for the tenant they erase.
+
+`tests/test_batch_tenant.py` records the tenant of every batch each of the calls above opens,
+and checks a store with no keyword, a store with `**kwargs` and SQLite.
+
 **A write given no `recorded_at` is recorded when it takes the lock.** `Memvara.remember()`
 used to take `recorded_at` from the clock when it was called, before the lock, while the
 reconciler retired whatever the claim displaced at the instant it ran, under the lock.

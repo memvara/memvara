@@ -60,14 +60,13 @@ caller who really is correcting the record says so with `close="retired"`; see
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Callable, Iterable, Mapping, Sequence
 
 from ..entities import EntityRegistry, entity_key
 from ..schema import PredicateRegistry
-from ..store.base import Store, bulk_claims, claim_digest
+from ..store.base import Store, bulk_claims, claim_digest, transaction
 from ..types import (
     NOTE_PREDICATE, PROJECT_SUBJECT_TYPE, SELF_SUBJECT, expired,
     ObjectKind,
@@ -945,6 +944,8 @@ class Reconciler:
         ([(1, 3), (5, 7)], 1)
         >>> Reconciler._uncovered(c(mar), [c(jan, may)], None)[0] == [(may, None)]
         True
+        >>> Reconciler._uncovered(c(mar), [c(may, may)], None) == ([(mar, None)], [])
+        True
         """
         start = as_utc(claim.valid_from)
         stop = as_utc(end) if end is not None else None
@@ -1383,7 +1384,8 @@ class Reconciler:
 # --- late-alias backfill --------------------------------------------------------
 
 
-def _write_back(store: Store, claims: Iterable[Claim], read: Mapping[str, bytes]) -> int:
+def _write_back(store: Store, claims: Iterable[Claim], read: Mapping[str, bytes],
+                tenant: str) -> int:
     """Write `claims` in one transaction, one slot at a time, leaving alone every slot in
     which another writer changed a row since the scan. Returns the rows written.
 
@@ -1401,9 +1403,8 @@ def _write_back(store: Store, claims: Iterable[Claim], read: Mapping[str, bytes]
     slots: dict[str, list[Claim]] = {}
     for claim in claims:
         slots.setdefault(claim.fact_key, []).append(claim)
-    batch = getattr(store, "batch", None)
     written = 0
-    with (batch() if batch is not None else nullcontext()):
+    with transaction(store, tenant):
         stored = bulk_claims(store, [c.id for group in slots.values() for c in group])
         for group in slots.values():
             if all((row := stored.get(c.id)) is not None and claim_digest(row) == read[c.id]
@@ -1493,7 +1494,7 @@ def backfill_entities(reconciler: Reconciler, tenant: str, *, dry_run: bool = Tr
     _replay(slots, reconciler.registry, t, report, ENTITY_REKEY)
 
     if not dry_run:
-        report.written = _write_back(reconciler.store, claims, read)
+        report.written = _write_back(reconciler.store, claims, read, tenant)
     return report
 
 
@@ -1621,7 +1622,7 @@ def backfill_predicates(reconciler: Reconciler, tenant: str, *,
         # touch in step with `_replay` itself.
         to_write = {c.id: c for c in moved}
         to_write.update((c.id, c) for group in slots.values() for c in group)
-        report.written = _write_back(reconciler.store, to_write.values(), read)
+        report.written = _write_back(reconciler.store, to_write.values(), read, tenant)
     return report
 
 
@@ -1877,5 +1878,5 @@ def split_entity(reconciler: Reconciler, scope: Scope, surface: str, at: datetim
         report.reopened += 1
 
     if not dry_run:
-        report.written = _write_back(reconciler.store, earlier, read)
+        report.written = _write_back(reconciler.store, earlier, read, scope.tenant)
     return report

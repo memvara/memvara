@@ -9,6 +9,30 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Changed
+
+- **`Store.batch()` takes an optional `tenant`, so a store can lock one tenant.**
+  `Store.batch(*, tenant=None)` is new on the `Store` protocol. `Memvara` passes the tenant
+  whenever everything a batch reads and writes is in one tenant, which covers `remember()`,
+  `add()`, `supersede()`, `delete()`, `forget()`, `forget_matching()`, `link()`, `erase()`,
+  the expiry sweep, consolidation, the backfills and the document writes. It passes `None`
+  for `reembed()` and for a write that names two tenants. `SQLiteStore` and `RemoteStore`
+  accept the keyword and ignore it. A third-party store whose `batch()` lacks the keyword
+  keeps working: the library reads the signature and calls it as `batch()`, which includes a
+  wrapper that only takes `**kwargs`. All the call
+  sites now go through `memvara.store.transaction(store, tenant)`, and `memvara.store`
+  exports `sole_tenant()`. memvara-cloud #298 uses this for a per-tenant Postgres lock.
+  `docs/UPGRADING.md` has the details for a store that implements the protocol.
+
+### Fixed
+
+- **`erase(claim_id, sources=True)` no longer erases a source turn of another tenant.**
+  `SQLiteStore.erase_claim` erased the claim's uncited source turns by id, whatever their
+  tenant. A claim can cite a turn of another tenant, through a hand-built `Claim` whose
+  `sources` name its id or a hand-built `Episode`, so a tenant could delete another tenant's
+  text by citing it and erasing its own claim. Only turns of the claim's own tenant are
+  erased now, and the claim's tenant is what `erase()` passes to `Store.batch()`.
+
 ## [0.18.0] — 2026-09-29
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so

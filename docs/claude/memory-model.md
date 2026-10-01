@@ -216,6 +216,11 @@ either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/sto
   `link()`, `erase()` and the expiry sweep — reads it inside that batch, so it never
   writes back a copy that another writer has changed or erased since. INTERNALS.md has
   the details under *Two writers on one store*.
+  `Store.batch(*, tenant=None)` lets a store lock one tenant instead of the whole
+  database. `Memvara` passes the tenant when everything the batch touches is in it, and
+  `None` for `reembed()` and for a write naming two tenants. Every call site goes through
+  `memvara.store.transaction(store, tenant)`, which calls a store whose `batch` lacks the
+  keyword as `batch()`, and a batch nested in another is covered by the outer one's tenant.
 - **Every commit `SQLiteStore` makes that can change a turn goes through `_maybe_commit`.**
   That is what empties `_scope_turns`, the vector leg's in-memory list of each scope's turns
   and their matrix rows. Another connection's commit, from another process or another
