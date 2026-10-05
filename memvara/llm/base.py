@@ -512,65 +512,20 @@ OPTIONAL_CLAIM_FIELDS = ("polarity", "when", "amount", "unit")
 def self_hosted_claim_schema(max_claims: int = MAX_CLAIMS) -> dict[str, Any]:
     """`bounded_claim_schema`, with the fields the model may leave out taken out of `required`.
 
-    On a CPU-hosted model, generating the response is most of the wall time, and much of
-    what gets generated is field names rather than facts. Measured against the shipped
-    shape: one claim serializes to 52 tokens, of which 44 are keys, punctuation and the
-    three forced nulls.
+    On a CPU-hosted model, generating the response takes most of the wall time, and most of
+    each claim is field names and forced nulls. This schema moves `polarity`, `when`,
+    `amount` and `unit` out of `required`. `shape_claims` already reads each of them with
+    `.get()`, so an absent field means the same as the default: an assertion for
+    `polarity`, and `None` for the other three. `memory_type` and `confidence` stay
+    required, because their defaults would be decisions; `DECIDED_CLAIM_FIELDS` explains.
 
-    **Four fields move out of `required`: `polarity`, `when`, `amount` and `unit`.** Each
-    is safe because `shape_claims` already reads it with `.get()` and documents what an
-    absent value means, and because none of the four carries a decision. `polarity`
-    defaults to 1, since anything that is not an explicit -1 is an assertion. `when`,
-    `amount` and `unit` default to `None`, which is what the shipped schema spells as an
-    explicit null on the common turn that states no time and no measurement. An absent
-    field and an explicit null reach `shape_claims` as the same answer.
-
-    `memory_type` and `confidence` stay required even though `shape_claims` can default
-    them, because there the default is a decision rather than a formality.
-    `DECIDED_CLAIM_FIELDS` carries the reasoning; the short version is that defaulting
-    `memory_type` files every episodic claim as a standing fact, and defaulting
-    `confidence` puts every claim at 0.5, which defeats the pollution guard's R4 discount
-    at `reconcile.AUTHORITY_SHARE` and lets a polluted claim retire a true one.
-
-    **On the saving, and what is and is not measured.** Serialization predicts 33%: eight
-    claims are 413 tokens under the shipped schema and 277 under this one. A wider version
-    of this schema, which also made `memory_type` and `confidence` optional, was measured
-    end to end on the production box at **27% of generated tokens, with the same 10 of 15
-    key facts found** — three episodes, the deployment's own prompt and predicate
-    vocabulary, a 12-claim cap on both arms, phi-4-mini Q8_0. That run showed the
-    measured saving falls well short of what serialization predicts, because the model
-    still spends tokens on values and on deciding what to write.
-
-    **This schema is now measured: it cut 12% of the generated tokens and found the same
-    10 of 15 key facts** — 2,401 output tokens against 2,103, the same three episodes,
-    the deployment's own prompt and predicate vocabulary, a 12-claim cap on both arms,
-    phi-4-mini Q8_0 on a 4-core box. Wall time moved much less than tokens did, 155.9 s
-    to 149.9 s at the median, because prefill is unchanged and dominates a short call.
-
-    So the measured saving is roughly a third of what serialization predicts, and the
-    reason is that only the field names went away: the model still spends tokens on
-    values and on deciding what to write. The wider version of this schema, which also
-    made `memory_type` and `confidence` optional, measured 27% on the same episodes —
-    the extra 15 points were the confidence number and the memory type, and both are
-    load-bearing, which is why they stayed required.
-
-    Run `bench/extract_cost.py` against your own model rather than taking 12% as a
-    promise: how much of the permission a model takes up is a property of its habits, not
-    of the schema. Measured on LFM2.5-1.2B-Instruct the wider schema cut 55% where
-    phi-4-mini cut 27%.
-
-    **It does not bound a runaway, and nothing here should be read as claiming it does.**
-    Measured on the same box, an *uncapped* claims array reached 7,197 generated tokens on
-    a 900-character turn, ran for 1,957 seconds, and found 7 of 15 facts against the capped
-    arm's 10 — the restatements crowd out the answer. A fixed fraction of a runaway is
-    still a runaway. `bounded_claim_schema` is what stops it, which is why this function
-    builds on it rather than beside it.
-
-    Opt-in for the same reason `bounded_claim_schema` is. OpenAI's strict mode requires
-    every declared property to appear in `required`, so this schema is a 400 on the hosted
-    path rather than something that degrades quietly. `additionalProperties` stays False
-    and every property stays declared, so a model that does send `confidence` is still
-    understood — the fields become optional, not forbidden.
+    It is opt-in. OpenAI's strict mode requires every declared property to be listed in
+    `required`, so the hosted path rejects this schema with a 400. Every property stays
+    declared and `additionalProperties` stays False, so a model that does send a field is
+    still understood. It shortens each claim but does not bound a runaway response; the
+    `maxItems` cap from `bounded_claim_schema` does that. The measured savings (12% of
+    generated tokens with phi-4-mini) are in `docs/DEPLOY.md`, under "Set
+    `MEMVARA_LLM_TERSE_CLAIMS` if generation is the bottleneck".
 
         >>> schema = self_hosted_claim_schema(8)
         >>> schema["properties"]["claims"]["maxItems"]

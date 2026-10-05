@@ -164,75 +164,38 @@ class OpenAILLM:
         transcription_model: str = "whisper-1",
     ) -> None:
         self.model = model
-        # The model `transcribe` asks for. A separate name from `model` because a chat
-        # model cannot transcribe. `whisper-1` is the default because every
-        # OpenAI-compatible server that offers transcription accepts that name, including
-        # Azure deployments and the common self-hosted Whisper servers.
+        # The model `transcribe` asks for, since a chat model cannot transcribe. Every
+        # OpenAI-compatible server that transcribes accepts `whisper-1`, including Azure
+        # and the common self-hosted Whisper servers.
         self.transcription_model = transcription_model
         self.max_tokens = max_tokens
-        # How long one call may take before the client gives up. `None` keeps the SDK's
-        # own default of 600 seconds, and that default is why this exists: a self-hosted
-        # model generating at about 5 tokens a second needs longer than 600 s for a turn
-        # of a few thousand characters, and a cancelled call is a turn that was not
-        # extracted. Until this, raising it meant building the whole `openai.OpenAI`
-        # client and injecting it — which `bench/extract_cost.py` does, and says so in a
-        # comment.
-        #
-        # Sent on the request rather than set on the client, so it applies however the
-        # client was built, including one a caller injected. `chat()` passes its own
-        # per-call timeout and is unaffected: `memvara.select` measures its budget in
-        # seconds and must not inherit an extraction's.
+        # Seconds one call may take. `None` keeps the SDK's default of 600, which is too
+        # short for a slow self-hosted model on a long turn. It is sent with each request,
+        # so it also applies to a client the caller injected. `chat()` passes its own
+        # timeout and does not use this one.
         self.timeout = timeout
-        # Provider-specific request fields the SDK does not name, sent on every request
-        # as the SDK's `extra_body`. The case it exists for is a self-hosted model that
-        # reasons before it answers: a Qwen3 server needs
-        # `{"chat_template_kwargs": {"enable_thinking": false}}` or it spends the whole
-        # token budget thinking and returns an empty message. `None` sends nothing, so a
-        # caller who never set it makes the same request as before this option existed.
+        # Extra request fields the SDK does not name, sent on every request. A Qwen3
+        # server needs `{"chat_template_kwargs": {"enable_thinking": false}}`, or it
+        # spends the whole token budget thinking and returns an empty message.
         self.extra_body = dict(extra_body) if extra_body else None
-        # Replacement extraction instructions, for the same self-hosted case `max_claims`
-        # serves. `EXTRACT_SYSTEM` closes by saying an empty list is a correct answer and
-        # the common case, which is true and is what a model able to weigh salience across
-        # a long turn needs to hear. A small one reads it as permission: measured
-        # 2026-09-03, phi-4-mini-instruct returned nothing at all on inputs past roughly
-        # 1,300 tokens until that sentence was removed, on the same prompt and episodes.
-        # An override rather than a rewrite, because the shipped wording is right for the
-        # models it was written for and a small-model accommodation applied to every
-        # provider is a change nobody asked for.
-        #
-        # `or` rather than `is not None`, so an empty string means "use the shipped
-        # prompt" here. That is deliberately *not* what the server does: it refuses an
-        # empty file, because an operator who named one meant to change something. The two
-        # answers differ because the inputs do — a caller passing `""` in Python has an
-        # object it can inspect, and sending a model an empty system message is never what
-        # it wanted. A caller that must distinguish "unset" from "empty" should not
-        # compute the argument down to a string first.
+        # Replacement extraction instructions. Small self-hosted models can read the
+        # shipped prompt's "an empty list is correct" as permission to return nothing;
+        # `docs/DEPLOY.md` has the measurement. An empty string means the shipped prompt
+        # here, whereas the server refuses an empty prompt file.
         self._extract_system = extract_system or EXTRACT_SYSTEM
-        # Cap the claims array, for a self-hosted server reached through this backend. Off
-        # by default because hosted OpenAI rejects `maxItems` under `strict: True` — see
-        # `bounded_claim_schema`, which carries the reasoning and the measurement. Built
-        # once here rather than per call, since it is the same dict every time.
-        # `terse` additionally takes `polarity`, `when`, `amount` and `unit` out of
-        # `required`, so the model stops spending tokens on `"when":null,"amount":null,
-        # "unit":null` for every claim. Serialization puts eight claims at 413 tokens
-        # against 277; what a model actually saves is less, and is a property of its
-        # habits rather than of the schema. `self_hosted_claim_schema` carries the
-        # measurements, and the reason `memory_type` and `confidence` stay required.
-        #
-        # A separate argument from `max_claims` rather than a second meaning for it. Both
-        # describe the same self-hosted case, but they are different trades: the cap
-        # protects against a runaway and costs nothing, while this one changes what the
-        # model is asked to write. An operator who set `MEMVARA_LLM_MAX_CLAIMS` asked for
-        # the first and must not silently receive the second.
+        # `max_claims` caps the claims array. It is off by default because hosted OpenAI
+        # rejects `maxItems` under `strict: True`; see `bounded_claim_schema`. `terse`
+        # also makes four claim fields optional; see `self_hosted_claim_schema`. They are
+        # separate arguments because the cap only guards against a runaway, while `terse`
+        # changes what the model is asked to write.
         if terse:
             self._claim_schema = self_hosted_claim_schema(
                 MAX_CLAIMS if max_claims is None else max_claims)
         else:
             self._claim_schema = (
                 CLAIM_SCHEMA if max_claims is None else bounded_claim_schema(max_claims))
-        # Extraction is a parsing task, not a creative one, and the same turn arriving
-        # twice should produce the same claim rather than two spellings of it that the
-        # reconciler then has to treat as competing values.
+        # Zero by default: the same turn extracted twice should give the same claim, not
+        # two spellings that the reconciler would treat as competing values.
         self.temperature = temperature
         self.name = f"openai/{model}"
         if client is None:
@@ -287,25 +250,11 @@ class OpenAILLM:
         # OpenAI names the same two quantities differently from Anthropic; the reading and
         # the refusal-to-guess live in one place so the two backends cannot drift.
         _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")
-        # After the usage, not before. A truncated call generated every one of those
-        # tokens and is billed for them, and `WritePipeline` publishes what a call that
-        # raised had reported — so recording first is what keeps a truncation visible on
-        # the bill as well as in the receipt.
-        #
-        # Here rather than in `_first_text`, which `chat()` also uses: a truncation is a
-        # fact about the request this method made, and `chat()` sets its own budget per
-        # call. It also does not need this — `memvara.select` raises a `ValueError` when
-        # a reply will not parse, so a cut-off selector answer is already loud. Silence
-        # is specific to the schema path, where an unparseable answer becomes an empty
-        # claim list that reads exactly like a turn holding no claims.
-        #
-        # That equivalence is strong rather than total, and the gap is worth naming: a
-        # reply cut off at a point where the JSON happens to be complete would parse, and
-        # `select` would return fewer results than the model meant to send without
-        # anything noticing. It needs the model to close its own array and then be cut
-        # off, which is not a shape a truncation produces, so this is a known residual
-        # rather than a defect. `MAX_COMPLETION_TOKENS` is 400 and the measured replies
-        # fit well inside it.
+        # Checked after the usage is recorded, so a truncated call still appears on the
+        # bill. Checked here rather than in `_first_text`, which `chat()` shares, because
+        # only the schema path is silent: there an unparseable reply becomes an empty claim
+        # list that looks like a turn with no claims. `memvara.select` already raises
+        # `ValueError` on a `chat()` reply that will not parse.
         _shape.refuse_if_truncated(
             _finish_reason(response), "length", model=self.model, budget=self.max_tokens)
         return response

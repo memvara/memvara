@@ -1129,62 +1129,20 @@ class Reconciler:
 
     def _accumulation(self, claim: Claim, t: datetime,
                       owner: str) -> Accumulation | None:
-        """Report a value landing beside live values in a slot with no declared schema.
+        """Report a value added beside live values under a predicate nobody declared.
 
-        **The trigger, exactly.** All four, on the write itself, where what was already
-        there is knowable:
+        Returns an `Accumulation` when the write is an `add`, the registry has no spec
+        for the predicate, and the slot already holds at least one live claim for the same
+        owner. Otherwise returns `None`. Only undeclared predicates are reported, because
+        a registered `MANY` predicate accumulates on purpose. Declaring the predicate as
+        either `ONE` or `MANY` stops the report.
 
-        1. the action is `add` — not a reinforcement (same value, already ours), not a
-           retraction, not a supersession;
-        2. the registry has **no spec** for the predicate, so its `MANY` is a default and
-           not a decision anyone made;
-        3. the slot already holds at least one live claim for the same owner;
-        4. and, implied by (1), not one of those occupants carries this value — step 1 of
-           `apply` would have reinforced instead. So the slot now answers a present-tense
-           question with two different answers.
-
-        (2) is what makes it worth reading, and it is the whole of the noise control.
-        A *registered* `MANY` predicate accumulates on purpose and says nothing here; a
-        predicate the extractor met and acquired a spec for is registered before its claim
-        is ever reconciled, so on the `add()` path with a model configured this fires
-        essentially never. What is left is exactly the population where cardinality can
-        never be learned at all: `remember()`, which does not run acquisition, and any
-        deployment with no extraction model. The signal appears only where the defect can
-        actually live.
-
-        **What it deliberately misses.** It cannot tell `status` from `tagged_with`. A
-        genuinely multi-valued undeclared predicate trips this on every write after its
-        first and is behaving perfectly, and nothing available at write time separates the
-        two — intent is not a property of the row. Two things make that acceptable rather
-        than merely admitted. The report is *symmetric*: it does not accuse the write of
-        being wrong, it says the predicate has never been decided. And it is
-        self-extinguishing in **both** directions — declaring the predicate `ONE` makes
-        the next write supersede, declaring it `MANY` makes this go quiet forever, and
-        either way one declaration ends it for that predicate permanently. A note you
-        silence by doing the right thing is a request for a decision, not a complaint.
-
-        It also misses, on purpose, the case with no live occupant: two values written a
-        year apart with the first already ended are not competing, and calling that a
-        pile-up would fire on ordinary history.
-
-        **Cost.** A registered predicate pays one memoized `normalize` and a dict
-        membership test — 0.13µs measured, against a ~125µs write — and a single-valued
-        one that displaced something pays not even that, because the caller
-        short-circuits on `superseded`. An *unregistered* one pays one indexed count.
-
-        That count is `Store.count_competing` and not `len(competing_claims(...))`
-        deliberately, and the difference is not a micro-optimisation: the number wanted
-        here is the occupancy of a multi-valued slot, which is the one number in the
-        system with no upper bound, and hydrating a `Claim` per occupant made the write
-        cost rise in proportion to the pathology being reported — 20µs at one occupant,
-        1.8ms at 200, 29ms at 3,000, per write, forever. A store predating the method
-        falls back to counting the claims and simply pays what it used to.
-
-        The counting branch applies no owner filter and does not need one: `fact_key`
-        hashes tenant and user, so the slot it names already belongs to exactly one
-        person — the same reason `_live`'s own owner check is described there as
-        redundant with the keys. The fallback keeps that check anyway, because it is
-        reading claims and the invariant should stay readable where the rows are.
+        The slot is counted with `Store.count_competing` rather than by loading its
+        claims, because a multi-valued slot has no size limit. A store without that method
+        falls back to `competing_claims`. The count needs no owner filter, because
+        `fact_key` already hashes the tenant and user. "When a write is reported as an
+        accumulation" in `docs/INTERNALS.md` has the full trigger, what it misses, and the
+        measured cost.
         """
         if self.registry.known(claim.predicate):
             return None
@@ -1723,109 +1681,75 @@ class SplitReport:
     __repr__ = __str__
 
 
-#: How a split marks the earlier identity. Chosen to survive `entity_key` unchanged —
-#: `#`, `::` and `-` are all folded to spaces by it, so a marker using them would not be
-#: idempotent and the second read of a split claim would land somewhere else. Verified
-#: rather than assumed: `entity_key("john smith split 20200101")` returns itself.
-#:
-#: **That holds only while the base has content the fold keeps**, which is why
-#: `split_entity` substitutes a `content_hash` for a surface form the fold empties — "..."
-#: or a bare emoji, the case `types.default_entity` exists for. `entity_key("... split
-#: 20200101")` is `"split 20200101"`, so such a marker is neither idempotent nor unique:
-#: two unfoldable names split at one instant would fold onto a single `fact_key` and start
-#: superseding each other, which is the exact defect this module exists to prevent.
-#:
-#: Readable on purpose, everywhere the base survives. It lands in `Claim.meta` and comes
-#: back out of `why()`, so an operator reading a split store sees "john smith split
-#: 20200101" and not a hash.
-#:
-#: The marker is passed through `entity_key` before it is stored, so it is never longer
-#: than `ENTITY_KEY_MAX`. A base that already sits at the bound would otherwise carry
-#: the marker past it. For such a base the fold cuts the marker to the words that fit plus
-#: a digest of the whole marker, so "split" and the stamp are no longer readable in it,
-#: but the stamp is still part of what the digest was taken over, so two splits of one
-#: long entity at different instants stay two identities.
+#: The identity a split gives the earlier claims, for example "john smith split
+#: 20200101". It uses only words and spaces, so `entity_key` leaves it unchanged; `#`,
+#: `::` or `-` would be folded to spaces and a second read would land elsewhere. When the
+#: fold empties the surface form (for example "..." or a bare emoji), `split_entity` uses
+#: a `content_hash` as the base, so two such names never share a marker. The marker is
+#: folded before it is stored, so it never exceeds `ENTITY_KEY_MAX`: a base already at
+#: the limit is cut to a digest that still covers the stamp.
 SPLIT_MARKER = "{base} split {stamp}"
 
 
 def split_entity(reconciler: Reconciler, scope: Scope, surface: str, at: datetime, *,
                  dry_run: bool = True, now: datetime | None = None) -> SplitReport:
-    """Say that one surface form has been two different things, either side of `at`.
+    """Record that one surface form named two different things, either side of `at`.
 
-    The inverse of `EntityRegistry.learn_alias`, and the repair `backfill_entities` is for
-    the other direction. The registry can be told two spellings are one thing; until this
-    existed nothing could tell it that one spelling is two.
-
-    **The failure it repairs.** Identity is a fold over the surface form and nothing else,
-    so two different people who happen to share a name are one entity, and on a
-    single-valued predicate the second retires the first:
+    This is the inverse of `EntityRegistry.learn_alias`, which says two spellings are one
+    thing. Identity is a fold over the surface form, so two people who share a name are
+    one entity, and on a single-valued predicate the later fact ends the earlier one:
 
         John Smith works_at Acme    (2018)
         John Smith works_at Globex  (2026)
         -> Acme ended, `why(Globex).superseded == [Acme]`
 
-    The store now asserts a job change nobody wrote, `history()` reports it as a timeline,
-    and `why()` explains it with a supersession pointer. That is the same failure
-    `entities.py` was built to fix on the *spelling* axis — four spellings of one employer
-    producing "three job changes that never happened, each one well-provenanced" — arrived
-    at from the other side.
+    Nothing in the data tells that apart from one person changing jobs, so memvara does
+    not try to detect it. Call this when you know that the name belonged to two different
+    subjects; `docs/DESIGN.md` explains the reasoning.
 
-    **Why this is a repair and not a detector.** Nothing in the data separates "one person
-    changed jobs after eight years" from "two people share a name". Not the gap: `works_at`
-    is `Volatility.SLOW`, a two-year half-life, so eight years is four half-lives and an
-    entirely ordinary job change. Not the provenance, not the confidence, not the
-    predicate. The distinction is knowledge the store does not have and cannot acquire,
-    which is why there is no write-time warning here: a signal that fires on every
-    long-gap supersession is noise, and noise in this position trains a reader to ignore
-    the notes that do mean something. What a person knows, this records.
+    Parameters:
 
-    **What it does, in the order it has to happen.**
+    * `reconciler` is the `Reconciler` whose store and entity registry are used, normally
+      `mem.writer.reconciler`.
+    * `scope` is the owner (tenant and user) whose claims are split.
+    * `surface` is the subject as written, for example "John Smith". It is resolved
+      through `EntityRegistry.probe_keys`, so claims written under any spelling an alias
+      has merged with it are included, the same way `Memvara.history()` reads them.
+    * `at` is the boundary. Claims whose `valid_from` is before `at` move to a new
+      identity (see `SPLIT_MARKER`); the rest keep the name as written. A naive datetime
+      is read as UTC.
+    * `dry_run`, True by default, computes and returns the report but writes nothing.
+      History is rewritten only when an operator asks: run it dry, read the report, then
+      run it with `dry_run=False`.
+    * `now` is the time stamped on each `ENTITY_REKEY` record, and defaults to the
+      current time.
 
-    1. Every claim under this identity is re-stamped, retired ones included — `history()`
-       loses the past it exists to show if the closed rows do not move with the live ones.
-       Only claims whose `valid_from` is *before* `at` move; the rest keep the identity
-       they had, so the later person stays addressable by the name as written.
-    2. A closure that crossed the boundary is undone. The two claims were never competing,
-       so the earlier one's `valid_to` and `invalidated_by` are cleared and it is live
-       again. Within a partition nothing is touched: those claims did compete and still
-       do, in the same order.
-    3. Each moved claim is stamped with a dated `ENTITY_REKEY` record, exactly as a
-       backfill stamps one, so `why()` can say why history changed and not merely that it
-       did.
+    Each claim that moves, retired claims included, is changed in three ways:
 
-    **"Under this identity" is every identity the surface form asks about**, resolved
-    through `EntityRegistry.probe_keys` — the same widening `Memvara.history()` reads
-    through, and for the same reason. A merge does not re-key the past, so once an alias
-    has joined two spellings the claims sit under whichever key each was written with.
-    Matching only `entity_key(surface)` would repair one half of the entity the operator
-    was looking at, and where the merge landed on the other spelling, none of it: a
-    `scanned=0` report on a store whose manufactured job change is in plain view.
+    1. Its subject identity becomes the split marker.
+    2. It gets a dated `ENTITY_REKEY` record, so `why()` can say why its history changed.
+    3. If a claim from after the boundary had ended it, the ending is undone: `valid_to`
+       and `invalidated_by` are cleared and the claim is live again. This includes a
+       backdated write that `Reconciler.apply` clamped to end where the later claim
+       begins, which leaves no `invalidated_by`; that case is matched by the end time.
+       An ending between two claims on the same side of the boundary is kept, because
+       those claims did compete.
 
-    **A crossing closure does not always carry a pointer**, and the one that does not is
-    the case a reader will miss. Writes arriving in valid-time order supersede: the later
-    employment closes the earlier one and `invalidated_by` names it. A *backdated* write —
-    the 2018 job recorded after the 2026 one, which is what importing somebody's history
-    looks like — takes the closure on itself instead, in `Reconciler.apply`'s `newer`
-    branch, which clamps the candidate's own `valid_to` to where the later claim begins
-    and writes no pointer at all. Same manufactured history, no `invalidated_by` to key
-    off, so this matches that end against the instant the clamp would have used.
+    A retired claim is moved but never made live again. An ending was inferred from the
+    fold, so a wrong fold makes it wrong; a retirement is a caller saying the record was
+    never true, which this function cannot reverse. Only subjects are split, never
+    objects, because an object's identity decides duplicate detection, not which slot a
+    claim occupies.
 
-    **A retirement is never undone**, and that is the one asymmetry worth stating. Ending
-    a claim is something the write path inferred from the fold, so the fold being wrong
-    makes the ending wrong. Retiring one is a caller saying "this was never true" — a
-    statement about the record that this function has no standing to reverse. Those are
-    counted in `retired_left` rather than silently kept, so a caller can see there were
-    some and go and look.
+    Returns a `SplitReport`. `scanned` counts the claims found under the surface form,
+    `moved` the claims re-stamped onto the earlier identity, `reopened` the endings
+    undone, and `retired_left` the crossing endings left alone because they were
+    retirements. `written` counts the rows rewritten on a real run. A slot that another
+    writer changed while the split ran is left as that writer left it, so `written` can
+    fall short of `moved`, and running the split again moves the rest. With
+    `dry_run=True`, `written` is 0 and the store is not changed.
 
-    **Subjects only.** An object-side identity decides `value_key`, which is exact-duplicate
-    detection rather than slot occupancy, so splitting one is a different operation with
-    different consequences and is not this one.
-
-    `dry_run=True` by default, for `backfill_entities`' reason: this rewrites history, and
-    history is rewritten when an operator asks and never as a side effect. Run it dry, read
-    the report, then run it for real. A slot in which another writer changed a claim while
-    the split ran is left as that writer left it, also for `backfill_entities`' reason;
-    `written` then falls short of `moved`, and running the split again moves the rest.
+    It raises no error of its own; an error from the store propagates.
     """
     t = now or utcnow()
     boundary = as_utc(at)
