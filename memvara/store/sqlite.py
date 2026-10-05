@@ -78,6 +78,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Iterator
 import numpy as np
 
 from ..filters import SearchFilter, meta_matches
+from ..retrieve.analyze import tokenize
 from ..types import (
     ObjectKind,
     OBJECT_ENTITY,
@@ -1139,17 +1140,7 @@ def _fts_query(raw: str) -> str:
     query is both a crash and an injection surface. Reduce to bare alphanumeric tokens
     and OR them; ranking, not filtering, is what BM25 is here for.
     """
-    toks = []
-    cur = []
-    for ch in raw.lower():
-        if ch.isalnum():
-            cur.append(ch)
-        elif cur:
-            toks.append("".join(cur))
-            cur = []
-    if cur:
-        toks.append("".join(cur))
-    toks = [t for t in toks if len(t) > 1]
+    toks = tokenize(raw)
     if not toks:
         return ""
     return " OR ".join(f'"{t}"' for t in toks)
