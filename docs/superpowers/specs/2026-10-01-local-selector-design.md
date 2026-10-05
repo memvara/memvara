@@ -706,3 +706,30 @@ to a question about the assistant 21 times in 22, as the paid selector does, and
 cannot see answers that are not stated word for word. So the next step is rendering (e)
 with whole turns, as section 14 concluded, and the judged run in gate G3 is where its
 distance from the paid selector gets settled.
+
+## 16. Gates G3 and G4 for rendering (e) (pre-registered 2026-10-05)
+
+Written before the LoCoMo pools were built and before the judged run. Section 6 fixed both
+gates before rendering (e) existed, so this section only says how they apply to it. The
+pass lines are section 6's, unchanged.
+
+**The model and the rendering.** Step 2a's model B with its server-fitted keep rule
+(`local/selector/cal/d6-B2a-server`), rendered as `LocalSelector.select_ordered()` now
+ships it: the kept turns first, then the other candidates in the model's order, then the
+rest of the reranked list. The stock row is the stock model rendered the same way.
+
+**G3, LoCoMo.** Categories 1 to 4 of all ten conversations, every question test only,
+pools built with `bench/selector_pools.py locomo`. A LoCoMo turn's role is its speaker's
+name, so routing finds no `user` turn and hands over both people's turns: that is the
+"routing off" of section 6. The measure is coverage at 720 tokens, as in section 14.
+- **Pass:** fine-tuned minus stock of at least +1.0 point, with the 95% paired bootstrap
+  interval above zero.
+- **Prediction:** +1.5 points, with a range of −1 to +4. The model was trained only on
+  LongMemEval, so this is the out-of-distribution check.
+
+**G4, judged LongMemEval.** The 199 questions of `memvara-ranked-parity2` in MemoryBench,
+with the gpt-5.4 reader and judge and a 720-token budget, served by a memvara store whose
+read selector is `LocalSelector` on step 2a's model B.
+- **Pass:** at least 174 correct, and a paired net of at least −3 against the model
+  selector's 177 on the same questions.
+- **Prediction:** 174, with a range of 168 to 180.
