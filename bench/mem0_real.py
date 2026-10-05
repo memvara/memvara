@@ -52,9 +52,9 @@ os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 os.environ.setdefault("OPENAI_API_KEY", "sk-not-used-by-this-benchmark")
 
 from memvara import Memvara, HashingEmbedder
-from memvara.select import PLAIN_READ
 
-from compare import NEEDLE_VALUE, ScriptedLLM, build_workload, make_extractor
+from compare import (NEEDLE_VALUE, ScriptedLLM, build_workload, make_extractor,
+                     score_memvara)
 
 EMBED_DIM = 256
 
@@ -169,25 +169,8 @@ def score_mem0(api, w) -> dict:
         "correct": correct,
         "stale": stale,
         "live": len(rows),
-        "needle": any(NEEDLE_VALUE in r.get("memory", "") for r in found),
+        "needle_found": any(NEEDLE_VALUE in r.get("memory", "") for r in found),
     }
-
-
-def score_memvara(mem: Memvara, w) -> dict:
-    live = mem.get_all()
-    by_pred: dict[str, list[str]] = {}
-    for c in live:
-        by_pred.setdefault(c.predicate, []).append(c.object)
-
-    stale = correct = 0
-    for pred, want in w.truth.items():
-        got = by_pred.get(pred, [])
-        correct += want in got
-        stale += len([g for g in got if g != want])
-
-    hits = [r.claim.object for r in mem.search(NEEDLE_VALUE, k=3, **PLAIN_READ)]
-    return {"correct": correct, "stale": stale, "live": len(live),
-            "needle": NEEDLE_VALUE in hits}
 
 
 # --- the run --------------------------------------------------------------------
@@ -262,8 +245,8 @@ def run(chitchat_ratio: int = 4, trials: int = 5) -> None:
         ("Stale values left live", col(m, "stale"), col(e, "stale")),
         ("Live rows in the store", col(m, "live"), col(e, "live")),
         ("Rare literal found (BM25 case)",
-         "yes" if all(r[0]["needle"] for r in m) else "not always",
-         "yes" if all(r[0]["needle"] for r in e) else "not always"),
+         "yes" if all(r[0]["needle_found"] for r in m) else "not always",
+         "yes" if all(r[0]["needle_found"] for r in e) else "not always"),
         ("Wall clock, median",
          f"{sorted(r[1] for r in m)[trials // 2] * 1000:.0f} ms",
          f"{sorted(r[1] for r in e)[trials // 2] * 1000:.0f} ms"),
