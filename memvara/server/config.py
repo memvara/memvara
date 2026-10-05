@@ -58,9 +58,9 @@ _MODES = ("local", "cloud")
 #: login command (built separately) has to write exactly this path for this file to find it.
 CREDENTIALS_PATH = Path.home() / ".memvara" / "credentials.json"
 
-#: Where a client goes absent MEMVARA_SERVER_URL. `login.py` declares its own copy as
-#: `_DEFAULT_SERVER_URL`; leaving that alone is deliberate, since collapsing them is a
-#: change to a module this work has no other reason to touch.
+#: Where a client goes absent MEMVARA_SERVER_URL. `login.py` and `init.py` import this
+#: one. `memvara/cli.py` keeps its own copy, because importing this module there would add
+#: about 20 ms to every start of the `memvara` command.
 DEFAULT_SERVER_URL = "https://app.memvara.dev"
 
 #: Backends selectable from the environment. Anything needing constructor arguments —

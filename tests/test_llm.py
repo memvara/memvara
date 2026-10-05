@@ -791,3 +791,14 @@ def test_a_model_that_finished_its_answer_does_not_raise(reason):
 ])
 def test_the_stop_reason_is_read_from_whatever_shape_arrives(response, expected, why):
     assert attr_or_key(response, "stop_reason") == expected, why
+
+
+def test_a_backend_that_does_not_implement_ask_fails_with_a_clear_error():
+    """`StructuredCalls` is a plain mixin, so nothing stops a backend from forgetting
+    `_ask`. Calling it must say so, instead of handing None to the code that shapes the
+    answer and failing there with an unrelated AttributeError."""
+    class Forgetful(_shape.StructuredCalls):
+        pass
+
+    with pytest.raises(NotImplementedError, match="Forgetful does not implement _ask"):
+        Forgetful().judge_replacement("new", "old")

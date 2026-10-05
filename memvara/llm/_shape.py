@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import math
 import re
-from abc import abstractmethod
 from typing import Any, Sequence
 
 from ..types import Episode, MemoryType
@@ -419,9 +418,10 @@ class StructuredCalls:
     _extract_system: str = EXTRACT_SYSTEM
     _claim_schema: dict[str, Any] = CLAIM_SCHEMA
 
-    @abstractmethod
     def _ask(self, system: str, prompt: str, schema: dict[str, Any],
-             usage: Usage | None, name: str) -> dict[str, Any]: ...
+             usage: Usage | None, name: str) -> dict[str, Any]:
+        """Send one request and return the parsed JSON object. Each backend overrides it."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement _ask")
 
     def extract(
         self, episodes: Sequence[Episode], known_predicates: Sequence[str],
