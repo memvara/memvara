@@ -9,6 +9,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-10-05
+
+Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so
+opening an existing store needs no migration, and the `Store`, `Embedder` and `LLM`
+protocols do not change. This release removes code nothing in the library used:
+`RemoteStore`, three internal consolidation functions, `PredicateRegistry.superseded_by()`
+and `encryption.export_key()`, each listed below with what to call instead. It adds two
+options: `Memvara(path, embeddings=False)`, a store that keeps no vectors, and a local
+selector, so a ranked read can run without a model provider. No MCP tool is added or
+renamed.
+
 ### Added
 
 - **`Memvara(path, embeddings=False)` opens a store that keeps no vectors.** It never
@@ -68,7 +79,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   and `index.d.ts` whose only job was to return an object saying the package is a command,
   not a library. They are removed, with the `main`, `types` and `sideEffects` fields, so
   `require("memvara")` now fails with Node's own `MODULE_NOT_FOUND` error. The `memvara`
-  command does not change.
+  command does not change. This reaches npm with the next npm release, which has its own
+  tag (`docs/RELEASING.md`, "The npm train"); npm 0.1.1, the version published when 0.20.0
+  was cut, still has the module.
 - **`PredicateRegistry.superseded_by()` is removed.** Read
   `registry.spec(predicate).supersedes` instead, which is what it returned.
 - **`memvara.store.encryption.export_key()` is removed.** Call
