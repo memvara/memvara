@@ -68,6 +68,10 @@ DEFAULT_SERVER_URL = "https://app.memvara.dev"
 #: it in Python rather than to grow a configuration language here.
 _BACKENDS = ("none", "anthropic", "openai")
 
+#: `MEMVARA_SELECTOR`'s values. `none` serves every ranked read unranked, with outcome
+#: `unconfigured`; `local` ranks with `memvara.select.local.LocalSelector` in this process.
+_SELECTORS = ("none", "local")
+
 #: Embedders selectable from the environment, as `kind` or `kind:argument`.
 #:
 #: The argument is the one exception to the rule above, and it is not a configuration
@@ -342,6 +346,12 @@ class ServerConfig:
     #: nothing for switching it on, because the walk does not run when there is nothing
     #: to walk.
     read_w_graph: float = 0.0
+    #: `MEMVARA_SELECTOR`: `none`, or `local` for a `LocalSelector` and the cross-encoder
+    #: reranker in front of it, on ranked reads only. See `_ranked_reads`.
+    selector: str = "none"
+    #: `MEMVARA_SELECTOR_MODEL`: a directory written by bench/selector_train.py, or `None`
+    #: for the model `LocalSelector()` loads by default.
+    selector_model: str | None = None
     #: Make `anchored` true by default on this server's three read tools, so a question
     #: the store has nothing about returns nothing instead of the nearest memory about
     #: somebody else. Each call can still pass `anchored` itself, either way.
@@ -456,6 +466,22 @@ class ServerConfig:
 
         closed = _flag(env.get("MEMVARA_CLOSED_VOCABULARY"), "MEMVARA_CLOSED_VOCABULARY")
 
+        selector = (env.get("MEMVARA_SELECTOR") or "none").strip().lower()
+        if selector not in _SELECTORS:
+            raise ConfigError(
+                f"MEMVARA_SELECTOR={selector!r} is not a selector. Use "
+                f"{_one_of(_SELECTORS)}. 'none' is the default: a ranked read is served "
+                "unranked, with outcome 'unconfigured'. 'local' ranks with a cross-encoder "
+                "in this process and needs pip install 'memvara[rerank]'.")
+        selector_model = _optional(env.get("MEMVARA_SELECTOR_MODEL"))
+        if selector_model is not None and selector != "local" and mode == "local":
+            # The same reason as MEMVARA_ADVISE_REPLACEMENTS: a setting read and never used
+            # tells the operator something false in silence.
+            raise ConfigError(
+                "MEMVARA_SELECTOR_MODEL is set but MEMVARA_SELECTOR is not 'local', so "
+                "nothing would read it. Set MEMVARA_SELECTOR=local, or unset "
+                "MEMVARA_SELECTOR_MODEL.")
+
         features_off = _features_off(env)
 
         guidance = _optional(env.get("MEMVARA_EXTRACT_GUIDANCE"))
@@ -540,6 +566,7 @@ class ServerConfig:
             api_key=api_key,
             predicates=predicates,
             read_w_graph=_weight(env.get("MEMVARA_READ_W_GRAPH")),
+            selector=selector, selector_model=selector_model,
             anchored=_flag(env.get("MEMVARA_ANCHORED"), "MEMVARA_ANCHORED"),
             project=project,
             features_off=features_off,
@@ -1065,6 +1092,8 @@ _SERVER_SIDE_UNDER_CLOUD = (
     ("advise_replacements", False, "MEMVARA_ADVISE_REPLACEMENTS", "replacement advice"),
     ("closed_vocabulary", False, "MEMVARA_CLOSED_VOCABULARY", "vocabulary policy"),
     ("read_w_graph", 0.0, "MEMVARA_READ_W_GRAPH", "retriever"),
+    ("selector", "none", "MEMVARA_SELECTOR", "selector"),
+    ("selector_model", None, "MEMVARA_SELECTOR_MODEL", "selector model"),
 )
 
 
@@ -1145,6 +1174,42 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
         raise ConfigError(str(exc)) from None
 
 
+#: How many turns a ranked read reranks before the selector's 40 candidates are taken:
+#: the depth the parity runs measured and memvara-cloud uses (`_RERANK_TOP_N`).
+RANKED_RERANK_DEPTH = 200
+
+
+def _ranked_reads(config: ServerConfig) -> dict[str, Any]:
+    """The read options `MEMVARA_SELECTOR=local` adds to the store, or none.
+
+    The selector needs the reranker in front of it: it is handed the first 40 turns of the
+    reranked, routed list, and its calibration was measured on that list. The reranker
+    runs on ranked reads only, so a plain read is exactly what it was. The selector loads
+    `LocalSelector()`'s published model, or the directory `MEMVARA_SELECTOR_MODEL` names,
+    and the reranker loads the stock model at its pinned commit beside it. Two models are
+    loaded; the selector adds about 130 MB to a process that reranks (docs/BENCHMARKS.md,
+    "The local selector", gate G6).
+    """
+    if config.selector != "local":
+        return {}
+    # Imported here so a server without the setting never pays for the module.
+    from ..rerank.cross import CrossEncoderReranker
+    from ..select.local import STOCK_MODEL, STOCK_REVISION, LocalSelector, load_encoder
+
+    try:
+        selector = (LocalSelector(config.selector_model) if config.selector_model
+                    else LocalSelector())
+        stock = load_encoder(STOCK_MODEL, STOCK_REVISION)
+    except ImportError as exc:
+        raise ConfigError(f"MEMVARA_SELECTOR=local needs sentence-transformers: {exc}") from exc
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"MEMVARA_SELECTOR=local could not load its model: {exc}") from exc
+    return {"read_selector": selector,
+            "read_reranker": CrossEncoderReranker(STOCK_MODEL, encoder=stock),
+            "read_rerank_top_n": RANKED_RERANK_DEPTH,
+            "read_rerank_ranked_only": True}
+
+
 def _local_memvara(config: ServerConfig, encryption: bool) -> Memvara:
     """The local engine `build_memvara` serves, over the store `config.path` names.
 
@@ -1215,5 +1280,6 @@ def _local_memvara(config: ServerConfig, encryption: bool) -> Memvara:
         # `filepath_prefix` too, so a caller of this `Memvara` other than the tools is
         # refused the same way.
         metadata_filters="metadata_filters" not in config.features_off,
+        **_ranked_reads(config),
         **config.scope_kwargs,
     )

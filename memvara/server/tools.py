@@ -375,14 +375,18 @@ _RECALL_MODEL_CALLS: Mapping[tuple[bool, bool], str] = {
     (True, True): "It calls a model only on a server that has one configured: there it "
                   "rewrites the query into a few other phrasings before searching "
                   "(query_rewrite), and ranked and synthesize each add one more call when "
-                  "you set them. ",
+                  "you set them, except that a server which ranks with a local model makes "
+                  "no call for ranked. ",
     (True, False): "It calls a model only on a server that has one configured: there it "
                    "rewrites the query into a few other phrasings before searching "
-                   "(query_rewrite), and ranked adds one more call when you set it. ",
+                   "(query_rewrite), and ranked adds one more call when you set it, except "
+                   "on a server that ranks with a local model, which makes no call for it. ",
     (False, True): "It calls a model only on a server that has one configured, and there "
-                   "only when you set ranked or synthesize, each of which adds one call. ",
+                   "only when you set ranked or synthesize, each of which adds one call; a "
+                   "server that ranks with a local model makes no call for ranked. ",
     (False, False): "It calls a model only on a server that has one configured, and there "
-                    "only when you set ranked, which adds one call. ",
+                    "only when you set ranked, which adds one call; a server that ranks "
+                    "with a local model makes no call for it. ",
 }
 
 
@@ -563,21 +567,23 @@ _RANKED = {
     "type": "boolean",
     "default": False,
     "description": (
-        "Consult a model, on this server's own key, to name which of the retrieved turns "
-        "actually bear on the question, and put those first, whole, ahead of everything "
-        "else. Before the model sees them, the retrieved turns are narrowed to the side "
-        "of the conversation the question names — a question about something you said "
-        "before draws only from your own prior turns, everything else only from the "
-        "user's — so it never has to choose between the two. Default false. Set it when "
-        "a question is worth a model call and the "
-        "answer is likely in something that was said rather than in a stored fact; leave "
-        "it off for an ordinary turn. It needs include_episodes true and no memory_types "
-        "filter. When the server has no key on file, the operator has switched the mode "
-        "off, the provider rejected the key, or the model call failed or timed out, the "
-        "read is served in the default order and the block ends with a line saying "
-        "which of those happened — the ranking was not skipped silently. When the "
-        "server's ranked reads are already at capacity, the call fails and asks you to "
-        "retry in a few seconds; that failure costs nothing and is worth one retry."
+        "Rank the retrieved turns to name which of them actually bear on the question, and "
+        "put those first, whole, ahead of everything else. Depending on how the server is "
+        "configured, it ranks with a model on its own key or with a local relevance model "
+        "that runs inside the server and sends nothing anywhere. Before ranking, the "
+        "retrieved turns are narrowed to the side of the conversation the question names — "
+        "a question about something you said before draws only from your own prior turns, "
+        "everything else only from the user's — so the ranking never has to choose between "
+        "the two. Default false. Set it when the answer is likely in something that was "
+        "said rather than in a stored fact; leave it off for an ordinary turn. It needs "
+        "include_episodes true and no memory_types filter. When the server has no key on "
+        "file and does not rank locally, the operator has switched the mode off, the "
+        "provider rejected the key, or the ranking failed or timed out, the read is served "
+        "in the default order "
+        "and the block ends with a line saying which of those happened — the ranking was "
+        "not skipped silently. When the server's ranked reads are already at capacity, the "
+        "call fails and asks you to retry in a few seconds; that failure costs nothing and "
+        "is worth one retry."
     ),
 }
 

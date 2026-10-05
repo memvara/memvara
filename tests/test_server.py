@@ -5348,3 +5348,113 @@ def test_a_server_that_anchors_by_default_says_so_in_the_tool_it_offers():
     finally:
         on.close()
         off.close()
+
+
+# --- MEMVARA_SELECTOR: ranked reads with a local selector ----------------------------
+
+import types as _types  # noqa: E402
+
+from memvara.rerank.cross import CrossEncoderReranker  # noqa: E402
+from memvara.select.local import (  # noqa: E402
+    CALIBRATION_FILE, SELECTOR_MODEL, SELECTOR_REVISION, STOCK_MODEL, STOCK_REVISION,
+    LocalSelector,
+)
+from memvara.server.config import RANKED_RERANK_DEPTH, _ranked_reads  # noqa: E402
+
+
+def _fake_cross_encoder(monkeypatch) -> list:
+    built: list = []
+
+    class CrossEncoder:
+        def __init__(self, model, **kwargs):
+            built.append((model, kwargs))
+
+        def predict(self, pairs, batch_size=32, show_progress_bar=None):
+            return [-5.0 for _ in pairs]
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers",
+                        _types.SimpleNamespace(CrossEncoder=CrossEncoder))
+    return built
+
+
+@pytest.mark.covers("env:MEMVARA_SELECTOR")
+def test_the_selector_setting_defaults_to_none_and_accepts_local() -> None:
+    assert ServerConfig.from_env({"MEMVARA_DB": ":memory:"}).selector == "none"
+    config = ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_SELECTOR": " Local "})
+    assert config.selector == "local"
+
+
+@pytest.mark.covers("env:MEMVARA_SELECTOR")
+def test_an_unknown_selector_is_refused() -> None:
+    with pytest.raises(ConfigError, match="is not a selector"):
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_SELECTOR": "remote"})
+
+
+@pytest.mark.covers("env:MEMVARA_SELECTOR_MODEL")
+def test_a_selector_model_needs_the_local_selector(tmp_path) -> None:
+    with pytest.raises(ConfigError, match="MEMVARA_SELECTOR is not 'local'"):
+        ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_SELECTOR_MODEL": str(tmp_path)})
+    config = ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_SELECTOR": "local",
+                                    "MEMVARA_SELECTOR_MODEL": str(tmp_path)})
+    assert config.selector_model == str(tmp_path)
+
+
+@pytest.mark.covers("env:MEMVARA_SELECTOR")
+def test_cloud_mode_refuses_the_selector() -> None:
+    config = ServerConfig.from_env({"MEMVARA_MODE": "cloud", "MEMVARA_API_KEY": "mv_test",
+                                    "MEMVARA_SELECTOR": "local"})
+    with pytest.raises(ConfigError, match="MEMVARA_SELECTOR='local' does not apply"):
+        build_memvara(config)
+
+
+def test_the_local_selector_brings_the_reranker_for_ranked_reads_only(monkeypatch) -> None:
+    built = _fake_cross_encoder(monkeypatch)
+    options = _ranked_reads(ServerConfig.from_env({"MEMVARA_DB": ":memory:",
+                                                   "MEMVARA_SELECTOR": "local"}))
+    assert isinstance(options["read_selector"], LocalSelector)
+    assert isinstance(options["read_reranker"], CrossEncoderReranker)
+    assert options["read_rerank_top_n"] == RANKED_RERANK_DEPTH == 200
+    assert options["read_rerank_ranked_only"] is True
+    # The published selector model and the stock reranker, each at its pinned commit.
+    assert [(model, kwargs.get("revision")) for model, kwargs in built] == [
+        (SELECTOR_MODEL, SELECTOR_REVISION), (STOCK_MODEL, STOCK_REVISION)]
+
+
+def test_a_trained_selector_still_reranks_with_the_stock_model(tmp_path, monkeypatch) -> None:
+    built = _fake_cross_encoder(monkeypatch)
+    (tmp_path / CALIBRATION_FILE).write_text(json.dumps(
+        {"format": 1, "scale": 1.0, "shift": 0.0, "threshold": 0.5, "max_keep": 6}),
+        encoding="utf-8")
+    _ranked_reads(ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_SELECTOR": "local",
+                                         "MEMVARA_SELECTOR_MODEL": str(tmp_path)}))
+    assert [model for model, _ in built] == [str(tmp_path), STOCK_MODEL]
+
+
+def test_no_setting_means_no_ranked_read_options() -> None:
+    assert _ranked_reads(ServerConfig.from_env({"MEMVARA_DB": ":memory:"})) == {}
+
+
+def test_a_missing_extra_or_model_is_a_startup_error(tmp_path, monkeypatch) -> None:
+    config = ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_SELECTOR": "local"})
+    monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+    with pytest.raises(ConfigError, match="needs sentence-transformers"):
+        _ranked_reads(config)
+    missing = ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_SELECTOR": "local",
+                                     "MEMVARA_SELECTOR_MODEL": str(tmp_path)})
+    with pytest.raises(ConfigError, match="could not load its model"):
+        _ranked_reads(missing)                   # no memvara_selector.json in the directory
+
+
+def test_a_ranked_recall_on_this_server_is_applied(tmp_path, monkeypatch) -> None:
+    _fake_cross_encoder(monkeypatch)
+    # Encryption off, so the test does not depend on the `encrypt` extra being installed.
+    mem = build_memvara(ServerConfig.from_env({
+        "MEMVARA_DB": str(tmp_path / "m.db"), "MEMVARA_USER": "alice",
+        "MEMVARA_FEATURE_ENCRYPTION": "0", "MEMVARA_SELECTOR": "local"}))
+    try:
+        mem.add("We chose Postgres for the job queue")
+        out = mem.recall("which database for the queue", ranked=True, include_episodes=True,
+                         with_ids=True)
+        assert out.selection.outcome == "applied"
+    finally:
+        mem.close()

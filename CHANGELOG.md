@@ -28,6 +28,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   questions, a model fine-tuned on gold labels put 0.928 of the answer-bearing turns in a
   720-token block this way, against 0.905 with the reranker's order and 0.958 for the
   model selector.
+- **`memvara-mcp` can rank reads locally.** `MEMVARA_SELECTOR=local` builds a
+  `LocalSelector` and the cross-encoder reranker in front of it, for ranked reads only, so
+  `memory_recall`'s `ranked` argument works with no key. It loads
+  `memvara/selector-minilm-l6` from Hugging Face on first start, unless
+  `MEMVARA_SELECTOR_MODEL` names a trained model directory. It is an opt-in, not a
+  replacement for a model selector: judged on 199 LongMemEval questions it answered 165,
+  against 162 with no selector and 171 with the model selector. Both settings are refused
+  under `MEMVARA_MODE=cloud`. The `ranked` description and the server instructions now say
+  a server may rank without a model call.
 
 ## [0.18.0] — 2026-09-29
 

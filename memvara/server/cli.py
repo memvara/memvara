@@ -224,7 +224,15 @@ client, not run interactively. Configured entirely by environment:
                      leg off, which is what every deployment has run. 1.0 gives it
                      the same weight as the vector and lexical legs. A store with
                      no relations in it pays nothing for switching it on.
-  MEMVARA_ANCHORED    '1' to answer only from memories the question is demonstrably
+  MEMVARA_SELECTOR    'local' to answer memory_recall's ranked argument with a small
+                     model in this process: no key, no call, nothing sent anywhere.
+                     Needs pip install "memvara[rerank]" and downloads about 180 MB
+                     of models on first start. Unset, or 'none', serves every ranked
+                     read unranked. Refused in cloud mode.
+  MEMVARA_SELECTOR_MODEL  a selector model directory written by
+                     bench/selector_train.py, in place of the published one. Needs
+                     MEMVARA_SELECTOR=local. Refused in cloud mode.
+  MEMVARA_ANCHORED'1' to answer only from memories the question is demonstrably
                      about, by default, on all three read tools. A question about
                      an entity this store has never heard of then returns nothing
                      rather than the nearest memory about somebody else. Each call
