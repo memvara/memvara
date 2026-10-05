@@ -137,12 +137,16 @@ def _text_or_number(value: Any) -> bool:
     """Whether `value` is non-empty text or a finite number, not a boolean."""
     if isinstance(value, str):
         return bool(value.strip())
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and _finite(value) is not None)
+    return finite_amount(value) is not None
 
 
 def _finite(value: Any) -> float | None:
-    """`value` as a finite float, or None when it is not a number or is not finite."""
+    """`value` as a finite float, or None when it cannot be read as one.
+
+    This is more lenient than `_shape.finite_amount`: it also reads numeric text such as
+    `"0.9"` and reads a boolean as 1.0 or 0.0. `_claim_from_dict` reads a confidence
+    through it, and has always accepted those forms.
+    """
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError):
