@@ -5430,6 +5430,13 @@ def test_a_trained_selector_still_reranks_with_the_stock_model(tmp_path, monkeyp
     assert [model for model, _ in built] == [str(tmp_path), STOCK_MODEL]
 
 
+def test_a_selector_model_that_is_not_a_directory_says_so(tmp_path) -> None:
+    config = ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_SELECTOR": "local",
+                                    "MEMVARA_SELECTOR_MODEL": str(tmp_path / "selctor")})
+    with pytest.raises(ConfigError, match="is not a directory"):
+        _ranked_reads(config)
+
+
 def test_no_setting_means_no_ranked_read_options() -> None:
     assert _ranked_reads(ServerConfig.from_env({"MEMVARA_DB": ":memory:"})) == {}
 

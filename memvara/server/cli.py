@@ -232,7 +232,7 @@ client, not run interactively. Configured entirely by environment:
   MEMVARA_SELECTOR_MODEL  a selector model directory written by
                      bench/selector_train.py, in place of the published one. Needs
                      MEMVARA_SELECTOR=local. Refused in cloud mode.
-  MEMVARA_ANCHORED'1' to answer only from memories the question is demonstrably
+  MEMVARA_ANCHORED    '1' to answer only from memories the question is demonstrably
                      about, by default, on all three read tools. A question about
                      an entity this store has never heard of then returns nothing
                      rather than the nearest memory about somebody else. Each call

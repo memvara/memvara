@@ -575,14 +575,13 @@ _RANKED = {
         "everything else only from the user's — so the ranking never has to choose between "
         "the two. Default false. Set it when the answer is likely in something that was "
         "said rather than in a stored fact; leave it off for an ordinary turn. It needs "
-        "include_episodes true and no memory_types filter. When the server has no key on "
-        "file and does not rank locally, the operator has switched the mode off, the "
-        "provider rejected the key, or the ranking failed or timed out, the read is served "
-        "in the default order "
-        "and the block ends with a line saying which of those happened — the ranking was "
-        "not skipped silently. When the server's ranked reads are already at capacity, the "
-        "call fails and asks you to retry in a few seconds; that failure costs nothing and "
-        "is worth one retry."
+        "include_episodes true and no memory_types filter. The read is served in the default "
+        "order, and the block ends with a line saying which case happened, in any of these "
+        "cases: there is no key on file and the server does not rank locally; the operator "
+        "has switched the mode off; the provider rejected the key; or the ranking failed or "
+        "timed out. The ranking is never skipped silently. When the server's ranked reads "
+        "are already at capacity, the call fails and asks you to retry in a few seconds; "
+        "that failure costs nothing and is worth one retry."
     ),
 }
 

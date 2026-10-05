@@ -1183,6 +1183,10 @@ def _ranked_reads(config: ServerConfig) -> dict[str, Any]:
     from ..rerank.cross import CrossEncoderReranker
     from ..select.local import STOCK_MODEL, STOCK_REVISION, LocalSelector, load_encoder
 
+    if config.selector_model and not Path(config.selector_model).is_dir():
+        raise ConfigError(f"MEMVARA_SELECTOR_MODEL={config.selector_model!r} is not a "
+                          "directory. It must name a model directory written by "
+                          "bench/selector_train.py.")
     try:
         selector = (LocalSelector(config.selector_model) if config.selector_model
                     else LocalSelector())

@@ -459,3 +459,14 @@ def test_candidates_a_selector_leaves_out_of_its_order_follow_the_ones_it_names(
     result = engine.search("kayak", SCOPE, k=5, include_episodes=True, ranked=True)
     shown = [x.text for x in result if isinstance(x, EpisodeResult)]
     assert len(shown) == 3 and set(shown) == set(plain)
+
+
+@pytest.mark.parametrize("fields, message", [
+    ({"scale": 1.0, "shift": 0.0, "max_keep": 6}, "has no 'threshold'"),
+    ({"scale": None, "shift": 0.0, "threshold": 0.5, "max_keep": 6}, "not a number"),
+])
+def test_an_incomplete_calibration_file_names_what_is_wrong(tmp_path, fields, message) -> None:
+    (tmp_path / CALIBRATION_FILE).write_text(json.dumps({"format": 1, **fields}),
+                                             encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        Calibration.read(tmp_path)

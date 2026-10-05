@@ -172,7 +172,10 @@ class Selector(Protocol):
     is the caller's job. A selector may also offer `select_ordered()`, which returns the
     same kept turns together with every candidate's id in its own order; the ranked stage
     then shows the unkept candidates in that order. It is optional and not part of this
-    protocol: `LocalSelector` has it and `ModelSelector` does not. `ModelSelector.select()`, the implementation this package
+    protocol: `LocalSelector` has it and `ModelSelector` does not. So is `kind`: a selector
+    whose `kind` is `"local"` is counted on the `retrieval.local_*` series. A wrapper around
+    `LocalSelector`, for example one that caps `admit()`, must forward both, or its reads
+    lose the local order and are counted on the model series a quota sums. `ModelSelector.select()`, the implementation this package
     ships, raises rather than returns for everything short of a clean answer — see its
     docstring for exactly what and why.
 

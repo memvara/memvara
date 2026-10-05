@@ -104,10 +104,15 @@ class Calibration:
             raise ValueError(f"{path} has format {data.get('format')!r}; this version of "
                              f"memvara reads format {CALIBRATION_FORMAT}")
         max_length = data.get("max_length")
-        calibration = cls(scale=float(data["scale"]), shift=float(data["shift"]),
-                          threshold=float(data["threshold"]),
-                          max_keep=int(data["max_keep"]),
-                          max_length=None if max_length is None else int(max_length))
+        try:
+            calibration = cls(scale=float(data["scale"]), shift=float(data["shift"]),
+                              threshold=float(data["threshold"]),
+                              max_keep=int(data["max_keep"]),
+                              max_length=None if max_length is None else int(max_length))
+        except KeyError as exc:
+            raise ValueError(f"{path} has no {exc.args[0]!r}") from None
+        except TypeError as exc:
+            raise ValueError(f"{path} has a field that is not a number: {exc}") from None
         digest = data.get("weights_sha256")
         return calibration, None if digest is None else str(digest)
 
