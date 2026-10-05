@@ -138,9 +138,7 @@ def proximity(ts: float, anchor: datetime,
     return 0.5 ** (days / half_life_days)
 
 
-def rank(hits: Sequence[tuple[str, float]], anchor: datetime,
-         half_life_days: float = PROXIMITY_HALF_LIFE_DAYS,
-         floor: float = MIN_PROXIMITY) -> list[tuple[str, float]]:
+def rank(hits: Sequence[tuple[str, float]], anchor: datetime) -> list[tuple[str, float]]:
     """`(episode_id, ts)` from the store, as a ranked `(id, closeness)` list — or nothing.
 
     The store already returned them nearest-first — the ordering and the cap live in one
@@ -148,8 +146,8 @@ def rank(hits: Sequence[tuple[str, float]], anchor: datetime,
     turns the timestamps into scores. Sorting here would silently make the store's `LIMIT`
     mean something different from what came back.
 
-    **Abstains wholesale when even the nearest turn is further than `floor`.** See
-    `MIN_PROXIMITY`: a leg with no opinion that votes anyway is worse than one that does
+    **Abstains wholesale when even the nearest turn scores below `MIN_PROXIMITY`.** See
+    that constant: a leg with no opinion that votes anyway is worse than one that does
     not run, because fusion reads positions and cannot tell the two apart.
 
     >>> from datetime import datetime, timezone
@@ -173,7 +171,7 @@ def rank(hits: Sequence[tuple[str, float]], anchor: datetime,
     >>> [item for item, _ in rank([("ep_1", at.timestamp()), ("ep_2", tail)], at)]
     ['ep_1', 'ep_2']
     """
-    scored = [(item_id, proximity(ts, anchor, half_life_days)) for item_id, ts in hits]
-    if not scored or scored[0][1] < floor:
+    scored = [(item_id, proximity(ts, anchor)) for item_id, ts in hits]
+    if not scored or scored[0][1] < MIN_PROXIMITY:
         return []
     return scored

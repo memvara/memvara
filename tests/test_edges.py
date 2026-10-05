@@ -76,13 +76,13 @@ def test_explanation_summary_omits_retrievers_that_did_not_fire():
 # Predicate registry
 # =============================================================================
 
-def test_superseded_by_exposes_cross_predicate_links():
+def test_a_spec_exposes_its_cross_predicate_links():
     reg = PredicateRegistry(specs=(
         PredicateSpec("unemployed", Cardinality.ONE, Volatility.SLOW,
                       supersedes=("works_at",)),
     ))
-    assert reg.superseded_by("unemployed") == ("works_at",)
-    assert reg.superseded_by("lives_in") == ()
+    assert reg.spec("unemployed").supersedes == ("works_at",)
+    assert reg.spec("lives_in").supersedes == ()
 
 
 def test_cross_predicate_supersession_actually_retires_the_other_slot():
