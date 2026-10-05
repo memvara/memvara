@@ -743,3 +743,16 @@ open-domain (+4.4), the categories where the stock model is weakest.
 parity run's search results reordered as `select_ordered()` ships them (5.1 turns kept on
 average), with answer and evaluate reset. The gateway account the reader and judge use has
 a balance of −$0.008 and refuses calls until it is topped up. The run costs about $1.10.
+
+**G4 amended before it ran (2026-10-05): gpt-oss-120b on Bedrock reads and judges.** The
+gpt-5.4 gateway had no credit, and the user chose to run the reader and judge on
+`openai.gpt-oss-120b` through Amazon Bedrock (us-east-1, the Responses API on the
+`bedrock-mantle` endpoint). The paid selector's 177 was judged by gpt-5.4, so it cannot be
+compared with a gpt-oss-120b score, and the absolute line of 174 does not apply. Both arms
+now run on the same saved search results with the same reader, judge and 720-token budget:
+- **local:** run `memvara-local-e199`, the order `select_ordered()` ships.
+- **paid:** run `memvara-paid-oss199`, the paid selector's own order from
+  `memvara-ranked-parity2`, re-answered and re-judged.
+
+**Pass:** local's paired net against paid of at least −3 questions out of 199, section 6's
+relative line. **Prediction:** −2, with a range of −8 to +4.
