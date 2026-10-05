@@ -54,20 +54,14 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence, TextIO
 
 from ..cli import _Usage, _options
+# `_CREDENTIALS_PATH` is where a successful login writes the key, and it stays a module
+# attribute of its own so tests can redirect it. `_DEFAULT_SERVER_URL` is where the flow
+# starts when MEMVARA_SERVER_URL is not set.
+from .config import CREDENTIALS_PATH as _CREDENTIALS_PATH
+from .config import DEFAULT_SERVER_URL as _DEFAULT_SERVER_URL
 from .init import private_directory
 
 __all__ = ["LOGIN_USAGE", "login"]
-
-#: Where the flow starts absent MEMVARA_SERVER_URL — the same default `config.py` gives
-#: `ServerConfig.server_url`, restated here because this module is the one that has to
-#: reach it before any `ServerConfig` exists.
-_DEFAULT_SERVER_URL = "https://app.memvara.dev"
-
-#: Where the credentials this command obtains get written. Kept equal to
-#: `config.CREDENTIALS_PATH` by construction — both are `~/.memvara/credentials.json` — but
-#: not imported from there, so this module (the one the `cloud` extra pulls `httpx` in for)
-#: never becomes a reason `config.py` has to know about `httpx` too.
-_CREDENTIALS_PATH = Path.home() / ".memvara" / "credentials.json"
 
 #: How long this process is willing to keep polling before giving up and telling the user
 #: to try again — a ceiling independent of the server's own `expires_in`, in case a clock

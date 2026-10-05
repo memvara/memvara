@@ -49,9 +49,10 @@ from . import __version__
 
 __all__ = ["USAGE", "main"]
 
-#: Where a credential lives when `--credentials` says nothing else. Named here rather
-#: than imported from `server.config` for the reason `login.py` gives for its own copy:
-#: this module has to stay importable with no extras installed.
+#: Where a credential lives when `--credentials` says nothing else. It is the same path as
+#: `server.config.CREDENTIALS_PATH`. It is written out here because importing
+#: `server.config` would load the whole `memvara.server` package every time the `memvara`
+#: command starts.
 _DEFAULT_CREDENTIALS = Path.home() / ".memvara" / "credentials.json"
 
 USAGE = f"""\

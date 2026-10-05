@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence, TextIO
 
 from ..cli import _Usage, _options
+from . import config
 
 __all__ = ["AGENTS", "INIT_USAGE", "MARKER", "client_entry", "cloud_client_entry", "init",
            "skill_text"]
@@ -138,12 +139,6 @@ This is the Python package; the npm package is a placeholder with no equivalent 
 _OPTIONS = ("--agent", "--db", "--dir", "--user", "--mode")
 _FLAGS = ("--force", "--skill-only")
 
-#: The server_url a client that never sets MEMVARA_SERVER_URL gets from config.py's own
-#: default. Written into .mcp.json only when the caller's value differs from it — writing
-#: a default into somebody's settings file freezes it there, the same reasoning
-#: `client_entry` already applies to MEMVARA_DB's default.
-_DEFAULT_SERVER_URL = "https://app.memvara.dev"
-
 
 @dataclass(frozen=True, slots=True)
 class _Step:
@@ -205,7 +200,7 @@ def cloud_client_entry(*, server_url: str | None, command: str) -> dict[str, Any
     one that does not move when the real default does.
     """
     environment: dict[str, str] = {"MEMVARA_MODE": "cloud"}
-    if server_url and server_url != _DEFAULT_SERVER_URL:
+    if server_url and server_url != config.DEFAULT_SERVER_URL:
         environment["MEMVARA_SERVER_URL"] = server_url
     return {"command": command, "args": ["-m", "memvara.server"], "env": environment}
 
@@ -226,7 +221,7 @@ def _httpx_importable() -> bool:
 
 
 def _credentials_path() -> Path:
-    return Path(os.path.expanduser("~")) / ".memvara" / "credentials.json"
+    return config.CREDENTIALS_PATH
 
 
 def _interpreter() -> str:
@@ -510,7 +505,7 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         return 0
 
     if mode == "cloud":
-        server_url = _first(env, "MEMVARA_SERVER_URL") or _DEFAULT_SERVER_URL
+        server_url = _first(env, "MEMVARA_SERVER_URL") or config.DEFAULT_SERVER_URL
         entry = cloud_client_entry(server_url=server_url, command=_interpreter())
 
         settings = _mcp_json(root, entry)
