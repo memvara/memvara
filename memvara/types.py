@@ -47,6 +47,21 @@ def as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+def z_as_offset(text: str) -> str:
+    """Return `text` with a trailing `Z` or `z` rewritten as `+00:00`.
+
+    `datetime.fromisoformat` does not accept the `Z` suffix before Python 3.11, and this
+    package supports 3.10. Every place that parses an ISO-8601 instant sent from outside
+    the library passes the text through this function first.
+
+    >>> z_as_offset("2026-03-01T10:00:00Z")
+    '2026-03-01T10:00:00+00:00'
+    >>> z_as_offset("2026-03-01")
+    '2026-03-01'
+    """
+    return text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+
+
 def time_axes(as_of: datetime | None, valid_at: datetime | None,
               known_at: datetime | None) -> tuple[datetime | None, datetime | None]:
     """Resolve the three time keywords every read method takes into the two axes.

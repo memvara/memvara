@@ -91,7 +91,8 @@ from ..select import Rewrite, SelectorBusy
 from ..types import (CUSTOM_ID_CHARS, DOCUMENT_STATES, LINK_RELATIONS, REASON_CHARS,
                      Accumulation, Claim, Closure, Collapse, DeleteResult, Dispute, Document,
                      ForgetPreview, MemoryType, RecallResult, RefusedProposal, Retype, Row,
-                     SearchResults, WriteReceipt, closure_reason, closure_reasons, utcnow)
+                     SearchResults, WriteReceipt, closure_reason, closure_reasons, utcnow,
+                     z_as_offset)
 from .memory_api import MemoryAPI
 from .validate import ToolError, shown, validate
 
@@ -187,9 +188,7 @@ def _timestamp(raw: str, label: str) -> datetime:
     timezone-aware, and comparing the two raises `TypeError` deep inside retrieval rather
     than here, where the caller can be told what to send.
     """
-    text = raw.strip()
-    if text.endswith(("Z", "z")):
-        text = text[:-1] + "+00:00"
+    text = z_as_offset(raw.strip())
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError as exc:
