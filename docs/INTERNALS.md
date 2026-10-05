@@ -3402,6 +3402,10 @@ which degrades to `w_graph=0.0`, the shipped default. It cannot fail the other w
 because claims do not un-join except by retirement and the liveness predicate already
 excludes those.
 
+The interval is 256 searches. Taking the connectivity reading was measured at 0.4 ms on a
+store with 1,000 live claims and 2.6 ms on one with 10,000, so re-measuring every 256
+searches adds less than 10 microseconds to the average search.
+
 `{}` keeps the leg. A backend without `connectivity`, or a hosted facade too old to report
 the counts, has not measured anything — and reading that as "no joins" would switch a
 working graph leg off on every third-party store at once.

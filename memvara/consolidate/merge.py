@@ -31,7 +31,7 @@ from ..embed.base import Embedder
 from ..embed.calibration import calibration_of, numbers
 from ..schema import PredicateRegistry
 from ..store.base import Store
-from ..telemetry import CONSOLIDATE_MERGED, CONSOLIDATE_PROMOTED, Recorder
+from ..telemetry import CONSOLIDATE_MERGED, CONSOLIDATE_PROMOTED
 from ..types import MAX_SALIENCE, Claim, Derivation, MemoryType, as_utc
 from .decay import BASE_KEY, decayed_salience
 from .sweep import Sweep
@@ -217,49 +217,3 @@ def promote_pass(sweep: Sweep, min_observations: int = 3) -> int:
         sweep.telemetry.counter(CONSOLIDATE_PROMOTED, promoted)
     return promoted
 
-
-def merge_duplicates(
-    store: Store,
-    embedder: Embedder,
-    registry: PredicateRegistry,
-    tenant: str | None = None,
-    threshold: float | None = None,
-    now: datetime | None = None,
-    *,
-    neighbourhood: int = NEIGHBOURHOOD,
-    window: int | None = None,
-    telemetry: Recorder | None = None,
-) -> int:
-    """Fold near-identical live claims in the same slot into one. Returns claims retired.
-
-    Only claims sharing a `fact_key` are ever compared - two claims answering different
-    questions are not duplicates however similar their text reads.
-    """
-    sweep = Sweep(store, tenant, now=now, window=window, telemetry=telemetry)
-    retired = merge_pass(sweep, embedder, registry, threshold=threshold,
-                         neighbourhood=neighbourhood)
-    sweep.flush()
-    return retired
-
-
-def promote(
-    store: Store,
-    tenant: str | None = None,
-    min_observations: int = 3,
-    now: datetime | None = None,
-    window: int | None = None,
-    telemetry: Recorder | None = None,
-) -> int:
-    """Reclassify repeatedly-observed EPISODIC claims as SEMANTIC. Returns count promoted.
-
-    Seeing something happen once is an event; seeing it `min_observations` times is a
-    pattern. The distinction is load-bearing at read time - a caller asking only for
-    SEMANTIC memory wants the pattern and not the individual occurrences - and it is only
-    knowable in hindsight, which is why it belongs here rather than on the write path.
-    Promotion is in place: the claim's identity has not changed, only our reading of what
-    kind of thing it is.
-    """
-    sweep = Sweep(store, tenant, now=now, window=window, telemetry=telemetry)
-    promoted = promote_pass(sweep, min_observations)
-    sweep.flush()
-    return promoted
