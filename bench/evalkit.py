@@ -1991,19 +1991,6 @@ def percentile(values: Sequence[float], q: float) -> float:
     return ordered[index]
 
 
-def upper_percentile(values: Sequence[float], q: float) -> float:
-    """The value at position `int(q * n)` of the sorted values, or the largest value.
-
-    This differs from `percentile`, which rounds `q * (n - 1)`: for 20 values, the 0.95
-    point here is the largest value and in `percentile` it is the second largest.
-    `bench/encryption.py` and `bench/scale.py` use this one so that their numbers stay
-    comparable with the figures already published from them. Empty input raises
-    IndexError.
-    """
-    ordered = sorted(values)
-    return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
-
-
 def mean(values: Sequence[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
