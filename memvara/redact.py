@@ -1,175 +1,31 @@
-"""The redaction seam: the last place text can be changed before it becomes durable.
+"""Redaction: one hook that can change text before memvara stores it or sends it anywhere.
 
-Memvara already answers half of a privacy story properly. `erase()` and `purge()` remove
-text that is *already* on disk — the claim row, the FTS entry that stores the tokens
-directly, the embedding that leaks content under inversion, and optionally the source
-turns. Most of the category cannot do that at all. This module is the other half, and
-deliberately only the *seam* of it: one injectable hook that sees every string on its way
-into the store and may hand back a different one.
+Pass a `Redactor` as `Memvara(redactor=...)`. Its `redact()` method receives each string on
+its way into the store and returns the text to store instead. The strings it is offered are
+listed in `FIELDS`: a turn's content, and a claim's subject, object and text. The predicate
+and the `meta` dict are never offered.
 
-That first half used to carry a caveat, and it is worth recording what it was because it
-is the reason this seam is placed where it is. `erase_claim` and `purge` did not clear the
-`entities` table, whose `canonical` column keeps the first spelling ever seen of every
-subject and object — so an erasure reported per-table counts as evidence while the
-employers and cities were still on disk, verbatim. That is fixed: `_gc_entities` is
-reference-counted and runs from both calls, and `tests/test_store.py` holds it fixed.
+Redaction runs before anything else happens to the text. A turn is redacted before it is
+hashed, stored, indexed, embedded or sent to the extraction model, so a hosted embedder or
+model never sees the raw turn, and no stored hash can confirm a guess at a removed value.
+Every claim is redacted once before reconciliation, whichever method wrote it.
+`redact_episode` and `redact_claim` apply the hook. Given a `Recorder`, they also report
+`redact.inspected` and `redact.changed`, so that a policy which stops matching shows up.
 
-Redaction still runs *upstream* of entity resolution, which is what made it an accidental
-partial mitigation while the bug existed. It is not a mitigation for erasure now and was
-never a substitute for one: this seam changes what gets written down, and erasure is about
-what happens to what already was.
+What it does not do:
 
-**What is deliberately not here.** A PII ruleset worth the name, a compliance mode,
-per-role policy, an audit report. Those are governance features; `docs/ROADMAP.md`
-settles them as a closed product, and none of them belongs in an Apache-2.0 core. What
-belongs here is the extension point and one honest default, for exactly the reason
-`Recorder` is here and the dashboard that consumes it is not: a seam is worth nothing to
-a competitor and everything to a deployment, and a library you have to fork in order to
-comply is worse than one that ships no policy at all.
+* It changes nothing already on disk. `erase()` and `purge()` are the calls for that.
+* It is not a compliance ruleset. `PatternRedactor` matches emails, punctuated phone
+  numbers and Luhn-valid card numbers, and its docstring lists what it misses. Policy
+  rulesets are outside this library; see phase 7 of `docs/ROADMAP.md`.
+* It does not keep values apart. A redacted value is a different value, so two numbers
+  that redact to the same token become one fact. Test a redactor of your own against
+  `history()`.
+* It does not fail open. A redactor that raises is not caught, because catching it would
+  store the raw text. An unset redactor costs one `is not None` test per write.
 
-Where it runs, and why the order is the whole feature
------------------------------------------------------
-
-`WritePipeline.add` calls this before it does anything else with a turn. Everything that
-happens to a turn's text afterwards, in order:
-
-===================  ==========================================================
-`ep.hash`            content-hash dedupe — and `episodes.hash` is a stored column
-`store.add_episode`  the `episodes` row, and its FTS5 index entry
-`embedder.encode`    a vector, and for a hosted embedder an HTTP request
-`llm.extract`        the extraction model — another HTTP request
-===================  ==========================================================
-
-All four are downstream, and two of them leave the process. The usual argument for
-redacting before the embedder is that embeddings are invertible enough to recover their
-input, which is true and is why `erase()` deletes them; the blunter argument is that a
-hosted embedder and a hosted extractor are third parties, and text that was posted to one
-and redacted afterwards was never redacted.
-
-The hash is the one that is easy to get backwards. Hashing first would be *tidier* — the
-dedupe key would then be stable across a change of redaction policy, so tightening a rule
-would not make old turns look new. It would also persist, in a column nobody thinks of as
-content, a blake2b digest of precisely the text just removed. Against a low-entropy
-secret — a phone number, a national ID, a card — a digest is a confirmation oracle:
-anyone holding the file tests a guess in a microsecond, and the redaction is undone. So
-the hash is taken **after** redaction, and the price is paid in the open: two turns
-differing only inside a redacted span now hash identically, so the second is recorded as
-an exact repeat, unless the first one's claims have all ended by then. Its claims are
-reinforced rather than re-extracted and its own text is never stored at all.
-Distinct-but-indistinguishable turns collapse. That is a real loss, and it is the
-recoverable kind — the other ordering loses the secret.
-
-The loss is not only informational, which is worth knowing before turning an aggressive
-policy on. The exact-repeat path calls `WritePipeline._reinforcements_from_source`, which
-scans every claim in the tenant, because the `Store` protocol carries no reverse
-provenance index. That is affordable while repeats are rare, and redaction is precisely
-what stops them being rare. Measured on an in-memory store with `HashingEmbedder`, a
-workload whose only per-turn variation sat *inside* a redacted span cost 1.50, 1.99 and
-3.02 ms per round at 100, 200 and 400 rounds, against 1.33, 1.45 and 1.69 for the same
-workload left distinct: per-round cost rising with store size, so total cost quadratic.
-Vary something outside the redacted span, or expect it.
-
-What is offered, and what is not
---------------------------------
-
-Four fields, listed in `FIELDS`: a turn's `content`, and a claim's `subject`, `object`
-and `text`. Between them they are every string this library writes to a text column,
-indexes for BM25, or hands to an embedder.
-
-The **predicate is never offered**, and that is a decision rather than an oversight. A
-predicate is schema, not content: it is normalized through `PredicateRegistry`, folded
-onto a canonical form shared by every user in the tenant, and hashed into `fact_key`.
-Rewriting it would split one slot into two and silently disable the contradiction
-detection this library is built on, in exchange for censoring a controlled vocabulary
-that no extraction path lets a user write into freely.
-
-**`meta` is not offered either**, and that one is a gap rather than a decision. It is a
-JSON column, so it does reach disk (it is neither indexed nor embedded). It is left alone
-because it holds two incompatible things: whatever the caller passed as `**meta` or in a
-transcript dict, which may well be personal, and machine fields — `salience_base`,
-`last_observed_at`, `subject_entity` — where a rewrite corrupts ranking or keying
-outright. A hook that cannot tell them apart would break the second to reach the first.
-Structure your own metadata before you pass it.
-
-Claims are redacted as well as turns, at both doors rather than once. Redacting the turn
-first means the extractor never sees the raw text, so an *extracted* claim is clean by
-construction — but `remember()`, `supersede()` and the mem0 importer write claims that
-never had a turn, and those are exactly the calls an application uses when it already has
-the data as structured fields. So every claim entering the store passes the hook exactly
-once, whatever door it came through.
-
-Consequences worth knowing before you turn it on
-------------------------------------------------
-
-* **Provenance still resolves.** Redaction happens to the object that gets stored, not as
-  a filter over one already stored, so there is exactly one version of every turn and
-  `why()` returns it. A redacted turn is still a turn; provenance that resolves to
-  `"call me at [redacted:phone]"` is intact, and it is the only shape of this feature that
-  keeps it so. Redacting on read, or erasing the source turn instead, dangles it.
-
-* **Redaction changes keys.** `value_key` hashes the object and `fact_key` hashes the
-  subject, both through the entity fold, so a redacted value is a *different value*. Two
-  distinct phone numbers that redact to the same token become one value, and the second
-  write reinforces the first rather than superseding it. A redactor that collapses
-  *subjects* collapses slots, so two people redacted to one token contradict each other —
-  which is why the shipped default matches nothing that appears in a subject position and
-  why a redactor of your own should be tested against `history()`, not only against a
-  string.
-
-* **Nothing retroactive.** The hook applies to writes from the moment it is configured.
-  Text already on disk stays there; `erase()` and `purge()` are the calls for that.
-
-* **The default is destructive, and the seam does not require it to be.** `redact` returns
-  text, and memvara never needs to invert it, so a tokenizing redactor that returns
-  `"[phone:7f3a]"` and keeps the mapping in a vault the deployment controls is a drop-in
-  with no change here. What memvara deliberately will not do is hold that mapping: a
-  library storing the key beside the ciphertext is theatre, and the moment it did, the
-  plaintext would be back inside this process and back inside `why()`.
-
-Knowing it is still working
----------------------------
-
-A redaction policy is the one part of this library whose failure is *rewarded*. Every
-other seam that stops doing its job costs something visible — a slower query, a missing
-answer, an exception. A `Redactor` whose rules stop matching the data raises nothing,
-logs nothing, returns the string it was handed, and makes the write path measurably
-faster; the store fills with the exact text the policy exists to remove, and the first
-person to find out is an auditor. Nothing about that is hypothetical: the built-in rules
-below match punctuated Latin-script phone numbers and a fixed email shape, so a tenant
-switching to a new number format, a new locale, or a vendor id whose shape changed
-crosses that line without anyone touching the code.
-
-So the two helpers here take a `Recorder` and report `redact.inspected` and
-`redact.changed`, tagged by field and by script. Neither number means much alone — see
-`memvara.telemetry.REDACT_INSPECTED` for why the *ratio* is the signal, why the changed
-count is emitted at zero, and why the absence of the pair is itself the alarm for the
-blunter failure of a deployment that dropped its `redactor=`.
-
-Both are reported by the seam rather than by any redactor, which is deliberate and is
-what makes them worth having: a policy that self-reports can only report the misses it
-knows about, and a policy's dangerous blind spots are by definition the ones it does not
-know about. Measuring at the door instead means a deployment's own `Redactor` — the
-serious case, and the one this module exists for — is measured on exactly the same terms
-as the default, with nothing to implement.
-
-Cost when unset
----------------
-
-The default is `None`, not a no-op redactor, on the same terms as `telemetry`: an unset
-redactor costs one `is not None` test per `add()` and per `assert_claim()` — not per turn,
-not per claim, and no object is constructed, no list rebuilt and no string touched. A
-library whose entire argument is the cost of the write path cannot ship an always-on hook
-on it. See `tests/test_redact.py::test_nothing_on_the_redaction_path_runs_when_it_is_unset`.
-
-The telemetry above is guarded a second time, independently, and everything it needs
-computed — the script classification, the before/after comparison — lives inside that
-guard rather than in front of it. A redactor with no recorder runs the same three
-statements it ran before the series existed. See
-`tests/test_redact.py::test_no_telemetry_work_happens_while_redacting_without_a_recorder`.
-
-A redactor that raises propagates, and is not caught anywhere. That is the same contract
-`Recorder` has and for a stronger reason: a redaction pass that failed open would write
-the raw text and report success.
+The section "Redaction runs before anything else touches a turn" in `docs/INTERNALS.md`
+explains the ordering, what it costs, and why the predicate and `meta` are left out.
 """
 
 from __future__ import annotations

@@ -12,12 +12,11 @@ line break, so a fact stated in one sentence is never split across two model cal
 single sentence longer than a whole piece is the only thing cut mid-sentence, at the last
 space that fits, or at the limit when it has no space at all.
 
-The phase 2 parity design plans a second splitter, for cutting documents into chunks for
-retrieval (`docs/superpowers/specs/2026-09-23-parity-phase-2-documents-and-retrieval-design.md`,
-section 4.3). It is not built yet. The two have different jobs: a retrieval chunk is small
-and overlaps its neighbours so a search can land on it, and an extraction piece is as large
-as the limit allows, with no overlap, because an overlap would make the model state the
-facts in it twice.
+Documents are cut into chunks for retrieval by a different splitter,
+`memvara/documents/chunk.py`. The two have different jobs: a retrieval chunk is small, about
+1,000 characters, and repeats the end of the chunk before it, so a search can land on the
+passage a question is about. An extraction piece is as large as the limit allows, with no overlap, because an overlap would
+make the model state the facts in it twice.
 """
 
 from __future__ import annotations
