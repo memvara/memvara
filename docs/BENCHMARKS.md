@@ -510,6 +510,34 @@ both arms' answers are sampled rather than fixed, and 26 discordant questions is
 sample, which is why section 6 calls G4 a screen. The result agrees with the offline gap,
 0.928 against 0.958 coverage. The Bedrock spend for both arms was well under a dollar.
 
+**The local selector against the routed read, judged.** The spec's §17 (fixed before the
+routed arm ran) asked whether the local selector beats option (c), the routed order with no
+model, which needs no fine-tuned weights. `memvara-routed-oss199` reorders the same saved
+search results as the routed replay (0.903 coverage) and was answered and judged on
+gpt-oss-120b exactly as the G4 arms were.
+
+| Arm (gpt-oss-120b reader and judge) | Correct of 199 |
+|---|---|
+| paid selector | 171 |
+| **local selector** | **165** |
+| routed read, no model | 162 |
+
+| Type | Questions | Local | Paid | Routed |
+|---|---|---|---|---|
+| knowledge-update | 31 | 26 | 27 | 26 |
+| multi-session | 53 | 42 | 43 | 40 |
+| single-session-assistant | 22 | 18 | 21 | 20 |
+| single-session-preference | 12 | 7 | 7 | 7 |
+| single-session-user | 28 | 26 | 28 | 27 |
+| temporal-reasoning | 53 | 46 | 45 | 42 |
+
+Against routed, the local selector wins 13 questions and loses 10, a net of **+3**. The rule
+written before the run was: +3 or more ships the local selector as an opt-in; −2 to +2 is a
+wash and the simpler option (c) is preferred. So the result meets the line exactly, and the
+prediction was +3. It is a narrow result: 23 discordant questions, with sampled answers.
+The gain comes from multi-session (+2) and temporal-reasoning (+4); questions about the
+assistant go the other way (18 against 20), as they did against the paid selector.
+
 The spec's §10 records what has to be decided before this work goes on.
 
 ## LOCOMO and LongMemEval — retrieval, measured

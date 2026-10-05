@@ -787,3 +787,11 @@ answered and judged by gpt-oss-120b on Bedrock exactly as section 16's arms were
 - **−3 or less:** routed is better, and the local selector does not ship.
 
 **Prediction:** +3, with a range of −3 to +8. Offline, local covers 0.928 against 0.903.
+
+**Result (2026-10-05): +3, on the line.** The routed arm answers 162 of 199, the local
+selector 165 and the paid selector 171, all read and judged by gpt-oss-120b. Local against
+routed: 13 wins, 10 losses, net +3. By the rule above, the local selector ships as an
+opt-in with `select_ordered()`. The margin is exactly the line and rests on 23 discordant
+questions with sampled answers, so the evidence is that local is at least as good as routed
+and probably a little better, not that it is clearly better. Questions about the assistant
+are where it loses ground (18 against routed's 20 and paid's 21).
