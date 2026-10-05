@@ -79,7 +79,9 @@ renamed.
   and `index.d.ts` whose only job was to return an object saying the package is a command,
   not a library. They are removed, with the `main`, `types` and `sideEffects` fields, so
   `require("memvara")` now fails with Node's own `MODULE_NOT_FOUND` error. The `memvara`
-  command does not change.
+  command does not change. This reaches npm with the next npm release, which has its own
+  tag (`docs/RELEASING.md`, "The npm train"); npm 0.1.1, the version published when 0.20.0
+  was cut, still has the module.
 - **`PredicateRegistry.superseded_by()` is removed.** Read
   `registry.spec(predicate).supersedes` instead, which is what it returned.
 - **`memvara.store.encryption.export_key()` is removed.** Call
