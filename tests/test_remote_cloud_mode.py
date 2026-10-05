@@ -67,6 +67,7 @@ def test_cloud_mode_builds_a_remote_client():
         client.close()
 
 
+@pytest.mark.covers("inv:RC4")
 def test_cloud_mode_no_longer_refuses_to_build():
     """A bare call with no assertion would pin nothing — `build_memvara` returning `None`
     would pass it — so this asserts the two things the old refusal took away: an object

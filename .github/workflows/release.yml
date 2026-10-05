@@ -179,7 +179,7 @@ jobs:
 
       - name: Install the dev extra, so the packaging tests can run
         # `[dev,cloud]`, matching `ci.yml`. `httpx` is in the `cloud` extra and
-        # `tests/test_store_remote.py` imports it at module scope, so `[dev]` alone
+        # `tests/test_remote_client.py` imports it at module scope, so `[dev]` alone
         # cannot collect the suite — two errors, before a single test runs. This job
         # restated its own install instead of sharing one, which is the drift the `ci`
         # job avoids by *calling* the matrix rather than repeating it. Caught on the

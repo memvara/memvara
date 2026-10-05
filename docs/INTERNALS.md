@@ -443,8 +443,8 @@ recorded before schema 17, whose row nobody recorded. `residue` runs in one `bat
 no other writer is between taking a freed row for a new vector and committing that, and
 the row read belongs to the owner the database names.
 
-`prove_erased` fails closed. A store with no `residue`, or one whose `residue` raises —
-`RemoteStore`, which a `getattr` guard cannot see — yields `proven=False` with a reason,
+`prove_erased` fails closed. A store with no `residue`, or one whose `residue` exists and
+raises, which a `getattr` guard cannot see, yields `proven=False` with a reason,
 and `erase()` raises `ErasureIncomplete` rather than returning `True`. Unproven and
 proven-gone are different answers and only one of them is an erasure certificate.
 
@@ -498,8 +498,9 @@ this process or another; that claim is left alone. A failed proof raises
 server's `serve()` loop runs (`server.mcp.ExpirySweeper`, on a daemon thread, which warns
 and carries on when a sweep fails). A read-only server runs neither, because erasing is a
 write. A store with no `expired_claims` is skipped at open, and so is one whose
-`expired_claims` raises `NotImplementedError`, as `RemoteStore`'s does: the hosted
-deployment runs its own sweep. Called by name, `erase_expired` raises in both cases.
+`expired_claims` raises `NotImplementedError`, which is how a store says that something
+else, such as a hosted deployment, erases its expired claims. Called by name,
+`erase_expired` raises in both cases.
 
 **Reads do not wait for the sweep.** From the instant a claim's `expires_at` passes, no
 read returns it. `SQLiteStore._state_clause`, the clause every limited claim query runs,
@@ -1460,7 +1461,7 @@ The leg must:
 - **abstain, not vote zero, when it did not run.** `_Legs.graph_active` is the same
   distinction the other two legs carry, and it is what keeps a two-leg query from being
   scored as though a third leg had rejected everything;
-- **degrade rather than raise.** `RemoteStore.adjacent` exists and raises, so a `getattr`
+- **degrade rather than raise.** A store's `adjacent` can exist and raise, so a `getattr`
   guard cannot see it: the `NotImplementedError` is caught, `DegradedRetrievalWarning`
   fires once per retriever, and the leg stays off for that retriever's life.
 
@@ -1921,8 +1922,8 @@ scopes=...)`, which counts only a claim stored at exactly one of `scopes`. A can
 the reader's own level, or with no narrower level of its owner, costs nothing, so a read at
 user level pays nothing. `occupied_slots` is optional on the store protocol, and a store
 that has it must accept `scopes`. A store without it is asked `competing_claims` once per
-slot, and a store that raises `NotImplementedError`, as `RemoteStore` does, returns the
-read unshadowed rather than failing it. `count_competing` answers how many claims a slot
+slot, and a store that raises `NotImplementedError` from that too returns the read
+unshadowed rather than failing it. `count_competing` answers how many claims a slot
 holds and not where, so shadowing no longer asks it.
 
 It applies to `get_all()` (and so to `standing()`, `profile()` and the MCP tools built on
@@ -2589,9 +2590,9 @@ The nine store methods (`put_document`, `get_document`, `find_document`,
 `list_documents`, `document_chunks`, `put_document_chunks`, `delete_document`,
 `claims_citing_any`, `erase_episodes`) are optional as a group, and a store that has them
 says so with `holds_documents = True`, which is what `Memvara` asks; see `OMITTABLE`.
-`RemoteStore` has each as a stub that raises and names the `RemoteMemvara` method to use,
-because the facade chunks, scope-checks and extracts server-side; it sets the marker to
-false, so `Memvara(store=RemoteStore(...)).add_document()` is refused with that advice.
+`Memvara` asks the marker rather than whether the methods exist, because a store can have
+them as stubs that raise. A store without the marker is refused with a message that names
+it and points to `SQLiteStore` or `RemoteMemvara.add_document()`.
 
 ### Metadata and file-path filters
 
@@ -2666,8 +2667,7 @@ time.
 **A store without `where`.** The retriever passes `where` only when the caller filtered,
 so a third-party store written before the parameter serves every unfiltered read as
 before, and a filtered read against it raises `TypeError` naming the argument rather than
-returning rows the filter would have excluded. `RemoteStore` accepts the argument on its
-stubs, which still raise.
+returning rows the filter would have excluded.
 
 **The switch.** `Memvara(metadata_filters=False)`, `RemoteMemvara(metadata_filters=False)`
 or `MEMVARA_FEATURE_METADATA_FILTERS=0` refuses a call that passes either argument with a
@@ -2953,8 +2953,8 @@ thread outside a batch reads through its own connection, which sees the last com
 another writer holds the lock.
 
 **A batch can say which tenant it is for.** `Store.batch(*, tenant=None)` takes an optional
-keyword. `SQLiteStore` and `RemoteStore` accept it and ignore it, because SQLite's write lock
-covers the whole file and the hosted client holds no lock. It exists for a store that can lock
+keyword. `SQLiteStore` accepts it and ignores it, because SQLite's write lock covers the
+whole file. It exists for a store that can lock
 one tenant, such as memvara-cloud's Postgres store, so that two customers' writes do not wait
 for each other. That store has to take its lock as the batch begins, before the batch's first
 read, so it cannot learn the tenant from the reads: the library has to say.

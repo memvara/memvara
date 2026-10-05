@@ -861,9 +861,9 @@ def test_a_hosted_client_refuses_local_ingestion_options():
 
 
 def test_a_store_that_does_not_say_it_holds_documents_is_refused_by_name():
-    """Asked through the marker, not the methods: `RemoteStore` has every document method
-    as a stub that raises, so a presence check would pass it and the caller would meet
-    the stub's message about REST routes instead."""
+    """Asked through the marker, not the methods. A store can have every document method
+    as a stub that raises, and a presence check would pass that store, so the caller
+    would meet the stub's own message instead of this one."""
     class NoDocuments(SQLiteStore):
         holds_documents = False
 
@@ -871,11 +871,6 @@ def test_a_store_that_does_not_say_it_holds_documents_is_refused_by_name():
                 embedder=HashingEmbedder(dim=64))
     with pytest.raises(NotImplementedError, match="NoDocuments cannot store documents"):
         m.add_document("Text.")
-    from memvara.store.remote import RemoteStore
-    remote = Memvara(store=RemoteStore(base_url="https://example.invalid", api_key="k"),
-                     llm=NullLLM(), embedder=HashingEmbedder(dim=64))
-    with pytest.raises(NotImplementedError, match="RemoteStore cannot store documents"):
-        remote.add_document("Text.")
 
 
 def test_erasing_a_claim_with_its_sources_leaves_a_document_whole():
@@ -1161,25 +1156,6 @@ def test_turning_retrieval_chunks_off_against_a_hosted_deployment_is_refused():
         Memvara(api_key="k", base_url="https://example.test", retrieval_chunks=False)
     client = Memvara(api_key="k", base_url="https://example.test", retrieval_chunks=True)
     client.close()
-
-
-def test_the_remote_store_names_the_route_to_use_instead():
-    from memvara.store.remote import RemoteStore
-    from memvara.types import Document
-    store = RemoteStore(base_url="https://example.invalid", api_key="k")
-    calls = [lambda: store.put_document(Document()),
-             lambda: store.get_document("t", "doc_1"),
-             lambda: store.find_document(Scope(), "c"),
-             lambda: store.list_documents([Scope()]),
-             lambda: store.document_chunks("t", "doc_1"),
-             lambda: store.put_document_chunks("t", "doc_1", []),
-             lambda: store.delete_document("t", "doc_1"),
-             lambda: store.claims_citing_any("t", ["ep_1"]),
-             lambda: store.erase_episodes(["ep_1"])]
-    for c in calls:
-        with pytest.raises(NotImplementedError, match="RemoteMemvara.add_document"):
-            c()
-    store.close()
 
 
 # --- another writer while a document is extracted or updated -----------------------------

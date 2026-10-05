@@ -4431,13 +4431,11 @@ def test_omittable_names_every_member_a_backend_may_actually_leave_out():
         "tests/test_edges.py pins that those keep working — optional by compatibility "
         "rather than by design, which is still optional"
     )
-    # Both shipped stores implement everything, optional members included — which is why
-    # the isinstance trap is invisible in this repository and waiting for the first
-    # third-party backend.
+    # The shipped store implements everything, optional members included. That is why
+    # the isinstance trap cannot be seen in this repository; the first third-party
+    # backend is where it would show.
     from memvara.store import SQLiteStore
-    from memvara.store.remote import RemoteStore
-    for cls in (SQLiteStore, RemoteStore):
-        assert not [m for m in members if not hasattr(cls, m)]
+    assert not [m for m in members if not hasattr(SQLiteStore, m)]
 
 
 # --- the predicate graph declaration ---------------------------------------------------

@@ -10,8 +10,8 @@ Grouped by the decision each test defends, because this feature is mostly decisi
    always blocked arriving at a seed, because `neighborhood`'s seeds are several
    spellings of one thing. Applied to `spread` that rule deletes the answer: the edges
    between two seeds are exactly the join the leg exists to make.
-3. **A leg that cannot run degrades and says so.** `RemoteStore.adjacent` exists and
-   raises, so a `getattr` guard cannot see it, and a search that quietly ran two legs
+3. **A leg that cannot run degrades and says so.** A store's `adjacent` can exist and
+   raise, so a `getattr` guard cannot see it, and a search that quietly ran two legs
    for a month is the failure this warning exists to prevent.
 4. **Gating happens before the walk, not after it.** A `lookup` query must cost nothing,
    not cost a walk whose score is then multiplied by zero.
@@ -294,7 +294,7 @@ def test_turning_intent_weighting_off_runs_every_query_at_the_configured_weights
 
 
 def test_a_store_that_cannot_traverse_degrades_once_and_says_so(mem):
-    """`RemoteStore.adjacent` is present and raises, which no `getattr` guard can see.
+    """A store whose `adjacent` is present and raises, which no `getattr` guard can see.
 
     Warned once per retriever rather than once per query: a store that cannot traverse
     cannot traverse for the whole process, and a warning per search buries the finding

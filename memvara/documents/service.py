@@ -153,9 +153,9 @@ class DocumentService:
         """The store, refused with a message naming it when it cannot hold documents.
 
         Asked through `holds_documents`, a marker a store sets when it implements the
-        document methods, rather than through the methods' presence. `RemoteStore` has
-        every method, each raising, so a presence check would pass and the caller would
-        meet the stub's message about REST routes instead of this one.
+        document methods, rather than through the methods' presence. A store can have
+        every method as a stub that raises, and a presence check would pass that store,
+        so the caller would meet the stub's own message instead of this one.
         """
         store = self.mem.store
         if getattr(store, "holds_documents", False) is not True:

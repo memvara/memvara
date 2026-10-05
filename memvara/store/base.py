@@ -535,7 +535,7 @@ OMITTABLE: dict[str, str] = {
                       "is kept if the store keeps it, and the claim is never erased.",
     # The nine document members are one capability, and a store that has it says so
     # with `holds_documents = True`; `Memvara` asks that marker rather than the methods,
-    # because `RemoteStore` has every method as a stub that raises.
+    # because a store can have every method as a stub that raises.
     "put_document": "the document methods on Memvara raise NotImplementedError naming "
                     "the store. Every other read and write is unaffected.",
     "get_document": "as put_document.",
@@ -552,9 +552,8 @@ OMITTABLE: dict[str, str] = {
     "count_competing": "the write receipt's accumulation report falls back to "
                        "len(competing_claims()).",
     "occupied_slots": "read-side shadowing falls back to one competing_claims per slot. "
-                      "A store that raises NotImplementedError from that too, as "
-                      "RemoteStore does, returns a broader value beside a narrower "
-                      "level's own.",
+                      "A store that raises NotImplementedError from that too "
+                      "returns a broader value beside a narrower level's own.",
     "unended_claims": "forget() reads the slot's whole history with slot_history and "
                       "picks the values to close with Claim.is_unended, so its cost grows "
                       "with every value the slot has held rather than with the few it "
@@ -566,7 +565,7 @@ OMITTABLE: dict[str, str] = {
 class Store(Protocol):
     #: True on a store that implements the document methods below. `Memvara` asks this
     #: rather than whether the methods exist, because a store can have them as stubs
-    #: that raise, as `RemoteStore` does. Optional, and read as false when absent; see
+    #: that raise. Optional, and read as false when absent; see
     #: `OMITTABLE`.
     holds_documents: bool = False
     #: True on a store that leaves a claim whose `expires_at` has passed out of its own
@@ -670,9 +669,7 @@ class Store(Protocol):
         A store whose `batch()` only defers commits, or that has no `batch()` at all, runs
         the same code without that guarantee: another writer can commit between a read and
         the write that follows it, and the write then puts back the copy it read over the
-        other writer's change. `RemoteStore.batch()` is one of these. It yields the store
-        and does nothing else, because the hosted API has no transaction a client can hold
-        open.
+        other writer's change.
         """
         ...
 

@@ -515,17 +515,13 @@ def test_a_self_link_is_refused_with_the_local_engines_own_message():
 
 
 def test_every_hosted_purge_refuses_a_project_with_one_message():
-    """Three hosted purges and one rule. They share one refusal, so its wording cannot
+    """Two hosted purges and one rule. They share one refusal, so its wording cannot
     drift between them again."""
     import asyncio
     from memvara.remote.aio import AsyncRemoteMemvara
-    from memvara.store.remote import RemoteStore
-    from memvara.types import Scope
     project = "github.com/acme/app"
     messages = []
     for purge in (
-        lambda: RemoteStore(base_url="https://example.test", api_key="k").purge(
-            Scope("acme", "alice", project=project)),
         lambda: RemoteMemvara(api_key="k", base_url="https://example.test",
                               user="alice", project=project).purge(),
         lambda: asyncio.run(AsyncRemoteMemvara(

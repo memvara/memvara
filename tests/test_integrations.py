@@ -1242,8 +1242,8 @@ def test_an_exact_duplicate_scores_as_the_same_text_and_comes_first(storage):
 
 
 def test_a_store_that_cannot_return_a_vector_is_scored_by_encoding_the_text(mem, monkeypatch):
-    """A cloud deployment's RemoteStore raises NotImplementedError for get_embedding: no
-    endpoint returns a stored vector. The score then comes from encoding the record's text
+    """A store can raise NotImplementedError from get_embedding when it has no way to
+    return a stored vector. The score then comes from encoding the record's text
     with the same embedder, rather than from a crash on the first search."""
     storage = ca.MemvaraStorage(mem, user="alice", types=CREWAI_TYPES)
     saved(storage, record("Alice prefers tea in the morning"))

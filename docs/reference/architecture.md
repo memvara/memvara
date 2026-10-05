@@ -157,12 +157,12 @@ nothing rather than degrading into an unfiltered query.
 
 ## Where the seams are
 
-Everything replaceable is a protocol, and each one has a real second implementation in
+Everything replaceable is a protocol. Most of them have a real second implementation in
 this repository rather than being a hypothetical extension point:
 
 | Protocol | Default | Also in this repo |
 |---|---|---|
-| `Store` | `SQLiteStore` | `RemoteStore` — partial on purpose, raising where the REST facade has no endpoint |
+| `Store` | `SQLiteStore` | none; the protocol is public, so a third-party backend such as Postgres can implement it |
 | `Embedder` | `HashingEmbedder` (offline, lexical) | `CachedEmbedder`, `LocalEmbedder` (sentence-transformers) |
 | `LLM` | `NullLLM` | `AnthropicLLM`, `OpenAILLM` |
 | `Redactor` | none | `PatternRedactor` |
@@ -178,9 +178,9 @@ is where pgvector or Qdrant goes.
 
 The REST API and the hosted control plane are the commercial half, and that is a decision
 rather than a gap — [Open core](../OPEN-CORE.md) says where the line is and why it does
-not move. What *is* here is the client half, twice over: `memvara/remote/` is what an
-application calls (`Memvara(api_key=…)`), and `memvara/store/remote.py` is the low-level
-`Store` the local engine calls.
+not move. What *is* here is the client half: `memvara/remote/` is what an application
+calls (`Memvara(api_key=…)`). The local engine is not run against a hosted deployment's
+storage.
 
 ---
 
