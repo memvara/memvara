@@ -73,7 +73,7 @@ from io import BufferedRandom
 from itertools import repeat
 from operator import itemgetter
 from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Iterator,
-                    Mapping, Sequence, cast)
+                    Mapping, Sequence, TypeVar, cast)
 
 import numpy as np
 
@@ -671,6 +671,9 @@ _EPISODE_UPSERT = (
 
 # SQLite's parameter limit is 999 on older builds; chunk bulk lookups below it.
 _MAX_SQL_PARAMS = 900
+
+#: What `SQLiteStore._by_ids` turns each row into: a `Claim` or an `Episode`.
+_Row = TypeVar("_Row")
 
 _VEC_TABLE_NAMES = ("embeddings", "episode_embeddings")
 
@@ -3378,16 +3381,25 @@ class SQLiteStore:
     def get_episodes(self, episode_ids: Sequence[str]) -> dict[str, Episode]:
         """Bulk fetch, for the same reason `get_claims` exists: hydrating a result set
         one row at a time makes a search cost O(results) queries."""
-        out: dict[str, Episode] = {}
-        if not episode_ids:
+        return self._by_ids("episodes", episode_ids, self._row_to_episode)
+
+    def _by_ids(self, table: str, ids: Sequence[str],
+                convert: Callable[[sqlite3.Row], _Row]) -> dict[str, _Row]:
+        """The rows of `table` whose `id` is in `ids`, converted and keyed by id.
+
+        The ids are looked up in chunks, because SQLite limits how many parameters one
+        statement can bind. Duplicate ids are looked up once.
+        """
+        out: dict[str, _Row] = {}
+        if not ids:
             return out
-        ids = list(dict.fromkeys(episode_ids))
+        unique = list(dict.fromkeys(ids))
         with self._read() as conn:
-            for i in range(0, len(ids), _MAX_SQL_PARAMS):
-                chunk = ids[i:i + _MAX_SQL_PARAMS]
-                q = f"SELECT * FROM episodes WHERE id IN ({','.join('?' * len(chunk))})"
+            for i in range(0, len(unique), _MAX_SQL_PARAMS):
+                chunk = unique[i:i + _MAX_SQL_PARAMS]
+                q = f"SELECT * FROM {table} WHERE id IN ({','.join('?' * len(chunk))})"
                 for r in conn.execute(q, chunk):
-                    out[r["id"]] = self._row_to_episode(r)
+                    out[r["id"]] = convert(r)
         return out
 
     def iter_episodes(self, tenant: str | None = None) -> Iterable[Episode]:
@@ -3696,17 +3708,7 @@ class SQLiteStore:
         the number of results rather than with the query. Returns a mapping so callers
         keep their own ordering — the DB's row order is not the ranking.
         """
-        out: dict[str, Claim] = {}
-        if not claim_ids:
-            return out
-        ids = list(dict.fromkeys(claim_ids))
-        with self._read() as conn:
-            for i in range(0, len(ids), _MAX_SQL_PARAMS):
-                chunk = ids[i:i + _MAX_SQL_PARAMS]
-                q = f"SELECT * FROM claims WHERE id IN ({','.join('?' * len(chunk))})"
-                for r in conn.execute(q, chunk):
-                    out[r["id"]] = self._row_to_claim(r)
-        return out
+        return self._by_ids("claims", claim_ids, self._row_to_claim)
 
     def competing_claims(self, tenant: str, fact_key: str, *,
                          valid_at: datetime | None = None,
