@@ -14,7 +14,7 @@ import pytest
 
 from memvara.llm import LLM, AnthropicLLM, NullLLM, TruncatedResponse
 from memvara.llm import _shape
-from memvara.llm.anthropic import _stop_reason
+from memvara.llm._shape import attr_or_key
 from memvara.llm.base import (
     CLAIM_SCHEMA,
     EXTRACT_SYSTEM,
@@ -790,4 +790,4 @@ def test_a_model_that_finished_its_answer_does_not_raise(reason):
     ({}, None, "a dict that does not say"),
 ])
 def test_the_stop_reason_is_read_from_whatever_shape_arrives(response, expected, why):
-    assert _stop_reason(response) == expected, why
+    assert attr_or_key(response, "stop_reason") == expected, why
