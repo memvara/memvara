@@ -733,3 +733,13 @@ read selector is `LocalSelector` on step 2a's model B.
 - **Pass:** at least 174 correct, and a paired net of at least −3 against the model
   selector's 177 on the same questions.
 - **Prediction:** 174, with a range of 168 to 180.
+
+**G3 result (2026-10-05): pass.** On the 1,496 LoCoMo questions with a gold turn in their
+pool, the fine-tuned model covers 0.777 and the stock model 0.758: +2.0 points (+1.2 to
++2.7), better on 59 questions and worse on 17. The gain is largest on multi-hop (+3.4) and
+open-domain (+4.4), the categories where the stock model is weakest.
+
+**G4 status (2026-10-05): staged, not run.** MemoryBench run `memvara-local-e199` holds the
+parity run's search results reordered as `select_ordered()` ships them (5.1 turns kept on
+average), with answer and evaluate reset. The gateway account the reader and judge use has
+a balance of −$0.008 and refuses calls until it is topped up. The run costs about $1.10.

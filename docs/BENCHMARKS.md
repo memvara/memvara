@@ -446,6 +446,43 @@ paid selector on this proxy (0.628 against 0.612). These comparisons were not th
 the proxy cannot see answers that are not stated word for word, which rules out most
 multi-session and preference questions. A judged run is the measure that can settle it.
 
+**Gate G3: LoCoMo, which the model never saw.** The spec's §16 (fixed before the pools were
+built) applies section 6's G3 to the shipped rendering: step 2a's model B against the stock
+model, both rendered as `LocalSelector.select_ordered()` ships them. All ten LoCoMo
+conversations, categories 1 to 4. A LoCoMo turn's role is its speaker's name, so routing
+finds no `user` turn and both people's turns are candidates.
+
+```bash
+PYTHONPATH=. python3 bench/selector_pools.py locomo --data locomo10.json --out local/selector/pools/locomo.jsonl
+PYTHONPATH=. python3 bench/selector_score.py --pools local/selector/pools/locomo.jsonl --model cross-encoder/ms-marco-MiniLM-L-6-v2 --revision 233902d25c440f23af6f7d6e94d2946bac0bee0a --device mps --out local/selector/scores/stock_locomo.jsonl
+PYTHONPATH=. python3 bench/selector_score.py --pools local/selector/pools/locomo.jsonl --model local/selector/models/step2a-B --max-length 256 --device mps --scope-of local/selector/scores/stock_locomo.jsonl --out local/selector/scores/step2a-B_locomo.jsonl
+```
+
+Coverage at 720 tokens on the 1,496 questions that have a gold turn in their pool (39 of
+1,535 have none):
+
+| Ordering | Coverage |
+|---|---|
+| plain read | 0.679 |
+| stock model | 0.758 |
+| **fine-tuned (step 2a's B)** | **0.777** |
+
+| Category | Questions | Stock | Fine-tuned |
+|---|---|---|---|
+| multi-hop | 279 | 0.619 | 0.653 |
+| open-domain | 82 | 0.481 | 0.525 |
+| single-hop | 824 | 0.896 | 0.899 |
+| temporal | 311 | 0.848 | 0.864 |
+
+**G3 passes.** Fine-tuned minus stock is +2.0 points [+1.2, +2.7], better on 59 questions
+and worse on 17, against a pass line of +1.0 with the interval above zero. The prediction
+was +1.5 (−1 to +4). The model was trained only on LongMemEval, so the ordering it learned
+carries over to conversations between two people it has never seen.
+
+**Gate G4,** the judged LongMemEval run, is staged as MemoryBench run `memvara-local-e199`
+(the parity run's saved search results, reordered as the local selector ships them) and
+has not run yet: the reader-and-judge gateway account has no credit.
+
 The spec's §10 records what has to be decided before this work goes on.
 
 ## LOCOMO and LongMemEval — retrieval, measured
