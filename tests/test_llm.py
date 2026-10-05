@@ -14,7 +14,7 @@ import pytest
 
 from memvara.llm import LLM, AnthropicLLM, NullLLM, TruncatedResponse
 from memvara.llm import _shape
-from memvara.llm.anthropic import _stop_reason
+from memvara.llm._shape import attr_or_key
 from memvara.llm.base import (
     CLAIM_SCHEMA,
     EXTRACT_SYSTEM,
@@ -790,4 +790,15 @@ def test_a_model_that_finished_its_answer_does_not_raise(reason):
     ({}, None, "a dict that does not say"),
 ])
 def test_the_stop_reason_is_read_from_whatever_shape_arrives(response, expected, why):
-    assert _stop_reason(response) == expected, why
+    assert attr_or_key(response, "stop_reason") == expected, why
+
+
+def test_a_backend_that_does_not_implement_ask_fails_with_a_clear_error():
+    """`StructuredCalls` is a plain mixin, so nothing stops a backend from forgetting
+    `_ask`. Calling it must say so, instead of handing None to the code that shapes the
+    answer and failing there with an unrelated AttributeError."""
+    class Forgetful(_shape.StructuredCalls):
+        pass
+
+    with pytest.raises(NotImplementedError, match="Forgetful does not implement _ask"):
+        Forgetful().judge_replacement("new", "old")

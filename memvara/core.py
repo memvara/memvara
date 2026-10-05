@@ -103,6 +103,7 @@ from .types import (
     Scope,
     SearchResults,
     WriteReceipt,
+    _as_memory_type,
     as_utc,
     close_out,
     closure,
@@ -606,25 +607,11 @@ _CHARS_PER_TOKEN = 4
 def _approx_tokens(text: str) -> int:
     """Roughly how many tokens `text` costs. The default counter for `recall(budget=)`.
 
-    **A length heuristic, and it is wrong in a direction worth naming.** It divides by
-    four and rounds up, which is close enough for English prose and materially wrong for
-    CJK, where a single character is often a token or more: this **under-counts** there,
-    by several times, so a block the heuristic certifies as fitting a 2,000-token budget
-    can be four thousand real tokens. The failure is silent and it is on the side that
-    overflows the caller's context rather than the side that wastes it. Cyrillic, Thai
-    and long code identifiers all lean the same way, less sharply.
-
-    There is no tokenizer here to do better with. Core's dependencies are `numpy` and
-    nothing else, and pulling a transformer stack into the zero-dependency package in
-    order to count characters would cost every user of the library a dependency tree so
-    that some of them could have an exact budget. So this is the default and the seam is
-    the answer: a caller who needs exactness passes their own `counter=` — `tiktoken`,
-    the Anthropic token-counting endpoint, whatever their model actually charges — and
-    pays for that dependency in their own project. It is the same seam as `Embedder`,
-    `AuditStore` and `Processor`, for the same reason.
-
-    A budget honoured approximately, with the approximation named, is worth having. One
-    that claims to be exact is not.
+    It is the character count divided by four, rounded up. That is close for English
+    prose, but it **under-counts** CJK text by several times, because one CJK character
+    is often a whole token, so a block it fits into a budget can overflow the caller's
+    context. Core has no tokenizer dependency; a caller who needs an exact count passes
+    their own `counter=`.
 
     >>> _approx_tokens("the user lives in Lisbon")
     6
@@ -716,18 +703,6 @@ def _pack_predicates(pack: str) -> tuple[str, ...]:
 #: 58% of the time on one production store and in the top ten only 71%, and each one
 #: past the third is a model call that mostly says "no".
 ADVISORY_CANDIDATES = 3
-
-
-def _as_memory_type(value: MemoryType | str | None) -> MemoryType | None:
-    """A `MemoryType` from itself or from its value as a string (#270)."""
-    if value is None:
-        return None
-    try:
-        return MemoryType(value)
-    except ValueError:
-        raise ValueError(
-            "memory_type must be one of "
-            + ", ".join(t.value for t in MemoryType) + f", not {value!r}") from None
 
 
 def _refuse_expired(expires_at: datetime, now: datetime) -> None:
@@ -1816,7 +1791,7 @@ class Memvara:
         string is a `ValueError` that names the argument, raised before anything is
         written.
         """
-        memory_type = _as_memory_type(memory_type)
+        memory_type = None if memory_type is None else _as_memory_type(memory_type)
         if PROJECT_META in meta:
             raise TypeError(PROJECT_META_REFUSAL.format(method="remember()"))
         if reserved := RESERVED_META & set(meta):
@@ -5175,19 +5150,14 @@ class ScopedMemvara:
     # -- narrowing -----------------------------------------------------------
 
     def bind(self, *, tenant=None, user=None, agent=None, session=None) -> "ScopedMemvara":
-        """A narrower view. Fields not given keep this view's values."""
-        s = self.scope
-        # `project` is carried rather than named as a parameter: `bind` narrows, and a
-        # project is bound once where the store is opened. Dropping it here contradicted
-        # this method's own docstring, which says fields not given keep this view's
-        # values, and left the view reporting a scope it was not actually reading at.
-        return ScopedMemvara(self._mem, Scope(
-            tenant if tenant is not None else s.tenant,
-            user if user is not None else s.user,
-            agent if agent is not None else s.agent,
-            session if session is not None else s.session,
-            project=s.project,
-        ))
+        """A narrower view. Fields not given keep this view's values.
+
+        `project` is not a parameter, because a project is bound once where the store is
+        opened, but it carries over like every other field that was not given.
+        """
+        given = dict(tenant=tenant, user=user, agent=agent, session=session)
+        return ScopedMemvara(self._mem, replace(
+            self.scope, **{k: v for k, v in given.items() if v is not None}))
 
     @property
     def _kw(self) -> dict[str, Any]:

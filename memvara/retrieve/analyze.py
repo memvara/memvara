@@ -24,6 +24,7 @@ positions, and positions are exactly what a fabricated ranking supplies.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 # Closed-class English function words: determiners, pronouns, prepositions,
@@ -53,10 +54,15 @@ STOPWORDS: frozenset[str] = frozenset("""
     there here also just only very too much more less least same
 """.split())
 
-# `_fts_query` in the SQLite store drops single-character tokens, so the analyzer drops
-# them too: the two must agree about what a "term" is, or the per-term normalization in
-# `scoring.lexical_relevance` divides by a count the store never used.
+# Single-character tokens are dropped. The SQLite store's `_fts_query` builds its MATCH
+# expression from `tokenize`, so the store and the analyzer agree about what a "term" is.
+# If they disagreed, the per-term normalization in `scoring.lexical_relevance` would
+# divide by a count the store never used.
 MIN_TERM_CHARS = 2
+
+#: A run of the characters `str.isalnum` accepts. `\w` matches exactly those characters
+#: plus the underscore, so excluding the underscore leaves the same set.
+_WORD = re.compile(r"[^\W_]+")
 
 
 def tokenize(raw: str) -> list[str]:
@@ -83,17 +89,7 @@ def tokenize(raw: str) -> list[str]:
     >>> tokenize("What is my mother's maiden name?")
     ['what', 'is', 'my', 'mother', 'maiden', 'name']
     """
-    tokens: list[str] = []
-    current: list[str] = []
-    for ch in raw.lower():
-        if ch.isalnum():
-            current.append(ch)
-        elif current:
-            tokens.append("".join(current))
-            current = []
-    if current:
-        tokens.append("".join(current))
-    return [t for t in tokens if len(t) >= MIN_TERM_CHARS]
+    return [t for t in _WORD.findall(raw.lower()) if len(t) >= MIN_TERM_CHARS]
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,28 +13,19 @@ import os
 from typing import Any, Sequence
 
 from ..ingest.errors import MediaUnsupported
-from ..types import Episode
 from . import _shape, _tools
-from .guidance import Guidance, with_guidance
+from ._shape import attr_or_key
 from .base import (
     TOOL_STEP_MAX_TOKENS,
     MalformedToolOutput,
     Message,
     ToolRun,
     ToolSpec,
-    CLAIM_SCHEMA,
-    EXTRACT_SYSTEM,
-    JUDGE_SCHEMA,
-    JUDGE_SYSTEM,
-    PREDICATE_SCHEMA,
-    PREDICATE_SYSTEM,
     COMPOSE_SCHEMA,
     COMPOSE_SYSTEM,
     DESCRIBE_IMAGE_MAX_TOKENS,
     DESCRIBE_IMAGE_PROMPT,
     DESCRIBE_IMAGE_SYSTEM,
-    RESOLVE_SCHEMA,
-    RESOLVE_SYSTEM,
     Usage,
 )
 
@@ -45,18 +36,6 @@ IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 
-def _stop_reason(response: Any) -> Any:
-    """Why generation stopped, or `None` if the response does not say."""
-    if isinstance(response, dict):
-        return response.get("stop_reason")
-    return getattr(response, "stop_reason", None)
-
-
-def _field(block: Any, name: str) -> Any:
-    """A content block's field, from an SDK object or a plain dict."""
-    return block.get(name) if isinstance(block, dict) else getattr(block, name, None)
-
-
 def _first_text(response: Any) -> str:
     """The first text block of a Messages response.
 
@@ -64,15 +43,12 @@ def _first_text(response: Any) -> str:
     reimplement the SDK's block types.
     """
     for block in getattr(response, "content", None) or []:
-        if isinstance(block, dict):
-            if block.get("type") == "text":
-                return str(block.get("text") or "")
-        elif getattr(block, "type", None) == "text":
-            return str(getattr(block, "text", "") or "")
+        if attr_or_key(block, "type") == "text":
+            return str(attr_or_key(block, "text") or "")
     return ""
 
 
-class AnthropicLLM:
+class AnthropicLLM(_shape.StructuredCalls):
     """Structured extraction and predicate resolution via the Messages API."""
 
     #: A real backend, so every call it makes is billed to `WriteReceipt.llm_calls`.
@@ -157,9 +133,18 @@ class AnthropicLLM:
         # it, and why `chat()` does not need it. Anthropic reports the same event on the
         # response itself rather than per choice, and names it `"max_tokens"`.
         _shape.refuse_if_truncated(
-            _stop_reason(response), "max_tokens", model=self.model,
+            attr_or_key(response, "stop_reason"), "max_tokens", model=self.model,
             budget=self.max_tokens)
         return response
+
+    def _ask(self, system: str, prompt: str, schema: dict[str, Any],
+             usage: Usage | None, name: str) -> dict[str, Any]:
+        """One structured request, parsed.
+
+        `name` is not sent, because the Messages API does not take a name for a schema.
+        """
+        return _shape.parse_json_object(
+            _first_text(self._call(system, prompt, schema, usage)))
 
     # -- Chat protocol --------------------------------------------------------
 
@@ -213,13 +198,13 @@ class AnthropicLLM:
                 output_config={"effort": self.effort},
             )
             _shape.record_usage(response, usage, "input_tokens", "output_tokens")
-            stop = _stop_reason(response)
+            stop = attr_or_key(response, "stop_reason")
             if stop in ("max_tokens", "refusal"):
                 raise MalformedToolOutput(f"{self.model} stopped with {stop!r}")
             blocks = list(getattr(response, "content", None) or [])
-            calls = [_tools.Call(str(_field(b, "id")), str(_field(b, "name")),
-                                 _field(b, "input"))
-                     for b in blocks if _field(b, "type") == "tool_use"]
+            calls = [_tools.Call(str(attr_or_key(b, "id")), str(attr_or_key(b, "name")),
+                                 attr_or_key(b, "input"))
+                     for b in blocks if attr_or_key(b, "type") == "tool_use"]
             return _tools.Step(_first_text(response), calls, blocks)
 
         def append(step: _tools.Step, results: list[tuple[str, str]]) -> None:
@@ -264,32 +249,7 @@ class AnthropicLLM:
             f"AnthropicLLM cannot transcribe {mime}, because the Anthropic API does not "
             "accept audio or video; configure OpenAILLM to transcribe it")
 
-    # -- LLM protocol -------------------------------------------------------
-
-    def extract(
-        self, episodes: Sequence[Episode], known_predicates: Sequence[str],
-        *, usage: Usage | None = None, guidance: Guidance | None = None,
-    ) -> list[dict[str, Any]]:
-        if not episodes:
-            return []  # nothing to extract from, and a call we should not pay for
-        response = self._call(
-            with_guidance(EXTRACT_SYSTEM, guidance),
-            _shape.extract_prompt(episodes, known_predicates),
-            CLAIM_SCHEMA,
-            usage,
-        )
-        return _shape.shape_claims(
-            _shape.parse_json_object(_first_text(response)), len(episodes))
-
-    def resolve_predicate(self, surface: str, candidates: Sequence[str],
-                          *, usage: Usage | None = None) -> dict[str, Any]:
-        """Merge a novel surface form onto an existing predicate, or declare it new."""
-        offered = _shape.bounded(candidates, _shape.MAX_CANDIDATES)
-        response = self._call(
-            RESOLVE_SYSTEM, _shape.resolve_prompt(surface, offered), RESOLVE_SCHEMA,
-            usage)
-        return _shape.shape_resolution(
-            _shape.parse_json_object(_first_text(response)), offered)
+    # -- Derived relation terms ---------------------------------------------
 
     def compose_relations(self, predicates: Sequence[str]) -> dict[str, int]:
         """Relation terms that are a composition of two or more of these predicates.
@@ -303,19 +263,3 @@ class AnthropicLLM:
             COMPOSE_SYSTEM, _shape.compose_prompt(offered), COMPOSE_SCHEMA, None)
         return _shape.shape_composition(
             _shape.parse_json_object(_first_text(response)))
-
-    def classify_predicate(self, predicate: str, example: str,
-                           *, usage: Usage | None = None) -> dict[str, str]:
-        """Legacy acquisition call, kept for backends and callers that still use it."""
-        prompt = f"predicate: {_shape.snake_case(predicate)}\nexample usage: {example}"
-        response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA, usage)
-        return _shape.spec_fields(_shape.parse_json_object(_first_text(response)))
-
-    # -- ReplacementJudge protocol -------------------------------------------
-
-    def judge_replacement(self, new_text: str, old_text: str,
-                          *, usage: Usage | None = None) -> dict[str, bool]:
-        """Is `new_text` a newer version of `old_text`? See `JUDGE_SYSTEM`."""
-        response = self._call(
-            JUDGE_SYSTEM, _shape.judge_prompt(new_text, old_text), JUDGE_SCHEMA, usage)
-        return _shape.shape_verdict(_shape.parse_json_object(_first_text(response)))

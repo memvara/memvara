@@ -29,9 +29,8 @@ import json
 from typing import Any, Mapping, Sequence
 
 from ..ingest.errors import MediaUnsupported
-from ..types import Episode
 from . import _shape, _tools
-from .guidance import Guidance, with_guidance
+from ._shape import attr_or_key
 from .base import (
     TOOL_STEP_MAX_TOKENS,
     MalformedToolOutput,
@@ -43,26 +42,11 @@ from .base import (
     DESCRIBE_IMAGE_PROMPT,
     DESCRIBE_IMAGE_SYSTEM,
     EXTRACT_SYSTEM,
-    JUDGE_SCHEMA,
-    JUDGE_SYSTEM,
     MAX_CLAIMS,
-    PREDICATE_SCHEMA,
-    PREDICATE_SYSTEM,
-    RESOLVE_SCHEMA,
-    RESOLVE_SYSTEM,
     Usage,
     bounded_claim_schema,
     self_hosted_claim_schema,
 )
-
-#: `json_schema` requires a name. It is echoed back in nothing we read, but the API
-#: rejects the request without one.
-_SCHEMA_NAMES = {
-    id(CLAIM_SCHEMA): "claims",
-    id(RESOLVE_SCHEMA): "predicate_resolution",
-    id(PREDICATE_SCHEMA): "predicate_spec",
-    id(JUDGE_SCHEMA): "replacement_verdict",
-}
 
 #: The image types Chat Completions accepts as image input.
 IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
@@ -98,28 +82,21 @@ def _first_text(response: Any) -> str:
     Tolerates SDK objects and plain dicts so a test double need not reimplement the SDK's
     model classes. A refusal returns `""` deliberately: see the module docstring.
     """
-    choices = _get(response, "choices") or []
+    choices = attr_or_key(response, "choices") or []
     if not choices:
         return ""
-    message = _get(choices[0], "message")
+    message = attr_or_key(choices[0], "message")
     if message is None:
         return ""
-    if _get(message, "refusal"):
+    if attr_or_key(message, "refusal"):
         return ""
-    return str(_get(message, "content") or "")
+    return str(attr_or_key(message, "content") or "")
 
 
 def _finish_reason(response: Any) -> Any:
     """Why generation stopped, off the first choice, or `None` if it does not say."""
-    choices = _get(response, "choices") or []
-    return _get(choices[0], "finish_reason") if choices else None
-
-
-def _get(obj: Any, name: str) -> Any:
-    """Attribute or key, whichever this object has."""
-    if isinstance(obj, dict):
-        return obj.get(name)
-    return getattr(obj, name, None)
+    choices = attr_or_key(response, "choices") or []
+    return attr_or_key(choices[0], "finish_reason") if choices else None
 
 
 def _arguments(raw: Any) -> Any:
@@ -140,7 +117,7 @@ def _arguments(raw: Any) -> Any:
         return raw
 
 
-class OpenAILLM:
+class OpenAILLM(_shape.StructuredCalls):
     """Structured extraction and predicate resolution via Chat Completions."""
 
     #: A real backend, so every call it makes is billed to `WriteReceipt.llm_calls`.
@@ -222,7 +199,12 @@ class OpenAILLM:
     # -- request ------------------------------------------------------------
 
     def _call(self, system: str, prompt: str, schema: dict[str, Any],
-              usage: Usage | None = None, *, name: str | None = None) -> Any:
+              usage: Usage | None = None, *, name: str) -> Any:
+        """One Chat Completions request with strict structured output.
+
+        `name` is the schema's name. The API rejects a `json_schema` without one, although
+        nothing in the response repeats it.
+        """
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_completion_tokens": self.max_tokens,
@@ -234,7 +216,7 @@ class OpenAILLM:
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": name or _SCHEMA_NAMES.get(id(schema), "result"),
+                    "name": name,
                     "strict": True,
                     "schema": schema,
                 },
@@ -258,6 +240,12 @@ class OpenAILLM:
         _shape.refuse_if_truncated(
             _finish_reason(response), "length", model=self.model, budget=self.max_tokens)
         return response
+
+    def _ask(self, system: str, prompt: str, schema: dict[str, Any],
+             usage: Usage | None, name: str) -> dict[str, Any]:
+        """One structured request, parsed."""
+        return _shape.parse_json_object(
+            _first_text(self._call(system, prompt, schema, usage, name=name)))
 
     # -- Chat protocol --------------------------------------------------------
 
@@ -322,18 +310,20 @@ class OpenAILLM:
                 kwargs["extra_body"] = self.extra_body
             response = self._client.chat.completions.create(**kwargs)
             _shape.record_usage(response, usage, "prompt_tokens", "completion_tokens")
-            choices = _get(response, "choices") or []
-            message = _get(choices[0], "message") if choices else None
-            if message is None or _get(message, "refusal"):
+            choices = attr_or_key(response, "choices") or []
+            message = attr_or_key(choices[0], "message") if choices else None
+            if message is None or attr_or_key(message, "refusal"):
                 raise MalformedToolOutput(f"{self.model} gave no usable message")
             if _finish_reason(response) == "length":
                 raise MalformedToolOutput(
                     f"{self.model} stopped at its {TOOL_STEP_MAX_TOKENS}-token limit")
-            raw_calls = list(_get(message, "tool_calls") or [])
-            calls = [_tools.Call(str(_get(c, "id")), str(_get(_get(c, "function"), "name")),
-                                 _arguments(_get(_get(c, "function"), "arguments")))
+            raw_calls = list(attr_or_key(message, "tool_calls") or [])
+            calls = [_tools.Call(str(attr_or_key(c, "id")),
+                                 str(attr_or_key(attr_or_key(c, "function"), "name")),
+                                 _arguments(attr_or_key(attr_or_key(c, "function"),
+                                                        "arguments")))
                      for c in raw_calls]
-            return _tools.Step(str(_get(message, "content") or ""), calls, raw_calls)
+            return _tools.Step(str(attr_or_key(message, "content") or ""), calls, raw_calls)
 
         def append(step: _tools.Step, results: list[tuple[str, str]]) -> None:
             convo.append({"role": "assistant", "content": step.text or None,
@@ -409,55 +399,8 @@ class OpenAILLM:
         response = self._client.audio.transcriptions.create(**kwargs)
         # The SDK returns an object with `.text`; a plain-text response format returns a
         # string, and a test double may return a dict.
-        text = response if isinstance(response, str) else _get(response, "text")
+        text = response if isinstance(response, str) else attr_or_key(response, "text")
         return str(text or "").strip()
-
-    # -- LLM protocol -------------------------------------------------------
-
-    def extract(
-        self, episodes: Sequence[Episode], known_predicates: Sequence[str],
-        *, usage: Usage | None = None, guidance: Guidance | None = None,
-    ) -> list[dict[str, Any]]:
-        if not episodes:
-            return []  # nothing to extract from, and a call we should not pay for
-        response = self._call(
-            # Appended to whichever prompt is in use, the shipped one or the replacement
-            # `extract_system` names: guidance adds a project's rules and never decides
-            # which base prompt a deployment runs.
-            with_guidance(self._extract_system, guidance),
-            _shape.extract_prompt(episodes, known_predicates),
-            self._claim_schema,
-            usage,
-            name="claims",
-        )
-        return _shape.shape_claims(
-            _shape.parse_json_object(_first_text(response)), len(episodes))
-
-    def resolve_predicate(self, surface: str, candidates: Sequence[str],
-                          *, usage: Usage | None = None) -> dict[str, Any]:
-        """Merge a novel surface form onto an existing predicate, or declare it new."""
-        offered = _shape.bounded(candidates, _shape.MAX_CANDIDATES)
-        response = self._call(
-            RESOLVE_SYSTEM, _shape.resolve_prompt(surface, offered), RESOLVE_SCHEMA,
-            usage)
-        return _shape.shape_resolution(
-            _shape.parse_json_object(_first_text(response)), offered)
-
-    def classify_predicate(self, predicate: str, example: str,
-                           *, usage: Usage | None = None) -> dict[str, str]:
-        """Legacy acquisition call, kept for backends and callers that still use it."""
-        prompt = f"predicate: {_shape.snake_case(predicate)}\nexample usage: {example}"
-        response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA, usage)
-        return _shape.spec_fields(_shape.parse_json_object(_first_text(response)))
-
-    # -- ReplacementJudge protocol -------------------------------------------
-
-    def judge_replacement(self, new_text: str, old_text: str,
-                          *, usage: Usage | None = None) -> dict[str, bool]:
-        """Is `new_text` a newer version of `old_text`? See `JUDGE_SYSTEM`."""
-        response = self._call(
-            JUDGE_SYSTEM, _shape.judge_prompt(new_text, old_text), JUDGE_SCHEMA, usage)
-        return _shape.shape_verdict(_shape.parse_json_object(_first_text(response)))
 
     def __repr__(self) -> str:
         return f"<OpenAILLM {self.model}>"

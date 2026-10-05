@@ -23,7 +23,10 @@ import re
 from typing import Any, Sequence
 
 from ..types import Episode, MemoryType
-from .base import TruncatedResponse, Usage
+from .base import (CLAIM_SCHEMA, EXTRACT_SYSTEM, JUDGE_SCHEMA, JUDGE_SYSTEM,
+                   PREDICATE_SCHEMA, PREDICATE_SYSTEM, RESOLVE_SCHEMA, RESOLVE_SYSTEM,
+                   TruncatedResponse, Usage)
+from .guidance import Guidance, with_guidance
 
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -323,6 +326,18 @@ def shape_resolution(parsed: dict[str, Any], offered: Sequence[str]) -> dict[str
     return {"canonical": canonical, **spec_fields(parsed)}
 
 
+def attr_or_key(obj: Any, name: str) -> Any:
+    """`obj.name`, or `obj[name]` when `obj` is a dict, or `None` when it has neither.
+
+    Provider SDKs return objects, and the test doubles return plain dicts, so every
+    backend reads a response field through this rather than assuming one form.
+
+        >>> attr_or_key({"text": "hi"}, "text"), attr_or_key(object(), "text")
+        ('hi', None)
+    """
+    return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+
+
 def record_usage(response: Any, usage: "Usage | None",
                  input_field: str, output_field: str) -> None:
     """Add one provider response's token counts to `usage`, if both are present.
@@ -343,11 +358,11 @@ def record_usage(response: Any, usage: "Usage | None",
     """
     if usage is None:
         return
-    block = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+    block = attr_or_key(response, "usage")
     if block is None:
         return
     def _field(name: str) -> int | None:
-        raw = block.get(name) if isinstance(block, dict) else getattr(block, name, None)
+        raw = attr_or_key(block, name)
         return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else None
     got_in, got_out = _field(input_field), _field(output_field)
     if got_in is None or got_out is None:
@@ -388,3 +403,61 @@ def refuse_if_truncated(reason: Any, cutoff: str, *, model: str, budget: int) ->
         f"{budget}, or ask for a shorter answer — on an extraction that means capping "
         f"the claims array with MEMVARA_LLM_MAX_CLAIMS (or max_claims=)."
     )
+
+
+class StructuredCalls:
+    """The schema-constrained `LLM` methods that every model backend shares.
+
+    `extract`, `resolve_predicate`, `classify_predicate` and `judge_replacement` build the
+    same prompt and shape the answer the same way whichever provider answers, so they
+    are written once here. A backend supplies `_ask`, which sends one request and returns
+    the parsed JSON object. A backend that uses a different extraction prompt or claim
+    schema sets `_extract_system` or `_claim_schema`; `OpenAILLM` does both.
+    """
+
+    _extract_system: str = EXTRACT_SYSTEM
+    _claim_schema: dict[str, Any] = CLAIM_SCHEMA
+
+    def _ask(self, system: str, prompt: str, schema: dict[str, Any],
+             usage: Usage | None, name: str) -> dict[str, Any]:
+        """Send one request and return the parsed JSON object. Each backend overrides it."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement _ask")
+
+    def extract(
+        self, episodes: Sequence[Episode], known_predicates: Sequence[str],
+        *, usage: Usage | None = None, guidance: Guidance | None = None,
+    ) -> list[dict[str, Any]]:
+        if not episodes:
+            return []  # nothing to extract from, and a call we should not pay for
+        parsed = self._ask(
+            # Appended to whichever prompt is in use, the shipped one or a replacement:
+            # guidance adds a project's rules and never decides which base prompt a
+            # deployment runs.
+            with_guidance(self._extract_system, guidance),
+            extract_prompt(episodes, known_predicates),
+            self._claim_schema,
+            usage,
+            "claims",
+        )
+        return shape_claims(parsed, len(episodes))
+
+    def resolve_predicate(self, surface: str, candidates: Sequence[str],
+                          *, usage: Usage | None = None) -> dict[str, Any]:
+        """Merge a novel surface form onto an existing predicate, or declare it new."""
+        offered = bounded(candidates, MAX_CANDIDATES)
+        parsed = self._ask(RESOLVE_SYSTEM, resolve_prompt(surface, offered),
+                           RESOLVE_SCHEMA, usage, "predicate_resolution")
+        return shape_resolution(parsed, offered)
+
+    def classify_predicate(self, predicate: str, example: str,
+                           *, usage: Usage | None = None) -> dict[str, str]:
+        """Legacy acquisition call, kept for backends and callers that still use it."""
+        prompt = f"predicate: {snake_case(predicate)}\nexample usage: {example}"
+        return spec_fields(self._ask(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA, usage,
+                                     "predicate_spec"))
+
+    def judge_replacement(self, new_text: str, old_text: str,
+                          *, usage: Usage | None = None) -> dict[str, bool]:
+        """Is `new_text` a newer version of `old_text`? See `JUDGE_SYSTEM`."""
+        return shape_verdict(self._ask(JUDGE_SYSTEM, judge_prompt(new_text, old_text),
+                                       JUDGE_SCHEMA, usage, "replacement_verdict"))

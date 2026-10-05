@@ -152,13 +152,12 @@ class LLM(Protocol):
 class Chat(Protocol):
     """A backend that can hold one unstructured system+user exchange and hand back text.
 
-    Its own protocol rather than a third method on `LLM`, for the reason `RelationComposer`
-    (`retrieve/compose.py`) is its own protocol: adding a member to a `runtime_checkable`
-    protocol breaks `isinstance` for every implementation that predates it, and a
-    downstream backend finds out when its type checker does. `LLM` calls a model for
-    exactly two things, and this is not one of them — it exists for `memvara.select`,
-    which needs a plain chat completion, not the schema-constrained extraction the two
-    `LLM` methods make.
+    It is its own protocol rather than a third method on `LLM`, because adding a member
+    to a `runtime_checkable` protocol breaks `isinstance` for every implementation that
+    predates it, and a downstream backend finds out when its type checker does. `LLM`
+    calls a model for exactly two things, and this is not one of them — it exists for
+    `memvara.select`, which needs a plain chat completion, not the schema-constrained
+    extraction the two `LLM` methods make.
 
     A backend that does not have this is not broken. `ModelSelector.__init__` refuses to
     construct on one, with a `TypeError` naming the extra to install — the same courtesy

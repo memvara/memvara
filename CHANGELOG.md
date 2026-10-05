@@ -38,6 +38,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `memvara/retrieve/hybrid.py`, `memvara/llm/` and `memvara/write/reconcile.py` are
   shorter, and the measurements they held are now in `docs/BENCHMARKS.md`,
   `docs/INTERNALS.md` and `docs/DEPLOY.md`.
+- **`RekeyReport`, `MergeReport` and `SplitReport` print in the standard dataclass form.**
+  For example, `MergeReport(scanned=1, moved=1, written=0, merged=0, retired=0,
+  dry_run=True)` instead of `<MergeReport ... dry-run>`. The fields do not change.
+- **`memvara login` and `memvara-mcp init` list the options they accept when given an
+  unknown one,** as `memvara logout` and `memvara whoami` already did.
+- **The mem0 and Supermemory importers accept a timestamp that ends in a lower-case `z`.**
+  A timestamp that parsed before still parses.
+- **More internal cleanups, with no change in behaviour.** The Anthropic and OpenAI
+  backends share one implementation of `extract`, `resolve_predicate`,
+  `classify_predicate` and `judge_replacement`, and the requests each one sends are
+  unchanged. The three command-line option parsers are one. The search tokenizer and the
+  full-text query builder share one regular expression, which keeps exactly the
+  characters they kept before. The ranked read stage counts its failures through the same
+  counter as the other stages, with the same counter names and values.
 
 ## [0.19.0] — 2026-10-01
 
