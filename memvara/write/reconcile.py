@@ -1385,13 +1385,6 @@ class RekeyReport:
     retired: int = 0     # claims superseded by the rebuilt chain
     dry_run: bool = True
 
-    def __str__(self) -> str:
-        return (f"<RekeyReport scanned={self.scanned} written={self.written} "
-                f"merged={self.merged} retired={self.retired}"
-                f"{' dry-run' if self.dry_run else ''}>")
-
-    __repr__ = __str__
-
 
 def backfill_entities(reconciler: Reconciler, tenant: str, *, dry_run: bool = True,
                       now: datetime | None = None) -> RekeyReport:
@@ -1470,13 +1463,6 @@ class MergeReport:
     merged: int = 0      # claims folded into an earlier claim of the same value
     retired: int = 0     # claims superseded by the rebuilt chain
     dry_run: bool = True
-
-    def __str__(self) -> str:
-        return (f"<MergeReport scanned={self.scanned} moved={self.moved} "
-                f"written={self.written} merged={self.merged} retired={self.retired}"
-                f"{' dry-run' if self.dry_run else ''}>")
-
-    __repr__ = __str__
 
 
 def backfill_predicates(reconciler: Reconciler, tenant: str, *,
@@ -1671,14 +1657,6 @@ class SplitReport:
     #: writer changed a row while the pass ran (see `_write_back`).
     written: int = 0
     dry_run: bool = True
-
-    def __str__(self) -> str:
-        return (f"<SplitReport scanned={self.scanned} moved={self.moved} "
-                f"reopened={self.reopened} retired_left={self.retired_left} "
-                f"written={self.written}"
-                f"{' (dry run)' if self.dry_run else ''}>")
-
-    __repr__ = __str__
 
 
 #: The identity a split gives the earlier claims, for example "john smith split
