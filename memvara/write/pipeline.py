@@ -137,12 +137,16 @@ def _text_or_number(value: Any) -> bool:
     """Whether `value` is non-empty text or a finite number, not a boolean."""
     if isinstance(value, str):
         return bool(value.strip())
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and _finite(value) is not None)
+    return finite_amount(value) is not None
 
 
 def _finite(value: Any) -> float | None:
-    """`value` as a finite float, or None when it is not a number or is not finite."""
+    """`value` as a finite float, or None when it cannot be read as one.
+
+    This is more lenient than `_shape.finite_amount`: it also reads numeric text such as
+    `"0.9"` and reads a boolean as 1.0 or 0.0. `_claim_from_dict` reads a confidence
+    through it, and has always accepted those forms.
+    """
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError):
@@ -211,7 +215,7 @@ RESTATED_EXTRACTOR = "tier0/restated"
 
 
 class _Call(NamedTuple):
-    """One `llm.extract()` call that tier 2 plans when some turn is cut into pieces."""
+    """One `llm.extract()` call that tier 2 plans for a batch of turns."""
 
     #: The turns the model is shown: every turn short enough to go whole, or one piece
     #: of a long turn.
@@ -1124,18 +1128,11 @@ class WritePipeline:
         result = (self._agentic(episodes, vocabulary, usage, receipt, now, timeout)
                   if self.agentic_extraction else None)
         plan = None if result is None else ProposalPlan(result, episodes)
-        calls = None if plan is not None else self._plan_calls(episodes)
         if plan is not None:
             raw, made = plan.items(), plan.requests
-        elif calls is None:
-            try:
-                raw = self._extract(episodes, vocabulary, usage)
-            except Exception:
-                return self._extraction_failed(receipt, usage, 1, len(episodes),
-                                               extract_t0), None
-            made = 1
         else:
-            raw, failed, made = self._extract_in_pieces(calls, vocabulary, usage)
+            raw, failed, made = self._extract_in_pieces(self._plan_calls(episodes),
+                                                        vocabulary, usage)
             if len(failed) == len(episodes):
                 return self._extraction_failed(receipt, usage, made, len(episodes),
                                                extract_t0), None
@@ -1300,17 +1297,18 @@ class WritePipeline:
             kwargs["guidance"] = self.guidance
         return self.llm.extract(episodes, vocabulary, **kwargs)
 
-    def _plan_calls(self, episodes: Sequence[Episode]) -> list[_Call] | None:
-        """The extraction calls tier 2 makes for `episodes`, or `None` for one call.
+    def _plan_calls(self, episodes: Sequence[Episode]) -> list[_Call]:
+        """The extraction calls tier 2 makes for `episodes`.
 
-        `None`, meaning one call for the whole batch as always, unless `extraction_chunks`
-        is on and some turn is longer than `split.EXTRACTION_CHUNK_CHARS`. Then the turns
-        short enough to go whole share one call, and each long turn is cut into pieces,
-        one call per piece. A piece is a copy of the episode with the same id and only
-        its text cut, so the model reads it as that turn.
+        This is one call for the whole batch, unless `extraction_chunks` is on and some
+        turn is longer than `split.EXTRACTION_CHUNK_CHARS`. Then the turns short enough
+        to go whole share one call, and each long turn is cut into pieces, one call per
+        piece. A piece is a copy of the episode with the same id and only its text cut,
+        so the model reads it as that turn.
         """
+        single = [_Call(list(episodes), list(range(len(episodes))))]
         if not self.extraction_chunks:
-            return None
+            return single
         whole = _Call([], [])
         cut: list[_Call] = []
         for position, ep in enumerate(episodes):
@@ -1323,20 +1321,20 @@ class WritePipeline:
                 continue
             cut.extend(_Call([replace(ep, content=text)], [position]) for text in pieces)
         if not cut:
-            return None
+            return single
         return ([whole] if whole.shown else []) + cut
 
     # -- predicate identity ---------------------------------------------------
 
-    def _admissible(self, raw: Any, episodes: Sequence[Episode],
+    def _admissible(self, raw: Sequence[dict[str, Any]], episodes: Sequence[Episode],
                     receipt: WriteReceipt) -> list[dict[str, Any]]:
         """The items of one extraction that `_claim_from_dict` could store, in order.
 
         Everything after this reads the items as well formed, so an item this drops is
-        never guarded, never acquired and never stored. It drops:
+        never guarded, never acquired and never stored. A reply that is not a list, and
+        an item that is not an object, never reach this: `_mapped` drops them first. It
+        drops:
 
-        - the whole reply when it is not a list;
-        - an item that is not an object;
         - an item with no `source_index` naming one of `episodes`, because a claim with
           no source turn has no provenance;
         - an item whose predicate is not non-empty text, or whose subject or object is
@@ -1347,12 +1345,8 @@ class WritePipeline:
         `_claim_from_dict` reads a polarity that is not a number, or not finite, as an
         assertion, and such a confidence as the default.
         """
-        if not isinstance(raw, list):
-            return []
         kept: list[dict[str, Any]] = []
         for item in raw:
-            if not isinstance(item, dict):
-                continue
             idx = item.get("source_index")
             if not isinstance(idx, int) or isinstance(idx, bool) \
                     or not 0 <= idx < len(episodes):
@@ -1818,13 +1812,13 @@ class WritePipeline:
 def _mapped(raw: Any, positions: Sequence[int]) -> list[dict[str, Any]]:
     """Copies of one call's claim dicts, with `source_index` pointing into the batch.
 
-    A call is shown only some of the batch's turns, so the model's `source_index` counts
-    within the call. `positions` maps it back. An index that names no turn in the call is
-    replaced by `None`, which `_admissible` drops as having no source, rather than left
-    as a number that would now name a different turn of the batch.
+    A call may be shown only some of the batch's turns, so the model's `source_index`
+    counts within the call. `positions` maps it back. An index that names no turn in the
+    call is replaced by `None`, which `_admissible` drops as having no source, rather than
+    left as a number that would now name a different turn of the batch.
 
-    This reads each item before `_admissible` does, so it drops what `_admissible` would:
-    a reply that is not a list, and an item that is not an object (#303).
+    This is the first code to read a model's reply, so it drops a reply that is not a
+    list and an item that is not an object (#303). `_admissible` relies on that.
     """
     if not isinstance(raw, list):
         return []
