@@ -34,7 +34,7 @@ from typing import (Any, Callable, ClassVar, Collection, Iterable, Literal, Mapp
 
 from .confirm import ConfirmationRefused, Confirmer
 from .consolidate import Consolidator
-from .embed import Embedder, default_embedder
+from .embed import Embedder, NoEmbedder, default_embedder, embeds
 from .filters import FilterValue, checked_filter
 from .embed.fingerprint import (
     EmbedderFingerprint,
@@ -800,10 +800,10 @@ class Memvara:
         # asking for encryption here would be accepted and never done.
         if kwargs.pop("encryption", False):
             named.append("encryption")
-        # The same reading for the local options whose default is true: chunking and
-        # ingestion run inside the deployment, so turning one off here would be accepted
-        # and never used.
-        for switch in ("retrieval_chunks", "ingest_urls", "ingest_media"):
+        # The same reading for the local options whose default is true: chunking,
+        # ingestion and embedding run inside the deployment, so turning one off here would
+        # be accepted and never used.
+        for switch in ("retrieval_chunks", "ingest_urls", "ingest_media", "embeddings"):
             if kwargs.pop(switch, True) is not True:
                 named.append(switch)
         # Prefix rather than name, and sorted so two of them read the same way twice.
@@ -860,6 +860,7 @@ class Memvara:
         telemetry: Recorder | None = None,
         redactor: Redactor | None = None,
         reembed: bool = False,
+        embeddings: bool = True,
         advise_replacements: bool = False,
         confirm_secret: str | bytes | None = None,
         query_rewrite: bool = True,
@@ -904,6 +905,25 @@ class Memvara:
                 "was opened before this call, so whether it is encrypted, and with which "
                 "key, is already decided. Pass SQLiteStore(path, encryption=True) as the "
                 "store, or Memvara(path, encryption=True).")
+        if not isinstance(embeddings, bool):
+            # `None` would read as false and quietly switch vectors off for a wrapper
+            # that forwards an optional argument.
+            raise TypeError(f"embeddings= takes True or False, not {embeddings!r}")
+        if not embeddings:
+            # A store that keeps no vectors has no embedder to choose, so one passed here
+            # would be ignored. Saying so is better than writing a store the caller
+            # believes is searchable by meaning.
+            if embedder is not None:
+                raise TypeError(
+                    "embeddings=False and embedder= cannot be combined: a store that "
+                    "keeps no vectors embeds nothing, so the embedder would be ignored. "
+                    "Pass one or the other.")
+            if advise_replacements:
+                raise TypeError(
+                    "advise_replacements=True finds each new fact's nearest neighbours "
+                    "by vector, and embeddings=False keeps no vectors. Leave one of them "
+                    "off.")
+            embedder = NoEmbedder()
         scope_kw: dict[str, str | None] = {"user": user, "agent": agent,
                                            "session": session, "project": project}
         self._absorb_scope_aliases(tuning, scope_kw)
@@ -1246,6 +1266,8 @@ class Memvara:
         def check(width: int | None) -> None:
             if width is None:
                 return
+            if embedder is not None and not embeds(embedder):
+                raise EmbedderMismatchError(self._vectors_kept_message(width, db_path))
             recorded = read_fingerprint_at(db_path)
             chosen = embedder
             if chosen is None:
@@ -1277,6 +1299,23 @@ class Memvara:
         record = sidecar_path(self.store)
         recorded = read_fingerprint(self.store)
         actual = stored_dim(self.store)
+        if not embeds(self.embedder):
+            # `embeddings=False`. A store that already holds vectors is refused rather
+            # than half kept: new claims would have none, and nothing could tell which.
+            if actual is not None:
+                raise EmbedderMismatchError(self._vectors_kept_message(actual))
+            if recorded != mine:
+                write_fingerprint(self.store, mine)
+            return
+        if recorded == fingerprint_of(NoEmbedder()) and self._holds_anything():
+            # The store was written with `embeddings=False`, so nothing in it has a
+            # vector. Embedding only what is written from now on would leave every older
+            # claim unreachable by meaning, with nothing to say which ones.
+            raise EmbedderMismatchError(
+                f"{self._store_label()} was written with embeddings=False, so none of "
+                f"what it holds has a vector, and {mine} would embed only what is "
+                "written from now on. Open it with reembed=True to embed everything it "
+                "holds, or keep opening it with embeddings=False.")
         if recorded is not None and actual is not None and recorded.dim != actual:
             # A record that names another width than the stored vectors have is wrong
             # about them, whatever name it gives, so it is treated as damaged: the open
@@ -1356,6 +1395,23 @@ class Memvara:
     def _store_label(self) -> str:
         path = getattr(self.store, "path", None)
         return path if isinstance(path, str) and path else type(self.store).__name__
+
+    def _vectors_kept_message(self, width: int, label: str | None = None) -> str:
+        """Why `embeddings=False` refuses a store that already holds vectors."""
+        return (
+            f"{label or self._store_label()} holds vectors of width {width}, and "
+            "embeddings=False keeps none. Open it with embeddings=False, reembed=True to "
+            "drop them, which deletes every stored vector and keeps every claim and "
+            "turn, or open it without embeddings=False to keep them.")
+
+    def _holds_anything(self) -> bool:
+        """Whether the store holds at least one claim or turn. A store that holds
+        neither has nothing an embedder could have missed, such as a new file beside a
+        record a deleted store left behind."""
+        if next(iter(self.store.iter_claims(include_invalidated=True)), None) is not None:
+            return True
+        iter_episodes = getattr(self.store, "iter_episodes", None)
+        return iter_episodes is not None and next(iter(iter_episodes()), None) is not None
 
     def _mismatch_message(self, mine: EmbedderFingerprint,
                           recorded: EmbedderFingerprint | None, actual: int, *,
@@ -1595,6 +1651,8 @@ class Memvara:
         workstream's to change and a `CachedEmbedder` makes the second encode free
         today.
         """
+        if not embeds(self.embedder):
+            return  # `embeddings=False`: the store keeps no vectors
         get = getattr(self.store, "get_episode_embedding", None)
         put = getattr(self.store, "set_episode_embedding", None)
         if get is None or put is None:
@@ -1928,6 +1986,11 @@ class Memvara:
         exactly like a whole one, and the caller cannot tell which it got. A judge call
         that raised is still counted as the model call it was.
         """
+        if not embeds(self.embedder):
+            # The constructor refuses `advise_replacements` with `embeddings=False`, but
+            # `reembed(NoEmbedder())` can drop the vectors from an advising instance
+            # later. The neighbours are found by vector, so there are none to judge.
+            return
         # The constructor refused any backend that cannot judge.
         judge = cast(ReplacementJudge, self.llm)
         new = receipt.added[0]
@@ -4918,6 +4981,13 @@ class Memvara:
         them. Claims that were never embedded get vectors too, so this doubles as an
         index repair. Returns the number of *claims* embedded.
 
+        On a store opened with `embeddings=False`, or with `embedder=NoEmbedder()`, it
+        drops every stored vector, embeds nothing and returns 0. That is how a store that
+        already holds vectors becomes one that keeps none: `Memvara(path,
+        embeddings=False, reembed=True)` does it as the store opens. The vectors' rows are
+        deleted and the `.vecs` file is emptied; the database file keeps its size until
+        SQLite's `VACUUM` gives the free pages back.
+
         Episodes are re-encoded in the same pass and deliberately not counted: they are
         not optional extra work. `clear_embeddings()` empties one shared matrix, so a
         migration that re-embedded only the claims would leave every turn unreachable
@@ -4940,7 +5010,13 @@ class Memvara:
         # object as it was: rebound first, it held the new embedder beside the old
         # vectors, and with one of the same width every search then compared two
         # unrelated vector spaces with nothing raised.
-        _drop_vectors(self.store)
+        #
+        # Skipped when the store keeps no vectors and none are about to be written,
+        # because there is nothing to drop and the drop needs the store to itself: a
+        # second handle opening with `embeddings=False, reembed=True` out of habit would
+        # otherwise be refused while the first is open.
+        if embeds(embedder or self.embedder) or stored_dim(self.store) is not None:
+            _drop_vectors(self.store)
 
         if embedder is not None:
             self.embedder = embedder
@@ -4949,6 +5025,11 @@ class Memvara:
             self.writer.embedder = embedder
             self.reader.embedder = embedder
             self.consolidator.embedder = embedder
+
+        if not embeds(self.embedder):
+            # A store that keeps no vectors: dropping them was the whole migration.
+            write_fingerprint(self.store, fingerprint_of(self.embedder))
+            return 0
 
         # No tenant: this walks every claim and every turn in the store.
         with transaction(self.store):

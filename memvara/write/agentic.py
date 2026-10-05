@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Mapping, Sequence, Union
 
-from ..embed.base import Embedder, encode_queries
+from ..embed.base import Embedder, embeds, encode_queries
 from ..llm import _shape
 from ..llm.base import Message, ToolChat, ToolRun, ToolSpec, Usage
 from ..llm.guidance import Guidance, with_guidance
@@ -420,8 +420,11 @@ class _Session:
         store, scopes, now = self.extractor.store, self.scope.ancestors(), self.now
         legs = {"lexical": store.lexical_search(query, scopes, k, valid_at=now, known_at=now)}
         try:
-            vector = encode_queries(self.extractor.embedder, [query])[0]
-            legs["vector"] = store.vector_search(vector, scopes, k, valid_at=now, known_at=now)
+            # `embeddings=False` keeps no vectors, so the lexical leg answers alone.
+            if embeds(self.extractor.embedder):
+                vector = encode_queries(self.extractor.embedder, [query])[0]
+                legs["vector"] = store.vector_search(
+                    vector, scopes, k, valid_at=now, known_at=now)
         except ValueError:
             # The index was built by another embedder. The lexical leg still answers, as
             # `WritePipeline._near_duplicate` does in the same situation.

@@ -61,7 +61,7 @@ from datetime import datetime
 from time import perf_counter
 from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
-from ..embed.base import Embedder
+from ..embed.base import Embedder, embeds
 from ..embed.calibration import calibration_of, numbers
 from ..llm._shape import finite_amount
 from ..llm.base import (
@@ -975,6 +975,11 @@ class WritePipeline:
         """
         if not episodes:
             return []
+        if not embeds(self.embedder):
+            # `embeddings=False`: a near-duplicate is found by vector, so with none every
+            # turn goes on to extraction, and reconciliation still collapses a fact that
+            # is stated twice.
+            return list(episodes)
         # Outside the transaction on purpose: `encode` is a local hash for the shipped
         # embedder and a network round trip for a hosted one, and the write lock must
         # not depend on which was configured.
@@ -1567,6 +1572,13 @@ class WritePipeline:
         lexical trigger alone is not grounds for rejection when the second opinion the
         mode promises cannot be obtained.
         """
+        if not embeds(self.embedder):
+            # `embeddings=False`: there is no embedder to vouch for a paraphrase, so
+            # nothing is rescued and `"auto"` is the lexical check alone. Keeping the
+            # claim instead would switch off the default guard against invented facts
+            # for good, which is not what the fail-open below is for: that covers an
+            # embedder that failed once, and warns.
+            return False
         try:
             chunks = [source[i:i + _GROUNDING_CHUNK_CHARS]
                       for i in range(0, max(len(source), 1), _GROUNDING_CHUNK_CHARS)]
@@ -1780,7 +1792,7 @@ class WritePipeline:
         )
 
     def _write_embeddings(self, claims: Sequence[Claim]) -> None:
-        if not claims:
+        if not claims or not embeds(self.embedder):
             return
         vecs = self.embedder.encode([c.text for c in claims])
         for claim, vec in zip(claims, vecs):

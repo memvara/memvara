@@ -27,7 +27,7 @@ from typing import Sequence
 
 import numpy as np
 
-from ..embed.base import Embedder
+from ..embed.base import Embedder, embeds
 from ..embed.calibration import calibration_of, numbers
 from ..schema import PredicateRegistry
 from ..store.base import Store
@@ -141,6 +141,12 @@ def merge_pass(sweep: Sweep, embedder: Embedder, registry: PredicateRegistry, *,
     at and still fold a restatement. In a slot that holds many values, both values of
     such a pair can be true, and a merge would retire one.
     """
+    if not embeds(embedder):
+        # `embeddings=False`: near-identical claims are found by comparing vectors, and
+        # the store keeps none, so nothing is merged. Still counted, at zero, as below.
+        if sweep.telemetry is not None:
+            sweep.telemetry.counter(CONSOLIDATE_MERGED, 0)
+        return 0
     if threshold is None:
         threshold = calibration_of(embedder).merge
     at = sweep.now

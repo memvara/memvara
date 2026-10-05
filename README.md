@@ -630,7 +630,7 @@ hypothetical extension point.
 | Temporal model | valid time and recorded time, queried independently |
 | Conflict handling | predicate-aware and deterministic, decided on write |
 | Provenance | the source episodes, the derivation, and the claim superseded |
-| Retrieval | vector and BM25 fused by rank, optionally a graph leg, decayed per predicate |
+| Retrieval | vector and BM25 fused by rank, optionally a graph leg, decayed per predicate; BM25 alone for a store opened with `embeddings=False`, which keeps no vectors |
 | Storage | SQLite with FTS5, plus an mmap vector sidecar; optionally encrypted at rest, vectors included |
 | Dependencies | numpy. Everything else is an extra |
 | Model dependency | none for `remember()`; `add()` reaches for one only where no rule matches the prose |

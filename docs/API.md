@@ -11,8 +11,10 @@ omitted below for readability.
 ```python
 mem = Memvara(path=":memory:", *, store=, embedder=, llm=, registry=, telemetry=,
              redactor=, tenant=, user=, agent=, session=, reembed=False,
-             encryption=False, expiry_erasure=True, **tuning)
+             embeddings=True, encryption=False, expiry_erasure=True, **tuning)
 # api_key= or base_url= instead returns a RemoteMemvara — see "A hosted deployment" below
+# embeddings=False keeps no vectors and finds by text alone — see "A store without
+#   vectors" below
 # encryption=True creates a new store file encrypted (pip install 'memvara[encrypt]');
 #   an existing file opens as whatever it already is — see "Encryption at rest" below
 # expiry_erasure=True (the default) hides from every read, and erases when the store
@@ -256,6 +258,7 @@ mem.consolidate()                                 -> dict[str, int]
 mem.reembed(embedder=None)                        -> int            # after a model change
 #   needs the store to itself: raises StoreInUseError, changing nothing, while another
 #   process or another SQLiteStore has it open
+#   on a store opened with embeddings=False it drops every vector and returns 0
 mem.stats()                                       -> dict[str, int]
 #   episodes, claims, live_claims, ended_claims, invalidated, embeddings
 #   these do not sum — see "Counting claims" above; `claims` is the only total
@@ -377,6 +380,41 @@ is transport and response-shape only — every rule about what counts as a valid
 shared in `memvara/llm/_shape.py`, so the same turn produces the same claim regardless of
 which model wrote it.
 
+### A store without vectors
+
+`Memvara(path, embeddings=False)` opens a store that keeps no vectors. Use it when you read
+the store by subject and predicate, with `history()`, `get_all()` and the like, and never
+search it by meaning. A vector is written for every claim and every turn, so a store that
+never reads them pays for them in size and in write time: they were about half of every
+store memvara-code measured.
+
+In this mode no embedder is built or loaded, no vector is written, and `search()` and
+`recall()` rank by text alone, through the keyword leg; the vector leg is skipped and the
+query is never embedded. What works by comparing vectors behaves differently:
+
+- `add()` does not look for a near-duplicate of each turn before extracting it, so a
+  restated turn reaches extraction, which costs a model call when one is configured. A
+  fact stated twice is still collapsed into one claim when it is reconciled.
+- `reject_ungrounded="auto"` has no embedder to vouch for a paraphrase, so a claim that
+  shares no words with its turn is rejected, as under `reject_ungrounded=True`.
+- `consolidate()` merges nothing; it still decays and promotes.
+- `advise_replacements=True` is refused with a `TypeError`, and so is `embedder=`. The
+  CrewAI backend refuses such a store too, because CrewAI searches by vector.
+- `embeddings=` takes `True` or `False` only; `None` is a `TypeError`.
+
+The choice is recorded beside the store, in `<db>.embedder.json`, as the embedder
+`"none"`, and both directions of a change are refused until you migrate:
+
+```python
+Memvara(path, embeddings=False)                  # store holds vectors: EmbedderMismatchError
+Memvara(path, embeddings=False, reembed=True)    # drops every vector, keeps every claim
+Memvara(path, embedder=HashingEmbedder())        # store written without vectors: refused
+Memvara(path, embedder=HashingEmbedder(), reembed=True)  # embeds everything it holds
+```
+
+Dropping vectors deletes their rows and empties the `.vecs` file. The database file keeps
+its size until SQLite's `VACUUM` gives the free pages back.
+
 ### Encryption at rest
 
 ```python
@@ -480,9 +518,9 @@ credential, builds a connection pool, and stops. The first request is the first 
 call, and `close()` (or a `with` block) releases the pool.
 
 Naming a local subsystem alongside a credential is a `TypeError` rather than a silent
-no-op — `path=`, `store=`, `embedder=`, `llm=`, `registry=` and `reembed=True` all
-describe an engine that runs server-side. `reembed=False` is accepted and does nothing,
-because it asks for nothing.
+no-op — `path=`, `store=`, `embedder=`, `llm=`, `registry=`, `reembed=True` and
+`embeddings=False` all describe an engine that runs server-side. `reembed=False` and
+`embeddings=True` are accepted and do nothing, because they ask for nothing.
 
 **What is absent is absent, not raising.** `reembed()`, `pending_extraction()`,
 `reextract()` and `reset()` have no endpoint, so they are not methods: reaching for one is

@@ -182,6 +182,12 @@ JSON, under a header that names the text as data rather than instruction.
   message naming the width to use. `reembed()` is the way through. `Memvara()` with no
   embedder, and the MCP server's bare `local`, load the local model the store's fingerprint
   names, because the default model changed after 0.15 to one of the same width.
+- **A store can keep no vectors at all.** `Memvara(path, embeddings=False)` holds a
+  `NoEmbedder`, records `none` as its embedder, and skips every vector leg, so reads rank by
+  text alone. Every place that would embed asks `embeds()` first, and `NoEmbedder.encode`
+  raises, so a missed place raises or, inside a call wrapped to keep a write going, warns. A store with vectors is refused in this mode
+  until `reembed=True` drops them, and an embedder is refused on a store written this way
+  until `reembed=True` embeds it. `tests/test_store_without_vectors.py` holds both.
 - **A store whose record is lost says so, and records the embedder again.** When
   `<db>.embedder.json` is missing or unreadable on a store that holds vectors, or names
   another width than those vectors have, the width still has to match, but nothing can

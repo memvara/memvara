@@ -59,7 +59,7 @@ from typing import (
 
 import numpy as np
 
-from ..embed.base import Embedder, encode_queries
+from ..embed.base import Embedder, embeds, encode_queries
 from ..filters import SearchFilter
 from ..llm.base import Usage
 from ..rerank import Reranker, rerank
@@ -684,7 +684,8 @@ class HybridRetriever:
         else:
             # Every phrasing in one call: an embedder behind a network pays a round trip
             # per call, not per text.
-            vectors = encode_queries(self.embedder, [query, *alternatives])
+            vectors = (encode_queries(self.embedder, [query, *alternatives])
+                       if embeds(self.embedder) else [None] * (1 + len(alternatives)))
             pending = [
                 self._phrasing_pool().submit(
                     once, q, valid_at=valid_at, window=window, now=asked, ranked=False,
@@ -734,7 +735,7 @@ class HybridRetriever:
         leg, so the embedder is only ever called from the thread that called `search()`.
         """
         can = getattr(self.store, "_parallel_reads", None)
-        if can is not None and can():
+        if can is not None and can() and embeds(self.embedder):
             vector = self._query_vector(query)
             if self._legs_free.acquire(blocking=False):
                 passing = getattr(self._pass, "vectors", None)
@@ -1545,7 +1546,7 @@ class HybridRetriever:
         lexical leg, which is the stronger one for verbatim recall.
         """
         search = getattr(self.store, "vector_search_episodes", None)
-        if search is None:
+        if search is None or not embeds(self.embedder):
             return []
         qvec = self._query_vector(query)
         if float(np.linalg.norm(qvec)) <= 0.0:
@@ -1642,8 +1643,11 @@ class HybridRetriever:
         A zero vector gives every candidate a cosine of 0.0, so the order would be
         arbitrary and fusion would read it as evidence. Queries with no alphanumeric
         content embed to zero, and so does any purely CJK query under the ASCII-only
-        `HashingEmbedder`. Returning nothing lets BM25 answer alone.
+        `HashingEmbedder`. Returning nothing lets BM25 answer alone, and so does a store
+        opened with `embeddings=False`, which keeps no vectors.
         """
+        if not embeds(self.embedder):
+            return []
         qvec = self._query_vector(query)
         if float(np.linalg.norm(qvec)) <= 0.0:
             return []

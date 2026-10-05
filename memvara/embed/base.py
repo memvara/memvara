@@ -54,6 +54,50 @@ class Embedder(Protocol):
     # out for the same reason; see `encode_queries` below.
 
 
+class NoEmbedder:
+    """The embedder of a store that keeps no vectors, which `Memvara(path,
+    embeddings=False)` opens.
+
+    Such a store writes no vector for any claim or turn, never builds or loads an
+    embedding model, and finds things by text alone. It is for a caller that reads its
+    store by subject and predicate and never searches by meaning, and for whom vectors
+    would be about half of the store's size for nothing.
+
+    `encode` refuses rather than returning zeros. Every place in this package that would
+    embed asks `embeds()` first, so a call that reaches `encode` is a place that question
+    was missed. It raises there, or, inside one of the few calls wrapped to keep a write
+    going when embedding fails, it warns; either way no vector is stored or compared.
+
+    >>> embeds(NoEmbedder()), embeds(HashingEmbedder(dim=8))
+    (False, True)
+    """
+
+    name = "none"
+    dim = 0
+
+    def encode(self, texts: Sequence[str]) -> np.ndarray:
+        raise RuntimeError(
+            "this store keeps no vectors: it was opened with embeddings=False, so "
+            "nothing can be embedded. To give it vectors, open it with an embedder and "
+            "reembed=True, which embeds every claim and turn it holds.")
+
+    def __repr__(self) -> str:
+        return "<NoEmbedder>"
+
+
+def embeds(embedder: object) -> bool:
+    """Whether `embedder` produces vectors: false only for a `NoEmbedder`, including
+    one wrapped in a `CachedEmbedder` or anything else that names it as `inner`."""
+    seen = 0
+    current: object | None = embedder
+    while current is not None and seen < 8:
+        if isinstance(current, NoEmbedder):
+            return False
+        current = getattr(current, "inner", None)
+        seen += 1
+    return True
+
+
 def encode_queries(embedder: Embedder, texts: Sequence[str]) -> np.ndarray:
     """`texts` embedded as search queries, as an (n, dim) float32 array.
 
