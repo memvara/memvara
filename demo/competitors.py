@@ -1,20 +1,16 @@
-"""Two other memory systems as arms of the answer-quality run, both off by default.
+"""Another memory system, mem0, as an arm of the answer-quality run. Off by default.
 
     PYTHONPATH=. python3 demo/harness.py --reader stub --arm-mem0
-    PYTHONPATH=. python3 demo/harness.py --reader stub --arm-supermemory \\
-        --supermemory-key-file ~/.config/memvara/supermemory.key \\
-        --supermemory-container memvara-demo-2026-09 \\
-        --supermemory-ingest-path /v3/documents --supermemory-search-path /v3/search
 
 `demo/baselines.py` has five arms and every one of them is either a control or memvara.
 The roadmap's "What is still missing" asks for the part that is not here: a comparison
 against another system **on answers**, rather than on architecture. `bench/compare.py`
 compares against a reimplementation of mem0's documented design and `bench/mem0_real.py`
 compares against the real package, but both score stored state — how many slots hold the
-current value — and neither puts a reader in the seat. These two arms do.
+current value — and neither puts a reader in the seat. This arm does.
 
-Both are off unless asked for, and each needs something this repository cannot supply.
-That is why they live here rather than in `ARMS`: an arm that cannot run on a clean
+The arm is off unless asked for, because it needs a package that a clean checkout does not
+install. That is why it lives here rather than in `ARMS`: an arm that cannot run on a clean
 checkout must not be able to break the offline run that CI depends on.
 
 ## mem0
@@ -38,59 +34,22 @@ Two things are deliberately identical to the memvara arms, because a difference 
 would make the comparison a comparison of budgets. The retrieval budget is `DEFAULT_K`
 slots capped at `MAX_CONTEXT_CHARS`, and the block is rendered under `recall()`'s own
 header, so the prompts differ in which values they carry and in nothing else.
-
-## Supermemory
-
-Needs an account, and this repository does not have one. What it knows about Supermemory
-is one endpoint: `memvara/compat/supermemory_import.py` reads `POST /v3/documents/list`,
-which lists documents that already exist. An arm has to write a corpus and then query it,
-and neither of those calls has ever been made from here.
-
-So the arm ships with **no default write path and no default search path**. Both are
-settings with no value, and turning the arm on without them is refused with the reason.
-That is the honest position: a default that looked plausible would be a guess that reads
-like a documented fact, and the next person to quote it would have no way to tell. Anybody
-with an account can supply the two paths and run the arm; until somebody does, there is no
-Supermemory row in `docs/BENCHMARKS.md` and the README says why.
-
-It also refuses without an explicit container tag. A run writes one document per visible
-turn — six hundred at `--corpus-scale 10` — and nothing here can take them back out of
-somebody's account afterwards. `demo/hosted.py` refuses this machine's own memvara
-credentials for the same reason and at the same point: before anything is sent.
-
-Network access goes through the importer's own injectable `fetch`, `(url, key, body) ->
-payload`, rather than a second HTTP client written here. That is how the importer is
-tested without a network, and it is how a caller routes through a client of their own.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Sequence
 
 from demo import baselines as bl
 from demo.baselines import Arm, Context, Question, Turn, Write
 
 from memvara import HashingEmbedder, Memvara
-from memvara.compat.supermemory_import import (
-    SupermemoryError,
-    _http_fetch,
-    read_supermemory_key,
-)
 
-__all__ = ["CompetitorUnavailable", "Mem0Arm", "SupermemoryArm",
-           "build_competitors"]
+__all__ = ["CompetitorUnavailable", "Mem0Arm", "build_competitors"]
 
-#: The one Supermemory endpoint anything in this repository has ever called. Named here
-#: because the arm's refusal quotes it: it is the whole evidence base for what this
-#: repository knows about that API, and it is a read.
-SUPERMEMORY_VERIFIED_PATH = "/v3/documents/list"
-
-#: Their documented host, shared with the importer so the two cannot drift.
-SUPERMEMORY_BASE_URL = "https://api.supermemory.ai"
-
-#: Documents per search request, and memories per mem0 search: `DEFAULT_K`, the same slot
-#: budget `naive_rag` and both memvara arms are held to.
+#: Memories per mem0 search: `DEFAULT_K`, the same slot budget
+#: `naive_rag` and both memvara arms are held to.
 _K = bl.DEFAULT_K
 
 
@@ -98,8 +57,8 @@ def stored_notes(arm: str, notes: Sequence[str], *, seen: Sequence[Turn],
                  max_chars: int) -> Context:
     """One arm's retrieved notes as the context a reader sees.
 
-    Both arms here return a list of stored sentences and have to turn it into the same
-    shape: `recall()`'s own header, one bullet per note, the shared character cap, and the
+    An arm here returns a list of stored sentences and has to turn it into the shape the
+    memvara arms produce: `recall()`'s own header, one bullet per note, the shared character cap, and the
     entry count taken from the rendered text after the cap rather than from the list that
     went in. Written once because the three parts are each load-bearing and each easy to
     get subtly differently. The header carries the framing that tells a model the lines
@@ -118,8 +77,7 @@ class CompetitorUnavailable(SystemExit):
     """An optional arm was asked for without what it needs. Raised with the fix in it.
 
     A `SystemExit`, like every other refusal a `demo/` entry point makes — see
-    `demo/hosted.py`'s credential checks. A missing package or an unconfigured account is
-    something the person running the command has to go and fix, so the useful output is
+    `demo/hosted.py`'s credential checks. A missing package is something the person running the command has to go and fix, so the useful output is
     the sentence saying what to do, not a traceback through the arm that noticed.
     """
 
@@ -334,128 +292,6 @@ class Mem0Arm:
                 f"so a value that moved is held beside the one that replaced it.")
 
 
-# --- Supermemory ------------------------------------------------------------------
-
-
-class SupermemoryArm:
-    """Supermemory as an arm, over the importer's injectable `fetch`.
-
-    Every requirement is checked in `__init__`, which runs while the arms are being built
-    — before any arm has produced a context and before a reader has been called. A run
-    that discovered a missing setting on the first question would already have filled the
-    mem0 stores and spent the reader's first calls.
-    """
-
-    #: There is no default for either. See the module docstring: this repository has
-    #: called one Supermemory endpoint and it is a read, so it has nothing to default to.
-    DEFAULT_INGEST_PATH: str | None = None
-    DEFAULT_SEARCH_PATH: str | None = None
-
-    def __init__(self, *, api_key: str, container: str,
-                 ingest_path: str | None = DEFAULT_INGEST_PATH,
-                 search_path: str | None = DEFAULT_SEARCH_PATH,
-                 base_url: str = SUPERMEMORY_BASE_URL, k: int = _K,
-                 max_chars: int = bl.MAX_CONTEXT_CHARS,
-                 fetch: Callable[[str, str, Mapping[str, Any]],
-                                 Mapping[str, Any]] | None = None,
-                 key_problem: str = "") -> None:
-        missing = []
-        if not api_key:
-            # `key_problem` carries why the key could not be read, so that a run missing
-            # both the key and the endpoint paths names all four things at once instead
-            # of finding the next one each time it is run.
-            missing.append(key_problem or "an API key (--supermemory-key-file PATH)")
-        if not container:
-            missing.append("a container tag of its own (--supermemory-container TAG)")
-        if not ingest_path:
-            missing.append("the path that writes a document "
-                           "(--supermemory-ingest-path PATH)")
-        if not search_path:
-            missing.append("the path that searches (--supermemory-search-path PATH)")
-        if missing:
-            raise CompetitorUnavailable(
-                "--arm-supermemory needs " + "; ".join(missing) + ". The container keeps "
-                "a run out of whatever space the account defaults to, because a run "
-                "writes one document per visible turn and nothing here can remove them "
-                "afterwards. The two paths have no default because this repository has "
-                f"never called them: the importer reads {SUPERMEMORY_VERIFIED_PATH} and "
-                "that is the whole of what it knows. Supply the paths from Supermemory's "
-                "own documentation rather than letting this guess them.")
-        self.api_key = api_key
-        self.container = container
-        self.ingest_url = base_url.rstrip("/") + ingest_path
-        self.search_url = base_url.rstrip("/") + search_path
-        self.base_url = base_url
-        self.k = k
-        self.max_chars = max_chars
-        self.fetch = fetch or _http_fetch
-        #: Containers whose corpus has been written. Same reasoning as `Mem0Arm`, and
-        #: here it also bounds what a run costs somebody's account.
-        self.filled: set[str] = set()
-
-    def container_for(self, question: Question) -> str:
-        """One container per question instant, under the tag this run was given.
-
-        A single container cannot serve two instants, and the reason is not hypothetical.
-        `demo/harness.py` asks questions in the order `demo/scenario.py` lists them, which
-        is **not** `asked_at` order: the eight August questions come first and the April
-        one is ninth. Sharing one container, the April question would search a store that
-        already held the whole history, and would read turns from four months after it was
-        asked — the cutoff every other arm keeps, silently broken for this one. It would
-        also write the overlapping turns a second time, into an account this code cannot
-        clean up. Neither failure shows in the report. `demo/hosted.py` splits hosted
-        scopes by instant for the same reason.
-        """
-        return f"{self.container}-{bl.instant_tag(question.asked_at)}"
-
-    def __call__(self, question: Question, turns: Sequence[Turn]) -> Context:
-        seen = bl.visible_turns(question, turns)
-        container = self.container_for(question)
-        self._fill(container, seen)
-        found = self._call(self.search_url,
-                           {"q": question.text, "limit": self.k,
-                            "containerTags": [container]})
-        rows = found.get("results") or found.get("memories") or []
-        return stored_notes("supermemory", [self._text_of(row) for row in rows],
-                            seen=seen, max_chars=self.max_chars)
-
-    def _fill(self, container: str, seen: Sequence[Turn]) -> None:
-        """Write this instant's visible turns into its own container, once."""
-        if container in self.filled:
-            return
-        for turn in seen:
-            self._call(self.ingest_url, {
-                "content": f"[{turn.at:%Y-%m-%d}] {turn.role}: "
-                           f"{' '.join(turn.text.split())}",
-                "containerTags": [container],
-            })
-        self.filled.add(container)
-
-    def _call(self, url: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
-        """One request, with the key handed to the transport and never put in the body."""
-        try:
-            return self.fetch(url, self.api_key, body)
-        except SupermemoryError as exc:
-            raise CompetitorUnavailable(f"Supermemory refused {url}: {exc}") from None
-
-    @staticmethod
-    def _text_of(row: Any) -> str:
-        """The text of one returned document, under whichever key carries it."""
-        if not isinstance(row, Mapping):
-            return ""
-        for key in ("content", "memory", "summary", "title"):
-            value = row.get(key)
-            if value:
-                return str(value)
-        return ""
-
-    def note(self) -> str:
-        return (f"  supermemory arm: {self.base_url}, containers {self.container}-<question "
-                f"instant>, one per instant, write {self.ingest_url}, search "
-                f"{self.search_url}. The endpoint paths were supplied on the command line; "
-                f"this repository has only ever called {SUPERMEMORY_VERIFIED_PATH}.")
-
-
 # --- the setup step ---------------------------------------------------------------
 
 
@@ -463,7 +299,7 @@ def build_competitors(args: Any) -> tuple[dict[str, Arm], list[str]]:
     """The optional arms this run asked for, and the lines the report prints about them.
 
     Called from `demo/harness.py`'s `build_arms`, which is where every arm and store is
-    built. Returns an empty mapping and no notes when neither flag was given, so the
+    built. Returns an empty mapping and no notes when `--arm-mem0` was not given, so the
     default run is the five arms it has always been.
     """
     arms: dict[str, Arm] = {}
@@ -473,32 +309,5 @@ def build_competitors(args: Any) -> tuple[dict[str, Arm], list[str]]:
         mem0.check()
         arms["mem0"] = mem0
         notes.append(mem0.note())
-    if getattr(args, "arm_supermemory", False):
-        key, key_problem = _supermemory_key(args.supermemory_key_file)
-        supermemory = SupermemoryArm(
-            api_key=key, key_problem=key_problem,
-            container=args.supermemory_container or "",
-            ingest_path=args.supermemory_ingest_path,
-            search_path=args.supermemory_search_path,
-            base_url=args.supermemory_base_url or SUPERMEMORY_BASE_URL)
-        arms["supermemory"] = supermemory
-        notes.append(supermemory.note())
     return arms, notes
 
-
-def _supermemory_key(path: str | None) -> tuple[str, str]:
-    """The key from the file at `path`, or the reason there is none.
-
-    Read at run time and never stored anywhere but in the arm. `read_supermemory_key`
-    already reads the plugin's file and raises with the fix in the message, so the
-    no-path case is its job; a `--supermemory-key-file` is read the same way, which is
-    what lets a demo use a key that is not the one the plugin signed in with.
-
-    Returns the reason rather than raising it, so that the arm can put it in the one
-    refusal that lists everything missing. Raising here would report the key on the first
-    run and the container and the two paths on the second.
-    """
-    try:
-        return read_supermemory_key(path), ""
-    except SupermemoryError as exc:
-        return "", f"an API key (--supermemory-key-file PATH): {exc}"

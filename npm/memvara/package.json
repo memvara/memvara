@@ -30,13 +30,9 @@
   "bin": {
     "memvara": "bin/memvara.js"
   },
-  "main": "index.js",
-  "types": "index.d.ts",
   "files": [
     "bin",
     "lib",
-    "index.js",
-    "index.d.ts",
     "README.md",
     "LICENSE"
   ],
@@ -46,6 +42,5 @@
   "engines": {
     "node": ">=20"
   },
-  "sideEffects": false,
   "private": false
 }

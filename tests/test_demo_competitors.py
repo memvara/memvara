@@ -1,18 +1,15 @@
-"""The two competitor arms of the demo, neither of which runs unless it is asked for.
+"""The mem0 competitor arm of the demo, which does not run unless it is asked for.
 
-`demo/competitors.py` adds `mem0` and `supermemory` to the answer-quality run. Both are
-off by default, and each needs something the repository cannot supply for it: mem0 needs
-the `mem0ai` package installed, and Supermemory needs an account. The arms exist so that
-the comparison in `demo/README.md` can be made against other systems on *answers* rather
-than on architecture, which is what item 1 of the roadmap's "What is still missing" asks
-for.
+`demo/competitors.py` adds `mem0` to the answer-quality run. It is off by default because
+it needs the `mem0ai` package, which the repository does not install. The arm exists so
+that the comparison in `demo/README.md` can be made against another system on *answers*
+rather than on architecture, which is what item 1 of the roadmap's "What is still
+missing" asks for.
 
 Everything here is offline. mem0 is replaced by `fake_mem0`, a module tree standing in for
 the parts of `mem0` the arm imports, whose `Memory` keeps the behaviour the comparison
 turns on: **every event is an ADD and nothing is ever superseded**, which is mem0 2.x's
-documented design and is what `bench/mem0_real.py` measured. Supermemory is reached through
-the same injectable `fetch` the importer in `memvara/compat/supermemory_import.py` uses, so
-no test here opens a socket.
+documented design and is what `bench/mem0_real.py` measured. No test here opens a socket.
 
 The failures these tests exist to prevent:
 
@@ -24,14 +21,6 @@ The failures these tests exist to prevent:
    prompt for known turns, so mem0 re-extracted every earlier turn in its window and each
    fact arrived eleven times. The numbers flattered memvara. An oracle keyed on anything
    but the single turn being added can reintroduce it, so the count is asserted.
-3. **A demo run that writes into somebody's real account.** The Supermemory arm refuses
-   without an explicit container, for the same reason `demo/hosted.py` refuses this
-   machine's own memvara credentials: a run writes hundreds of documents and nothing here
-   can take them back.
-4. **An endpoint this repository has never seen being presented as if it had.** The
-   importer has only ever exercised `POST /v3/documents/list`. The arm therefore ships no
-   default write or search path, and a test pins that, because a plausible-looking default
-   is how a guess becomes a documented fact.
 """
 
 from __future__ import annotations
@@ -39,8 +28,8 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from datetime import timezone
+from typing import Any, Mapping
 
 import pytest
 
@@ -369,214 +358,16 @@ def test_the_mem0_arm_is_not_built_until_it_is_used(monkeypatch):
     co.Mem0Arm()  # must not raise
 
 
-# --- Supermemory, offline ---------------------------------------------------------
-
-
-class FakeSupermemory:
-    """A Supermemory account behind the importer's `fetch` shape: (url, key, body).
-
-    Reusing that signature rather than inventing a second one is the point: it is already
-    how `memvara/compat/supermemory_import.py` is tested and how a caller routes through
-    their own HTTP client. This records what was sent so the tests can assert on the
-    request rather than on the arm's intentions.
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, Mapping[str, Any]]] = []
-        self.documents: list[Mapping[str, Any]] = []
-
-    def __call__(self, url: str, key: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
-        self.calls.append((url, key, dict(body)))
-        if url.endswith("/ingest"):
-            self.documents.append(body)
-            return {"id": f"doc{len(self.documents)}"}
-        # Search honours `containerTags`, which is the whole point of sending them. A
-        # double that ignored the tag and returned every document would pass a test for
-        # an arm that mixed two question instants in one container — the exact bug this
-        # file's last section is about.
-        tags = set(body.get("containerTags") or ())
-        mine = [d for d in self.documents
-                if not tags or tags & set(d.get("containerTags") or ())]
-        wanted = set(str(body.get("q", "")).lower().split())
-        ranked = sorted(
-            mine,
-            key=lambda d: (-len(wanted & set(str(d["content"]).lower().split())),
-                           str(d["content"])))
-        limit = int(body.get("limit", 10))
-        return {"results": [{"content": d["content"]} for d in ranked[:limit]]}
-
-
-def _supermemory(fetch: Any, **kw: Any) -> co.SupermemoryArm:
-    settings = {"api_key": "sm-test-key", "container": "memvara-demo",
-                "ingest_path": "/ingest", "search_path": "/search", "fetch": fetch}
-    settings.update(kw)
-    return co.SupermemoryArm(**settings)
-
-
-def test_the_supermemory_arm_names_every_missing_requirement_at_once(monkeypatch):
-    """One refusal listing four things beats four runs each finding the next one.
-
-    Every requirement is checked before anything is sent, so a person configuring the arm
-    learns the whole list in one go. The message must name the key, the container and both
-    endpoint paths.
-    """
-    with pytest.raises(co.CompetitorUnavailable) as caught:
-        co.SupermemoryArm(api_key="", container="", ingest_path="", search_path="")
-    message = str(caught.value)
-    for needed in ("api key", "container", "ingest", "search"):
-        assert needed in message.lower(), f"{needed} is not named in the refusal"
-
-
-def test_the_supermemory_arm_refuses_without_a_container(monkeypatch):
-    """A run must not be able to land in whatever space the account defaults to.
-
-    `demo/hosted.py` refuses this machine's own memvara credentials for the same reason,
-    and the reason is the same size: a scale-10 run writes six hundred documents, and
-    nothing in this repository can take them back out of somebody's account.
-    """
-    with pytest.raises(co.CompetitorUnavailable) as caught:
-        co.SupermemoryArm(api_key="sm-test-key", container="",
-                          ingest_path="/ingest", search_path="/search")
-    assert "container" in str(caught.value).lower()
-
-
-def test_the_repository_ships_no_default_write_or_search_endpoint():
-    """The honesty claim of the Supermemory arm, pinned as a test.
-
-    The importer has exercised exactly one endpoint, `POST /v3/documents/list`. Nobody
-    here has an account, so nobody here has seen a write or a query succeed. A default
-    path that looked plausible would turn a guess into something a reader would quote, so
-    there is none, and this is where that stays true.
-    """
-    assert co.SupermemoryArm.DEFAULT_INGEST_PATH is None
-    assert co.SupermemoryArm.DEFAULT_SEARCH_PATH is None
-    assert co.SUPERMEMORY_VERIFIED_PATH == "/v3/documents/list"
-
-
-def test_the_supermemory_arm_ingests_only_what_the_question_may_see():
-    """The `asked_at` cutoff again, on the arm that sends its corpus over a wire.
-
-    Every turn at or before the question's instant is sent, and none after it. The count
-    is compared against `visible_turns`, the same function every other arm uses, rather
-    than against a number written here.
-    """
-    fetch = FakeSupermemory()
-    question = _question("q_plan_current")
-    _supermemory(fetch)(question, TURNS)
-
-    ingests = [body for url, _, body in fetch.calls if url.endswith("/ingest")]
-    assert len(ingests) == len(bl.visible_turns(question, TURNS))
-    latest = max(t.at for t in bl.visible_turns(question, TURNS))
-    assert latest <= question.asked_at
-
-
-def test_the_supermemory_arm_tags_every_document_with_its_container():
-    """Isolation is per document, not a setting made once.
-
-    The container tag is what keeps a demo run separable from the rest of an account, so
-    it has to be on every document written; one untagged document is one document that
-    cannot be found and removed afterwards. The tag is the run's tag plus the question
-    instant — see `container_for`.
-    """
-    fetch = FakeSupermemory()
-    question = _question("q_plan_current")
-    arm = _supermemory(fetch)
-    arm(question, TURNS)
-    ingests = [body for url, _, body in fetch.calls if url.endswith("/ingest")]
-    assert ingests, "nothing was ingested"
-    for body in ingests:
-        assert body["containerTags"] == [arm.container_for(question)]
-        assert body["containerTags"][0].startswith("memvara-demo")
-
-
-def test_a_question_never_searches_a_container_holding_turns_from_after_it():
-    """The cutoff, against the order the harness actually asks questions in.
-
-    `demo/harness.py` iterates questions as `demo/scenario.py` lists them, and that is not
-    `asked_at` order — the August questions come first and the April one is ninth. So this
-    fills the latest instant first, exactly as a real run does, and only then asks the
-    earliest question. With one container shared by every instant the April question would
-    search a store already holding the whole history and would read turns from four months
-    after it was asked, which no other arm can do and nothing in the report would show.
-
-    Asserted on the documents the search could match rather than on the container's name,
-    because the name is the mechanism and the cutoff is the property.
-    """
-    fetch = FakeSupermemory()
-    arm = _supermemory(fetch)
-    latest = max(QUESTIONS, key=lambda q: q.asked_at)
-    earliest = min(QUESTIONS, key=lambda q: q.asked_at)
-    assert latest.asked_at > earliest.asked_at, "the corpus must span instants"
-
-    arm(latest, TURNS)
-    arm(earliest, TURNS)
-
-    tag = arm.container_for(earliest)
-    visible = [d for d in fetch.documents if tag in (d.get("containerTags") or ())]
-    assert visible, "the earliest question's container holds nothing"
-    cutoff = f"[{earliest.asked_at:%Y-%m-%d}]"
-    for document in visible:
-        stamp = str(document["content"])[:12]
-        assert stamp <= cutoff, f"{stamp} is after the question was asked"
-    assert len(visible) == len(bl.visible_turns(earliest, TURNS))
-
-
-def test_the_supermemory_key_travels_as_the_fetch_argument_and_not_in_a_body():
-    """The key is handed to the transport, never written into a request body.
-
-    `_http_fetch` puts it in an Authorization header. Anything that also copied it into
-    the JSON body would put a live credential into every log and every captured response
-    that a run leaves behind.
-    """
-    fetch = FakeSupermemory()
-    _supermemory(fetch)(_question("q_plan_current"), TURNS)
-    for _, key, body in fetch.calls:
-        assert key == "sm-test-key"
-        assert "sm-test-key" not in json.dumps(body)
-
-
-def test_the_supermemory_context_is_built_from_what_the_search_returned():
-    """The arm renders the documents the service chose, under the same cap as the rest."""
-    fetch = FakeSupermemory()
-    question = _question("q_plan_current")
-    context = _supermemory(fetch, max_chars=300)(question, TURNS)
-
-    assert context.arm == "supermemory"
-    assert context.chars <= 300
-    assert context.turns_visible == len(bl.visible_turns(question, TURNS))
-    assert context.items_used == bl.count_entries(context.text)
-
-
-def test_one_supermemory_container_is_filled_per_question_instant():
-    """The same instant-sharing observation as mem0, for the same reason.
-
-    Writing the corpus again for each of twenty questions would send seven times the
-    documents into somebody's account for no change in any context.
-    """
-    fetch = FakeSupermemory()
-    arm = _supermemory(fetch)
-    for question in QUESTIONS:
-        arm(question, TURNS)
-
-    ingests = [b for url, _, b in fetch.calls if url.endswith("/ingest")]
-    expected = sum(len(bl.visible_turns(q, TURNS))
-                   for q in {q.asked_at: q for q in QUESTIONS}.values())
-    assert len(ingests) == expected
-
-
 # --- wiring into the harness ------------------------------------------------------
 
 
 def _args(**kw: Any) -> Any:
-    parser_args = {"memory": "local", "corpus_scale": 1, "arm_mem0": False,
-                   "arm_supermemory": False, "supermemory_key_file": None,
-                   "supermemory_container": None, "supermemory_base_url": co.SUPERMEMORY_BASE_URL,
-                   "supermemory_ingest_path": None, "supermemory_search_path": None}
+    parser_args = {"memory": "local", "corpus_scale": 1, "arm_mem0": False}
     parser_args.update(kw)
     return type("Args", (), parser_args)()
 
 
-def test_neither_arm_appears_unless_its_flag_is_given():
+def test_the_mem0_arm_does_not_appear_unless_its_flag_is_given():
     """Off by default, and the default run is the five arms it has always been.
 
     `test_the_offline_run_is_identical_twice` pins the stub report byte for byte, so an
@@ -629,38 +420,8 @@ def test_the_report_says_which_optional_arms_ran(fake_mem0):
     assert any("mem0" in line for line in notes)
 
 
-def test_turning_on_supermemory_without_its_settings_fails_at_setup(fake_mem0):
-    """The refusal lands before any arm has run, not on the first question.
-
-    A run that got as far as building contexts and then failed would have already written
-    the mem0 corpus and spent the reader's first calls. Everything an arm needs is checked
-    while the arms are being built.
-    """
-    with pytest.raises(co.CompetitorUnavailable):
-        co.build_competitors(_args(arm_supermemory=True))
-
-
-def test_the_cli_path_also_names_everything_missing_in_one_refusal(tmp_path):
-    """Including the key, which is read before the arm is constructed.
-
-    `build_competitors` has to read the key file to build the arm at all, so a failure
-    there could easily have been raised on the spot — and then a person with none of the
-    four settings would have learned about the key on the first run and about the
-    container and the two paths on the second. The reason is carried into the arm instead
-    and takes its place in the one list.
-    """
-    missing_key = tmp_path / "no-such-key.json"
-    with pytest.raises(co.CompetitorUnavailable) as caught:
-        co.build_competitors(_args(arm_supermemory=True,
-                                   supermemory_key_file=str(missing_key)))
-    message = str(caught.value).lower()
-    for needed in ("api key", "container", "ingest", "search"):
-        assert needed in message, f"{needed} is not named in the refusal"
-    assert str(missing_key).lower() in message, "the refusal must name the file it tried"
-
-
 def test_turning_on_mem0_without_the_package_fails_at_setup(monkeypatch):
-    """The same rule for the arm whose dependency is a package rather than an account.
+    """The refusal lands while the arms are being built, not on the first question.
 
     mem0 is imported lazily, so that `demo/competitors.py` imports on a checkout that has
     never heard of it. Left alone, that would push the failure into `plan()` — after the
@@ -676,8 +437,8 @@ def test_turning_on_mem0_without_the_package_fails_at_setup(monkeypatch):
 def test_a_refusal_is_a_clean_exit_rather_than_a_traceback():
     """`demo/hosted.py` refuses a bad credential with `SystemExit`, and so does this.
 
-    Both failures are things the person running the command has to go and fix — install a
-    package, make an account — so the useful output is the sentence that says what to do.
+    Both failures are things the person running the command has to go and fix, such as
+    installing a package, so the useful output is the sentence that says what to do.
     A traceback through the arm that happened to notice buries it.
     """
     assert issubclass(co.CompetitorUnavailable, SystemExit)
