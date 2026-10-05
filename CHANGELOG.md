@@ -9,6 +9,17 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-10-05
+
+Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so
+opening an existing store needs no migration, and the `Store`, `Embedder` and `LLM`
+protocols do not change. This release removes code nothing in the library used:
+`RemoteStore`, three internal consolidation functions, `PredicateRegistry.superseded_by()`
+and `encryption.export_key()`, each listed below with what to call instead. It adds two
+options: `Memvara(path, embeddings=False)`, a store that keeps no vectors, and a local
+selector, so a ranked read can run without a model provider. No MCP tool is added or
+renamed.
+
 ### Added
 
 - **`Memvara(path, embeddings=False)` opens a store that keeps no vectors.** It never
