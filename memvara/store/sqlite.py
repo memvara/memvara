@@ -82,6 +82,7 @@ from ..retrieve.analyze import tokenize
 from ..types import (
     ObjectKind,
     OBJECT_ENTITY,
+    OWNER_SEP,
     SUBJECT_ENTITY,
     Claim,
     Derivation,
@@ -93,6 +94,8 @@ from ..types import (
     Scope,
     TimeWindow,
     as_utc,
+    content_hash,
+    entity_type_of,
     resolved_entity,
     stored_scope,
     utcnow,
@@ -956,8 +959,7 @@ def _ts(dt: datetime | None) -> float | None:
     """
     if dt is None:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+    dt = as_utc(dt)
     # Both ends, because both are real. On POSIX the floor is year 1 and clamps nothing;
     # on Windows it is the epoch, and without it an ordinary decay test dating a claim
     # 600 years back writes a row the store cannot read.
@@ -1001,8 +1003,6 @@ def _fact_key_of(tenant: str, usr: str | None, project: str | None,
     what has to change, and loading every claim to re-save it would turn a single UPDATE
     into a scan with a Python round trip per row.
     """
-    from ..types import OWNER_SEP, content_hash
-
     subject_key, _, predicate = packed.partition(OWNER_SEP)
     return content_hash(f"{tenant}{OWNER_SEP}{usr or ''}", project or "",
                         subject_key, predicate)
@@ -1016,18 +1016,9 @@ def _value_key_of(tenant: str, usr: str | None, packed: str) -> str:
     being recognised as a re-observation, so the next assertion of a fact already on
     record is stored as a rival value instead of reinforcing the one there.
     """
-    from ..types import OWNER_SEP, content_hash
-
     subject_key, predicate, object_key, polarity = packed.split(OWNER_SEP)
     return content_hash(f"{tenant}{OWNER_SEP}{usr or ''}", subject_key, predicate,
                         object_key, polarity)
-
-
-def _entity_type_of(key: str) -> str:
-    """The namespace half of an entity identity. See `types.entity_type_of`."""
-    from ..types import entity_type_of
-
-    return entity_type_of(key)
 
 
 def _subject_key_of(meta: str, surface: str) -> str:
@@ -1038,16 +1029,11 @@ def _object_key_of(meta: str, surface: str) -> str:
     return resolved_entity(json.loads(meta), OBJECT_ENTITY, surface)
 
 
-#: `GraphTraverser._edges`' three rules, as SQL, for the one counter that has to agree
-#: with them. A negation is adjacency and not a link; an empty end is what a retraction
-#: stores and not a node; a self-loop leads back to where the walk is standing. Written
-#: once because a join rate that counts edges the traverser refuses to follow promises
-#: hops that will not happen — the same failure as a benchmark scoring its own answer key.
 #: `GraphTraverser._edges`' four rules as SQL, and the two have to say the same thing:
 #: this is what `connectivity()` counts, so a rule in one and not the other makes the
-#: reported join rate promise hops the walk will not take. The `IS NULL` is the third
-#: state of `object_kind` and not an oversight — a claim written before the
-#: classification rule keeps its edges rather than losing them to an upgrade.
+#: reported join rate promise hops the walk will not take. The `IS NULL` admits the third
+#: state of `object_kind`: a claim written before the classification rule existed keeps
+#: its edges instead of losing them in an upgrade.
 _WALKABLE = ("{a}.polarity > 0 AND {a}.subject_key != '' AND {a}.object_key != '' "
              "AND {a}.subject_key != {a}.object_key "
              "AND ({a}.object_kind IS NULL OR {a}.object_kind = 'entity')")
@@ -1674,12 +1660,6 @@ def _where_clause(where: SearchFilter | None, row: str, documents: str,
         parts.append(f"EXISTS ({documents.format(row=row, test=test)})")
         params += test_params
     return "(" + " AND ".join(parts) + ")", params
-
-
-#: Fact keys per `occupied_slots` statement, under SQLite's oldest bound-parameter limit
-#: of 999 with room for the tenant, the liveness clause's own parameters and the five
-#: parameters of each of the at most seven scopes in a read's chain.
-_SLOT_CHUNK = 900
 
 
 class SQLiteStore:
@@ -2467,7 +2447,7 @@ class SQLiteStore:
         # before this, so they are always present by the time this line runs.
         self._db.create_function("mv_fact_key", 4, _fact_key_of, deterministic=True)
         self._db.create_function("mv_value_key", 3, _value_key_of, deterministic=True)
-        self._db.create_function("mv_entity_type", 1, _entity_type_of, deterministic=True)
+        self._db.create_function("mv_entity_type", 1, entity_type_of, deterministic=True)
         self._db.execute(
             "UPDATE claims SET subject_key = mv_subject_key(meta, subject), "
             "object_key = mv_object_key(meta, object)"
@@ -3745,8 +3725,8 @@ class SQLiteStore:
         where, wp = ("1=1", []) if scopes is None else self._scope_clause(scopes)
         found: set[str] = set()
         with self._read() as conn:
-            for start in range(0, len(keys), _SLOT_CHUNK):
-                chunk = keys[start:start + _SLOT_CHUNK]
+            for start in range(0, len(keys), _MAX_SQL_PARAMS):
+                chunk = keys[start:start + _MAX_SQL_PARAMS]
                 marks = ", ".join("?" * len(chunk))
                 rows = conn.execute(
                     f"SELECT DISTINCT fact_key FROM claims WHERE tenant=? AND "
