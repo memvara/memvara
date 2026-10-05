@@ -213,11 +213,10 @@ def test_the_terse_schema_is_deliberately_not_valid_under_strict_mode():
 
 
 def test_terse_is_off_by_default_so_the_hosted_request_is_unchanged():
-    """A server that never asked for the short shape sends the shared schema by identity.
+    """A server that never asked for the short shape sends the shared schema itself.
 
-    Identity rather than equality, because `_SCHEMA_NAMES` is keyed on the id() of the
-    module-level dicts: an equal copy would be sent under the name "result", which the API
-    accepts and nothing notices."""
+    The check is on identity, not equality: an equal copy would mean the default request
+    builds a new schema on every call, which is work the default case should not do."""
     client = FakeClient({"claims": []})
     OpenAILLM(client=client).extract(episodes("hi"), [])
     assert client.calls[0]["response_format"]["json_schema"]["schema"] is CLAIM_SCHEMA
@@ -270,9 +269,9 @@ def test_a_cap_is_opt_in_and_rides_on_the_request_under_its_own_name():
     extraction in three ran to its token limit emitting well-formed claim objects and
     arrived as truncated JSON, losing the real claims that came before the restatements.
 
-    The name is asserted because `_SCHEMA_NAMES` is keyed on the identity of the
-    module-level dicts. A bounded schema is a copy, so an id() lookup would quietly send
-    it as "result" — which the API accepts, leaving nothing to notice."""
+    The name is asserted because a bounded schema is a copy of the shared one, and the
+    request must still name it "claims". The API accepts any name, so a wrong one would
+    pass unnoticed."""
     client = FakeClient({"claims": []})
     OpenAILLM(client=client, max_claims=7).extract(episodes("hi"), [])
     sent = client.calls[0]["response_format"]["json_schema"]
