@@ -209,18 +209,18 @@ nothing can bring it back. When a fact will only stop being true, end it at that
 instead, so its history stays. An expiry is set when the fact is written; it cannot be
 added later to erase a fact that is already stored.
 
-**A ranked read.** A ranked recall makes a model call whenever it has turns to rank,
-on a key the deployment holds, which may be the person's own. So an ordinary recall
-comes first. Ask for a ranked one only when two things are true: the ordinary recall
-found the right conversation but the turn that answers is buried under others, and the
-answer rests on what somebody said rather than on a stored fact. Do not set it on every
-turn to be safe.
+**A ranked read.** A ranked recall either makes a model call on a key the deployment
+holds, which may be the person's own, or runs a local model that calls nothing; the
+deployment decides which. Either way an ordinary recall comes first. Ask for a ranked
+one only when two things are true: the ordinary recall found the right conversation but
+the turn that answers is buried under others, and the answer rests on what somebody said
+rather than on a stored fact. Do not set it on every turn to be safe.
 
 Read the last line of a ranked block before you rely on the order. If it says the
 ranking was not applied, the block is an ordinary read, and the word at the end of the
 line says why:
 
-- `unconfigured` means this deployment has no model set up to choose turns.
+- `unconfigured` means this deployment has nothing set up to choose turns.
 - `disabled` means its operator switched ranked reads off.
 - Both of those last for the whole session, so stop asking for a ranked read.
 - `key_rejected` means the provider refused the key. Only the person can fix that, so
