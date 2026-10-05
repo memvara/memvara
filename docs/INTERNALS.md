@@ -63,12 +63,15 @@ was being read as holding further than it does.
    > what the reconciler does with them. On the read path, a reranker is a
    > cross-encoder rather than a generative model, and it is off by default. The three
    > model stages are: `search(ranked=True)` against a retriever configured with a
-   > `read_selector` (`memvara.select`), one chat call per read over the turns of the
-   > role the question asks about (`retrieve.intent.routed_role`, model-free;
-   > `read_route_roles=False` hands it both roles); `query_rewrite`, one chat call before
+   > `read_selector` (`memvara.select`), which is either one chat call per read
+   > (`ModelSelector`) or a cross-encoder in this process (`LocalSelector`, no call and
+   > nothing sent anywhere), over the turns of the role the question asks about
+   > (`retrieve.intent.routed_role`, model-free; `read_route_roles=False` hands it both
+   > roles); `query_rewrite`, one chat call before
    > retrieval that returns up to three other phrasings and an optional date range; and
    > `synthesis`, one chat call after `recall(synthesize=True)` has rendered its notes.
-   > Each runs on the caller's own chat backend with a 10-second deadline, records its
+   > Each chat call runs on the caller's own chat backend with a 10-second deadline (a
+   > `LocalSelector` makes none). Each stage records its
    > outcome (`applied`, `fallback`, `key_rejected`, `disabled`, `unconfigured`) on the
    > result, and serves the plain read on every outcome but `applied`. The model's
    > answer never changes what is stored and never reaches a deterministic stage: a

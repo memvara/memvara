@@ -37,10 +37,12 @@ The same package holds the two other model stages a read may run, `QueryRewriter
 A default install makes no model call on the read path. `Memvara(read_selector=None)` is
 the default, and the default `llm=` is `NullLLM`, which cannot chat, so neither rewrite
 nor synthesis has a backend to call — see `docs/INTERNALS.md`, invariant 1.
-`ModelSelector`, the one real selector here, needs the `openai` or `anthropic` extra, and
-so do the two stages; naming any of them must not import either SDK, the same
-promise `memvara.rerank.CrossEncoderReranker` makes about `sentence-transformers`, and
-`tests/test_rerank.py`'s subprocess assertion covers this package too.
+`ModelSelector`, the selector that calls a model, needs the `openai` or `anthropic`
+extra, and so do the two stages. `LocalSelector` ranks with a cross-encoder in this
+process instead: it needs the `rerank` extra and makes no call to anyone. Naming any of
+them must not import its SDK, the same promise `memvara.rerank.CrossEncoderReranker`
+makes about `sentence-transformers`, and `tests/test_rerank.py`'s subprocess assertion
+covers this package too.
 """
 
 from __future__ import annotations
@@ -55,7 +57,7 @@ from .base import (
 __all__ = [
     "OUTCOMES", "PLAIN_READ", "Candidate", "Rewrite", "Selected", "Selection", "Selector",
     "SelectorBusy", "SelectorRefused", "StageOutcome", "Synthesis", "ModelSelector",
-    "QueryRewriter", "Synthesizer",
+    "QueryRewriter", "Synthesizer", "LocalSelector", "Calibration",
 ]
 
 
@@ -71,4 +73,8 @@ def __getattr__(name: str) -> Any:
         from . import stages
 
         return getattr(stages, name)
+    if name in ("LocalSelector", "Calibration"):
+        from . import local
+
+        return getattr(local, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

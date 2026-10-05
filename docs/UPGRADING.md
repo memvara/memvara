@@ -7,6 +7,25 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Ranked reads can run without a model provider
+
+### What changed
+
+`memvara.select.LocalSelector` is a second selector. It scores a ranked read's candidate
+turns with a cross-encoder in this process, so `ranked=True` works with no key, and nothing
+is sent anywhere. By default it loads `memvara/selector-minilm-l6`, a model memvara
+publishes on Hugging Face. The MCP server builds it when `MEMVARA_SELECTOR=local` is set.
+Its reads are counted as `retrieval.local_query`, `retrieval.local_select_ms` and
+`retrieval.local_fallback`, never as `retrieval.model_query`.
+
+### What to do
+
+Nothing, unless you want it. With the setting unset, a server behaves as before. A
+dashboard or quota that counts ranked reads by `retrieval.model_query` will not see local
+ones; add `retrieval.local_query` if you want them counted.
+
+---
+
 ## `PredicateRegistry.superseded_by()` and `encryption.export_key()` are removed
 
 ### What changed

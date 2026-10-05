@@ -83,7 +83,8 @@
       "TB5": "Telemetry adds no required dependency and no background thread.",
       "TB6": "Every read-path model call is counted, whichever stage made it.",
       "TB7": "Benchmark reads are plain.",
-      "TB8": "A graph harness declares its corpus's relations, or it measures a store with no edges."
+      "TB8": "A graph harness declares its corpus's relations, or it measures a store with no edges.",
+      "TB9": "A local selection is not a model call, and is counted apart."
     },
     "docs/claude/write-pipeline.md": {
       "WP1": "A document chunk passes the role check.",

@@ -129,6 +129,16 @@ mem.search(query, *, k=10, min_score=0.0, anchored=False, ranked=False,
 #     memvara.select. Needs include_episodes=True and no memory_types (ValueError
 #     otherwise). SearchResults.selection records what happened: None on a plain read,
 #     else an outcome of applied | fallback | unconfigured | disabled | key_rejected.
+#   A read_selector is a ModelSelector, which makes one chat call on your key, or a
+#     LocalSelector (memvara.select.local), which scores the candidates with a
+#     cross-encoder in this process: no key, no call, nothing sent anywhere. It needs
+#     pip install 'memvara[rerank]'. LocalSelector() loads memvara/selector-minilm-l6 from
+#     Hugging Face, pinned to a commit, with the calibration memvara ships for it; it is
+#     downloaded once, on first use. LocalSelector(model) takes another Hugging Face id or a
+#     directory written by bench/selector_train.py; calibration= overrides the calibration
+#     that ships with the model. After its kept turns, a LocalSelector
+#     read shows the other candidates in the local model's own order, then the rest
+#     in reranked order; a ModelSelector read shows the rest in reranked order.
 #   query_rewrite=True (the default) asks the chat backend, when llm= has one, for up to
 #     three other phrasings of the query and the dates it names, in one call with a 10 s
 #     deadline. Every phrasing is searched and the lists are fused by rank; the facts are
