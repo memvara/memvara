@@ -61,7 +61,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from ..core import Memvara
 from ..llm.base import LLM, Usage
-from ..types import Claim, Derivation, Episode, Scope
+from ..types import Claim, Derivation, Episode, Scope, z_as_offset
 from ._notes import NOTE_PREDICATE, build_note, ensure_note_predicate, note_subject
 from ._notes import SUBJECT_PREFIX, write_note
 
@@ -129,7 +129,7 @@ def _parse_ts(value: Any, *, where: str) -> datetime:
         parsed = value
     elif isinstance(value, str):
         try:
-            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(z_as_offset(value.strip()))
         except ValueError:
             raise ValueError(f"{where}: cannot read timestamp {value!r}") from None
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
