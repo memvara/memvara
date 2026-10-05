@@ -10,6 +10,12 @@ nothing else busy. The candidates come from real pools when `--pools` is given, 
 otherwise 40 copies of a 400-token assistant-length turn, which is the slow case. The
 encoder is kept on the CPU with 4 threads even where a GPU is available, because G6 is a
 CPU gate.
+
+`--steady with|without` is the steady-state memory measure of the spec's section 18: a fresh
+process serves `--reads` production-shaped ranked reads, each reranking one test pool's
+turns and, with `with`, running `select_ordered()` on its 40 routed candidates. It prints
+the median current resident memory over the last 10 reads. Run each kind three times, in
+fresh processes, and compare the medians.
 """
 
 from __future__ import annotations
@@ -40,12 +46,47 @@ def rss_mb() -> float:
     return peak / (1024 * 1024) if sys.platform == "darwin" else peak / 1024
 
 
+def steady(args: argparse.Namespace) -> int:
+    import json
+
+    import psutil
+    import torch
+    from sentence_transformers import CrossEncoder
+
+    torch.set_num_threads(4)
+    splits = json.loads(args.splits.read_text(encoding="utf-8"))
+    pools = [p for p in read_pools(args.pools) if splits.get(p.qid) == "test"][:args.reads]
+    reranker = CrossEncoderReranker(encoder=CrossEncoder(STOCK_MODEL, device="cpu"))
+    selector = None
+    if args.steady == "with":
+        calibration = Calibration.read(Path(args.model))[0]
+        selector = LocalSelector(args.model, calibration=calibration, encoder=CrossEncoder(
+            args.model, device="cpu", max_length=calibration.max_length))
+    process = psutil.Process()
+    samples = []
+    for pool in pools:
+        texts = [t.text for t in pool.turns]
+        scores = reranker.score(pool.question, texts)
+        scope = replay(pool, scores, None).scope
+        if selector is not None:
+            selector.select_ordered(pool.question, [
+                Candidate(id=str(i), when=WHEN, text=texts[i]) for i in scope])
+        samples.append(process.memory_info().rss / (1024 * 1024))
+    print(f"{args.steady}: {len(pools)} reads, median resident memory over the last 10: "
+          f"{statistics.median(samples[-10:]):.0f} MB")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Time the local selector.")
     parser.add_argument("--model", default=STOCK_MODEL)
     parser.add_argument("--pools", type=Path)
     parser.add_argument("--reads", type=int, default=50)
+    parser.add_argument("--steady", choices=["with", "without"])
+    parser.add_argument("--splits", type=Path)
     args = parser.parse_args(argv)
+    if args.steady:
+        return steady(args)
 
     import torch
     torch.set_num_threads(4)

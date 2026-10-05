@@ -562,10 +562,30 @@ selector runs, so a production process has already reached that working-memory p
 the reranker first run on 200 assistant-length turns, the selector added 54 to 68 MB to the
 peak. The weights alone are 91 MB, so a peak-based measure cannot say exactly what the
 selector costs; what it does show is that most of the 300-plus MB is torch's working memory
-for a first large batch, which a process that reranks has already paid. Settling this needs
-a measure of the process's memory after many reads rather than its peak, fixed before it is
-run. All timings here are on an M-series laptop, which is faster per core than the 4-core
-production host.
+for a first large batch, which a process that reranks has already paid. All timings here are on
+an M-series laptop, which is faster per core than the 4-core production host.
+
+**G6's memory half, re-measured at steady state (spec §18, fixed before the run).** Fresh
+processes on 4 CPU threads served 50 ranked reads each, every read reranking one LongMemEval
+test pool's turns (up to 200); the *with* processes also ran `select_ordered()` on each
+read's 40 routed candidates. A process's figure is its median current resident memory over
+the last 10 reads.
+
+```bash
+OMP_NUM_THREADS=4 PYTHONPATH=. python3 bench/selector_latency.py --steady without --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json
+OMP_NUM_THREADS=4 PYTHONPATH=. python3 bench/selector_latency.py --steady with --model local/selector/models/step2a-B --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json
+```
+
+| Run | Without the selector | With the selector |
+|---|---|---|
+| 1 | 738 MB | 867 MB |
+| 2 | 737 MB | 869 MB |
+| 3 | 742 MB | 857 MB |
+| median | 738 MB | 867 MB |
+
+**The selector adds 129 MB at steady state, so G6's memory half passes** against the 300 MB
+line; the prediction was about 120 MB (80 to 200). With the speed half, G6 passes under the
+re-measure. The peak-based figures above stay on record as the gate as first written.
 
 The spec's §10 records what has to be decided before this work goes on.
 
