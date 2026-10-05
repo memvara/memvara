@@ -1161,9 +1161,10 @@ class _VecIndex:
       `np.vstack` transiently holds four times the old matrix and stalls whichever user
       write happens to cross the boundary — measured at 562 ms here.
 
-    Slots are assigned by whoever owns durability. The store allocates them inside its
-    write transaction (so two processes cannot claim one row) and calls `put`/`map`;
-    a bare index, with no store behind it, allocates its own via `add`.
+    Slots are assigned by whoever owns durability, never by the index. The store
+    allocates them inside its write transaction, so two processes cannot claim one row,
+    and then calls `put` or `map`. When it erases, the store records the freed slot in
+    its `vec_free` table, and `forget` only blanks the row.
 
     The keys are opaque strings, and the index does not care what kind of thing they
     name. Claims and episodes share it: their ids are disjoint by construction, they
@@ -1196,7 +1197,6 @@ class _VecIndex:
         # different claim from "not looked at".
         self._count = count
         self._row: dict[str, int] = {}
-        self._free: list[int] = []
         self._mat: np.ndarray | None = None
         # Annotated because it is initialised to None and only ever assigned a real
         # handle later: without it every use below reads as an attribute on `None`, and
@@ -1393,29 +1393,13 @@ class _VecIndex:
             self._row[item_id] = slot
             self._high = max(self._high, slot + 1)
 
-    def add(self, item_id: str, vec: np.ndarray) -> None:
-        """Store a vector, allocating its slot. For an index with no store behind it."""
-        v = _unit(vec)
-        with self._lock:
-            if self.dim is None:
-                self.attach(int(v.shape[0]), self._INITIAL_ROWS)
-            if v.shape[0] != self.dim:
-                raise ValueError(
-                    f"embedding dim {v.shape[0]} != index dim {self.dim}; "
-                    "the store was built with a different embedder"
-                )
-            slot = self._row.get(item_id)
-            if slot is None:
-                slot = self._free.pop() if self._free else self._high
-            self.put(item_id, slot, v)
-
     def forget(self, item_id: str, slot: int | None = None) -> int | None:
         """Unmap an item and blank its row, returning the slot it held.
 
         Zeroing matters for erasure: purged text stays reconstructible from
         its embedding, and the file outlives the process. The slot is handed back to
-        the caller rather than reused here, because when a store is present the free
-        list has to be durable and shared.
+        the caller rather than reused here, because the list of free slots has to be
+        durable and shared between processes, so the store keeps it in the database.
 
         `slot` is the row the database says the item holds. The store passes it when it
         erases, because the name-to-row map is loaded lazily: a process that erases
@@ -1460,7 +1444,6 @@ class _VecIndex:
         with self._lock:
             self.dim = None
             self._row.clear()
-            self._free.clear()
             self._rows = 0
             self._high = 0
             # Unmap before truncating. A mapping that outlives the pages behind it
@@ -1470,19 +1453,6 @@ class _VecIndex:
                 os.ftruncate(self._fh.fileno(), 0)
                 self._fh.close()
                 self._fh = None
-
-    def remove(self, item_id: str) -> bool:
-        """Drop a vector and keep its slot for reuse. Required for erasure — without
-        it, purged text stays reconstructible from the embedding.
-
-        Search resolves through the name-to-row map, so an unmapped id is unreachable
-        even before the row is blanked.
-        """
-        slot = self.forget(item_id)
-        if slot is None:
-            return False
-        self._free.append(slot)
-        return True
 
     # -- query ---------------------------------------------------------------
 

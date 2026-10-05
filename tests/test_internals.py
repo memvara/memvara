@@ -417,7 +417,7 @@ def test_vector_index_tolerates_a_zero_norm_query():
     from memvara.store.sqlite import _VecIndex
 
     idx = _VecIndex()
-    idx.add("a", np.array([1.0, 0.0], dtype=np.float32))
+    idx.put("a", 0, np.array([1.0, 0.0], dtype=np.float32))
     hits = idx.search(np.zeros(2, dtype=np.float32), ["a"], 5)
     assert hits == [("a", 0.0)]
 
