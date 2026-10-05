@@ -24,6 +24,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   not a library. They are removed, with the `main`, `types` and `sideEffects` fields, so
   `require("memvara")` now fails with Node's own `MODULE_NOT_FOUND` error. The `memvara`
   command does not change.
+- **`PredicateRegistry.superseded_by()` is removed.** Read
+  `registry.spec(predicate).supersedes` instead, which is what it returned.
+- **`memvara.store.encryption.export_key()` is removed.** Call
+  `resolve_key(create=False)` instead, which is what it called.
+- **`memvara.server.init.skill_text()` no longer takes an `agent` argument.** It already
+  ignored it.
+- **The `dev` extra no longer installs `pytest-asyncio`.** No test used it: the async
+  tests call `asyncio.run`.
 - **The demo harness no longer has a Supermemory arm.** `--arm-supermemory` and the
   `--supermemory-*` flags are gone. The arm had never been run, because it needed an
   account nobody here has. The Supermemory importer, `memvara.compat.supermemory_import`,
@@ -52,6 +60,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   full-text query builder share one regular expression, which keeps exactly the
   characters they kept before. The ranked read stage counts its failures through the same
   counter as the other stages, with the same counter names and values.
+- **`telemetry.rank_correlation` uses `statistics.correlation`.** Every documented and
+  tested value is the same. On arbitrary input, a result can differ from before in the
+  last bit of the floating-point value.
 
 ## [0.19.0] — 2026-10-01
 
