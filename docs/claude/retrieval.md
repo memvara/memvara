@@ -48,7 +48,9 @@ JSON, under a header that names the text as data rather than instruction.
 - Optional model-ranked reads: `memvara/select/base.py` — the `Selector` protocol,
   `Candidate`, `Selection`, `SelectorRefused`; `memvara/select/model.py` — `ModelSelector`;
   `memvara/select/local.py` — `LocalSelector`, which ranks with a cross-encoder in this
-  process. A selector that also has `select_ordered()`, as `LocalSelector` does, hands the
+  process; by default `memvara/selector-minilm-l6` on Hugging Face, pinned by
+  `SELECTOR_REVISION`, with its calibration in `_BUILT_IN`. A new model or commit needs a
+  new `_BUILT_IN` entry, copied from the `memvara_selector.json` published beside it. A selector that also has `select_ordered()`, as `LocalSelector` does, hands the
   ranked stage its order of every candidate, and the candidates it did not keep are shown
   in that order ahead of the rest of the reranked list (`HybridRetriever._run_ranked_stage`).
   `ModelSelector` has no such method, so a model selection's order is unchanged.

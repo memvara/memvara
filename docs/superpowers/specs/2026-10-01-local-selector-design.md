@@ -831,3 +831,9 @@ range of 80 to 200 MB.
 selector (738, 737, 742) and 867 MB with it (867, 869, 857): the selector adds 129 MB,
 against the 300 MB line and a prediction of about 120 MB. With speed already passing, G6
 passes under this measure. The peak-based fail stays on record beside it.
+
+**Decision 1 settled (2026-10-05).** The user chose to publish on Hugging Face, in a
+`memvara` organisation, publicly, under Apache-2.0 with a note on the card that the base
+model was trained on MS MARCO, whose terms describe it as for non-commercial research. Step
+2a's model B is `memvara/selector-minilm-l6` at commit `fb240a9c`. `LocalSelector()` now
+loads it by default, pinned to that commit, with its calibration in `_BUILT_IN`.

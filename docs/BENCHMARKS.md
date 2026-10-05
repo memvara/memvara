@@ -587,6 +587,12 @@ OMP_NUM_THREADS=4 PYTHONPATH=. python3 bench/selector_latency.py --steady with -
 line; the prediction was about 120 MB (80 to 200). With the speed half, G6 passes under the
 re-measure. The peak-based figures above stay on record as the gate as first written.
 
+**Published.** Step 2a's model B is published as
+[`memvara/selector-minilm-l6`](https://huggingface.co/memvara/selector-minilm-l6) at commit
+`fb240a9c282889ec8e95391e93fa0a86f52ac7a9`, under Apache-2.0, with the measurements above on
+its model card. `LocalSelector()` loads it at that commit by default; an anonymous download
+of that commit matches the weights' recorded SHA-256.
+
 The spec's §10 records what has to be decided before this work goes on.
 
 ## LOCOMO and LongMemEval — retrieval, measured

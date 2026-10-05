@@ -42,6 +42,12 @@ from .base import Candidate, Selected
 STOCK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 STOCK_REVISION = "233902d25c440f23af6f7d6e94d2946bac0bee0a"
 
+#: The model `LocalSelector()` loads when none is named: the stock model fine-tuned on the
+#: gold labels of 256 LongMemEval questions, published by memvara and pinned to a commit.
+#: Its card, with the measurements, is https://huggingface.co/memvara/selector-minilm-l6.
+SELECTOR_MODEL = "memvara/selector-minilm-l6"
+SELECTOR_REVISION = "fb240a9c282889ec8e95391e93fa0a86f52ac7a9"
+
 #: The file a trained selector model keeps beside its weights. `Calibration.read` reads
 #: it and `bench/selector_train.py` writes it.
 CALIBRATION_FILE = "memvara_selector.json"
@@ -106,8 +112,18 @@ class Calibration:
         return calibration, None if digest is None else str(digest)
 
 
-#: Calibrations memvara ships for Hugging Face models, keyed by model id and commit.
-_BUILT_IN: dict[tuple[str, str], Calibration] = {}
+#: Calibrations memvara ships for Hugging Face models, keyed by model id and commit. Each
+#: is the `memvara_selector.json` published beside the weights at that commit, fitted on 45
+#: LongMemEval questions the model was not trained on (docs/BENCHMARKS.md, "The local
+#: selector").
+_BUILT_IN: dict[tuple[str, str], Calibration] = {
+    (SELECTOR_MODEL, SELECTOR_REVISION): Calibration(
+        scale=0.5170408164055298, shift=-2.690818832603243, threshold=0.01, max_keep=6,
+        max_length=256),
+}
+
+#: The commit each pinned model loads at when no `revision` is given.
+_PINNED = {STOCK_MODEL: STOCK_REVISION, SELECTOR_MODEL: SELECTOR_REVISION}
 
 
 def keep_positions(scores: Sequence[float], calibration: Calibration) -> list[int]:
@@ -154,9 +170,11 @@ def _check_weights(directory: Path, expected: str) -> None:
 class LocalSelector:
     """A `Selector` backed by a cross-encoder in this process. See the module docstring.
 
-    `model` is a Hugging Face model id or a local directory. A Hub id needs a calibration
+    `model` is a Hugging Face model id or a local directory, and defaults to
+    `SELECTOR_MODEL`, the fine-tuned model memvara publishes. A Hub id needs a calibration
     memvara ships, which is keyed by id and commit, unless `calibration=` is given; the
-    stock model's commit is filled in when `revision` is not. A directory needs its
+    commit of `SELECTOR_MODEL` or of the stock model is filled in when `revision` is not.
+    A directory needs its
     `memvara_selector.json` unless `calibration=` is given, and when that file records the
     weights' SHA-256, the weights are checked before they are loaded.
 
@@ -171,7 +189,7 @@ class LocalSelector:
     #: model provider answered.
     kind = "local"
 
-    def __init__(self, model: str = STOCK_MODEL, *, revision: str | None = None,
+    def __init__(self, model: str = SELECTOR_MODEL, *, revision: str | None = None,
                  calibration: Calibration | None = None, encoder: Any = None,
                  top_n: int = 40, batch_size: int = 32) -> None:
         if top_n < 1:
@@ -183,8 +201,8 @@ class LocalSelector:
             if calibration is None:
                 calibration, digest = Calibration.read(directory)
         else:
-            if revision is None and model == STOCK_MODEL:
-                revision = STOCK_REVISION
+            if revision is None:
+                revision = _PINNED.get(model)
             if calibration is None:
                 calibration = _BUILT_IN.get((model, revision or ""))
             if calibration is None:

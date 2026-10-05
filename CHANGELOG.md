@@ -16,7 +16,10 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   in this process, turns each score into a probability with a calibration measured on
   labelled data, and keeps the turns that reach a threshold. It needs the `rerank` extra,
   sends nothing anywhere, and gives the same answer every time for the same input.
-  `Memvara(read_selector=LocalSelector(...))` uses it. Design:
+  `Memvara(read_selector=LocalSelector())` uses it. With no arguments it loads
+  `memvara/selector-minilm-l6`, a model memvara publishes on Hugging Face: the stock
+  reranker fine-tuned on LongMemEval's gold labels, pinned to a commit, with its
+  calibration built in. Design:
   `docs/superpowers/specs/2026-10-01-local-selector-design.md`. Its reads are counted as
   `retrieval.local_query`, `retrieval.local_select_ms` and `retrieval.local_fallback`,
   never as the model series a quota sums. After the turns it keeps, a local selection

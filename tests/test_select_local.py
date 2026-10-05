@@ -16,7 +16,8 @@ import pytest
 from memvara.llm.base import Usage
 from memvara.select import Candidate, Selected, Selector
 from memvara.select.local import (
-    CALIBRATION_FILE, STOCK_MODEL, STOCK_REVISION, Calibration, LocalSelector,
+    CALIBRATION_FILE, SELECTOR_MODEL, SELECTOR_REVISION, STOCK_MODEL, STOCK_REVISION,
+    Calibration, LocalSelector,
     keep_positions, load_encoder,
 )
 
@@ -212,7 +213,7 @@ def test_top_n_must_be_positive() -> None:
 def test_repr_and_encoder() -> None:
     encoder = FakeEncoder()
     sel = LocalSelector(encoder=encoder, calibration=CAL)
-    assert repr(sel) == f"<LocalSelector {STOCK_MODEL} top_n=40>"
+    assert repr(sel) == f"<LocalSelector {SELECTOR_MODEL} top_n=40>"
     assert sel.encoder is encoder
 
 
@@ -222,8 +223,21 @@ def test_repr_and_encoder() -> None:
 def test_a_hub_model_without_a_shipped_calibration_is_refused() -> None:
     with pytest.raises(ValueError, match="no calibration"):
         LocalSelector("someone/else", encoder=FakeEncoder())
-    with pytest.raises(ValueError, match="no calibration"):    # until Task 6 ships one
-        LocalSelector(encoder=FakeEncoder())
+    with pytest.raises(ValueError, match="no calibration"):    # the stock model ships none
+        LocalSelector(STOCK_MODEL, encoder=FakeEncoder())
+    with pytest.raises(ValueError, match="no calibration"):    # nor does another commit
+        LocalSelector(SELECTOR_MODEL, revision="0" * 40, encoder=FakeEncoder())
+
+
+def test_the_default_is_the_published_model_at_its_commit_with_its_calibration(
+        monkeypatch) -> None:
+    built = _fake_sentence_transformers(monkeypatch)
+    sel = LocalSelector()
+    assert (sel.model, sel.revision) == (SELECTOR_MODEL, SELECTOR_REVISION)
+    # The memvara_selector.json published beside the weights at that commit.
+    assert sel.calibration == Calibration(scale=0.5170408164055298, shift=-2.690818832603243,
+                                          threshold=0.01, max_keep=6, max_length=256)
+    assert built == [(SELECTOR_MODEL, {"revision": SELECTOR_REVISION, "max_length": 256})]
 
 
 def test_the_stock_model_is_pinned_to_its_commit(monkeypatch) -> None:
