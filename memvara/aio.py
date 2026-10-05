@@ -61,6 +61,7 @@ import contextvars
 import inspect
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime
 from functools import partial
 from typing import Any, Callable, Collection, Literal, Mapping, Sequence, overload
@@ -728,19 +729,14 @@ class AsyncScopedMemvara:
 
     def bind(self, *, tenant=None, user=None, agent=None,
              session=None) -> "AsyncScopedMemvara":
-        """A narrower view. Fields not given keep this view's values."""
-        s = self.scope
-        # `project` is carried rather than named as a parameter: `bind` narrows, and a
-        # project is bound once where the store is opened. Dropping it here contradicted
-        # this method's own docstring, which says fields not given keep this view's
-        # values, and left the view reporting a scope it was not actually reading at.
-        return AsyncScopedMemvara(self._amem, Scope(
-            tenant if tenant is not None else s.tenant,
-            user if user is not None else s.user,
-            agent if agent is not None else s.agent,
-            session if session is not None else s.session,
-            project=s.project,
-        ))
+        """A narrower view. Fields not given keep this view's values.
+
+        `project` is not a parameter, because a project is bound once where the store is
+        opened, but it carries over like every other field that was not given.
+        """
+        given = dict(tenant=tenant, user=user, agent=agent, session=session)
+        return AsyncScopedMemvara(self._amem, replace(
+            self.scope, **{k: v for k, v in given.items() if v is not None}))
 
     @property
     def _kw(self) -> dict[str, Any]:
