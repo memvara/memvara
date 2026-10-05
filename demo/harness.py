@@ -951,9 +951,9 @@ def build_arms(args: Any) -> tuple[dict[str, Arm], str]:
     offline report does not change. `--memory hosted` replaces the two memvara arms with
     `demo/hosted.py`'s, after refusing a credential that could reach this machine's own
     store, and returns the note naming the project, the run and what that store does
-    differently. `--arm-mem0` and `--arm-supermemory` add `demo/competitors.py`'s arms,
-    each of which refuses here — while the arms are being built, before a reader has been
-    called — if what it needs is missing.
+    differently. `--arm-mem0` adds `demo/competitors.py`'s mem0 arm, which refuses here —
+    while the arms are being built, before a reader has been called — if the mem0ai
+    package is missing.
 
     Both modules are imported only where they are used, because a plain local run has no
     use for either and `demo/competitors.py` reaches an optional dependency.
@@ -974,8 +974,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     from demo.hosted import DEFAULT_MIN_SCOPE_AGE
 
     parser = argparse.ArgumentParser(
-        description="Blinded answer-quality run: five arms, plus any competitor arm "
-                    "asked for with --arm-mem0 or --arm-supermemory.")
+        description="Blinded answer-quality run: five arms, plus the mem0 arm when "
+                    "asked for with --arm-mem0.")
     parser.add_argument("--reader", default="file",
                         choices=["file", "stub", "anthropic", "openai"],
                         help="file: the two-phase blinded round trip for a person or an "
@@ -1036,37 +1036,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="--memory hosted: read scopes with a smaller "
                              "--min-scope-age than their write step recorded. The report "
                              "says this was done")
-    # The two competitor arms. Off unless asked for, because each needs something a clean
-    # checkout does not have, and the offline run CI depends on must keep working without
-    # either. See demo/competitors.py.
+    # The competitor arm. Off unless asked for, because it needs a package a clean checkout
+    # does not have, and the offline run CI depends on must keep working without it. See
+    # demo/competitors.py.
     parser.add_argument("--arm-mem0", action="store_true",
                         help="add a mem0 arm, driven by the same ground-truth facts the "
                              "memvara_structured arm gets. Needs the mem0ai package "
                              "(pip install mem0ai); no key and no network")
-    parser.add_argument("--arm-supermemory", action="store_true",
-                        help="add a Supermemory arm. Needs an account: a key, a container "
-                             "tag of its own, and the two endpoint paths, which have no "
-                             "default because nothing here has ever called them")
-    parser.add_argument("--supermemory-key-file", metavar="PATH", default=None,
-                        help="--arm-supermemory: the file holding the API key, read at "
-                             "run time and never printed. Defaults to the Supermemory "
-                             "plugin's own credentials file")
-    parser.add_argument("--supermemory-container", metavar="TAG", default=None,
-                        help="--arm-supermemory: the container tag every document this "
-                             "run writes is filed under. Required: it is what keeps a run "
-                             "out of whatever space the account defaults to")
-    parser.add_argument("--supermemory-base-url", metavar="URL",
-                        default=None,
-                        help="--arm-supermemory: the API host. Defaults to "
-                             "https://api.supermemory.ai")
-    parser.add_argument("--supermemory-ingest-path", metavar="PATH", default=None,
-                        help="--arm-supermemory: the path that writes one document. No "
-                             "default: this repository has only ever called "
-                             "POST /v3/documents/list, so it has nothing to default to "
-                             "and will not guess")
-    parser.add_argument("--supermemory-search-path", metavar="PATH", default=None,
-                        help="--arm-supermemory: the path that searches. No default, for "
-                             "the same reason as --supermemory-ingest-path")
     # --model, --effort, --max-tokens, --thinking, --temperature, --sampling-seed,
     # --base-url, --api-key-file, --extra-body, --concurrency and --checkpoint: one
     # definition, shared with the bench/ runners.

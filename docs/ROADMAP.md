@@ -912,10 +912,11 @@ Stated plainly, because a roadmap that only lists what is done is an advertiseme
    the fifteen questions with a superseded value to be wrong with, mem0 asserts that value
    as a current fact in 13 of 15, and both memvara arms in 0 of 15. That is where a value
    sits in a prompt, not whether a model was fooled by it, and the second is the number
-   this item is about. `--arm-supermemory` exists too and **has never been run**: it needs
-   an account nobody here has, and the write and search endpoints have no default because
-   the only Supermemory call this repository has ever made is a read. See
-   [`demo/README.md`](../demo/README.md#two-other-systems-as-arms).
+   this item is about. See [`demo/README.md`](../demo/README.md#mem0-as-an-arm).
+   A Supermemory arm, `--arm-supermemory`, was removed without ever having been run. It
+   needed a Supermemory account that nobody here has, and its write and search endpoints
+   had no default because the only Supermemory call this repository has ever made is a
+   read, in the importer.
    A hosted reader has since been run on a different corpus — 0.11.0's
    ranked recall, judged on LongMemEval-S through the MemoryBench harness, in
    [`docs/BENCHMARKS.md`](BENCHMARKS.md#answer-accuracy-judged-in-the-memorybench-harness)
