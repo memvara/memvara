@@ -593,6 +593,29 @@ re-measure. The peak-based figures above stay on record as the gate as first wri
 its model card. `LocalSelector()` loads it at that commit by default; an anonymous download
 of that commit matches the weights' recorded SHA-256.
 
+**Gate G5: real recall calls.** The spec's §19 (fixed before the run, and amended twice
+before any agreement was computed) replayed the 92 `memory_recall` calls (61 distinct
+queries) found in this machine's Claude Code transcripts. Each project's conversation text
+became a store; each call's 40 routed candidates, cut to 4,000 characters, went to the local
+selector and to `ModelSelector` running on gpt-oss-120b on Bedrock. Agreement is the share
+of the model selector's kept turns that the local selector also kept.
+
+| Measure | Result |
+|---|---|
+| calls answered by both | 92 of 92 |
+| agreement | 105 of 261 = **0.402** |
+| turns kept per call | local 4.6, model 2.8 |
+| turns only the local selector kept | 314 |
+| hand review of 20 disagreements | local right 8, model right 7, unclear 5 |
+
+**G5 fails:** agreement is 0.402 against a pass line of 0.75, below the predicted range of
+0.45 to 0.75. The hand review does not show either selector to be the better one where they
+disagree. Many candidates in these stores are not conversation at all (task-completion
+notices, pasted system prompts, session summaries), which neither model was trained on. Two
+cautions: the model selector here is a stand-in, not the gpt-5.4-mini the hosted service
+uses, and the review saw only the first 420 characters of each turn. The review itself stays
+under `local/`, because it quotes private transcripts.
+
 The spec's §10 records what has to be decided before this work goes on.
 
 ## LOCOMO and LongMemEval — retrieval, measured

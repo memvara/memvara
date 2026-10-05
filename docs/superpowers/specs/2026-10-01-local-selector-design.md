@@ -893,3 +893,13 @@ overflow gpt-oss-120b's context. Both selectors now see each candidate cut to it
 anyway, so this changes what the model selector sees and not what the local one sees. The
 hosted model selector sends whole turns to a model with a larger context, so this is a
 limit of the stand-in model, not of the product. The run starts again from the first call.
+
+**Result (2026-10-05): fail.** All 92 calls were answered by both selectors. The local
+selector kept 105 of the 261 turns the model selector kept: agreement 0.402, against the
+0.75 line and below the predicted 0.45 to 0.75. It kept more turns per call (4.6 against
+2.8). The hand review of 20 disagreements found the local selector right on 8, the model
+selector right on 7, and 5 unclear, so low agreement here is not evidence that the local
+selector is the worse of the two; the stores are full of harness text neither was trained
+on. The stand-in model selector is a caution as well. Under section 6, G5 does not stop an
+opt-in, which section 17 already decided; it does count against making the local selector
+a default, which G4 had already ruled out.
