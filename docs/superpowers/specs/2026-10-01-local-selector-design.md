@@ -766,3 +766,24 @@ default, does not ship. G3 passed, so the model's gain over the stock model hold
 never saw. Whether the local selector improves on the read a user without a key gets today
 (the routed order, 171 of 199 under gpt-5.4) was not part of this gate and is unmeasured
 under gpt-oss-120b.
+
+## 17. Local selector against the routed read, judged (pre-registered 2026-10-05)
+
+Written before the routed arm ran. The local arm's 165 is already known; the routed arm's
+score and the paired comparison are not.
+
+**Question.** Does the local selector answer more questions than option (c), the routed
+read with no model: the stock reranker's order, cut to the routed role's candidates, all of
+them first, then the rest? Option (c) needs no fine-tuned weights, so the local selector is
+worth shipping as an opt-in only if it beats (c).
+
+**Arm.** `memvara-routed-oss199`: the parity run's saved search results reordered by
+`bench/selector_metrics.py`'s `routed` replay (0.903 coverage), with no turn marked kept,
+answered and judged by gpt-oss-120b on Bedrock exactly as section 16's arms were.
+
+**Decision rule,** on local's paired net against routed:
+- **+3 or more:** the local selector ships as an opt-in, with `select_ordered()`.
+- **−2 to +2:** a wash. Option (c) is simpler and needs no model, so it is preferred.
+- **−3 or less:** routed is better, and the local selector does not ship.
+
+**Prediction:** +3, with a range of −3 to +8. Offline, local covers 0.928 against 0.903.
