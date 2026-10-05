@@ -3244,6 +3244,21 @@ write the existing files but may not add new ones refuses the temporary file, an
 record is then overwritten in place, as it was before the rename, where a crash can still
 tear it.
 
+**A store that keeps no vectors records `none`.** `Memvara(path, embeddings=False)` holds a
+`NoEmbedder` (`memvara/embed/base.py`) in place of an embedder, and its record is
+`{"embedder": "none", "dim": 0}`. Every place that would embed asks `embeds()` first: the
+claim and turn writes, tier 0's near-duplicate check, the grounding rescue, the agentic
+extractor's search, both vector legs of a read and the rewrite path's query encoding, the
+merge step of `consolidate()`, and `_advise_replacements`. `NoEmbedder.encode` raises, so a
+place that skipped the question fails where it happens instead of storing or comparing
+vectors nobody asked for. `_check_embedder` refuses such an open when the store holds
+vectors, and `_refuse_before_upgrade` refuses it before an older file is upgraded. It also
+refuses an embedder on a store whose record says `none` while the store holds a claim or a
+turn, because only what is written from then on would get a vector, and nothing could say
+which. A store that holds neither is not refused: the record may have been left behind by
+a deleted store. `reembed()` with a `NoEmbedder` drops every vector, embeds nothing,
+records `none` and returns 0, which is how `embeddings=False, reembed=True` migrates.
+
 ### Encryption at rest
 
 `SQLiteStore(path, encryption=True)` creates a new store encrypted. An existing file is

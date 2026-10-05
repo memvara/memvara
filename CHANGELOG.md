@@ -9,6 +9,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`Memvara(path, embeddings=False)` opens a store that keeps no vectors.** It never
+  builds or loads an embedder, writes no vector for any claim or turn, and finds things by
+  text alone: `search()` and `recall()` run their keyword leg and skip the vector leg.
+  It is for a caller that reads its store by subject and predicate and never searches by
+  meaning, such as memvara-code, where vectors were about half of every store. Three
+  things that compare vectors are off in this mode: `add()`'s near-duplicate check (a
+  restated fact is still collapsed when it is reconciled), the merge step of
+  `consolidate()`, and `advise_replacements=True`, which is refused. A store that already
+  holds vectors is refused until they are dropped with
+  `Memvara(path, embeddings=False, reembed=True)`, and a store written without vectors is
+  refused by an embedder until it embeds everything with `reembed=True`. The store's
+  `.embedder.json` records `"none"`, and `embeddings=False` with `api_key=` is a
+  `TypeError`. `memvara.embed.NoEmbedder` is the embedder such a store holds.
+
 ### Removed
 
 - **`memvara.store.remote.RemoteStore` is removed.** It was a `Store` that sent its calls to
