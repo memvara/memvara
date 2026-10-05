@@ -90,10 +90,6 @@ def _scalar_ok(value: Any) -> bool:
     return isinstance(value, (str, int, float))  # `bool` is an `int` in Python
 
 
-def _describe(value: Any) -> str:
-    return type(value).__name__
-
-
 def _values(key: str, value: Any) -> tuple[Scalar, ...]:
     """The values `key` may equal, refusing anything that is not a scalar or a list of
     them."""
@@ -105,13 +101,13 @@ def _values(key: str, value: Any) -> tuple[Scalar, ...]:
         bad = [v for v in value if not _scalar_ok(v)]
         if bad:
             raise FilterError(
-                f"filters[{key!r}] holds a {_describe(bad[0])} ({bad[0]!r}). A list may "
-                "hold only strings, numbers and booleans.")
+                f"filters[{key!r}] holds a {type(bad[0]).__name__} ({bad[0]!r}). "
+                "A list may hold only strings, numbers and booleans.")
         return tuple(value)
     if not _scalar_ok(value):
         raise FilterError(
-            f"filters[{key!r}] is a {_describe(value)} ({value!r}). A filter value is a "
-            "string, a number, a boolean, or a list of those meaning any one of them.")
+            f"filters[{key!r}] is a {type(value).__name__} ({value!r}). A filter value "
+            "is a string, a number, a boolean, or a list of those meaning any one of them.")
     return (value,)
 
 
@@ -194,10 +190,10 @@ def search_filter(filters: Mapping[str, Any] | None,
     if filters is not None and not isinstance(filters, Mapping):
         raise FilterError(
             f"filters must be a mapping of metadata keys to values, got "
-            f"{_describe(filters)}")
+            f"{type(filters).__name__}")
     if filepath_prefix is not None and not isinstance(filepath_prefix, str):
         raise FilterError(
-            f"filepath_prefix must be a string, got {_describe(filepath_prefix)}")
+            f"filepath_prefix must be a string, got {type(filepath_prefix).__name__}")
     meta = []
     for key, value in (filters or {}).items():
         if not isinstance(key, str) or not FILTER_KEY.fullmatch(key):
