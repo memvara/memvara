@@ -109,11 +109,6 @@ async def _read(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         pool, partial(context.run, fn, *args, **kwargs))
 
 
-async def _nothing() -> list[Result]:
-    """The search a profile with no query does not run, as an awaitable."""
-    return []
-
-
 class AsyncMemvara:
     """An `Memvara` whose methods are coroutines. Same semantics, off the loop thread.
 
@@ -513,11 +508,13 @@ class AsyncMemvara:
             # A plain read, as in `Memvara.profile`.
             return mem.search(query or "", k=k, **PLAIN_READ, **scope_kw)
 
+        # With no query there is no search to run. `asyncio.sleep(0, [])` stands in for
+        # it: an awaitable that returns a new empty list.
         live, then, hits = await asyncio.gather(
             asyncio.to_thread(mem.get_all, states=["live"], **scope_kw),
             asyncio.to_thread(mem._believed_at, mem._scope(tenant, user, agent, session),
                               at),
-            asyncio.to_thread(search) if query else _nothing())
+            asyncio.to_thread(search) if query else asyncio.sleep(0, []))
         return mem._assemble_profile(live, then, hits, k=k, buckets=buckets)
 
     async def get(self, claim_id: str, *, tenant=None, user=None, agent=None,
@@ -1109,13 +1106,6 @@ def _scoped_omissions() -> set[str]:
     return _public(Memvara) - _public(ScopedMemvara)
 
 
-#: Names `AsyncMemvara` deliberately does not wrap, checked by the test suite so that a
-#: method added to `Memvara` cannot quietly go missing here. Empty since `scope` landed;
-#: kept because the check needs somewhere to record a deliberate omission, and an empty
-#: set is the honest current answer.
-NOT_WRAPPED: frozenset[str] = frozenset()
-
-
 def _unwrapped(memvara_type: type = Memvara) -> set[str]:
     """Public `Memvara` methods with no `AsyncMemvara` counterpart. For the suite.
 
@@ -1123,7 +1113,7 @@ def _unwrapped(memvara_type: type = Memvara) -> set[str]:
     and so a reader of this file can see what the promise "the whole public surface" is
     actually checked against.
     """
-    return _public(memvara_type) - set(dir(AsyncMemvara)) - NOT_WRAPPED
+    return _public(memvara_type) - set(dir(AsyncMemvara))
 
 
 def _unbound(async_type: type = AsyncMemvara,
