@@ -46,8 +46,7 @@ answer quality with no error, no exception and nothing in any log.
 - End-to-end answer quality: `demo/harness.py`, `demo/scenario.py`, `demo/distractors.py`
   (the second corpus size), `demo/baselines.py`, `demo/hosted.py` (the two memvara
   arms against a hosted deployment, under `--memory hosted`), and `demo/competitors.py`
-  (mem0 and Supermemory as arms, under `--arm-mem0` and `--arm-supermemory`, both off by
-  default), with recorded runs under `demo/runs/`.
+  (mem0 as an arm, under `--arm-mem0`, off by default), with recorded runs under `demo/runs/`.
 - The public benchmark others can enter: `benchmarks/agent_memory/`, with its own
   `benchmarks/agent_memory/README.md` and adapters under
   `benchmarks/agent_memory/adapters/`.

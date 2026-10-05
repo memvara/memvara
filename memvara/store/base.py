@@ -20,11 +20,12 @@ below the facade sees it. See `memvara.types.time_axes`.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import fields
 from datetime import datetime
 from contextlib import AbstractContextManager, nullcontext
-from typing import (TYPE_CHECKING, Any, Collection, Iterable, Literal, Protocol, Sequence,
+from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Literal, Protocol, Sequence,
                     runtime_checkable)
 
 import numpy as np
@@ -425,16 +426,71 @@ def claim_digest(claim: Claim) -> bytes:
     return hashlib.blake2b(repr(values).encode(), digest_size=16).digest()
 
 
-def transaction(store: object) -> AbstractContextManager[Any]:
+def sole_tenant(tenants: Iterable[str]) -> str | None:
+    """The one tenant in `tenants`, or `None` when it holds none or more than one.
+
+    A caller that can list every tenant a transaction will touch passes the result to
+    `transaction` as `tenant=`. `None` means any tenant, which makes a store lock as broadly
+    as it can, so a caller that finds two tenants, or none, ends up on the safe side.
+
+    >>> sole_tenant(["acme", "acme"])
+    'acme'
+    >>> sole_tenant(["acme", "globex"]) is None
+    True
+    >>> sole_tenant([]) is None
+    True
+    """
+    found = set(tenants)
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def batch_takes_tenant(batch: Callable[..., Any]) -> bool:
+    """Whether a store's `batch` can be called with `tenant=`.
+
+    True only when it declares a parameter named `tenant` that can be passed by keyword.
+    A `**kwargs` alone does not count: a wrapper that forwards `**kwargs` to a store written
+    before the keyword would pass `tenant=` on to a `batch()` that cannot take it, so the
+    wrapper has to declare `tenant` to receive it. Not passing it is always safe, because a
+    store then locks as broadly as it did before. Decided from the signature rather than by
+    catching `TypeError`, so that a `TypeError` raised inside the batch stays a visible
+    fault. A signature that cannot be read counts as not taking it.
+
+    >>> from contextlib import nullcontext
+    >>> batch_takes_tenant(lambda: nullcontext())
+    False
+    >>> batch_takes_tenant(lambda *, tenant=None: nullcontext())
+    True
+    >>> batch_takes_tenant(lambda **kwargs: nullcontext())
+    False
+    """
+    try:
+        params = inspect.signature(batch).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == "tenant" and p.kind is not inspect.Parameter.POSITIONAL_ONLY
+               for p in params)
+
+
+def transaction(store: object, tenant: str | None = None) -> AbstractContextManager[Any]:
     """`store.batch()` where the store has one, and a context that does nothing where it
     does not.
 
     The one spelling of "run this in one transaction if the store can", for the callers
     that must also work with a store predating `batch()`. A store without it commits
     each statement, which is correct and slower.
+
+    `tenant` is passed on as `batch(tenant=...)` when the batch touches rows of that one
+    tenant and no other, so a store may narrow its lock to it (see `Store.batch`). It is
+    left out of the call when it is `None`, and also when the store's `batch` does not
+    declare it (`batch_takes_tenant`), so a `Store` written before the keyword existed keeps
+    working: it is called as `batch()`.
     """
     batch = getattr(store, "batch", None)
-    return batch() if batch is not None else nullcontext()
+    if batch is None:
+        return nullcontext()
+    if tenant is not None and batch_takes_tenant(batch):
+        return batch(tenant=tenant)  # type: ignore[no-any-return]
+    return batch()  # type: ignore[no-any-return]
 
 
 #: Members a backend may leave out, and what it costs to leave each one out.
@@ -479,7 +535,7 @@ OMITTABLE: dict[str, str] = {
                       "is kept if the store keeps it, and the claim is never erased.",
     # The nine document members are one capability, and a store that has it says so
     # with `holds_documents = True`; `Memvara` asks that marker rather than the methods,
-    # because `RemoteStore` has every method as a stub that raises.
+    # because a store can have every method as a stub that raises.
     "put_document": "the document methods on Memvara raise NotImplementedError naming "
                     "the store. Every other read and write is unaffected.",
     "get_document": "as put_document.",
@@ -496,9 +552,8 @@ OMITTABLE: dict[str, str] = {
     "count_competing": "the write receipt's accumulation report falls back to "
                        "len(competing_claims()).",
     "occupied_slots": "read-side shadowing falls back to one competing_claims per slot. "
-                      "A store that raises NotImplementedError from that too, as "
-                      "RemoteStore does, returns a broader value beside a narrower "
-                      "level's own.",
+                      "A store that raises NotImplementedError from that too "
+                      "returns a broader value beside a narrower level's own.",
     "unended_claims": "forget() reads the slot's whole history with slot_history and "
                       "picks the values to close with Claim.is_unended, so its cost grows "
                       "with every value the slot has held rather than with the few it "
@@ -510,7 +565,7 @@ OMITTABLE: dict[str, str] = {
 class Store(Protocol):
     #: True on a store that implements the document methods below. `Memvara` asks this
     #: rather than whether the methods exist, because a store can have them as stubs
-    #: that raise, as `RemoteStore` does. Optional, and read as false when absent; see
+    #: that raise. Optional, and read as false when absent; see
     #: `OMITTABLE`.
     holds_documents: bool = False
     #: True on a store that leaves a claim whose `expires_at` has passed out of its own
@@ -570,7 +625,7 @@ class Store(Protocol):
         result count rather than with the query."""
         ...
 
-    def batch(self) -> AbstractContextManager["Store"]:
+    def batch(self, *, tenant: str | None = None) -> AbstractContextManager["Store"]:
         """Context manager that runs a block as one transaction, committed once at the end.
 
         Every guarantee `Memvara` gives about a read followed by a write depends on the
@@ -583,12 +638,38 @@ class Store(Protocol):
         and the write. `SQLiteStore.batch()` takes the lock: it begins with
         `BEGIN IMMEDIATE`.
 
+        **`tenant` lets a store narrow that lock.** `Memvara` passes the tenant when
+        everything the batch reads and writes belongs to that one tenant, and leaves it
+        `None` when the batch may touch several or all of them: `reembed()`, a sweep over
+        every tenant, and a write whose turns or claims name two tenants. The expiry sweep
+        lists claims of every tenant outside any batch, and then erases each in a batch for
+        that claim's tenant. A store whose lock covers the whole database, as `SQLiteStore`'s
+        does, ignores the keyword. A store that can lock one tenant takes the lock for that
+        tenant only, so two batches for different tenants run at the same time, and treats
+        `None` as "any tenant" by locking as broadly as it did before this keyword existed,
+        which also excludes every batch for a single tenant. Nothing in the batch may touch
+        another tenant's rows when a tenant was passed.
+
+        A batch nested inside another joins it, and the outermost batch decides the lock:
+        a tenant passed to the inner one changes nothing. `Memvara` passes the same
+        tenant to a nested batch as to the one around it, or a tenant the outer one
+        covers.
+
+        The parameter is keyword-only and optional. `Memvara` passes it only to a store
+        whose `batch` declares a parameter named `tenant`, and calls any other store as
+        `batch()`, so a store written before it existed keeps working with the lock it
+        always took. A wrapper that forwards `**kwargs` has to declare `tenant` to receive
+        it.
+
+        A store's own erasure methods open their own batch, and a store that narrows its
+        lock should narrow these too: `purge(scope)` touches `scope.tenant` only, and
+        `erase_claim` and `erase_episodes` can look up the tenant of what they erase before
+        they open the batch.
+
         A store whose `batch()` only defers commits, or that has no `batch()` at all, runs
         the same code without that guarantee: another writer can commit between a read and
         the write that follows it, and the write then puts back the copy it read over the
-        other writer's change. `RemoteStore.batch()` is one of these. It yields the store
-        and does nothing else, because the hosted API has no transaction a client can hold
-        open.
+        other writer's change.
         """
         ...
 
@@ -1141,7 +1222,10 @@ class Store(Protocol):
         `sources=True` also erases the source turns no surviving claim still cites —
         correct for a memory that *is* its source text, wrong for a fact extracted from
         a conversation turn that holds much else besides. Those turns are what `episodes`
-        counts, so it is 0 without the flag.
+        counts, so it is 0 without the flag. Only turns of the claim's own tenant: a claim
+        can cite a turn of another tenant, and erasing that turn would reach outside the
+        tenant the erasure is for, and outside the lock a store may hold for it. It is left
+        where it is.
         """
         ...
 

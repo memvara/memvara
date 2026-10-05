@@ -8,8 +8,8 @@ directory is the corpus, the arms and the harness for closing it.
 
 The apparatus is complete: the corpus, the five arms, a blinded round trip for a person or
 an agent, a reader behind an API with every parameter pinned and printed, a second
-corpus size ([Two corpus sizes](#two-corpus-sizes)), and two other memory systems that can
-be run as arms beside them ([Two other systems, as arms](#two-other-systems-as-arms)).
+corpus size ([Two corpus sizes](#two-corpus-sizes)), and another memory system, mem0,
+that can be run as an arm beside them ([mem0, as an arm](#mem0-as-an-arm)).
 [What the recorded runs produced](#what-the-recorded-runs-produced) has the first runs with
 a model as the reader, at both corpus sizes, and says what they do and do not show.
 
@@ -18,7 +18,7 @@ demo/scenario.py    the support history and the question set
 demo/distractors.py generated tickets that scale the history without moving any fact
 demo/baselines.py   the five context-building arms, and the structured integration
 demo/hosted.py      the two memvara arms against a memvara-cloud project
-demo/competitors.py mem0 and Supermemory as arms, neither on unless asked for
+demo/competitors.py mem0 as an arm, not on unless asked for
 demo/harness.py     the blinded run over those arms, and the scoring
 ```
 
@@ -624,10 +624,10 @@ start again with a new run id.
 
 ---
 
-## Two other systems, as arms
+## mem0, as an arm
 
-The five arms are controls and memvara. Neither of the two below is on unless you ask for
-it, and each needs something a fresh checkout does not have, which is why they live in
+The five arms are controls and memvara. The mem0 arm is not on unless you ask for it,
+because it needs a package that a fresh checkout does not have. That is why it lives in
 `demo/competitors.py` rather than in `ARMS`: an arm that cannot run on a clean machine must
 not be able to break the offline run that CI depends on.
 
@@ -635,9 +635,7 @@ not be able to break the offline run that CI depends on.
 PYTHONPATH=. python3 demo/harness.py --reader stub --arm-mem0
 ```
 
-### mem0
-
-Needs the package and nothing else — `pip install mem0ai`, no key, no network. The arm is
+The arm needs the package and nothing else — `pip install mem0ai`, no key, no network. The arm is
 driven by the oracle `bench/mem0_real.py` uses: a perfect extractor in mem0's own shape
 that emits the ground-truth fact for the turn being added. So mem0 is given exactly the
 facts `memvara_structured` is given, with complete extraction recall and no
@@ -680,50 +678,6 @@ visible by reading mem0:
 * `on_disk: False` does not make qdrant in-memory. mem0 hands it a default storage folder
   and qdrant locks it, so the second store a process builds dies with "already accessed by
   another instance". `"path": ":memory:"` is the spelling that means no folder.
-
-### Supermemory
-
-Needs an account, and this repository does not have one. What it knows about Supermemory
-is one endpoint: `memvara/compat/supermemory_import.py` reads `POST /v3/documents/list`,
-which lists documents that already exist. An arm has to write a corpus and then query it,
-and neither of those calls has ever been made from here.
-
-So the arm ships with **no default write path and no default search path**. Both are
-settings with no value, and turning the arm on without them is refused, with the reason.
-A default that looked plausible would be a guess that reads like a documented fact, and
-the next person to quote it would have no way to tell which it was. Anyone with an account
-can supply the two paths from Supermemory's own documentation and run the arm.
-
-It also refuses without an explicit container tag. A run writes one document per visible
-turn — six hundred at `--corpus-scale 10` — into an account this code cannot clean up
-afterwards. `demo/hosted.py` refuses this machine's own memvara credentials for the same
-reason and at the same moment: before anything is sent.
-
-The tag you give is a prefix, not the container: the arm writes one container per question
-instant, `<tag>-<instant>`. That is not tidiness. The harness asks questions in the order
-the scenario lists them, which is not `asked_at` order — the eight August questions come
-first and the April one is ninth — so a single container would already hold the whole
-history by the time the April question searched it. Measured with a shared container, that
-question could match 64 documents instead of the 32 turns it was allowed to see, 32 of them
-dated after it was asked and some of them nearly four months later. It would also write
-every overlapping turn twice. `demo/hosted.py` splits hosted scopes by instant for the
-same reason.
-
-```bash
-PYTHONPATH=. python3 demo/harness.py --reader stub --arm-supermemory \
-    --supermemory-key-file ~/.config/memvara/supermemory.key \
-    --supermemory-container memvara-demo-2026-09 \
-    --supermemory-ingest-path <from their docs> \
-    --supermemory-search-path <from their docs>
-```
-
-The key is read from the file at run time and is never printed, logged or put on a command
-line. Requests go through the importer's own injectable `fetch`, `(url, key, body) ->
-payload`, rather than a second HTTP client written for the demo.
-
-**No Supermemory number is published anywhere in this repository**, because nobody here
-has run the arm. That is the honest state and it is recorded here rather than filled in
-with something plausible.
 
 ---
 

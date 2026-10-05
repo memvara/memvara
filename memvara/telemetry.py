@@ -58,6 +58,7 @@ silently, which is the failure mode this module exists to remove.
 
 from __future__ import annotations
 
+import statistics
 from typing import Iterable, Mapping, Protocol, Sequence
 
 # The metric-name constants below are part of the public surface too and are imported
@@ -733,21 +734,14 @@ def rank_correlation(values: Sequence[float]) -> float | None:
     >>> rank_correlation([7]) is None
     True
     """
-    n = len(values)
-    if n < 2:
+    # The positions 0, 1, 2, ... grow as the rank gets worse, so a positive correlation
+    # with them means high values sit at bad ranks. The result is negated so that
+    # positive means good. `correlation` raises StatisticsError for fewer than two values
+    # and for identical values, and both of those mean there is nothing to correlate.
+    try:
+        return -statistics.correlation(_tied_ranks(values), range(len(values)))
+    except statistics.StatisticsError:
         return None
-    value_ranks = _tied_ranks(values)
-    mean = (n - 1) / 2.0                      # mean of both 0..n-1 rank vectors
-    spread = sum((r - mean) ** 2 for r in value_ranks)
-    if spread <= 0.0:
-        return None                           # every value identical: no ordering at all
-    # `position` ascends with rank index (0 is best), so a positive Pearson here means
-    # high values at *bad* ranks. Negated once, at the end, rather than by reversing one
-    # of the two vectors - which is the same arithmetic and half as easy to check.
-    covariance = sum((r - mean) * (position - mean)
-                     for position, r in enumerate(value_ranks))
-    positions_spread = sum((position - mean) ** 2 for position in range(n))
-    return -covariance / (spread * positions_spread) ** 0.5
 
 
 def _tied_ranks(values: Sequence[float]) -> list[float]:

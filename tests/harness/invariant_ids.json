@@ -59,7 +59,7 @@
       "RC1": "The credential decides the tenant.",
       "RC2": "Narrowing is one-way.",
       "RC3": "Redaction runs client-side.",
-      "RC4": "An unmapped operation raises rather than approximating.",
+      "RC6": "The engine is not run over the facade.",
       "RC5": "This repository does not implement the server."
     },
     "docs/claude/retrieval.md": {

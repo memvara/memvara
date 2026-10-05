@@ -71,9 +71,10 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          # `cloud` alongside `dev`: RemoteStore's tests use `httpx.MockTransport` as
-          # their offline seam (see tests/test_store_remote.py), so without the `cloud`
-          # extra installed the module fails to collect at all rather than skipping.
+          # `cloud` alongside `dev`: the hosted client's tests use `httpx.MockTransport`
+          # as their offline seam (see tests/test_remote_client.py), so without the
+          # `cloud` extra installed those modules fail to collect at all rather than
+          # skipping.
           # `ingest` so the PDF tests read a real PDF with the real `pypdf`; without it
           # they run only against a stand-in module and the real ones skip.
           # `encrypt` so the encrypted-store tests run on every interpreter and every OS
@@ -112,8 +113,8 @@ jobs:
           cache: pip
       - run: |
           python -m pip install --upgrade pip
-          # See the `test` job: RemoteStore's tests need `httpx` (the `cloud` extra) to
-          # collect at all, and every line in memvara/store/remote.py is covered only
+          # See the `test` job: the hosted client's tests need `httpx` (the `cloud`
+          # extra) to collect at all, and every line in memvara/remote/ is covered only
           # when they run. `ingest` and `encrypt` for the same reasons as in the `test`
           # job; memvara/store/encryption.py is covered only when SQLCipher is installed.
           python -m pip install -e ".[dev,cloud,ingest,encrypt]"
@@ -151,7 +152,7 @@ jobs:
           cache: pip
       - run: |
           python -m pip install --upgrade pip
-          # `memvara/store/remote.py`, `memvara/server/login.py` and
+          # `memvara/remote/client.py`, `memvara/server/login.py` and
           # `memvara/server/init.py` import `httpx` under `TYPE_CHECKING`/lazily; mypy
           # still needs it installed to resolve the import, or every annotated use of it
           # is an `import-not-found` error regardless of whether the code is correct.

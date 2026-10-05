@@ -36,11 +36,8 @@ used to undo the other writer's ending, or bring an erased claim back, text and 
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
-from typing import Callable
-
-from ..store.base import Store, bulk_claims, claim_digest
+from ..store.base import Store, bulk_claims, claim_digest, transaction
 from ..telemetry import (
     CONSOLIDATE_CLAIMS_PER_SLOT,
     CONSOLIDATE_CROWDED_SLOTS,
@@ -165,9 +162,6 @@ class Sweep:
         units: dict[str, list[Claim]] = {}
         for claim in queued:
             units.setdefault(self._unit.get(claim.id, claim.id), []).append(claim)
-        # `getattr` so a third-party Store that never heard of batching still works; it
-        # just commits per statement, as it did before windowing existed.
-        batch = getattr(self.store, "batch", None)
         written = 0
         window: list[list[Claim]] = []
         rows = 0
@@ -175,20 +169,25 @@ class Sweep:
             window.append(members)
             rows += len(members)
             if rows >= self.window:
-                written += self._write(window, batch)
+                written += self._write(window)
                 window, rows = [], 0
         if window:
-            written += self._write(window, batch)
+            written += self._write(window)
         self.skipped += len(queued) - written
         if self.telemetry is not None:
             self.telemetry.counter(CONSOLIDATE_ROWS_WRITTEN, written)
         return written
 
-    def _write(self, units: list[list[Claim]],
-               batch: Callable[[], AbstractContextManager[object]] | None) -> int:
-        """Write one window of units in one transaction. Returns the rows written."""
+    def _write(self, units: list[list[Claim]]) -> int:
+        """Write one window of units in one transaction. Returns the rows written.
+
+        The transaction is for this sweep's tenant, because the snapshot holds that
+        tenant's claims and nothing else; a sweep over every tenant (`tenant=None`) asks
+        for the broadest lock the store has. A third-party `Store` that never heard of
+        batching still works, and commits per statement as it did before windowing existed.
+        """
         written = 0
-        with (batch() if batch is not None else nullcontext()):
+        with transaction(self.store, self.tenant):
             # Inside the transaction, so no writer can change a row between this read
             # and the write below.
             stored = bulk_claims(self.store, [c.id for members in units for c in members])

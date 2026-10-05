@@ -25,8 +25,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from ..schema import PredicateRegistry
-from ..store.base import Store
-from ..telemetry import CONSOLIDATE_DECAYED, Recorder
+from ..telemetry import CONSOLIDATE_DECAYED
 from ..types import (
     SALIENCE_BASE,
     SALIENCE_PRECISION,
@@ -78,9 +77,8 @@ def decayed_salience(claim: Claim, registry: PredicateRegistry,
 def decay_pass(sweep: Sweep, registry: PredicateRegistry) -> int:
     """Recompute salience over a snapshot already in hand. Returns claims changed.
 
-    Split from `decay` so a full sweep pays for one scan of the table instead of one
-    per stage - three scans of everything, each materialized, was most of the cost of a
-    pass over a store that had nothing left to do.
+    It works on a `Sweep` that the caller builds and flushes, so that a full
+    consolidation reads the table once for all three stages instead of once per stage.
     """
     changed = 0
     for claim in sweep.claims:
@@ -98,21 +96,3 @@ def decay_pass(sweep: Sweep, registry: PredicateRegistry) -> int:
         sweep.telemetry.counter(CONSOLIDATE_DECAYED, changed)
     return changed
 
-
-def decay(
-    store: Store,
-    registry: PredicateRegistry,
-    tenant: str | None = None,
-    now: datetime | None = None,
-    window: int | None = None,
-    telemetry: Recorder | None = None,
-) -> int:
-    """Recompute salience for every live claim. Returns the number actually changed.
-
-    A second consecutive call returns 0: the target is a function of stored state and
-    `now`, so once written there is nothing left to write.
-    """
-    sweep = Sweep(store, tenant, now=now, window=window, telemetry=telemetry)
-    changed = decay_pass(sweep, registry)
-    sweep.flush()
-    return changed

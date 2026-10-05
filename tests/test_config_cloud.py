@@ -191,11 +191,13 @@ def test_no_cloud_path_anywhere_constructs_an_engine_over_a_remote_store():
     rather than completed. Deleting the guard is therefore deliberate, and this is what
     has to stay true in its place.
 
-    Read off `config.py`'s syntax rather than its behaviour, because a reintroduced
-    `Memvara(store=RemoteStore(...))` would construct, start, and fail exactly as it did
-    before — there is no call that returns the wrong answer for a test to catch. Two
-    things are checked: nothing here imports `RemoteStore`, and no call here passes a
-    `store=`, which is the only door the engine has onto one.
+    Read off `config.py`'s syntax rather than its behaviour, because an engine built over
+    a remote store would construct, start, and fail only on its first tool call — there
+    is no call that returns the wrong answer for a test to catch. Two things are checked.
+    First, `config.py` imports no store class: no imported name ends in `Store`.
+    `RemoteStore` itself was removed, so the check is on any store, under any name.
+    Second, no call here passes a `store=`, which is the only way to hand the engine a
+    store.
     """
     import ast
     from pathlib import Path
@@ -210,9 +212,10 @@ def test_no_cloud_path_anywhere_constructs_an_engine_over_a_remote_store():
     imported = {alias.name for node in ast.walk(tree)
                 if isinstance(node, (ast.Import, ast.ImportFrom))
                 for alias in node.names}
-    assert "RemoteStore" not in imported, (
-        "cloud mode builds a client of the facade; importing RemoteStore here means the "
-        "engine is being pointed at a store that cannot serve it"
+    stores = sorted(name for name in imported if name.endswith("Store"))
+    assert not stores, (
+        f"config.py imports {stores}. Cloud mode builds a client of the facade, and a "
+        "store class here means the engine is being pointed at a store"
     )
     assert "RemoteMemvara" in imported
 
@@ -228,7 +231,7 @@ def test_build_memvara_rejects_a_hand_built_cloud_config_with_no_api_key():
     """`ServerConfig.from_env` never produces `mode="cloud"` with `api_key=None`, but
     `ServerConfig` can be constructed directly in Python bypassing that check — mypy
     sees `api_key: str | None`, so `build_memvara` has to narrow it itself rather than
-    hand `None` to `RemoteStore`."""
+    hand `None` to `RemoteMemvara`."""
     config = ServerConfig(mode="cloud", api_key=None)
     with pytest.raises(ConfigError, match="no api_key"):
         build_memvara(config)

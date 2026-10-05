@@ -91,17 +91,34 @@ def _sentences(text: str) -> list[tuple[int, int]]:
         spans.extend(_trimmed(text, start, m.end()))
         start = m.end()
     spans.extend(_trimmed(text, start, len(text)))
+    return [piece for s, e in spans for piece in cut_long(text, s, e, CHUNK_CHARS)]
+
+
+def cut_long(text: str, start: int, end: int, limit: int) -> list[tuple[int, int]]:
+    """`text[start:end]` as `(start, end)` spans of at most `limit` characters, in order.
+
+    A span longer than `limit` is cut at the last space that fits, or at the limit itself
+    when there is none, and the whitespace after each cut is skipped. The last span is
+    whatever is left, and it is empty when only whitespace was left.
+    `memvara/write/split.py` uses this too, for a sentence longer than one extraction
+    piece.
+
+    >>> text = "one two three"
+    >>> [text[s:e] for s, e in cut_long(text, 0, len(text), 7)]
+    ['one two', 'three']
+    """
     out: list[tuple[int, int]] = []
-    for s, e in spans:
-        while e - s > CHUNK_CHARS:
-            cut = text.rfind(" ", s + 1, s + CHUNK_CHARS + 1)
-            if cut <= s:
-                cut = s + CHUNK_CHARS
-            out.append((s, cut))
-            s = cut
-            while s < e and text[s].isspace():
-                s += 1
-        out.append((s, e))
+    while end - start > limit:
+        # A space inside the first `limit + 1` characters ends a word that fits, because
+        # the space itself is dropped rather than carried into either span.
+        cut = text.rfind(" ", start + 1, start + limit + 1)
+        if cut <= start:
+            cut = start + limit
+        out.append((start, cut))
+        start = cut
+        while start < end and text[start].isspace():
+            start += 1
+    out.append((start, end))
     return out
 
 

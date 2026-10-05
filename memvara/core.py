@@ -62,7 +62,8 @@ from .select.base import PLAIN_READ, Synthesis
 from .select.stages import QueryRewriter, Synthesizer, gate, run_stage
 from .schema import (Cardinality, PredicatePackError, PredicateRegistry, _slugify,
                      load_specs)
-from .store import SQLiteStore, Store, bulk_claims, resolve_states, transaction
+from .store import (SQLiteStore, Store, bulk_claims, resolve_states, sole_tenant,
+                    transaction)
 from .telemetry import WRITE_LLM_CALLS, WRITE_TOKENS_IN, WRITE_TOKENS_OUT, Recorder
 from dataclasses import replace
 
@@ -102,6 +103,7 @@ from .types import (
     Scope,
     SearchResults,
     WriteReceipt,
+    _as_memory_type,
     as_utc,
     close_out,
     closure,
@@ -605,25 +607,11 @@ _CHARS_PER_TOKEN = 4
 def _approx_tokens(text: str) -> int:
     """Roughly how many tokens `text` costs. The default counter for `recall(budget=)`.
 
-    **A length heuristic, and it is wrong in a direction worth naming.** It divides by
-    four and rounds up, which is close enough for English prose and materially wrong for
-    CJK, where a single character is often a token or more: this **under-counts** there,
-    by several times, so a block the heuristic certifies as fitting a 2,000-token budget
-    can be four thousand real tokens. The failure is silent and it is on the side that
-    overflows the caller's context rather than the side that wastes it. Cyrillic, Thai
-    and long code identifiers all lean the same way, less sharply.
-
-    There is no tokenizer here to do better with. Core's dependencies are `numpy` and
-    nothing else, and pulling a transformer stack into the zero-dependency package in
-    order to count characters would cost every user of the library a dependency tree so
-    that some of them could have an exact budget. So this is the default and the seam is
-    the answer: a caller who needs exactness passes their own `counter=` — `tiktoken`,
-    the Anthropic token-counting endpoint, whatever their model actually charges — and
-    pays for that dependency in their own project. It is the same seam as `Embedder`,
-    `AuditStore` and `Processor`, for the same reason.
-
-    A budget honoured approximately, with the approximation named, is worth having. One
-    that claims to be exact is not.
+    It is the character count divided by four, rounded up. That is close for English
+    prose, but it **under-counts** CJK text by several times, because one CJK character
+    is often a whole token, so a block it fits into a budget can overflow the caller's
+    context. Core has no tokenizer dependency; a caller who needs an exact count passes
+    their own `counter=`.
 
     >>> _approx_tokens("the user lives in Lisbon")
     6
@@ -715,18 +703,6 @@ def _pack_predicates(pack: str) -> tuple[str, ...]:
 #: 58% of the time on one production store and in the top ten only 71%, and each one
 #: past the third is a model call that mostly says "no".
 ADVISORY_CANDIDATES = 3
-
-
-def _as_memory_type(value: MemoryType | str | None) -> MemoryType | None:
-    """A `MemoryType` from itself or from its value as a string (#270)."""
-    if value is None:
-        return None
-    try:
-        return MemoryType(value)
-    except ValueError:
-        raise ValueError(
-            "memory_type must be one of "
-            + ", ".join(t.value for t in MemoryType) + f", not {value!r}") from None
 
 
 def _refuse_expired(expires_at: datetime, now: datetime) -> None:
@@ -1146,11 +1122,10 @@ class Memvara:
             # had before scoping existed, not a new leak.
             return all_specs()
         except NotImplementedError:
-            # A Store whose method exists (so the `getattr` check above passes) but
-            # whose backing surface has no way to answer — `RemoteStore.all_specs`, in
-            # particular: the cloud facade has no read route for learned predicate
-            # specs at all (see its docstring). Treated the same as "no specs to
-            # rehydrate" rather than left to propagate, because propagating would mean
+            # A Store whose method exists, so the `getattr` check above passes, but
+            # which has no way to answer, so it raises `NotImplementedError`. Treated
+            # the same as "no specs to rehydrate" rather than left to propagate,
+            # because propagating would mean
             # no `Memvara` can ever be constructed over that store — this is the one
             # caller that has to tolerate "this store cannot do this" rather than
             # surface it, since every other caller of `all_specs` reaches it through a
@@ -1505,7 +1480,9 @@ class Memvara:
         # findable by BM25 and by `why()` — only its *vector* is missing — and because
         # `_index_episodes` skips turns that already have one, so a retry converges.
         receipt = self.writer.add(episodes)
-        with transaction(self.store):
+        # The turns this call stored or found: one tenant unless the caller handed in
+        # `Episode` objects scoped to several.
+        with transaction(self.store, sole_tenant(ep.scope.tenant for ep in episodes)):
             self._index_episodes(receipt.episode_ids)
         return receipt
 
@@ -1676,9 +1653,9 @@ class Memvara:
         one reading and whatever the write ends stops exactly where it starts; with
         `valid_to` given it is instead the instant of this call, the one `valid_to` is
         checked against below. A `recorded_at` that is given is stored as it is. The
-        write lock is taken by the store's `batch()`, as `SQLiteStore.batch()` takes it;
-        `RemoteStore.batch()` takes none, and only yields the store, so there the instant
-        is simply the one at which the write's transaction begins. See `Store.batch`.
+        write lock is taken by the store's `batch()`, as `SQLiteStore.batch()` takes it.
+        On a store whose `batch()` takes no lock, the instant is simply the one at which
+        the write's transaction begins. See `Store.batch`.
 
         A `recorded_at` in the past sets when this claim is believed from, and nothing
         else. When the write closes claims already on record, as a retraction
@@ -1814,7 +1791,7 @@ class Memvara:
         string is a `ValueError` that names the argument, raised before anything is
         written.
         """
-        memory_type = _as_memory_type(memory_type)
+        memory_type = None if memory_type is None else _as_memory_type(memory_type)
         if PROJECT_META in meta:
             raise TypeError(PROJECT_META_REFUSAL.format(method="remember()"))
         if reserved := RESERVED_META & set(meta):
@@ -2044,6 +2021,18 @@ class Memvara:
                 ep.scope = claim.scope
         return fresh
 
+    @staticmethod
+    def _tenants_of(scope: Scope, sources: Sequence[str | Episode] | None) -> list[str]:
+        """The tenants a claim at `scope` and the new turns it cites are stored under.
+
+        A turn named by id is stored already and is visible to the claim's scope, so it is
+        in the claim's tenant. A new `Episode` keeps the scope it names, except that one
+        naming none takes the claim's (`_cite`), so it can be in another tenant only when
+        the caller said so.
+        """
+        return [scope.tenant] + [(s.scope if s.scope != Scope() else scope).tenant
+                                 for s in sources or () if isinstance(s, Episode)]
+
     def _citable(self, scope: Scope, sources: Sequence[str | Episode] | None,
                  ) -> Sequence[str | Episode] | None:
         """The caller's sources that a claim at `scope` may cite.
@@ -2117,7 +2106,11 @@ class Memvara:
             for ep in episodes:
                 redact_episode(self.redactor, ep,
                                telemetry=self.writer.telemetry)
-        with transaction(self.store):
+        # Every tenant this write touches: the claim's, each new turn's, and the tenant of
+        # the claim it closes. Two or more leave the lock as wide as the store can make it.
+        tenant = sole_tenant([*self._tenants_of(claim.scope, episodes),
+                              *([retire.scope.tenant] if retire is not None else [])])
+        with transaction(self.store, tenant):
             # On `SQLiteStore` the transaction holds the write lock from its first
             # statement, so from this instant no other writer can commit before this one.
             now = utcnow()
@@ -2273,9 +2266,8 @@ class Memvara:
         retired or erased while this call waited is refused as above rather than closed
         again from a copy read before that write. That holds on a store whose `batch()`
         takes the write lock when it begins, as `SQLiteStore.batch()` does.
-        `RemoteStore.batch()` takes no lock and only yields the store, and on a store
-        like that another writer can commit between the read and the write; see
-        `Store.batch`.
+        On a store whose `batch()` takes no lock, another writer can commit between the
+        read and the write; see `Store.batch`.
         """
         return self._supersede(old_claim_id, new_claim, at=at, sources=sources,
                                close=close, reason=reason, stamp=(), refuse_expired=False,
@@ -2294,7 +2286,13 @@ class Memvara:
         checks the new claim's `expires_at` again at that instant, as `remember()` does
         for every write. See `_write_claim`."""
         how, why = closure(close), closure_reason(reason)
-        with transaction(self.store):
+        # The old claim is in the caller's tenant, because `get` below refuses any other.
+        # The new claim and its new turns may name another scope on purpose; see below.
+        caller = self._scope(tenant, user, agent, session)
+        with transaction(self.store, sole_tenant([
+                caller.tenant,
+                *self._tenants_of(new_claim.scope if new_claim.scope != Scope() else caller,
+                                  sources)])):
             old = self.get(old_claim_id, tenant=tenant, user=user, agent=agent,
                            session=session)
             if old is None:
@@ -2434,9 +2432,8 @@ class Memvara:
         another writer added or ended while this call waited for the lock is seen as that
         writer left it, and nothing is closed at an instant before it was recorded.
         That holds on a store whose `batch()` takes the write lock when it begins, as
-        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
-        the store, and on a store like that another writer can commit between the read
-        and the write; see `Store.batch`.
+        `SQLiteStore.batch()` does. On a store whose `batch()` takes no lock, another
+        writer can commit between the read and the write; see `Store.batch`.
         """
         scope = self._scope(tenant, user, agent, session)
         how = closure(close)
@@ -2467,12 +2464,12 @@ class Memvara:
         # A claim whose retirement is recorded but takes effect later is still believed,
         # so that lookup returns it. It is retired all the same, and `close_out` leaves a
         # retired claim as it is, so it is left out rather than reported as closed.
-        with transaction(self.store):
+        with transaction(self.store, scope.tenant):
             clock = utcnow()
             now = at or clock
             retired = [c for c in self._unended(scope.tenant, probe.fact_key, clock)
                        if slot.contains(c.scope) and c.invalidated_at is None]
-            self._close_all(retired, now, how, why)
+            self._close_all(retired, now, how, why, tenant=scope.tenant)
         return retired
 
     def _unended(self, tenant: str, fact_key: str, at: datetime) -> list[Claim]:
@@ -2491,7 +2488,7 @@ class Memvara:
                 if c.is_unended(at) and not self._gone(c, at)]
 
     def _close_all(self, claims: Sequence[Claim], at: datetime, how: Closure,
-                   why: str | None) -> None:
+                   why: str | None, *, tenant: str) -> None:
         """Close every claim in `claims` the same way, in one transaction.
 
         One transaction because the callers close a set that means something as a whole:
@@ -2504,7 +2501,7 @@ class Memvara:
         the copies written back are the rows as they stood under the write lock, on a
         store whose `batch()` takes it (`Store.batch`).
         """
-        with transaction(self.store):
+        with transaction(self.store, tenant):
             for c in claims:
                 close_out(c, at, None, how, why)
                 self.store.put_claim(c)
@@ -2703,9 +2700,11 @@ class Memvara:
     # the source tree, and not cosmetic since `py.typed` started shipping: this is now
     # the first thing a typed caller meets.
     #
-    # Three variants rather than two, because the third is the one that keeps a
-    # *forwarding* caller working — `recall()` below, and any wrapper holding a runtime
-    # bool. Dropping it would turn "pass the flag through" into a type error.
+    # Two variants. Without the flag, or with `include_episodes=False`, the result is
+    # `list[Result]`. With a `bool`, which includes `True`, it is `list[Retrieved]`. The
+    # `bool` variant is also what keeps a *forwarding* caller working — `recall()` below,
+    # and any wrapper holding a runtime bool. Without it, passing the flag through would
+    # be a type error.
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
                anchored: bool = ..., ranked: bool = ..., query_rewrite: bool = ...,
@@ -2718,19 +2717,6 @@ class Memvara:
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
-
-    @overload
-    def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
-               anchored: bool = ..., ranked: bool = ..., query_rewrite: bool = ...,
-               user=..., agent=..., session=..., as_of: datetime | None = ...,
-               valid_at: datetime | None = ..., known_at: datetime | None = ...,
-               valid_during: Sequence[datetime] | None = ...,
-               states: Collection[str] | None = ...,
-               include_invalidated: bool | None = ...,
-               memory_types: Sequence[MemoryType] | None = ...,
-               filters: Mapping[str, FilterValue] | None = ...,
-               filepath_prefix: str | None = ...,
-               include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
@@ -2831,7 +2817,7 @@ class Memvara:
 
         The return type follows that flag: `list[Result]` without it, `list[Retrieved]`
         with it. `list[Any]` here is the implementation signature, which an overloaded
-        function cannot make narrower than every variant it serves; the three overloads
+        function cannot make narrower than every variant it serves; the two overloads
         above are the surface.
 
         `ranked=True` runs a configured `read_selector` over the reranked turns and
@@ -2945,12 +2931,11 @@ class Memvara:
         removed would be written back. Under the lock, an erasure either happens before
         the read, and this returns `False` and writes nothing, or after the write.
         That holds on a store whose `batch()` takes the write lock when it begins, as
-        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
-        the store, and on a store like that another writer can commit between the read
-        and the write; see `Store.batch`.
+        `SQLiteStore.batch()` does. On a store whose `batch()` takes no lock, another
+        writer can commit between the read and the write; see `Store.batch`.
         """
         how, why = closure(close), closure_reason(reason)
-        with transaction(self.store):
+        with transaction(self.store, self._scope(tenant, user, agent, session).tenant):
             claim = self.get(claim_id, tenant=tenant, user=user, agent=agent,
                              session=session)
             if claim is None:
@@ -3006,9 +2991,8 @@ class Memvara:
         claim another writer closed or erased while this call waited is refused, as
         above, rather than closed again from a copy read before that write. That holds
         on a store whose `batch()` takes the write lock when it begins, as
-        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
-        the store, and on a store like that another writer can commit between the read
-        and the write; see `Store.batch`.
+        `SQLiteStore.batch()` does. On a store whose `batch()` takes no lock, another
+        writer can commit between the read and the write; see `Store.batch`.
 
         >>> mem = Memvara(llm=NullLLM(), user="alice")
         >>> _ = mem.remember("user", "works_at", "Acme")
@@ -3040,7 +3024,7 @@ class Memvara:
         # Checked, read and closed in one transaction, which holds the write lock from
         # before the read: a claim another writer closed or erased while this call waited
         # is refused, rather than closed again from a copy read before that write.
-        with transaction(self.store):
+        with transaction(self.store, scope.tenant):
             now = utcnow()
             ids = self._confirmer.check(confirm, how, now=now)
             found = self._visible(ids, scope)
@@ -3058,7 +3042,7 @@ class Memvara:
                         f"{now_is}. Nothing was changed. Run the call again without "
                         "confirm to see what matches now.")
                 doomed.append(claim)
-            self._close_all(doomed, now, how, why)
+            self._close_all(doomed, now, how, why, tenant=scope.tenant)
         return ForgetResult(close=how, closed=doomed, reason=why)
 
     def link(self, from_id: str, to_id: str, relation: str, *, by: str = "api",
@@ -3081,14 +3065,13 @@ class Memvara:
         link run in one transaction that holds the database's write lock, so a claim
         erased while this call waited is refused rather than named by a link that
         outlives it. That holds on a store whose `batch()` takes the write lock when it
-        begins, as `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and
-        only yields the store, and on a store like that another writer can commit
-        between the read and the write; see `Store.batch`.
+        begins, as `SQLiteStore.batch()` does. On a store whose `batch()` takes no lock,
+        another writer can commit between the read and the write; see `Store.batch`.
         """
         rel = link_relation(relation)
         refuse_self_link(from_id, to_id)
         scope = self._scope(tenant, user, agent, session)
-        with transaction(self.store):
+        with transaction(self.store, scope.tenant):
             found = self._visible([from_id, to_id], scope)
             for claim_id in (from_id, to_id):
                 if claim_id not in found:
@@ -3150,6 +3133,8 @@ class Memvara:
         still cites. Right for a memory that *is* its source text, wrong for a fact
         extracted from a conversation turn holding much else besides, so the caller
         chooses; see `Store.erase_claim`.
+        Only turns of the claim's own tenant are erased; a turn of another tenant that the
+        claim cites is left where it is.
 
         Scope-checked like `why()`, and `False` rather than an exception for an unknown
         or out-of-scope id, so the method cannot be used to test whether an id exists in
@@ -3175,16 +3160,15 @@ class Memvara:
         write lock from before the claim is read, so a second erasure of the same claim,
         in this process or another, finds nothing, returns `False` and records nothing.
         That holds on a store whose `batch()` takes the write lock when it begins, as
-        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
-        the store, and on a store like that another writer can commit between the read
-        and the write; see `Store.batch`.
+        `SQLiteStore.batch()` does. On a store whose `batch()` takes no lock, another
+        writer can commit between the read and the write; see `Store.batch`.
         """
         scope = self._scope(tenant, user, agent, session)
-        done = self._erase_proved(claim_id, sources=sources,
+        done = self._erase_proved(claim_id, sources=sources, tenant=scope.tenant,
                                   wanted=lambda claim: scope.sees(claim.scope))
         return done is not None
 
-    def _erase_proved(self, claim_id: str, *, sources: bool,
+    def _erase_proved(self, claim_id: str, *, sources: bool, tenant: str,
                       wanted: Callable[[Claim], bool]) -> tuple[Claim, ErasureProof] | None:
         """Erase one claim if `wanted` says so, and prove it against the disk. Returns the
         claim as it was read and the proof, or `None` if nothing was erased.
@@ -3196,8 +3180,12 @@ class Memvara:
         (`Store.batch`). Read outside it, the claim could be changed or erased by
         another writer before the delete. `prove_erased` runs after that transaction
         commits. Raises `ErasureIncomplete` when the proof fails.
+
+        `tenant` is the tenant of the claim to erase, which the caller `wanted` checks
+        again once the claim is read: `erase()` passes its scope's tenant and refuses a
+        claim in any other, and the expiry sweep passes the tenant of the claim it listed.
         """
-        with transaction(self.store):
+        with transaction(self.store, tenant):
             # Not `get()`, which hides a claim whose expiry has passed: erasing one of
             # those by name is still an erasure, and must not report that nothing was
             # there.
@@ -3216,8 +3204,8 @@ class Memvara:
                 )
             if not erase(claim_id, sources=sources)["claims"]:
                 # Another erasure got there first. Under the write lock that cannot
-                # happen, but a store whose `batch()` takes no lock, such as
-                # `RemoteStore`, can still race one between the read and here. Nothing
+                # happen, but a store whose `batch()` takes no lock can still race one
+                # between the read and here. Nothing
                 # was deleted, so there is nothing to prove and nothing to refuse.
                 return None
         proof = self.prove_erased(claim_id)
@@ -3273,8 +3261,8 @@ class Memvara:
 
     def _erase_expired(self, at: datetime, *, at_open: bool = False) -> list[ErasedClaim]:
         """`erase_expired` at `at`. When the store opens, a listing the store has only as
-        a stub that raises `NotImplementedError` is skipped: `RemoteStore` has one, and
-        the deployment behind it runs its own sweep."""
+        a stub that raises `NotImplementedError` is skipped, because such a store says
+        that something other than this process erases its expired claims."""
         try:
             listed = self.store.expired_claims(at)
         except NotImplementedError:
@@ -3287,7 +3275,7 @@ class Memvara:
             # erased the claim. `_erase_proved` reads it under the write lock, in the same
             # transaction as the delete, so no write can land between the check and it.
             done = self._erase_proved(
-                due.id, sources=False,
+                due.id, sources=False, tenant=due.scope.tenant,
                 wanted=lambda c: c.expires_at is not None and as_utc(c.expires_at) <= at)
             if done is None:
                 continue
@@ -3336,7 +3324,7 @@ class Memvara:
         except Exception as exc:
             # Deliberately every exception, not just `NotImplementedError`. This method's
             # whole job is to answer "is it really gone", and a store that raised while
-            # being asked has not answered — `RemoteStore` raises `NotImplementedError`,
+            # being asked has not answered — a stub raises `NotImplementedError`,
             # a locked database raises `OperationalError`, and a third-party store can
             # raise anything at all. Narrowing this to the one type we happened to think
             # of is how a check that did not run gets reported as a check that passed.
@@ -3535,10 +3523,11 @@ class Memvara:
         return cls.RECALL_UNRANKED.format(outcome=outcome)
 
     # `with_ids` decides what kind of thing comes back, so it decides the return type,
-    # exactly as `include_episodes` does on `search()` — and the three variants are the
-    # three there, for the third's reason as well: a wrapper holding a runtime bool
-    # (`ScopedMemvara.recall`, `AsyncMemvara.recall`, an MCP handler reading its own
-    # arguments dict) has to be able to pass the flag through without a type error.
+    # exactly as `include_episodes` does on `search()`. There are three variants here,
+    # and the third has the same reason as the `bool` variant of `search()`: a wrapper
+    # holding a runtime bool (`ScopedMemvara.recall`, `AsyncMemvara.recall`, an MCP
+    # handler reading its own arguments dict) has to be able to pass the flag through
+    # without a type error.
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
@@ -4961,6 +4950,7 @@ class Memvara:
             self.reader.embedder = embedder
             self.consolidator.embedder = embedder
 
+        # No tenant: this walks every claim and every turn in the store.
         with transaction(self.store):
             embedded = self._reencode(
                 self.store.iter_claims(include_invalidated=True),
@@ -5160,19 +5150,14 @@ class ScopedMemvara:
     # -- narrowing -----------------------------------------------------------
 
     def bind(self, *, tenant=None, user=None, agent=None, session=None) -> "ScopedMemvara":
-        """A narrower view. Fields not given keep this view's values."""
-        s = self.scope
-        # `project` is carried rather than named as a parameter: `bind` narrows, and a
-        # project is bound once where the store is opened. Dropping it here contradicted
-        # this method's own docstring, which says fields not given keep this view's
-        # values, and left the view reporting a scope it was not actually reading at.
-        return ScopedMemvara(self._mem, Scope(
-            tenant if tenant is not None else s.tenant,
-            user if user is not None else s.user,
-            agent if agent is not None else s.agent,
-            session if session is not None else s.session,
-            project=s.project,
-        ))
+        """A narrower view. Fields not given keep this view's values.
+
+        `project` is not a parameter, because a project is bound once where the store is
+        opened, but it carries over like every other field that was not given.
+        """
+        given = dict(tenant=tenant, user=user, agent=agent, session=session)
+        return ScopedMemvara(self._mem, replace(
+            self.scope, **{k: v for k, v in given.items() if v is not None}))
 
     @property
     def _kw(self) -> dict[str, Any]:
@@ -5281,7 +5266,7 @@ class ScopedMemvara:
 
     # -- reading -------------------------------------------------------------
 
-    # Same three variants as `Memvara.search`, for the same reason. A view that widened
+    # The same variants as `Memvara.search`, for the same reason. A view that widened
     # the type back to the union would be the more-convenient object that types worse,
     # and this is the one the MCP server and every integration holds.
     @overload
@@ -5296,19 +5281,6 @@ class ScopedMemvara:
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
-
-    @overload
-    def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ..., ranked: bool = ...,
-               query_rewrite: bool = ...,
-               as_of: datetime | None = ..., valid_at: datetime | None = ...,
-               known_at: datetime | None = ..., states: Collection[str] | None = ...,
-               valid_during: Sequence[datetime] | None = ...,
-               include_invalidated: bool | None = ...,
-               memory_types: Sequence[MemoryType] | None = ...,
-               filters: Mapping[str, FilterValue] | None = ...,
-               filepath_prefix: str | None = ...,
-               include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,

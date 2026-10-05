@@ -19,17 +19,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from time import perf_counter
+from typing import Callable
 
 from ..embed.base import Embedder
 from ..schema import PredicateRegistry
 from ..store.base import Store
 from ..telemetry import CONSOLIDATE_LATENCY_MS, Recorder
-from .decay import BASE_KEY, SALIENCE_FLOOR
-from .decay import decay as _decay
-from .decay import decay_pass
+from .decay import BASE_KEY, SALIENCE_FLOOR, decay_pass
 from .merge import NEIGHBOURHOOD, merge_pass, promote_pass
-from .merge import merge_duplicates as _merge_duplicates
-from .merge import promote as _promote
 from .sweep import DEFAULT_WINDOW, Sweep
 
 __all__ = ["Consolidator", "SALIENCE_FLOOR", "BASE_KEY", "Sweep", "DEFAULT_WINDOW"]
@@ -57,19 +54,46 @@ class Consolidator:
         #: that has silently stopped running looks exactly like a settled store.
         self.telemetry = telemetry
 
-    def decay(self, tenant: str | None = None, now: datetime | None = None) -> int:
-        return _decay(self.store, self.registry, tenant, now, self.window,
+    def _one(self, stage: Callable[[Sweep], int], tenant: str | None,
+             now: datetime | None = None) -> int:
+        """Run one stage on its own: read a snapshot, run `stage` over it, write it back.
+
+        `run()` builds the snapshot itself instead, so that all three stages share it.
+        """
+        sweep = Sweep(self.store, tenant, now=now, window=self.window,
                       telemetry=self.telemetry)
+        count = stage(sweep)
+        sweep.flush()
+        return count
+
+    def decay(self, tenant: str | None = None, now: datetime | None = None) -> int:
+        """Recompute salience for every live claim. Returns the number actually changed.
+
+        A second call at the same `now` returns 0, because the new value depends only on
+        stored state and `now`.
+        """
+        return self._one(lambda sweep: decay_pass(sweep, self.registry), tenant, now)
 
     def merge_duplicates(self, tenant: str | None = None, threshold: float | None = None,
                          *, neighbourhood: int = NEIGHBOURHOOD) -> int:
-        return _merge_duplicates(self.store, self.embedder, self.registry, tenant,
-                                 threshold, neighbourhood=neighbourhood,
-                                 window=self.window, telemetry=self.telemetry)
+        """Fold near-identical live claims in one slot into one. Returns claims retired.
+
+        Only claims that share a `fact_key` are compared, because two claims that answer
+        different questions are not duplicates however similar their text is.
+        """
+        return self._one(lambda sweep: merge_pass(sweep, self.embedder, self.registry,
+                                                  threshold=threshold,
+                                                  neighbourhood=neighbourhood), tenant)
 
     def promote(self, tenant: str | None = None, min_observations: int = 3) -> int:
-        return _promote(self.store, tenant, min_observations, window=self.window,
-                        telemetry=self.telemetry)
+        """Reclassify EPISODIC claims seen `min_observations` times as SEMANTIC.
+
+        Returns the number promoted. A claim seen once is an event; a claim seen
+        repeatedly is a pattern, and a caller asking only for SEMANTIC memory wants the
+        pattern. That can only be known in hindsight, which is why it happens here and
+        not on the write path. The claim keeps its id; only its `memory_type` changes.
+        """
+        return self._one(lambda sweep: promote_pass(sweep, min_observations), tenant)
 
     def run(self, tenant: str | None = None,
             now: datetime | None = None) -> dict[str, int]:

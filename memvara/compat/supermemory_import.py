@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
+from ..types import z_as_offset
+
 __all__ = ["SupermemoryError", "SupermemoryReceipt", "import_supermemory",
            "read_supermemory_key"]
 
@@ -164,9 +166,8 @@ def _created_at(document: Mapping[str, Any]) -> datetime | None:
     if not raw:
         return None
     try:
-        # Their timestamps end in `Z`, which fromisoformat rejects before 3.11 and
-        # accepts after; normalised either way rather than depending on the runtime.
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        # Their timestamps end in `Z`, which fromisoformat rejects before 3.11.
+        parsed = datetime.fromisoformat(z_as_offset(raw))
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

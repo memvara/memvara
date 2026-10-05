@@ -39,8 +39,6 @@ DOCS = (REPO / "docs", REPO)
 TARBALL_FILES = {
     "LICENSE",
     "README.md",
-    "index.d.ts",
-    "index.js",
     "package.json",
     "bin/memvara.js",
     "lib/bridge.js",
@@ -102,6 +100,16 @@ def test_the_package_ships_a_binary_and_the_file_it_names_exists():
     )
 
 
+def test_the_package_is_a_command_and_has_no_module_to_require():
+    """The package has a `bin` and nothing else to import. `require("memvara")` fails
+    with Node's own `MODULE_NOT_FOUND`, which is the intended answer: the placeholder
+    `index.js` that used to return an explanation was removed on purpose."""
+    meta = _manifest()
+    assert "main" not in meta and "types" not in meta and "exports" not in meta, meta
+    assert not (PKG / "index.js").exists()
+    assert not (PKG / "index.d.ts").exists()
+
+
 def test_the_package_has_no_runtime_dependencies():
     """This process holds a bearer token. A dependency here is a dependency in
     everyone's install of it, and 'we will review what we add' is a policy, not a
@@ -118,28 +126,6 @@ def test_node_20_is_the_floor_because_fetch_is():
     floor is 20 — and it has to be *declared*, or an install on 16 fails at the first
     request with a ReferenceError rather than at install time with a reason."""
     assert _manifest()["engines"]["node"] == ">=20"
-
-
-def test_the_module_export_is_a_signpost_and_not_a_client():
-    """The package is a CLI. `require("memvara")` is almost certainly a mistake, and
-    the export exists to say so — without throwing, because a module that throws on
-    import breaks a bundler's graph several layers from the cause."""
-    src = (PKG / "index.js").read_text(encoding="utf-8")
-    keys = set(re.findall(r"^\s{2}(\w+):", src, re.M))
-    assert keys == {"isLibrary", "cli", "notice", "python", "homepage"}
-    for forbidden in ("connect", "retrieve", "remember", "recall", "search",
-                      "createClient", "Memvara"):
-        assert forbidden not in keys, f"{forbidden} is a client surface on a CLI package"
-    assert "isLibrary: false" in src
-
-
-def test_the_type_declaration_has_no_methods():
-    """Four properties and no methods, so using this package as a client is a compile
-    error at the earliest possible moment: `memvara.recall(...)` is TS2339."""
-    types = (PKG / "index.d.ts").read_text(encoding="utf-8")
-    assert "isLibrary: false" in types
-    assert "isLibrary: boolean" not in types
-    assert "():" not in types
 
 
 @pytest.mark.skipif(not _node_runs(), reason="node/npm missing or unloadable")
@@ -174,17 +160,6 @@ def test_the_cli_reports_its_version_and_that_version_is_the_manifest_s():
     out = subprocess.check_output(["node", str(PKG / "bin" / "memvara.js"), "--version"],
                                   cwd=PKG, text=True, timeout=30)
     assert out.strip() == _manifest()["version"]
-
-
-@pytest.mark.skipif(not _node_runs(), reason="node/npm missing or unloadable")
-def test_requiring_the_package_does_not_throw():
-    script = (
-        "const m = require('./index.js');"
-        " if (m.isLibrary !== false) process.exit(2);"
-        " process.stdout.write(JSON.stringify(Object.keys(m)));"
-    )
-    out = subprocess.check_output(["node", "-e", script], cwd=PKG, text=True)
-    assert set(json.loads(out)) == {"isLibrary", "cli", "notice", "python", "homepage"}
 
 
 # -- the release process ----------------------------------------------------------

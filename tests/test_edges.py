@@ -28,7 +28,7 @@ from memvara import (
 )
 from memvara.embed import encode_queries
 from memvara.schema import Cardinality, PredicateSpec, Volatility
-from memvara.store.sqlite import _VecIndex
+from memvara.store.sqlite import _VecIndex, _unit
 from memvara.types import Explanation, utcnow
 
 TZ = timezone.utc
@@ -76,13 +76,13 @@ def test_explanation_summary_omits_retrievers_that_did_not_fire():
 # Predicate registry
 # =============================================================================
 
-def test_superseded_by_exposes_cross_predicate_links():
+def test_a_spec_exposes_its_cross_predicate_links():
     reg = PredicateRegistry(specs=(
         PredicateSpec("unemployed", Cardinality.ONE, Volatility.SLOW,
                       supersedes=("works_at",)),
     ))
-    assert reg.superseded_by("unemployed") == ("works_at",)
-    assert reg.superseded_by("lives_in") == ()
+    assert reg.spec("unemployed").supersedes == ("works_at",)
+    assert reg.spec("lives_in").supersedes == ()
 
 
 def test_cross_predicate_supersession_actually_retires_the_other_slot():
@@ -250,16 +250,9 @@ def test_null_llm_extracts_nothing():
 # Vector index internals
 # =============================================================================
 
-def test_vec_index_rejects_mismatched_dimension_on_add():
-    idx = _VecIndex()
-    idx.add("a", np.ones(8, dtype=np.float32))
-    with pytest.raises(ValueError, match="dim"):
-        idx.add("b", np.ones(9, dtype=np.float32))
-
-
 def test_vec_index_rejects_mismatched_query_dimension():
     idx = _VecIndex()
-    idx.add("a", np.ones(8, dtype=np.float32))
+    idx.put("a", 0, _unit(np.ones(8, dtype=np.float32)))
     with pytest.raises(ValueError, match="query dim"):
         idx.search(np.ones(3, dtype=np.float32), ["a"], 5)
 
@@ -270,7 +263,7 @@ def test_vec_index_grows_past_initial_capacity():
     for i in range(700):
         v = np.zeros(4, dtype=np.float32)
         v[i % 4] = float(i + 1)
-        idx.add(f"c{i}", v)
+        idx.put(f"c{i}", i, _unit(v))
     assert len(idx) == 700
     probe = np.array([1, 0, 0, 0], dtype=np.float32)
     hits = idx.search(probe, [f"c{i}" for i in range(700)], 3)
@@ -280,7 +273,7 @@ def test_vec_index_grows_past_initial_capacity():
 
 def test_vec_index_search_with_no_known_ids_returns_empty():
     idx = _VecIndex()
-    idx.add("a", np.ones(4, dtype=np.float32))
+    idx.put("a", 0, _unit(np.ones(4, dtype=np.float32)))
     assert idx.search(np.ones(4, dtype=np.float32), ["unknown", "also_unknown"], 5) == []
 
 
@@ -294,8 +287,8 @@ def test_vec_index_get_returns_none_for_unknown():
 
 def test_vec_index_readd_overwrites_rather_than_duplicating():
     idx = _VecIndex()
-    idx.add("a", np.array([1, 0], dtype=np.float32))
-    idx.add("a", np.array([0, 1], dtype=np.float32))
+    idx.put("a", 0, np.array([1, 0], dtype=np.float32))
+    idx.put("a", 0, np.array([0, 1], dtype=np.float32))
     assert len(idx) == 1
     assert np.allclose(idx.get("a"), [0, 1])
 
@@ -966,26 +959,22 @@ def test_purge_on_a_store_that_cannot_erase_refuses_rather_than_pretending():
 
 
 def test_removing_an_unknown_vector_reports_that_nothing_was_removed():
-    """purge() calls remove() for every claim it deletes, including ones that were never
-    embedded — that must be a no-op, not an error."""
-    from memvara.store.sqlite import _VecIndex
-
+    """Erasure calls forget() for every claim it deletes, including claims that were
+    never embedded. Forgetting one of those must do nothing, not raise an error."""
     idx = _VecIndex()
-    idx.add("a", np.ones(4, dtype=np.float32))
-    assert idx.remove("a") is True
-    assert idx.remove("a") is False, "removing twice is harmless"
-    assert idx.remove("never-existed") is False
+    idx.put("a", 0, _unit(np.ones(4, dtype=np.float32)))
+    assert idx.forget("a") == 0
+    assert idx.forget("a") is None, "forgetting twice is harmless"
+    assert idx.forget("never-existed") is None
     assert len(idx) == 0
     assert idx.get("a") is None
 
 
 def test_a_removed_vector_is_unreachable_by_search():
-    from memvara.store.sqlite import _VecIndex
-
     idx = _VecIndex()
-    idx.add("keep", np.array([1.0, 0.0], dtype=np.float32))
-    idx.add("drop", np.array([0.0, 1.0], dtype=np.float32))
-    idx.remove("drop")
+    idx.put("keep", 0, np.array([1.0, 0.0], dtype=np.float32))
+    idx.put("drop", 1, np.array([0.0, 1.0], dtype=np.float32))
+    idx.forget("drop")
     hits = idx.search(np.array([0.0, 1.0], dtype=np.float32), ["keep", "drop"], 5)
     assert [h[0] for h in hits] == ["keep"], "an erased vector must not be retrievable"
 

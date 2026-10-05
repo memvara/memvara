@@ -1047,7 +1047,7 @@ a third leg that reaches almost nothing still votes, and fusion reads positions,
 puts a real zero on every candidate the walk did not touch. That is the same failure the
 temporal leg's `MIN_PROXIMITY` floor exists to prevent, and the graph leg has no
 equivalent. The precedent for shipping a measured stage at zero is the MMR rejection
-recorded in `hybrid.py`.
+recorded under [Diversity by fact slot rather than by MMR](#diversity-by-fact-slot-rather-than-by-mmr).
 
 <div data-type="panel-warning">
 
@@ -1245,6 +1245,10 @@ predicates:
   no terms                    49.0% answer / 45.1% chain
   terms from the live model   80.3%        / 78.6%
 ```
+
+An earlier measurement of the same feature, on the `inference` family with a different
+term list, gave 52.6% to 86.4% answer accuracy and 49.0% to 83.8% chain accuracy. The
+figures above are the current ones; the earlier pair is recorded here so it is not lost.
 
 **The floor matters more than that number.** A minimal list of four words any model would
 produce — `grandfather, grandmother, uncle, aunt` — is worth 73.9% / 71.8% on its own. The
@@ -1692,6 +1696,30 @@ measure retrieval, not answers. The apparatus for scoring answers end to end is
 [below](#answer-quality-end-to-end-an-authored-corpus-a-model-as-the-reader); it exists
 now, it has been run once, and the run is a sanity check rather than a benchmark.
 
+### No default relevance floor for `min_score`
+
+`HybridRetriever` has no default `min_score`. A floor of 0.25, calibrated on a 36-claim
+corpus, was once shipped and turned out to be wrong for both small and large stores,
+because the gap between the weakest correct answer and the best wrong one moves with
+corpus size. The measurement is in the docstring of `memvara/retrieve/calibrate.py`,
+and `calibrate_min_score` derives a floor from a deployment's own probes.
+
+### Diversity by fact slot rather than by MMR
+
+`HybridRetriever._rank` stops one slot from filling the results: it keeps at most
+`max_per_slot` claims per `fact_key` (owner, subject, predicate) at the head of the list
+and moves the rest further down. Without that pass, a cluster of near-identical claims
+in one slot was measured taking 5 of 8 result positions.
+
+Greedy maximal marginal relevance (MMR), which spreads results by embedding distance,
+was measured first and rejected. Over the shipped `HashingEmbedder` it reduced topical
+coverage: 6.30 distinct predicates per result set at lambda=0.7, against 6.78 with no
+diversity pass at all, and it still left 5 of 8 positions to the duplicate cluster.
+Capping on the slot gave 7.04 and left the ranking otherwise unchanged. The reason is
+that the hashing embedder's vectors are lexical: two claims about one subject in
+different words look far apart, and two claims about different subjects in similar
+words look close, so MMR spreads results along the wrong axis.
+
 ### Throughput
 
 `PYTHONPATH=. python3 bench/perf.py` — single process, in-memory store, no LLM:
@@ -1892,7 +1920,7 @@ demo/scenario.py    64 turns of one customer's support history, and 20 questions
 demo/distractors.py generated tickets that scale the history without moving any fact
 demo/baselines.py   five context-building arms
 demo/hosted.py      the two memvara arms against a memvara-cloud project
-demo/competitors.py two more arms, mem0 and Supermemory, off unless asked for
+demo/competitors.py a sixth arm, mem0, off unless asked for
 demo/harness.py     a blinded dump/answer round trip over those arms, and the scoring
 ```
 
@@ -2011,13 +2039,12 @@ sibling was given is named in a warning, and that arm's rows are marked `[NOT A 
 [`demo/README.md`](../demo/README.md#the-memvara-arms-against-the-hosted-service) has the
 whole of it.
 
-### Two other systems, as arms
+### mem0, as an arm
 
-`--arm-mem0` and `--arm-supermemory` add a competitor arm each. Both are off by default
-and each needs something a fresh checkout does not have, so neither can affect the offline
-run.
+`--arm-mem0` adds mem0 as a competitor arm. It is off by default because it needs a
+package that a fresh checkout does not have, so it cannot affect the offline run.
 
-**mem0** needs only the package (`pip install mem0ai`). It is driven by the oracle
+It needs only the package (`pip install mem0ai`). It is driven by the oracle
 `bench/mem0_real.py` uses, so it receives exactly the ground-truth facts
 `memvara_structured` receives, with perfect extraction recall — better than any real model
 — which leaves architecture as the only thing that differs. mem0 2.x's add path emits only
@@ -2030,13 +2057,6 @@ the episode header, which tells the reader those lines are things that were said
 unverified. That is a statement about where a value appears in a prompt, not about whether
 a reader was fooled — no model was asked. The judged comparison is the missing half and is
 [item 1 of what is still missing](ROADMAP.md#what-is-still-missing).
-
-**Supermemory** needs an account, which this repository does not have. The only endpoint
-anything here has ever called is `POST /v3/documents/list`, in the importer, and it is a
-read; an arm has to write a corpus and query it. So the arm ships with no default write or
-search path and refuses without them rather than guessing, and it refuses without an
-explicit container tag so that a run cannot land in whatever space an account defaults to.
-**No Supermemory number is published in this repository**, because nobody here has run it.
 
 ### The model runs, 2026-09-28
 

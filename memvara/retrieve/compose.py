@@ -34,7 +34,7 @@ backend that has not grown it. `docs/ROADMAP.md` carries it.
 from __future__ import annotations
 
 import warnings
-from typing import Any, Collection, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Collection, Mapping
 
 from .analyze import tokenize
 
@@ -65,26 +65,13 @@ class DerivedTermsUnavailable(UserWarning):
 MAX_TERM_TOKENS = 3
 
 
-@runtime_checkable
-class RelationComposer(Protocol):
-    """An LLM that can name the derived relations over a set of predicates.
-
-    Its own protocol rather than a third method on `LLM`, and the reason is a lesson from
-    `Store`: adding a member to a `runtime_checkable` protocol makes every implementation
-    that predates it fail `isinstance`, and a downstream backend finds out when its type
-    checker does. `LLM` has two methods because the architecture calls a model as rarely
-    as possible, and this is not one of the two.
-
-    A backend that does not have this is not broken. `acquire()` returns nothing, the gate
-    keeps the behaviour it had, and the questions this would have caught stay missed —
-    which is the state every release before this one shipped in.
-    """
-
-    def compose_relations(self, predicates: Sequence[str]) -> Mapping[str, int]: ...
-
-
 def acquire(llm: Any, predicates: Collection[str]) -> frozenset[str]:
     """Derived relation terms over `predicates`, or nothing if the backend cannot say.
+
+    The backend answers through an optional method, `compose_relations(predicates)`,
+    which returns a mapping from each term to the number of predicates it composes. This
+    function looks the method up with `getattr`. A backend without it is not broken: it
+    gets an empty set back and no warning.
 
     Returns only the terms that compose from **two or more** predicates, because that is
     the gate's question. A model that reports `stepmother: 1` is saying the store has a

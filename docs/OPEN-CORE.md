@@ -46,7 +46,7 @@ application on one machine, nothing is missing.
 The uncomfortable half, stated here rather than discovered three weeks in: if you need
 Postgres or an HTTP endpoint, this repository does not implement one and is not scheduled
 to grow one — that is a commercial boundary, not a backlog, and it holds even with the
-`cloud` extra installed. What the `cloud` extra adds is a *client*: `memvara/store/remote.py`
+`cloud` extra installed. What the `cloud` extra adds is a *client*: `memvara/remote/`
 speaks HTTP to a memvara-cloud deployment you do not have to run yourself, gated behind a
 lazy `httpx` import so the core install stays as it always was. It is a thin caller of
 someone else's server, not the server itself, and it changes nothing about what a claim
@@ -77,12 +77,12 @@ how an offline integration gets the whole bitemporal machine. See
 
 ## The remote/local seam: a decision, not a gap
 
-`MEMVARA_MODE=cloud` once built a `Memvara` over a `RemoteStore` and started a server. That
-server listed twelve tools and raised `NotImplementedError` on the first one a model
-reached for, because `RemoteStore` wires seven `Store` methods and the engine calls a
-different set on every turn — `put_claim`, `add_episode`, `candidate_ids`,
-`lexical_search`, `vector_search`, `competing_claims`, none of which the REST facade has
-an endpoint for.
+`MEMVARA_MODE=cloud` once built a `Memvara` over a `RemoteStore`, a `Store` implementation
+that sent its calls to a hosted deployment, and started a server. That server listed twelve
+tools and raised `NotImplementedError` on the first one a model reached for, because
+`RemoteStore` wired seven `Store` methods and the engine calls a different set on every
+turn — `put_claim`, `add_episode`, `candidate_ids`, `lexical_search`, `vector_search`,
+`competing_claims`, none of which the REST facade has an endpoint for.
 
 The decision is **diverge, and gate**, and it is written down here rather than left as a
 TODO because "converge" is the option somebody will otherwise reach for and it is the
@@ -105,15 +105,15 @@ and a Python process two places where the same guarantee has to hold.
 |---|---|---|
 | `memvara/store/base.py` — the `Store` protocol | **open** | Public, documented, implementable by anyone. A third-party Postgres backend is a legitimate thing to write and the design does not object. |
 | `memvara/core.py` — the engine over that protocol | **open** | It *is* the library. Nothing about running it changes when the rows live elsewhere. |
-| `memvara/store/remote.py` — the HTTP client | **open**, and thin on purpose | A caller of someone else's server. It maps what the facade actually exposes and raises for the rest; a `put_claim` that quietly wrote through `POST /v1/facts` would reinterpret every field the caller set, and a `competing_claims` returning `[]` would make every write believe a slot was empty. Both are worse than an exception. |
 | the `/v1` facade itself | **commercial** | Auth, multi-tenancy, quotas. Naming it "planned" here would be the dishonest version. |
-| running the engine *against* a remote store | **neither, for now** | Never constructed. `MEMVARA_MODE=cloud` builds a client of the facade instead, and a test reads `config.py` to keep a `RemoteStore` from coming back. |
+| running the engine *against* a remote store | **not offered** | The `RemoteStore` class that tried it was removed in the release after 0.19.0. Nothing constructed it, and most of its methods raised `NotImplementedError`, because the facade has no endpoint for them. Cloud mode is served by `RemoteMemvara` instead, and a test reads `config.py` so that an engine over a remote store does not come back. |
 | `memvara/remote/api.py` — a client of the facade | **open** | `RemoteMemvara` is the library's own API served over `/v1`. It calls the facade the way any customer would, holds no engine, and is what `MEMVARA_MODE=cloud` now builds. |
 
 **What happened to the refusal.** It is gone, and not because the gap closed — the row
 above still says what it said. `build_memvara` used to compare `_ENGINE_NEEDS` against
-`RemoteStore.WIRED` and refuse when anything was missing, which was correct for as long as
-cloud mode meant *running the engine over a remote store*. It no longer means that.
+`RemoteStore.WIRED`, the list of methods that class implemented, and refuse when anything
+was missing, which was correct for as long as cloud mode meant *running the engine over a
+remote store*. It no longer means that.
 `MEMVARA_MODE=cloud` builds a `RemoteMemvara`, a client of the facade, and the MCP tool
 table is typed to `MemoryAPI` — a protocol that `ScopedMemvara` and `ScopedRemoteMemvara`
 both satisfy. One tool table, two engines, and the engine is still never pointed at a

@@ -58,9 +58,9 @@ _MODES = ("local", "cloud")
 #: login command (built separately) has to write exactly this path for this file to find it.
 CREDENTIALS_PATH = Path.home() / ".memvara" / "credentials.json"
 
-#: Where a client goes absent MEMVARA_SERVER_URL. `login.py` declares its own copy as
-#: `_DEFAULT_SERVER_URL`; leaving that alone is deliberate, since collapsing them is a
-#: change to a module this work has no other reason to touch.
+#: Where a client goes absent MEMVARA_SERVER_URL. `login.py` and `init.py` import this
+#: one. `memvara/cli.py` keeps its own copy, because importing this module there would add
+#: about 20 ms to every start of the `memvara` command.
 DEFAULT_SERVER_URL = "https://app.memvara.dev"
 
 #: Backends selectable from the environment. Anything needing constructor arguments —
@@ -549,12 +549,22 @@ class ServerConfig:
             read_only=_flag(env.get("MEMVARA_READ_ONLY"), "MEMVARA_READ_ONLY"),
             llm=backend,
             llm_model=_optional(env.get("MEMVARA_LLM_MODEL")),
-            llm_max_claims=_max_claims(env.get("MEMVARA_LLM_MAX_CLAIMS")),
+            llm_max_claims=_positive_int(
+                env.get("MEMVARA_LLM_MAX_CLAIMS"), "MEMVARA_LLM_MAX_CLAIMS",
+                "Leave it unset for no cap, which is what hosted models want. Set it only "
+                "for a self-hosted server that constrains decoding, where an uncapped "
+                "array has no legal way to end a response."),
             llm_extract_system=_optional(env.get("MEMVARA_LLM_EXTRACT_SYSTEM")),
             extract_guidance=guidance,
             llm_terse_claims=_flag(
                 env.get("MEMVARA_LLM_TERSE_CLAIMS"), "MEMVARA_LLM_TERSE_CLAIMS"),
-            llm_max_tokens=_max_tokens(env.get("MEMVARA_LLM_MAX_TOKENS")),
+            llm_max_tokens=_positive_int(
+                env.get("MEMVARA_LLM_MAX_TOKENS"), "MEMVARA_LLM_MAX_TOKENS",
+                "Leave it unset for the backend default of 8192. Set it to bound how long "
+                "one runaway response can run — and read it off a measured response "
+                "length, because a budget under what your model actually writes truncates "
+                "every one of those turns, and a truncated turn is retried rather than "
+                "stored."),
             llm_timeout=_timeout(env.get("MEMVARA_LLM_TIMEOUT")),
             llm_extra_body=_json_object(
                 env.get("MEMVARA_LLM_EXTRA_BODY"), "MEMVARA_LLM_EXTRA_BODY"),
@@ -672,7 +682,7 @@ def _timeout(raw: str | None) -> float | None:
     duration. `inf` is the sharp one: it would wait on a single turn forever, which is the
     failure this setting exists to end rather than to cause.
 
-    `isascii()` for the reason `_weight` and `_max_tokens` give, and this validator was
+    `isascii()` for the reason `_weight` and `_positive_int` give, and this validator was
     written without it: `float()` reads Arabic-indic `"\u0661"` as `1.0`, so
     `MEMVARA_LLM_TIMEOUT=١` would have started a server that cancels every extraction after
     one second and retries every turn forever — the wedged queue this setting exists to
@@ -695,14 +705,16 @@ def _timeout(raw: str | None) -> float | None:
     return seconds
 
 
-def _max_tokens(raw: str | None) -> int | None:
-    """A positive integer, or `None` for the backend's own default.
+def _positive_int(raw: str | None, name: str, hint: str) -> int | None:
+    """A positive integer, or `None` when the variable `name` is unset or blank.
 
-    Refused rather than clamped, for the reason `_max_claims` is: a value that fell back
-    to the default would leave an operator believing they had bounded a runaway they had
-    not. `0` is refused for a sharper reason than "not positive" — it would truncate every
-    response at once, and since a truncation now raises, that is not a quiet no-op but a
-    server whose every write reports the turn unextracted.
+    `MEMVARA_LLM_MAX_TOKENS` and `MEMVARA_LLM_MAX_CLAIMS` both use this. A bad value is
+    refused at startup rather than clamped, because a value that fell back to the default
+    would leave an operator believing they had set a bound they had not. `0` is refused
+    as well. For the response budget it would truncate every response, and each truncated
+    turn is retried rather than stored. For the claim cap it would forbid every claim and
+    make extraction a silent no-op. `hint` is the rest of the error message, which tells
+    the operator what to set instead.
     """
     value = (raw or "").strip()
     if not value:
@@ -713,13 +725,10 @@ def _max_tokens(raw: str | None) -> int | None:
     # catches only `ConfigError`, so the operator gets a traceback where this module
     # promises a sentence telling them what to do.
     if not (value.isascii() and value.isdigit() and int(value) > 0):
-        raise ConfigError(
-            f"MEMVARA_LLM_MAX_TOKENS={raw!r} is not a positive integer. Leave it unset "
-            "for the backend default of 8192. Set it to bound how long one runaway "
-            "response can run — and read it off a measured response length, because a "
-            "budget under what your model actually writes truncates every one of those "
-            "turns, and a truncated turn is retried rather than stored.")
+        raise ConfigError(f"{name}={raw!r} is not a positive integer. {hint}")
     return int(value)
+
+
 def _json_object(raw: str | None, name: str) -> dict[str, Any] | None:
     """A JSON object, or `None` when the variable is unset or blank."""
     text = (raw or "").strip()
@@ -735,28 +744,6 @@ def _json_object(raw: str | None, name: str) -> dict[str, Any] | None:
             '{"chat_template_kwargs": {"enable_thinking": false}}, not '
             f"{type(parsed).__name__}.")
     return parsed
-
-
-def _max_claims(raw: str | None) -> int | None:
-    """A positive integer, or `None` for uncapped.
-
-    Refused at startup rather than clamped, because every wrong value here means
-    something an operator would want to know: `0` would forbid every claim and turn
-    extraction into a silent no-op, and a typo that fell back to uncapped would leave a
-    grammar backend with the failure the cap was set to prevent.
-    """
-    value = (raw or "").strip()
-    if not value:
-        return None
-    # `isascii()` for the reason `_max_tokens` gives: this pattern was copied from here,
-    # and the escaping `ValueError` was found there and is the same bug in both.
-    if not (value.isascii() and value.isdigit() and int(value) > 0):
-        raise ConfigError(
-            f"MEMVARA_LLM_MAX_CLAIMS={raw!r} is not a positive integer. Leave it unset "
-            "for no cap, which is what hosted models want. Set it only for a self-hosted "
-            "server that constrains decoding, where an uncapped array has no legal way to "
-            "end a response.")
-    return int(value)
 
 
 #: Most a prompt file may hold. `EXTRACT_SYSTEM` is about 2 KB, so this is generous by a
@@ -1108,7 +1095,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
     In "cloud" mode there is no local file and no local engine. This returns a
     `RemoteMemvara`: a client of the `/v1` facade that turns each library call into one
     request and hydrates the reply into the same dataclasses, which is why one MCP tool
-    table can serve either. It is **not** a `Memvara` over a `RemoteStore`, and that
+    table can serve either. It does **not** run the engine over a remote store, and that
     distinction is the whole decision — the engine calls `put_claim`, `lexical_search`
     and `competing_claims` on every turn and the facade has an endpoint for none of them,
     so a server built that way would start, list twenty-two tools and fail on the first one

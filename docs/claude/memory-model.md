@@ -31,8 +31,8 @@ landing beside them unnoticed.
 - Storage: `memvara/store/base.py` — the `Store` protocol, `resolve_states()`,
   `state_predicate()`, `stored_state_predicate()`, `live_predicate()`, and
   `unended_predicate()`, which selects what `forget()` closes.
-- Storage backends: `memvara/store/sqlite.py` — `SQLiteStore`, the default;
-  `memvara/store/remote.py` — `RemoteStore`, the same protocol against a hosted deployment.
+- Storage backend: `memvara/store/sqlite.py` — `SQLiteStore`, the only `Store` in this
+  repository. A hosted deployment is reached through `memvara/remote/`, not through a store.
 - Encryption at rest for `SQLiteStore`: `memvara/store/encryption.py` — `resolve_key()`,
   `VectorSealer` (the encrypted vector file), `encrypt_store()` (behind
   `memvara encrypt`), `EncryptionError`, `EncryptionWarning`. Tests:
@@ -216,6 +216,11 @@ either claim removes them. `docs/INTERNALS.md` has all three under *`memvara/sto
   `link()`, `erase()` and the expiry sweep — reads it inside that batch, so it never
   writes back a copy that another writer has changed or erased since. INTERNALS.md has
   the details under *Two writers on one store*.
+  `Store.batch(*, tenant=None)` lets a store lock one tenant instead of the whole
+  database. `Memvara` passes the tenant when everything the batch touches is in it, and
+  `None` for `reembed()` and for a write naming two tenants. Every call site goes through
+  `memvara.store.transaction(store, tenant)`, which calls a store whose `batch` lacks the
+  keyword as `batch()`, and a batch nested in another is covered by the outer one's tenant.
 - **Every commit `SQLiteStore` makes that can change a turn goes through `_maybe_commit`.**
   That is what empties `_scope_turns`, the vector leg's in-memory list of each scope's turns
   and their matrix rows. Another connection's commit, from another process or another

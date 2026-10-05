@@ -14,8 +14,8 @@ Entries are newest first, and each one says how you find your own instances of i
 `memvara.select.LocalSelector` is a second selector. It scores a ranked read's candidate
 turns with a cross-encoder in this process, so `ranked=True` works with no key, and nothing
 is sent anywhere. By default it loads `memvara/selector-minilm-l6`, a model memvara
-publishes on Hugging Face. The MCP server builds it when `MEMVARA_SELECTOR=local` is set. Its reads
-are counted as `retrieval.local_query`, `retrieval.local_select_ms` and
+publishes on Hugging Face. The MCP server builds it when `MEMVARA_SELECTOR=local` is set.
+Its reads are counted as `retrieval.local_query`, `retrieval.local_select_ms` and
 `retrieval.local_fallback`, never as `retrieval.model_query`.
 
 ### What to do
@@ -23,6 +23,100 @@ are counted as `retrieval.local_query`, `retrieval.local_select_ms` and
 Nothing, unless you want it. With the setting unset, a server behaves as before. A
 dashboard or quota that counts ranked reads by `retrieval.model_query` will not see local
 ones; add `retrieval.local_query` if you want them counted.
+
+---
+
+## `PredicateRegistry.superseded_by()` and `encryption.export_key()` are removed
+
+### What changed
+
+Two small public functions were removed, because each only repeated something you can
+already call directly.
+
+- `PredicateRegistry.superseded_by(predicate)` returned `registry.spec(predicate).supersedes`.
+- `memvara.store.encryption.export_key(env=...)` returned
+  `resolve_key(create=False, env=env)`.
+
+### Who this changes
+
+**If you call either function**, you get an `AttributeError` or an `ImportError`. Replace
+`registry.superseded_by(p)` with `registry.spec(p).supersedes`, and
+`export_key(env=env)` with `resolve_key(create=False, env=env)`.
+
+**How to find it:** search your code for `superseded_by` and `export_key`.
+
+---
+
+## `memvara.store.remote.RemoteStore` is removed
+
+### What changed
+
+The module `memvara/store/remote.py` and its class `RemoteStore` are gone. `RemoteStore` was
+a `Store` implementation that sent its calls to a hosted deployment. Nothing in the library
+constructed it, and most of its methods raised `NotImplementedError`, because the hosted
+API has no endpoint for them. So a `Memvara(store=RemoteStore(...))` could be built but
+failed on its first write or search.
+
+Cloud mode does not change. `MEMVARA_MODE=cloud` has built a `RemoteMemvara`, a client of
+the hosted API, for several releases, and it still does.
+
+### Who this changes
+
+**If you import `memvara.store.remote`**, the import now raises `ModuleNotFoundError`. Use
+the hosted client instead: `Memvara(api_key="mv_…", user="alice")`, or `Memvara.connect()`
+to use the key that `memvara login` saved. Both return a client with the same methods as a
+local `Memvara`. Running the engine over a remote store is not offered.
+
+**How to find it:** search your code for `RemoteStore` and for `memvara.store.remote`.
+
+---
+
+## `Store.batch()` takes an optional `tenant`
+
+### What changed
+
+`Store.batch()` has a new keyword-only parameter, `tenant: str | None = None`. A store may use
+it to lock one tenant instead of the whole database, so that writes for two customers do not
+wait for each other. `Memvara` passes the tenant whenever everything a batch reads and writes
+belongs to one tenant: `remember()`, `add()`, `supersede()`, `delete()`, `forget()`,
+`forget_matching()`, `link()`, `erase()`, the expiry sweep (one batch per expired claim, for
+that claim's tenant), consolidation, the backfills and the document writes. It passes nothing
+when a batch may touch several tenants: `reembed()`, and a write whose turns or claims name
+more than one tenant. `None` means "any tenant", so a store must then lock as broadly as it
+does today.
+
+Nothing changes for `SQLiteStore`, which accepts the keyword and ignores it, or for the hosted
+client. A batch nested inside another joins it, and the outermost batch decides the lock.
+
+### Who this changes
+
+**If you implement `Store` yourself**, nothing breaks. `Memvara` passes `tenant=` only to a store
+whose `batch` declares a parameter named `tenant`, and calls any other store as `batch()`. The
+check reads the signature, so a `TypeError` raised inside your `batch` is not retried and not
+hidden. A wrapper whose `batch` only takes `**kwargs` is called as `batch()` too, because it may
+forward the call to a store that cannot take the keyword; declare `tenant` on the wrapper to
+have it passed.
+
+To narrow your lock, add `*, tenant: str | None = None` to `batch`, take a lock for that tenant
+when it is given, and take the broadest lock you have when it is `None`. Take it as the batch
+begins, before the first read: the library names the tenant up front because a batch cannot
+learn it from its reads. While a tenant batch is open, it must not change another tenant's
+rows. Your own erasure methods open their own batches and should do the same: `purge(scope)`
+touches `scope.tenant`, and `erase_claim` and `erase_episodes` can look up the tenant of what
+they erase before they open the batch. `erase_claim(sources=True)` must erase only source turns
+of the claim's own tenant, as `SQLiteStore` now does.
+
+**If you rely on `erase(sources=True)` removing a source turn of another tenant**, it no longer
+does. `SQLiteStore.erase_claim` used to erase any uncited source turn by id, whatever its
+tenant, which let one tenant delete another's turn by citing its id. It now leaves a turn of
+another tenant where it is.
+
+**If you run memvara-cloud**, its Postgres store takes advantage of the keyword from the
+release that requires core 0.19.0.
+
+### How to find it in your code
+
+Search for classes that define `batch`: `grep -rn "def batch" --include="*.py" .`
 
 ---
 

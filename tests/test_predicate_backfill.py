@@ -193,10 +193,10 @@ def test_a_mapping_is_normalized_before_it_is_applied(rec, store):
 def test_the_report_reads_as_one_line(rec, store):
     _write(store, "hired_by", "Globex", 20)
     assert repr(backfill_predicates(rec, "acme", aliases={"hired_by": "works_at"})) == (
-        "<MergeReport scanned=1 moved=1 written=0 merged=0 retired=0 dry-run>")
+        "MergeReport(scanned=1, moved=1, written=0, merged=0, retired=0, dry_run=True)")
     assert str(backfill_predicates(rec, "acme", aliases={"hired_by": "works_at"},
                                    dry_run=False)) == (
-        "<MergeReport scanned=1 moved=1 written=1 merged=0 retired=0>")
+        "MergeReport(scanned=1, moved=1, written=1, merged=0, retired=0, dry_run=False)")
 
 
 def test_a_store_without_batch_is_written_one_row_at_a_time(rec, store):

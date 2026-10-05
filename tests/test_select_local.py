@@ -367,6 +367,23 @@ def test_an_encoder_that_raises_is_counted_as_a_local_error() -> None:
     assert telemetry.total(RETRIEVAL_LOCAL_FALLBACK, reason="error") == 1
 
 
+def test_a_local_failure_with_a_status_keeps_it_on_the_local_series() -> None:
+    # A local model fetched over HTTP on first use can fail with a status code; the
+    # failure is still a local one, never a model-provider fallback.
+    class Unreachable(FakeEncoder):
+        def predict(self, pairs, batch_size=32, show_progress_bar=None):
+            exc = RuntimeError("hub unavailable")
+            exc.status_code = 503                        # type: ignore[attr-defined]
+            raise exc
+
+    engine, telemetry = _engine(LocalSelector(encoder=Unreachable(), calibration=CAL),
+                                ["alpha kayak"])
+    result = engine.search("kayak", SCOPE, k=5, include_episodes=True, ranked=True)
+    assert (result.selection.outcome, result.selection.reason) == ("fallback", "provider")
+    assert telemetry.total(RETRIEVAL_LOCAL_FALLBACK, reason="provider", status="503") == 1
+    assert telemetry.total(RETRIEVAL_MODEL_FALLBACK) == 0
+
+
 def test_recall_with_nothing_kept_is_still_a_ranked_block() -> None:
     mem = Memvara(llm=NullLLM(), user="alice", embedder=HashingEmbedder(dim=8),
                   read_selector=_selector({}))

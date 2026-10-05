@@ -43,6 +43,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Sequence, TextIO
 
+from ..cli import _Usage, _options
+from . import config
 
 __all__ = ["AGENTS", "INIT_USAGE", "MARKER", "client_entry", "cloud_client_entry", "init",
            "skill_text"]
@@ -137,16 +139,6 @@ This is the Python package; the npm package is a placeholder with no equivalent 
 _OPTIONS = ("--agent", "--db", "--dir", "--user", "--mode")
 _FLAGS = ("--force", "--skill-only")
 
-#: The server_url a client that never sets MEMVARA_SERVER_URL gets from config.py's own
-#: default. Written into .mcp.json only when the caller's value differs from it — writing
-#: a default into somebody's settings file freezes it there, the same reasoning
-#: `client_entry` already applies to MEMVARA_DB's default.
-_DEFAULT_SERVER_URL = "https://app.memvara.dev"
-
-
-class _Usage(Exception):
-    """The command line was wrong, and the message says which part."""
-
 
 @dataclass(frozen=True, slots=True)
 class _Step:
@@ -161,12 +153,8 @@ class _Step:
     paste: bool = False
 
 
-def skill_text(agent: str = AGENTS[0]) -> str:
-    """The packaged skill body, read out of the installed package.
-
-    `agent` is the client `init` is configuring. It used to pick a per-client file;
-    there is one skill now, and every client gets it. The argument stays so callers
-    that pass it keep working.
+def skill_text() -> str:
+    """The packaged skill body, read out of the installed package. Every client gets it.
 
     Package data rather than a string literal, for the reason the skill itself is
     short: it describes the tools, and a copy that ships separately from them is
@@ -208,7 +196,7 @@ def cloud_client_entry(*, server_url: str | None, command: str) -> dict[str, Any
     one that does not move when the real default does.
     """
     environment: dict[str, str] = {"MEMVARA_MODE": "cloud"}
-    if server_url and server_url != _DEFAULT_SERVER_URL:
+    if server_url and server_url != config.DEFAULT_SERVER_URL:
         environment["MEMVARA_SERVER_URL"] = server_url
     return {"command": command, "args": ["-m", "memvara.server"], "env": environment}
 
@@ -229,7 +217,7 @@ def _httpx_importable() -> bool:
 
 
 def _credentials_path() -> Path:
-    return Path(os.path.expanduser("~")) / ".memvara" / "credentials.json"
+    return config.CREDENTIALS_PATH
 
 
 def _interpreter() -> str:
@@ -269,32 +257,6 @@ def _absolute(raw: str) -> Path:
     directory they named.
     """
     return Path(os.path.abspath(os.path.expanduser(raw)))
-
-
-def _parse(argv: Sequence[str]) -> tuple[dict[str, str], dict[str, bool]]:
-    """`--name value` and `--name=value`, and a hand-written parser for the options.
-
-    The same reasoning as the server's argument handling: a parser library here would be
-    a dependency-shaped answer to a question with six options in it, and `argparse` in
-    particular exits the process on error, which would take the injected streams that make
-    this testable out of the picture.
-    """
-    options: dict[str, str] = {}
-    flags = {name: False for name in _FLAGS}
-    rest = list(argv)
-    while rest:
-        argument = rest.pop(0)
-        name, joined, inline = argument.partition("=")
-        if name in flags and not joined:
-            flags[name] = True
-            continue
-        if name not in _OPTIONS:
-            raise _Usage(f"unexpected argument {argument!r}")
-        value = inline if joined else (rest.pop(0) if rest else "")
-        if not value.strip():
-            raise _Usage(f"{name} needs a value")
-        options[name] = value.strip()
-    return options, flags
 
 
 def _first(env: Mapping[str, str], *names: str) -> str | None:
@@ -455,9 +417,9 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         return 0
 
     try:
-        options, flags = _parse(argv)
-        force = flags["--force"]
-        skill_only = flags["--skill-only"]
+        options = _options(argv, _OPTIONS, _FLAGS)
+        force = "--force" in options
+        skill_only = "--skill-only" in options
         agent = options.get("--agent")
         if agent is None:
             raise _Usage("init needs --agent, naming the client to configure: "
@@ -496,11 +458,11 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
             # line of output connecting the two. The reason arrives while there is still
             # something to do about it.
             #
-            # This replaces the check that compared the engine's needs against
-            # `RemoteStore.WIRED`. That gap is gone as a reason to refuse, because cloud
-            # mode no longer runs the engine over a remote store — it builds a client of
-            # the facade. What is left is the one thing that still stops the server
-            # starting, and `httpx` is exactly it.
+            # This replaces the check that compared the engine's needs against the
+            # methods a remote store implemented. That gap is gone as a reason to
+            # refuse, because cloud mode no longer runs the engine over a remote store —
+            # it builds a client of the facade. What is left is the one thing that still
+            # stops the server starting, and `httpx` is exactly it.
             from ..remote.client import install_hint
 
             raise _Usage(f"MEMVARA_MODE=cloud cannot start a server here. "
@@ -539,7 +501,7 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         return 0
 
     if mode == "cloud":
-        server_url = _first(env, "MEMVARA_SERVER_URL") or _DEFAULT_SERVER_URL
+        server_url = _first(env, "MEMVARA_SERVER_URL") or config.DEFAULT_SERVER_URL
         entry = cloud_client_entry(server_url=server_url, command=_interpreter())
 
         settings = _mcp_json(root, entry)

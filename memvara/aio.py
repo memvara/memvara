@@ -17,14 +17,6 @@ lock are both hundreds of milliseconds of blocked event loop, and blocking the l
 that long stalls every other request the process is serving. Awaiting instead means the
 loop keeps serving.
 
-An earlier version of this paragraph also claimed the LangChain, LlamaIndex and CrewAI
-adapters declare async methods that fall back to running the sync one on the loop
-thread. That is not true of any of the three — LangChain's `aget_messages` uses
-`run_in_executor`, LlamaIndex's `BaseMemory.aget` uses `asyncio.to_thread`, its
-`BaseMemoryBlock` is async-primary with no sync fallback at all, and CrewAI's
-`StorageBackend` is a bare `Protocol`, so an omitted `asave` is an `AttributeError`
-rather than a silent sync call. The argument above stands without it.
-
 **Where this argument stops applying: `memvara.remote.aio`.** The case above rests on
 two facts that are both true of the local engine and both false of a hosted deployment.
 There is no async SQLite, and there is an engine — `Store`, `WritePipeline`,
@@ -69,6 +61,7 @@ import contextvars
 import inspect
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime
 from functools import partial
 from typing import Any, Callable, Collection, Literal, Mapping, Sequence, overload
@@ -116,11 +109,6 @@ async def _read(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         pool, partial(context.run, fn, *args, **kwargs))
 
 
-async def _nothing() -> list[Result]:
-    """The search a profile with no query does not run, as an awaitable."""
-    return []
-
-
 class AsyncMemvara:
     """An `Memvara` whose methods are coroutines. Same semantics, off the loop thread.
 
@@ -128,22 +116,13 @@ class AsyncMemvara:
     return value — so the sync docstring is the documentation for both, and there is no
     second set of semantics to keep in step.
 
-    Nothing is omitted any more. `scope()` used to be, on the argument that every method
-    here already takes the four scope keywords so nothing was unreachable without it —
-    which was true, and which answered the wrong question: `ScopedMemvara` does not exist
-    to reach anything, it exists so that the four keywords are written once instead of on
-    every line, because the call site that repeats them is the call site that eventually
-    writes one user's fact into another user's scope.
-
-    The workaround for that omission also had a price, and this docstring used to
-    understate it. Holding one `AsyncMemvara` per scope means holding one `Memvara` per
-    scope — this class has no scope of its own, it forwards the one it is given — and
-    constructing a `Memvara` over an existing store is *not* free even though the store
-    is shared: it re-reads the persisted predicate specs, re-runs the embedder
-    fingerprint check, and builds a fresh `PredicateRegistry` that starts empty of
-    anything learned since. Per request, that is several queries and a schema the process
-    has already paid for. `scope()` costs a `Scope` and two attribute writes; `registry=`
-    and `store=` are still there for the case that genuinely wants two instances.
+    `scope()` is here too, and it is the way to serve many users from one instance. It
+    returns a view that writes the four scope keywords once, so no call site can write
+    one user's fact into another user's scope by repeating them wrongly. Prefer it to one
+    `AsyncMemvara` per scope: each of those needs its own `Memvara`, and constructing a
+    `Memvara` over an existing store re-reads the predicate specs, re-runs the embedder
+    fingerprint check and builds a fresh `PredicateRegistry`. `scope()` costs a `Scope`
+    and two attribute writes.
     """
 
     __slots__ = ("memvara",)
@@ -381,21 +360,6 @@ class AsyncMemvara:
                      memory_types: Sequence[MemoryType] | None = ...,
                      filters: Mapping[str, FilterValue] | None = ...,
                      filepath_prefix: str | None = ...,
-                     include_episodes: Literal[True]) -> list[Retrieved]: ...
-
-    @overload
-    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ..., ranked: bool = ...,
-                     query_rewrite: bool = ...,
-                     tenant=..., user=..., agent=..., session=...,
-                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
-                     known_at: datetime | None = ...,
-                     states: Collection[str] | None = ...,
-                     valid_during: Sequence[datetime] | None = ...,
-                     include_invalidated: bool | None = ...,
-                     memory_types: Sequence[MemoryType] | None = ...,
-                     filters: Mapping[str, FilterValue] | None = ...,
-                     filepath_prefix: str | None = ...,
                      include_episodes: bool) -> list[Retrieved]: ...
 
     async def search(self, query: str, *, k: int = 10, min_score: float = 0.0,
@@ -544,11 +508,13 @@ class AsyncMemvara:
             # A plain read, as in `Memvara.profile`.
             return mem.search(query or "", k=k, **PLAIN_READ, **scope_kw)
 
+        # With no query there is no search to run. `asyncio.sleep(0, [])` stands in for
+        # it: an awaitable that returns a new empty list.
         live, then, hits = await asyncio.gather(
             asyncio.to_thread(mem.get_all, states=["live"], **scope_kw),
             asyncio.to_thread(mem._believed_at, mem._scope(tenant, user, agent, session),
                               at),
-            asyncio.to_thread(search) if query else _nothing())
+            asyncio.to_thread(search) if query else asyncio.sleep(0, []))
         return mem._assemble_profile(live, then, hits, k=k, buckets=buckets)
 
     async def get(self, claim_id: str, *, tenant=None, user=None, agent=None,
@@ -760,19 +726,14 @@ class AsyncScopedMemvara:
 
     def bind(self, *, tenant=None, user=None, agent=None,
              session=None) -> "AsyncScopedMemvara":
-        """A narrower view. Fields not given keep this view's values."""
-        s = self.scope
-        # `project` is carried rather than named as a parameter: `bind` narrows, and a
-        # project is bound once where the store is opened. Dropping it here contradicted
-        # this method's own docstring, which says fields not given keep this view's
-        # values, and left the view reporting a scope it was not actually reading at.
-        return AsyncScopedMemvara(self._amem, Scope(
-            tenant if tenant is not None else s.tenant,
-            user if user is not None else s.user,
-            agent if agent is not None else s.agent,
-            session if session is not None else s.session,
-            project=s.project,
-        ))
+        """A narrower view. Fields not given keep this view's values.
+
+        `project` is not a parameter, because a project is bound once where the store is
+        opened, but it carries over like every other field that was not given.
+        """
+        given = dict(tenant=tenant, user=user, agent=agent, session=session)
+        return AsyncScopedMemvara(self._amem, replace(
+            self.scope, **{k: v for k, v in given.items() if v is not None}))
 
     @property
     def _kw(self) -> dict[str, Any]:
@@ -884,7 +845,7 @@ class AsyncScopedMemvara:
 
     # -- reading -------------------------------------------------------------
 
-    # The same three variants as `ScopedMemvara.search`, for the reason given there and
+    # The same variants as `ScopedMemvara.search`, for the reason given there and
     # again on `AsyncMemvara.search`: this is the object a server layer holds, and it is
     # the one that must not be the more-convenient facade that types worse.
     @overload
@@ -900,20 +861,6 @@ class AsyncScopedMemvara:
                      filters: Mapping[str, FilterValue] | None = ...,
                      filepath_prefix: str | None = ...,
                      include_episodes: Literal[False] = ...) -> list[Result]: ...
-
-    @overload
-    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ..., ranked: bool = ...,
-                     query_rewrite: bool = ...,
-                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
-                     known_at: datetime | None = ...,
-                     states: Collection[str] | None = ...,
-                     valid_during: Sequence[datetime] | None = ...,
-                     include_invalidated: bool | None = ...,
-                     memory_types: Sequence[MemoryType] | None = ...,
-                     filters: Mapping[str, FilterValue] | None = ...,
-                     filepath_prefix: str | None = ...,
-                     include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
@@ -1159,13 +1106,6 @@ def _scoped_omissions() -> set[str]:
     return _public(Memvara) - _public(ScopedMemvara)
 
 
-#: Names `AsyncMemvara` deliberately does not wrap, checked by the test suite so that a
-#: method added to `Memvara` cannot quietly go missing here. Empty since `scope` landed;
-#: kept because the check needs somewhere to record a deliberate omission, and an empty
-#: set is the honest current answer.
-NOT_WRAPPED: frozenset[str] = frozenset()
-
-
 def _unwrapped(memvara_type: type = Memvara) -> set[str]:
     """Public `Memvara` methods with no `AsyncMemvara` counterpart. For the suite.
 
@@ -1173,7 +1113,7 @@ def _unwrapped(memvara_type: type = Memvara) -> set[str]:
     and so a reader of this file can see what the promise "the whole public surface" is
     actually checked against.
     """
-    return _public(memvara_type) - set(dir(AsyncMemvara)) - NOT_WRAPPED
+    return _public(memvara_type) - set(dir(AsyncMemvara))
 
 
 def _unbound(async_type: type = AsyncMemvara,

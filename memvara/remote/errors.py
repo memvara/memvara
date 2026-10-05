@@ -213,8 +213,8 @@ def refuse_project_purge(project: str | None) -> None:
     `POST /v1/erasures` takes a user, an agent and a session but has no project field yet
     (memvara-cloud #267 adds one). Sent from a client bound to a project, the erasure
     would reach every project the user holds rather than the one bound, and erasure cannot
-    be undone. `RemoteStore.purge`, `RemoteMemvara.purge` and `AsyncRemoteMemvara.purge`
-    all call this, so the three refuse with one message.
+    be undone. `RemoteMemvara.purge` and `AsyncRemoteMemvara.purge` both call this, so the
+    two refuse with one message.
 
     A `ValueError` rather than `NotImplementedError`: each purge is wired, and it is this
     one scope that it refuses.

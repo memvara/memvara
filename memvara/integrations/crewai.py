@@ -441,9 +441,9 @@ class MemvaraStorage:
 
         The vector is the one the store keeps for the claim, which memvara's embedder
         built from its text, the record's content. Where there is none to read, the text
-        is encoded again with the same embedder: a hosted client has no store, a cloud
-        deployment's `RemoteStore` raises `NotImplementedError` because no endpoint
-        returns a stored vector, and a claim whose text could not be embedded has none."""
+        is encoded again with the same embedder: a hosted client has no store, a store
+        with no way to return a stored vector raises `NotImplementedError`, and a claim
+        whose text could not be embedded has none."""
         store = getattr(self.memory, "store", None)
         try:
             vector = store.get_embedding(claim.id) if store is not None else None

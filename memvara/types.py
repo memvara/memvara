@@ -47,6 +47,21 @@ def as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+def z_as_offset(text: str) -> str:
+    """Return `text` with a trailing `Z` or `z` rewritten as `+00:00`.
+
+    `datetime.fromisoformat` does not accept the `Z` suffix before Python 3.11, and this
+    package supports 3.10. Every place that parses an ISO-8601 instant sent from outside
+    the library passes the text through this function first.
+
+    >>> z_as_offset("2026-03-01T10:00:00Z")
+    '2026-03-01T10:00:00+00:00'
+    >>> z_as_offset("2026-03-01")
+    '2026-03-01'
+    """
+    return text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+
+
 def time_axes(as_of: datetime | None, valid_at: datetime | None,
               known_at: datetime | None) -> tuple[datetime | None, datetime | None]:
     """Resolve the three time keywords every read method takes into the two axes.
@@ -651,6 +666,21 @@ class MemoryType(str, Enum):
     EPISODIC = "episodic"
     SEMANTIC = "semantic"
     PROCEDURAL = "procedural"
+
+
+def _as_memory_type(value: MemoryType | str) -> MemoryType:
+    """A `MemoryType` from itself or from its value as a string (#270).
+
+    Anything else, `None` included, raises `ValueError` listing the valid names.
+    `remember()` and the `memory_types` search filter both call this, so a misspelling
+    is refused with the same words in both places.
+    """
+    try:
+        return MemoryType(value)
+    except ValueError:
+        raise ValueError(
+            "memory_type must be one of "
+            + ", ".join(t.value for t in MemoryType) + f", not {value!r}") from None
 
 
 class Derivation(str, Enum):

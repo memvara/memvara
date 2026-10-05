@@ -38,6 +38,99 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   under `MEMVARA_MODE=cloud`. The `ranked` description and the server instructions now say
   a server may rank without a model call.
 
+### Removed
+
+- **`memvara.store.remote.RemoteStore` is removed.** It was a `Store` that sent its calls to
+  a hosted deployment. Nothing in the library constructed it, and most of its methods raised
+  `NotImplementedError`, because the hosted API has no endpoint for them. Cloud mode does
+  not change: it builds `RemoteMemvara`. Code that imported the module should use
+  `Memvara(api_key=...)` or `Memvara.connect()`. `docs/UPGRADING.md` has the details.
+- **The module functions `decay()`, `merge_duplicates()` and `promote()` in
+  `memvara.consolidate` are removed.** They were internal and not exported. The
+  `Consolidator` methods with the same names are the public API and do not change.
+- **The npm package `memvara` no longer has a `main` module.** It shipped an `index.js`
+  and `index.d.ts` whose only job was to return an object saying the package is a command,
+  not a library. They are removed, with the `main`, `types` and `sideEffects` fields, so
+  `require("memvara")` now fails with Node's own `MODULE_NOT_FOUND` error. The `memvara`
+  command does not change.
+- **`PredicateRegistry.superseded_by()` is removed.** Read
+  `registry.spec(predicate).supersedes` instead, which is what it returned.
+- **`memvara.store.encryption.export_key()` is removed.** Call
+  `resolve_key(create=False)` instead, which is what it called.
+- **`memvara.server.init.skill_text()` no longer takes an `agent` argument.** It already
+  ignored it.
+- **The `dev` extra no longer installs `pytest-asyncio`.** No test used it: the async
+  tests call `asyncio.run`.
+- **The demo harness no longer has a Supermemory arm.** `--arm-supermemory` and the
+  `--supermemory-*` flags are gone. The arm had never been run, because it needed an
+  account nobody here has. The Supermemory importer, `memvara.compat.supermemory_import`,
+  does not change.
+
+### Changed
+
+- **Smaller internal cleanups, with no change in behaviour.** The `search()` overload for
+  `include_episodes=True` is gone, because the overload for `include_episodes: bool`
+  already gives the same type. `RemoteMemvara` and `AsyncRemoteMemvara` share their request
+  helpers through one base class. Long docstrings and comments in `memvara/redact.py`,
+  `memvara/retrieve/hybrid.py`, `memvara/llm/` and `memvara/write/reconcile.py` are
+  shorter, and the measurements they held are now in `docs/BENCHMARKS.md`,
+  `docs/INTERNALS.md` and `docs/DEPLOY.md`.
+- **`RekeyReport`, `MergeReport` and `SplitReport` print in the standard dataclass form.**
+  For example, `MergeReport(scanned=1, moved=1, written=0, merged=0, retired=0,
+  dry_run=True)` instead of `<MergeReport ... dry-run>`. The fields do not change.
+- **`memvara login` and `memvara-mcp init` list the options they accept when given an
+  unknown one,** as `memvara logout` and `memvara whoami` already did.
+- **The mem0 and Supermemory importers accept a timestamp that ends in a lower-case `z`.**
+  A timestamp that parsed before still parses.
+- **More internal cleanups, with no change in behaviour.** The Anthropic and OpenAI
+  backends share one implementation of `extract`, `resolve_predicate`,
+  `classify_predicate` and `judge_replacement`, and the requests each one sends are
+  unchanged. The three command-line option parsers are one. The search tokenizer and the
+  full-text query builder share one regular expression, which keeps exactly the
+  characters they kept before. The ranked read stage counts its failures through the same
+  counter as the other stages, with the same counter names and values.
+- **Two internal names changed.** `memvara.aio.NOT_WRAPPED`, an empty set, is removed, and
+  `memvara.retrieve.temporal.rank()` no longer takes `half_life_days` or `floor`, which no
+  caller passed. Neither is exported from the package.
+- **`telemetry.rank_correlation` uses `statistics.correlation`.** Every documented and
+  tested value is the same. On arbitrary input, a result can differ from before in the
+  last bit of the floating-point value.
+
+## [0.19.0] — 2026-10-01
+
+Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so
+opening an existing store needs no migration. The `Store` protocol changed in one place:
+`batch()` takes an optional keyword-only `tenant`, so a store can lock one tenant instead of
+the whole database. A third-party store does not have to change its signature, because the
+library calls a `batch()` that does not declare the keyword as it always did, and
+`SQLiteStore` accepts the keyword and ignores it. One behaviour changed:
+`erase_claim(sources=True)` erases only source turns of the claim's own tenant, and a
+third-party store that erases a source turn of another tenant should stop doing that too.
+
+### Changed
+
+- **`Store.batch()` takes an optional `tenant`, so a store can lock one tenant.**
+  `Store.batch(*, tenant=None)` is new on the `Store` protocol. `Memvara` passes the tenant
+  whenever everything a batch reads and writes is in one tenant, which covers `remember()`,
+  `add()`, `supersede()`, `delete()`, `forget()`, `forget_matching()`, `link()`, `erase()`,
+  the expiry sweep, consolidation, the backfills and the document writes. It passes `None`
+  for `reembed()` and for a write that names two tenants. `SQLiteStore` and `RemoteStore`
+  accept the keyword and ignore it. A third-party store whose `batch()` lacks the keyword
+  keeps working: the library reads the signature and calls it as `batch()`, which includes a
+  wrapper that only takes `**kwargs`. All the call sites now go through
+  `memvara.store.transaction(store, tenant)`, and `memvara.store` exports `sole_tenant()`.
+  memvara-cloud #298 uses this for a per-tenant Postgres lock.
+  `docs/UPGRADING.md` has the details for a store that implements the protocol.
+
+### Fixed
+
+- **`erase(claim_id, sources=True)` no longer erases a source turn of another tenant.**
+  `SQLiteStore.erase_claim` erased the claim's uncited source turns by id, whatever their
+  tenant. A claim can cite a turn of another tenant, through a hand-built `Claim` whose
+  `sources` name its id or a hand-built `Episode`, so a tenant could delete another tenant's
+  text by citing it and erasing its own claim. Only turns of the claim's own tenant are
+  erased now, and the claim's tenant is what `erase()` passes to `Store.batch()`.
+
 ## [0.18.0] — 2026-09-29
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so

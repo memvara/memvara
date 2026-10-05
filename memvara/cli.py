@@ -49,9 +49,10 @@ from . import __version__
 
 __all__ = ["USAGE", "main"]
 
-#: Where a credential lives when `--credentials` says nothing else. Named here rather
-#: than imported from `server.config` for the reason `login.py` gives for its own copy:
-#: this module has to stay importable with no extras installed.
+#: Where a credential lives when `--credentials` says nothing else. It is the same path as
+#: `server.config.CREDENTIALS_PATH`. It is written out here because importing
+#: `server.config` would load the whole `memvara.server` package every time the `memvara`
+#: command starts.
 _DEFAULT_CREDENTIALS = Path.home() / ".memvara" / "credentials.json"
 
 USAGE = f"""\
@@ -85,21 +86,33 @@ class _Usage(Exception):
     """The command line was wrong, and the message says which part."""
 
 
-def _options(argv: Sequence[str], allowed: Sequence[str]) -> dict[str, str]:
-    """`--name value` and `--name=value`, matching `login.py`'s parser exactly.
+def _options(argv: Sequence[str], allowed: Sequence[str],
+             flags: Sequence[str] = ()) -> dict[str, str]:
+    """Parse `--name value` and `--name=value` options, and bare `--flag` switches.
 
-    Hand-written rather than `argparse` for the reason `init.py` and `login.py` are:
-    these commands take two or three options between them, and `argparse` would print
-    its own usage over the top of the one above, in a different voice.
+    This is the one parser for `memvara login`, `logout` and `whoami` and for
+    `memvara-mcp init`: `server/login.py` and `server/init.py` import it from here. A flag
+    that was given appears in the result with an empty value. Anything not named in
+    `allowed` or `flags` raises `_Usage`, and so does an option given no value.
+
+    It is hand-written rather than `argparse` on purpose. `argparse` prints its own usage
+    text over each command's usage, and it exits the process on an error, which would
+    bypass the output streams the tests inject.
+
+    >>> _options(["--server", "x", "--force"], ("--server",), ("--force",))
+    {'--server': 'x', '--force': ''}
     """
     found: dict[str, str] = {}
     rest = list(argv)
     while rest:
         argument = rest.pop(0)
         name, joined, inline = argument.partition("=")
+        if name in flags and not joined:
+            found[name] = ""
+            continue
         if name not in allowed:
             raise _Usage(f"unexpected argument {argument!r}. This command takes "
-                         f"{', '.join(allowed)}.")
+                         f"{', '.join((*allowed, *flags))}.")
         value = inline if joined else (rest.pop(0) if rest else "")
         if not value.strip():
             raise _Usage(f"{name} needs a value")
@@ -291,11 +304,13 @@ def encrypt(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
     # Imported here rather than at module scope, for the reason `whoami` gives: this
     # module has to import on a bare install. `encryption` itself imports no SDK until a
     # function in it needs one, which is where a missing extra is caught below.
-    from .store.encryption import EncryptionUnavailable, encrypt_store, export_key
+    from .store.encryption import EncryptionUnavailable, encrypt_store, resolve_key
 
     try:
         if args[0] == "--export-key":
-            found = export_key(env)
+            # `create=False`, because exporting a newly generated key that encrypts
+            # nothing would make the user believe they had backed up a real one.
+            found = resolve_key(create=False, env=env)
             print(found.key.hex(), file=out)
             print(f"memvara encrypt: that is the store key from {found.describe()}. "
                   "Anyone who has it and a copy of a store can read every memory in it, "

@@ -110,7 +110,7 @@ document; `conftest.py` says which and why. The server tests used to be exempt t
 build a `Memvara` through `build_memvara()` and had no keyword to pass it — and are not
 any more, now that `MEMVARA_EMBEDDER` gives them one.
 
-`[dev]` is pytest, pytest-asyncio, coverage, mypy and Hypothesis — no provider SDKs. `cloud`, `ingest`
+`[dev]` is pytest, pytest-xdist, coverage, mypy and Hypothesis — no provider SDKs. `cloud`, `ingest`
 and `encrypt` are what CI installs beside it: the remote-store tests need `httpx` to be
 collected at all, the PDF tests read real PDFs with `pypdf`, and the server tests create
 stores the way the server does, encrypted, which needs SQLCipher. The encrypted-store tests
@@ -285,7 +285,7 @@ If it is still unclear after those four, it is genuinely unclear, and the issue 
 the right place — not the PR.
 
 **One deliberate exception, made by the maintainer, so you do not file it as a policy
-violation:** `memvara/store/remote.py` and the `memvara-mcp login` device-code flow are a
+violation:** `memvara/remote/` and the `memvara-mcp login` device-code flow are a
 thin HTTP *client* for the hosted console, living in this repo behind the optional `cloud`
 extra with a lazy `httpx` import — no import in the core install, no runtime dependency
 added to it. By question 1 above that is a "yes": it only makes sense when there is more

@@ -28,7 +28,6 @@ from conftest import entity_registry
 
 from memvara import Memvara, HashingEmbedder, NullLLM, Scope, utcnow
 from memvara.aio import (
-    NOT_WRAPPED,
     AsyncMemvara,
     AsyncScopedMemvara,
     _public,
@@ -64,13 +63,6 @@ def test_every_public_memvara_method_has_an_awaitable_counterpart():
     `a`, and it was `add`. LangChain, LlamaIndex and CrewAI all declare async methods
     whose default implementation runs the sync one on the loop thread."""
     assert _unwrapped() == set()
-
-
-def test_nothing_is_deliberately_omitted_any_more():
-    """`scope` was the one entry, and it is implemented. The set stays because the check
-    needs somewhere to record a deliberate omission; empty is the honest answer."""
-    assert NOT_WRAPPED == frozenset()
-    assert hasattr(AsyncMemvara, "scope")
 
 
 def test_a_method_added_to_memvara_and_not_here_is_reported():
