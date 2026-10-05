@@ -60,6 +60,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..core import Memvara
+from ..integrations._common import scope_kw
 from ..llm.base import LLM, Usage
 from ..types import Claim, Derivation, Episode, Scope, z_as_offset
 from ._notes import NOTE_PREDICATE, build_note, ensure_note_predicate, note_subject
@@ -347,11 +348,6 @@ def _payload_scope(payload: Mapping[str, Any], fallback: Scope) -> Scope:
     )
 
 
-def _scope_kw(scope: Scope) -> dict[str, Any]:
-    return {"tenant": scope.tenant, "user": scope.user, "agent": scope.agent,
-            "session": scope.session}
-
-
 def _events(memories: Iterable[Mapping[str, Any]] | None,
             history: Sequence[HistoryRow], fallback: Scope) -> list[_Event]:
     """One ordered stream out of the two things mem0 keeps.
@@ -471,7 +467,7 @@ def import_mem0(
             started.add(event.memory_id)
             if skip_existing and mem.history(
                     note_subject(event.memory_id, prefix=subject_prefix), predicate,
-                    **_scope_kw(event.scope)):
+                    **scope_kw(event.scope)):
                 skipping.add(event.memory_id)
                 receipt.skipped += 1
         if event.memory_id in skipping:
@@ -487,7 +483,7 @@ def import_mem0(
             # and that distinction is the fact being imported. `delete` defaults to
             # `close="retired"`, which is exactly that. It is scope-checked too, which
             # costs nothing — the claim was written by this import, into this scope.
-            mem.delete(current.id, at=event.ts, **_scope_kw(event.scope))
+            mem.delete(current.id, at=event.ts, **scope_kw(event.scope))
             receipt.deleted += 1
             continue
 
@@ -631,7 +627,7 @@ def _contested(mem: Memvara, scopes: Sequence[Scope], note_predicate: str) -> li
     """
     claims: dict[str, Claim] = {}
     for scope in scopes:
-        for claim in mem.get_all(**_scope_kw(scope)):
+        for claim in mem.get_all(**scope_kw(scope)):
             claims[claim.id] = claim
 
     slots: dict[str, list[Claim]] = {}
