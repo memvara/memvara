@@ -32,7 +32,8 @@ import base64
 from contextlib import contextmanager, nullcontext
 from copy import copy
 from datetime import datetime
-from typing import Any, Callable, Collection, Iterator, Literal, Mapping, Sequence, overload
+from typing import (Any, Callable, Collection, Iterator, Literal, Mapping, Sequence, TypeVar,
+                    overload)
 from urllib.parse import quote
 
 from ..confirm import ConfirmationRefused
@@ -250,7 +251,90 @@ def tenant_of(answer: object) -> str | None:
     return tenant if isinstance(tenant, str) and tenant else None
 
 
-class RemoteMemvara:
+_Client = TypeVar("_Client", bound="_RemoteClient")
+
+
+class _RemoteClient:
+    """The methods `RemoteMemvara` and `AsyncRemoteMemvara` share.
+
+    Each of these builds part of a request without sending it, so the sync and async
+    clients can use the same code. The methods that send a request (`_request`, `_read`
+    and `_end`) stay on each class, because the async client awaits them.
+    """
+
+    default_scope: Scope
+    redactor: Redactor | None
+
+    def _at(self: _Client, scope: Scope) -> _Client:
+        """A twin bound to a different scope, sharing this client's transport.
+
+        Sharing rather than dialling a second pool, because the two are the same
+        deployment on the same credential. Closing either closes both, which is the
+        honest reading of one pool with two handles on it.
+        """
+        twin = copy(self)
+        twin.default_scope = scope
+        return twin
+
+    def _params(self, **extra: Any) -> dict[str, Any]:
+        """Scope on every call, plus whatever this call adds. `None` values are dropped
+        by the transport rather than sent as empty strings."""
+        scope = self.default_scope
+        return {"user": scope.user, "agent": scope.agent, "session": scope.session,
+                **extra}
+
+    def _redact(self, text: str | None, field: str) -> str | None:
+        """Apply the policy to one string on its way out, or pass it through.
+
+        The `Redactor` protocol is `redact(text, *, field=..., scope=...)`. `field` says
+        which of `redact.FIELDS` is being offered, so a deployment can be aggressive on
+        raw turns and conservative on claim objects; `scope` is what makes "redact for EU
+        tenants" expressible at all. Calling the policy with the text alone would apply
+        one branch of it to everything.
+
+        Here rather than server-side, and that is the point of the seam: redaction that
+        happens after the text has left the process is not redaction.
+        """
+        if self.redactor is None or text is None:
+            return text
+        return self.redactor.redact(text, field=field, scope=self.default_scope)
+
+    def _turn(self, message: Episode | Mapping[str, Any] | str) -> dict[str, Any]:
+        """One conversation turn as `Message` spells it, with its content redacted.
+
+        Keys the model does not declare go into `metadata` rather than beside it: the
+        facade's request models are `extra="forbid"`, so a stray key is a 422 and not a
+        field somebody quietly loses. `Memvara.add` does the same fold locally.
+        """
+        if isinstance(message, str):
+            return _sent({"content": self._redact(message, EPISODE)})
+        if isinstance(message, Episode):
+            return _sent({"role": message.role,
+                          "content": self._redact(message.content, EPISODE),
+                          "ts": _iso(message.ts), "metadata": dict(message.meta)})
+        known = {"role", "content", "ts", "metadata"}
+        meta = dict(message.get("metadata") or {})
+        meta.update({k: v for k, v in message.items() if k not in known})
+        return _sent({"role": message.get("role"),
+                      "content": self._redact(message["content"], EPISODE),
+                      "ts": _iso(message.get("ts")), "metadata": meta})
+
+    def _cite(self, sources: Sequence[Episode | Mapping[str, Any] | str] | None,
+              ) -> tuple[list[str], list[dict[str, Any]]]:
+        """Split what a caller cited into ids already stored and turns to store now.
+
+        `Memvara.remember` takes one mixed sequence; the facade takes two fields, because
+        over HTTP the two are different acts — `source_ids` cites rows the store already
+        holds, `sources` writes new turns in the same transaction as the fact. A string
+        is an id and anything else is a turn, which is the same rule `Memvara._cite`
+        applies.
+        """
+        ids = [s for s in sources or [] if isinstance(s, str)]
+        turns = [self._turn(s) for s in sources or [] if not isinstance(s, str)]
+        return ids, turns
+
+
+class RemoteMemvara(_RemoteClient):
     """The library's API against a hosted deployment.
 
     Constructing one performs no network call. It resolves a credential, builds a
@@ -320,17 +404,6 @@ class RemoteMemvara:
         )
         return ScopedRemoteMemvara(self, narrowed)
 
-    def _at(self, scope: Scope) -> "RemoteMemvara":
-        """A twin bound to a different scope, sharing this client's transport.
-
-        Sharing rather than dialling a second pool, because the two are the same
-        deployment on the same credential. Closing either closes both, which is the
-        honest reading of one pool with two handles on it.
-        """
-        twin = copy(self)
-        twin.default_scope = scope
-        return twin
-
     def _request(self, method: str, path: str, **kw: Any) -> Any:
         """One `/v1` call, carrying the bound project as the `Memvara-Project` header.
 
@@ -359,63 +432,6 @@ class RemoteMemvara:
                 raise
             body = {k: v for k, v in body.items() if k != "query_rewrite"}
             return self._request("POST", path, params=self._params(), json=body)
-
-    def _params(self, **extra: Any) -> dict[str, Any]:
-        """Scope on every call, plus whatever this call adds. `None` values are dropped
-        by the transport rather than sent as empty strings."""
-        scope = self.default_scope
-        return {"user": scope.user, "agent": scope.agent, "session": scope.session,
-                **extra}
-
-    def _redact(self, text: str | None, field: str) -> str | None:
-        """Apply the policy to one string on its way out, or pass it through.
-
-        The `Redactor` protocol is `redact(text, *, field=..., scope=...)`. `field` says
-        which of `redact.FIELDS` is being offered, so a deployment can be aggressive on
-        raw turns and conservative on claim objects; `scope` is what makes "redact for EU
-        tenants" expressible at all. Calling the policy with the text alone would apply
-        one branch of it to everything.
-
-        Here rather than server-side, and that is the point of the seam: redaction that
-        happens after the text has left the process is not redaction.
-        """
-        if self.redactor is None or text is None:
-            return text
-        return self.redactor.redact(text, field=field, scope=self.default_scope)
-
-    def _turn(self, message: Episode | Mapping[str, Any] | str) -> dict[str, Any]:
-        """One conversation turn as `Message` spells it, with its content redacted.
-
-        Keys the model does not declare go into `metadata` rather than beside it: the
-        facade's request models are `extra="forbid"`, so a stray key is a 422 and not a
-        field somebody quietly loses. `Memvara.add` does the same fold locally.
-        """
-        if isinstance(message, str):
-            return _sent({"content": self._redact(message, EPISODE)})
-        if isinstance(message, Episode):
-            return _sent({"role": message.role,
-                          "content": self._redact(message.content, EPISODE),
-                          "ts": _iso(message.ts), "metadata": dict(message.meta)})
-        known = {"role", "content", "ts", "metadata"}
-        meta = dict(message.get("metadata") or {})
-        meta.update({k: v for k, v in message.items() if k not in known})
-        return _sent({"role": message.get("role"),
-                      "content": self._redact(message["content"], EPISODE),
-                      "ts": _iso(message.get("ts")), "metadata": meta})
-
-    def _cite(self, sources: Sequence[Episode | Mapping[str, Any] | str] | None,
-              ) -> tuple[list[str], list[dict[str, Any]]]:
-        """Split what a caller cited into ids already stored and turns to store now.
-
-        `Memvara.remember` takes one mixed sequence; the facade takes two fields, because
-        over HTTP the two are different acts — `source_ids` cites rows the store already
-        holds, `sources` writes new turns in the same transaction as the fact. A string
-        is an id and anything else is a turn, which is the same rule `Memvara._cite`
-        applies.
-        """
-        ids = [s for s in sources or [] if isinstance(s, str)]
-        turns = [self._turn(s) for s in sources or [] if not isinstance(s, str)]
-        return ids, turns
 
     def _end(self, body: dict[str, Any]) -> list[Claim]:
         """`POST /v1/end`: close what this addresses on the world clock.
@@ -519,19 +535,6 @@ class RemoteMemvara:
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
-
-    @overload
-    def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ..., ranked: bool = ...,
-               query_rewrite: bool = ...,
-               as_of: datetime | None = ..., valid_at: datetime | None = ...,
-               known_at: datetime | None = ..., states: Collection[str] | None = ...,
-               valid_during: Sequence[datetime] | None = ...,
-               include_invalidated: bool | None = ...,
-               memory_types: Sequence[MemoryType | str] | None = ...,
-               filters: Mapping[str, FilterValue] | None = ...,
-               filepath_prefix: str | None = ...,
-               include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
@@ -1344,19 +1347,6 @@ class ScopedRemoteMemvara:
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
-
-    @overload
-    def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ..., ranked: bool = ...,
-               query_rewrite: bool = ...,
-               as_of: datetime | None = ..., valid_at: datetime | None = ...,
-               known_at: datetime | None = ..., states: Collection[str] | None = ...,
-               valid_during: Sequence[datetime] | None = ...,
-               include_invalidated: bool | None = ...,
-               memory_types: Sequence[MemoryType | str] | None = ...,
-               filters: Mapping[str, FilterValue] | None = ...,
-               filepath_prefix: str | None = ...,
-               include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,

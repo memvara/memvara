@@ -2755,19 +2755,6 @@ class Memvara:
                memory_types: Sequence[MemoryType] | None = ...,
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
-               include_episodes: Literal[True]) -> list[Retrieved]: ...
-
-    @overload
-    def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
-               anchored: bool = ..., ranked: bool = ..., query_rewrite: bool = ...,
-               user=..., agent=..., session=..., as_of: datetime | None = ...,
-               valid_at: datetime | None = ..., known_at: datetime | None = ...,
-               valid_during: Sequence[datetime] | None = ...,
-               states: Collection[str] | None = ...,
-               include_invalidated: bool | None = ...,
-               memory_types: Sequence[MemoryType] | None = ...,
-               filters: Mapping[str, FilterValue] | None = ...,
-               filepath_prefix: str | None = ...,
                include_episodes: bool) -> list[Retrieved]: ...
 
     def search(self, query: str, *, k: int = 10, min_score: float = 0.0, tenant=None,
@@ -5328,19 +5315,6 @@ class ScopedMemvara:
                filters: Mapping[str, FilterValue] | None = ...,
                filepath_prefix: str | None = ...,
                include_episodes: Literal[False] = ...) -> list[Result]: ...
-
-    @overload
-    def search(self, query: str, *, k: int = ..., min_score: float = ...,
-               anchored: bool = ..., ranked: bool = ...,
-               query_rewrite: bool = ...,
-               as_of: datetime | None = ..., valid_at: datetime | None = ...,
-               known_at: datetime | None = ..., states: Collection[str] | None = ...,
-               valid_during: Sequence[datetime] | None = ...,
-               include_invalidated: bool | None = ...,
-               memory_types: Sequence[MemoryType] | None = ...,
-               filters: Mapping[str, FilterValue] | None = ...,
-               filepath_prefix: str | None = ...,
-               include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ...,
