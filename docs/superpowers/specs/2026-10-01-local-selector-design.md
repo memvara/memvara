@@ -884,3 +884,12 @@ answers, and the selector's 400-token cap left no room for the JSON on 40 real c
 No model-selector result existed, so no agreement had been computed. The bench adapter now
 raises that cap to 4,000 tokens and asks Bedrock for low reasoning effort; everything else
 in this section is unchanged, and the run starts again from the first call.
+
+**Amended again before any agreement was computed (2026-10-05).** The second run failed on
+every call from the tenth on with Bedrock's "Input length (160212) exceeds model's maximum
+context length (131072)": real transcripts hold pastes long enough that 40 whole turns
+overflow gpt-oss-120b's context. Both selectors now see each candidate cut to its first
+4,000 characters. The local model reads only its first 256 tokens (about 1,000 characters)
+anyway, so this changes what the model selector sees and not what the local one sees. The
+hosted model selector sends whole turns to a model with a larger context, so this is a
+limit of the stand-in model, not of the product. The run starts again from the first call.
