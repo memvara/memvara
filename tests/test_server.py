@@ -3998,7 +3998,7 @@ def test_an_unusable_claim_cap_is_refused_at_startup(value):
     extraction a silent no-op, and a typo falling back to uncapped would leave a grammar
     backend with exactly the failure the cap was set to prevent.
 
-    The last two cover the `str.isdigit()` trap that `_max_tokens` documents: superscript
+    The last two cover the `str.isdigit()` trap that `_positive_int` documents: superscript
     "\u00b9\u00b2" satisfied `isdigit()` and then made `int()` raise, so a `ValueError` escaped a
     module whose whole contract is to fail with a sentence."""
     with pytest.raises(ConfigError, match="MEMVARA_LLM_MAX_CLAIMS"):
@@ -4130,7 +4130,7 @@ def test_an_unusable_extraction_timeout_is_refused_at_startup(value):
 
     The last two are Arabic-indic digits, which `float()` reads as 1 and 500. Without the
     `isascii()` guard `MEMVARA_LLM_TIMEOUT=١` started a server that cancelled every
-    extraction after one second — the same test `_weight` and `_max_tokens` carry, and
+    extraction after one second — the same test `_weight` and `_positive_int` carry, and
     this validator shipped its first draft without it."""
     with pytest.raises(ConfigError, match="MEMVARA_LLM_TIMEOUT"):
         ServerConfig.from_env({"MEMVARA_DB": ":memory:", "MEMVARA_LLM": "openai",

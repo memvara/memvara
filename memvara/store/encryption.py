@@ -20,7 +20,8 @@ file `~/.memvara/db.key`. When none of them has a key and a new encrypted store 
 created, a key is generated into that file with mode 0600, and a warning says so. Losing
 the key makes every store it encrypted unreadable. There is no recovery.
 
-**Nothing in this module prints a key**, except `export_key`, whose caller asked for it.
+**Nothing in this module prints a key.** The one place that does is
+`memvara encrypt --export-key` in `cli.py`, because printing it is what the user asked for.
 Error messages name where a key came from, never its value.
 """
 
@@ -40,7 +41,7 @@ from typing import Any, Mapping
 __all__ = [
     "EncryptionError", "EncryptionUnavailable", "EncryptionWarning", "EncryptResult",
     "KEY_ENV", "KEYRING_SERVICE", "KEYRING_USERNAME", "StoreKey", "VectorSealer",
-    "encrypt_store", "export_key", "file_kind", "key_file", "parse_key",
+    "encrypt_store", "file_kind", "key_file", "parse_key",
     "require_sqlcipher", "resolve_key",
 ]
 
@@ -280,15 +281,6 @@ def _generate(path: Path) -> StoreKey:
         "machine. If this key is lost, every store it encrypts is unreadable, and there "
         "is no way to recover it."), stacklevel=4)
     return StoreKey(key, "generated", str(path))
-
-
-def export_key(env: Mapping[str, str] | None = None) -> StoreKey:
-    """The key an existing encrypted store would be opened with, for a backup.
-
-    Never generates one: exporting a key that encrypts nothing would give a false sense
-    that something was backed up.
-    """
-    return resolve_key(create=False, env=env)
 
 
 def require_sqlcipher() -> Any:

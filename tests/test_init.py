@@ -41,7 +41,6 @@ import memvara
 from memvara.server import main
 from memvara.server.config import EXAMPLE_CONFIG
 from memvara.server.init import (
-    AGENTS,
     INIT_USAGE,
     MARKER,
     _default_db,
@@ -506,12 +505,6 @@ def test_the_skill_is_read_out_of_the_installed_package(tmp_path) -> None:
     """
     assert skill_text() == SKILL_SOURCE.read_text(encoding="utf-8")
     assert skill_text().startswith("---\n"), "front matter is what makes it a skill"
-
-
-def test_every_agent_init_knows_gets_the_same_packaged_skill() -> None:
-    """`--agent` is an inventory of file layouts, not of different prose."""
-    for agent in AGENTS:
-        assert skill_text(agent) == skill_text(), f"--agent {agent} drifted from the package"
 
 
 def test_the_skill_is_not_hidden_from_the_build_by_an_ignore_rule() -> None:

@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 from enum import Enum
 
-from typing import TYPE_CHECKING, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Callable, Iterable
 
 from ..entities import POSSESSIVE
 from ..schema import word_stem
@@ -174,31 +174,19 @@ _POSSESSIVE = POSSESSIVE
 _BETWEEN_AND = re.compile(r"\bbetween\b.+\band\b", re.IGNORECASE)
 
 
-#: Non-word characters collapse to spaces before a predicate phrase is looked for, so
-#: "works at?" and "works-at" both match `works at`.
-_WORDS = re.compile(r"[^a-z0-9]+")
-
-def _phrases(registry: "PredicateRegistry") -> frozenset[str]:
-    """Every predicate name and alias the registry knows, spelled the way a person would.
-
-    `works_at` becomes `works at`, because a question says the second and the registry
-    stores the first. Matched as phrases and never as tokens: `lives_in` splits into
-    `lives` and `in`, and `in` appears in most English questions, so a token index would
-    make almost every query look relational.
+def _names(registry: "PredicateRegistry") -> frozenset[str]:
+    """Every predicate name and alias the registry knows.
 
     Read from the registry on every call, and not memoised. A memo keyed on the registry's
     identity and its `learned_count` went stale in two ways nothing reported: `register()`
     and `learn_alias()` change the vocabulary without moving `learned_count`, and a
     registry created after another was garbage-collected can carry the same `id()`, so a
-    fresh registry answered with a dead one's phrases. Either way `predicate_refs` saw a
+    fresh registry answered with a dead one's names. Either way `predicate_refs` saw a
     vocabulary the registry no longer held. The set is a few dozen short strings, which
     costs less than the stemming `_named_in` does on every call anyway.
     """
-    return frozenset(
-        name.replace("_", " ")
-        for spec in registry.all_specs()
-        for name in (spec.name, *spec.aliases)
-    )
+    return frozenset(name for spec in registry.all_specs()
+                     for name in (spec.name, *spec.aliases))
 
 
 def predicate_refs(query: str, registry: "PredicateRegistry") -> set[str]:
@@ -214,7 +202,7 @@ def predicate_refs(query: str, registry: "PredicateRegistry") -> set[str]:
     two — otherwise a question that spelled the same relation twice would look like a
     chain.
     """
-    return _named_in(query, _phrases(registry), registry.normalize)
+    return _named_in(query, _names(registry), registry.normalize)
 
 
 def observed_refs(query: str, predicates: "Iterable[str]",
@@ -238,9 +226,7 @@ def observed_refs(query: str, predicates: "Iterable[str]",
     So the vocabulary comes from the rows instead. Predicates in hand are observed facts
     about the store and commit it to nothing.
     """
-    fold = normalize or (lambda name: name)
-    spoken = {name.replace("_", " "): name for name in predicates}
-    return _named_in(query, spoken, fold)
+    return _named_in(query, predicates, normalize or (lambda name: name))
 
 
 def _content(predicate: str) -> frozenset[str]:
@@ -268,7 +254,7 @@ def _content(predicate: str) -> frozenset[str]:
                      if t not in STOPWORDS)
 
 
-def _named_in(query: str, spoken: "Mapping[str, str] | Iterable[str]",
+def _named_in(query: str, predicates: "Iterable[str]",
               fold: "Callable[[str], str]") -> set[str]:
     """Which of these predicates the question says, folded and deduplicated.
 
@@ -291,12 +277,10 @@ def _named_in(query: str, spoken: "Mapping[str, str] | Iterable[str]",
     none, it names the smallest name, so two stores holding the same schema agree.
     """
     tokens = {word_stem(t) for t in tokenize(query)}
-    pairs = (spoken.items() if isinstance(spoken, Mapping)
-             else ((phrase, phrase.replace(" ", "_")) for phrase in spoken))
     # Everything the question said, keyed on the content tokens that said it, with every
     # predicate that answers to each.
     said: dict[frozenset[str], set[str]] = {}
-    for _phrase, name in pairs:
+    for name in predicates:
         parts = _content(name)
         if parts and parts <= tokens:
             said.setdefault(parts, set()).add(fold(name))

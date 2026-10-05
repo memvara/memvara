@@ -47,6 +47,7 @@ from ..embed.base import Embedder, encode_queries
 from ..llm import _shape
 from ..llm.base import Message, ToolChat, ToolRun, ToolSpec, Usage
 from ..llm.guidance import Guidance, with_guidance
+from ..retrieve.fusion import reciprocal_rank_fusion
 from ..store.base import Store, bulk_claims
 from ..types import (
     REASON_CHARS, Claim, Episode, LinkRelation, RefusalReason, RefusedProposal, Scope,
@@ -75,9 +76,6 @@ SEARCH_MAX_K = 20
 #: Characters of a stored memory's object shown in a tool result. A stored value is
 #: caller-supplied text, and a very long one would crowd the model's context.
 _SHOWN_CHARS = 300
-
-#: How a fused search weighs rank, as in `retrieve/fusion.py`.
-_RRF_K = 60
 
 AGENTIC_SYSTEM = """\
 You maintain a long-term memory store. You read conversation turns and propose changes to \
@@ -420,19 +418,15 @@ class _Session:
     def _search(self, query: str, k: int) -> list[Claim]:
         """Live memories this scope can see, lexical and vector hits fused by rank."""
         store, scopes, now = self.extractor.store, self.scope.ancestors(), self.now
-        legs = [store.lexical_search(query, scopes, k, valid_at=now, known_at=now)]
+        legs = {"lexical": store.lexical_search(query, scopes, k, valid_at=now, known_at=now)}
         try:
             vector = encode_queries(self.extractor.embedder, [query])[0]
-            legs.append(store.vector_search(vector, scopes, k, valid_at=now, known_at=now))
+            legs["vector"] = store.vector_search(vector, scopes, k, valid_at=now, known_at=now)
         except ValueError:
             # The index was built by another embedder. The lexical leg still answers, as
             # `WritePipeline._near_duplicate` does in the same situation.
             pass
-        fused: dict[str, float] = {}
-        for leg in legs:
-            for rank, (claim_id, _) in enumerate(leg):
-                fused[claim_id] = fused.get(claim_id, 0.0) + 1.0 / (_RRF_K + rank + 1)
-        order = sorted(fused, key=lambda cid: (-fused[cid], cid))[:k]
+        order = list(reciprocal_rank_fusion(legs))[:k]
         claims = bulk_claims(store, order)
         return [claims[cid] for cid in order
                 if cid in claims and self.scope.sees(claims[cid].scope)]

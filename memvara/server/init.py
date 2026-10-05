@@ -153,12 +153,8 @@ class _Step:
     paste: bool = False
 
 
-def skill_text(agent: str = AGENTS[0]) -> str:
-    """The packaged skill body, read out of the installed package.
-
-    `agent` is the client `init` is configuring. It used to pick a per-client file;
-    there is one skill now, and every client gets it. The argument stays so callers
-    that pass it keep working.
+def skill_text() -> str:
+    """The packaged skill body, read out of the installed package. Every client gets it.
 
     Package data rather than a string literal, for the reason the skill itself is
     short: it describes the tools, and a copy that ships separately from them is

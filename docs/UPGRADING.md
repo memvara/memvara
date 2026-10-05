@@ -7,6 +7,27 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `PredicateRegistry.superseded_by()` and `encryption.export_key()` are removed
+
+### What changed
+
+Two small public functions were removed, because each only repeated something you can
+already call directly.
+
+- `PredicateRegistry.superseded_by(predicate)` returned `registry.spec(predicate).supersedes`.
+- `memvara.store.encryption.export_key(env=...)` returned
+  `resolve_key(create=False, env=env)`.
+
+### Who this changes
+
+**If you call either function**, you get an `AttributeError` or an `ImportError`. Replace
+`registry.superseded_by(p)` with `registry.spec(p).supersedes`, and
+`export_key(env=env)` with `resolve_key(create=False, env=env)`.
+
+**How to find it:** search your code for `superseded_by` and `export_key`.
+
+---
+
 ## `memvara.store.remote.RemoteStore` is removed
 
 ### What changed
