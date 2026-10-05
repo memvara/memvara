@@ -304,11 +304,13 @@ def encrypt(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
     # Imported here rather than at module scope, for the reason `whoami` gives: this
     # module has to import on a bare install. `encryption` itself imports no SDK until a
     # function in it needs one, which is where a missing extra is caught below.
-    from .store.encryption import EncryptionUnavailable, encrypt_store, export_key
+    from .store.encryption import EncryptionUnavailable, encrypt_store, resolve_key
 
     try:
         if args[0] == "--export-key":
-            found = export_key(env)
+            # `create=False`, because exporting a newly generated key that encrypts
+            # nothing would make the user believe they had backed up a real one.
+            found = resolve_key(create=False, env=env)
             print(found.key.hex(), file=out)
             print(f"memvara encrypt: that is the store key from {found.describe()}. "
                   "Anyone who has it and a copy of a store can read every memory in it, "

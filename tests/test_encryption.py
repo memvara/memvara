@@ -46,7 +46,7 @@ from memvara.server.mcp import MemvaraMCPServer, _storage_fact
 from memvara.store import SQLiteStore, StoreInUseError
 from memvara.store.encryption import (EncryptionError, EncryptionUnavailable,
                                       EncryptionWarning, StoreKey, VectorSealer,
-                                      encrypt_store, export_key, file_kind, key_file,
+                                      encrypt_store, file_kind, key_file,
                                       resolve_key)
 from memvara.types import Claim, Scope
 
@@ -325,9 +325,9 @@ def test_the_key_is_not_in_the_repr_of_the_object_that_carries_it():
     assert KEY.hex() not in repr(found) and repr(KEY) not in repr(found)
 
 
-def test_export_key_never_generates_one():
+def test_a_lookup_that_may_not_create_never_generates_a_key():
     with pytest.raises(EncryptionError):
-        export_key()
+        resolve_key(create=False)
     assert not key_file().exists()
 
 
