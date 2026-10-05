@@ -606,25 +606,11 @@ _CHARS_PER_TOKEN = 4
 def _approx_tokens(text: str) -> int:
     """Roughly how many tokens `text` costs. The default counter for `recall(budget=)`.
 
-    **A length heuristic, and it is wrong in a direction worth naming.** It divides by
-    four and rounds up, which is close enough for English prose and materially wrong for
-    CJK, where a single character is often a token or more: this **under-counts** there,
-    by several times, so a block the heuristic certifies as fitting a 2,000-token budget
-    can be four thousand real tokens. The failure is silent and it is on the side that
-    overflows the caller's context rather than the side that wastes it. Cyrillic, Thai
-    and long code identifiers all lean the same way, less sharply.
-
-    There is no tokenizer here to do better with. Core's dependencies are `numpy` and
-    nothing else, and pulling a transformer stack into the zero-dependency package in
-    order to count characters would cost every user of the library a dependency tree so
-    that some of them could have an exact budget. So this is the default and the seam is
-    the answer: a caller who needs exactness passes their own `counter=` — `tiktoken`,
-    the Anthropic token-counting endpoint, whatever their model actually charges — and
-    pays for that dependency in their own project. It is the same seam as `Embedder`,
-    `AuditStore` and `Processor`, for the same reason.
-
-    A budget honoured approximately, with the approximation named, is worth having. One
-    that claims to be exact is not.
+    It is the character count divided by four, rounded up. That is close for English
+    prose, but it **under-counts** CJK text by several times, because one CJK character
+    is often a whole token, so a block it fits into a budget can overflow the caller's
+    context. Core has no tokenizer dependency; a caller who needs an exact count passes
+    their own `counter=`.
 
     >>> _approx_tokens("the user lives in Lisbon")
     6

@@ -17,14 +17,6 @@ lock are both hundreds of milliseconds of blocked event loop, and blocking the l
 that long stalls every other request the process is serving. Awaiting instead means the
 loop keeps serving.
 
-An earlier version of this paragraph also claimed the LangChain, LlamaIndex and CrewAI
-adapters declare async methods that fall back to running the sync one on the loop
-thread. That is not true of any of the three — LangChain's `aget_messages` uses
-`run_in_executor`, LlamaIndex's `BaseMemory.aget` uses `asyncio.to_thread`, its
-`BaseMemoryBlock` is async-primary with no sync fallback at all, and CrewAI's
-`StorageBackend` is a bare `Protocol`, so an omitted `asave` is an `AttributeError`
-rather than a silent sync call. The argument above stands without it.
-
 **Where this argument stops applying: `memvara.remote.aio`.** The case above rests on
 two facts that are both true of the local engine and both false of a hosted deployment.
 There is no async SQLite, and there is an engine — `Store`, `WritePipeline`,
@@ -128,22 +120,13 @@ class AsyncMemvara:
     return value — so the sync docstring is the documentation for both, and there is no
     second set of semantics to keep in step.
 
-    Nothing is omitted any more. `scope()` used to be, on the argument that every method
-    here already takes the four scope keywords so nothing was unreachable without it —
-    which was true, and which answered the wrong question: `ScopedMemvara` does not exist
-    to reach anything, it exists so that the four keywords are written once instead of on
-    every line, because the call site that repeats them is the call site that eventually
-    writes one user's fact into another user's scope.
-
-    The workaround for that omission also had a price, and this docstring used to
-    understate it. Holding one `AsyncMemvara` per scope means holding one `Memvara` per
-    scope — this class has no scope of its own, it forwards the one it is given — and
-    constructing a `Memvara` over an existing store is *not* free even though the store
-    is shared: it re-reads the persisted predicate specs, re-runs the embedder
-    fingerprint check, and builds a fresh `PredicateRegistry` that starts empty of
-    anything learned since. Per request, that is several queries and a schema the process
-    has already paid for. `scope()` costs a `Scope` and two attribute writes; `registry=`
-    and `store=` are still there for the case that genuinely wants two instances.
+    `scope()` is here too, and it is the way to serve many users from one instance. It
+    returns a view that writes the four scope keywords once, so no call site can write
+    one user's fact into another user's scope by repeating them wrongly. Prefer it to one
+    `AsyncMemvara` per scope: each of those needs its own `Memvara`, and constructing a
+    `Memvara` over an existing store re-reads the predicate specs, re-runs the embedder
+    fingerprint check and builds a fresh `PredicateRegistry`. `scope()` costs a `Scope`
+    and two attribute writes.
     """
 
     __slots__ = ("memvara",)
