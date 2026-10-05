@@ -589,9 +589,9 @@ def _legacy(store, obj: str, minutes: int) -> Claim:
 def test_the_report_reads_as_one_line(rec, store):
     _legacy(store, "Acme", 30)
     assert repr(backfill_entities(rec, "acme")) == (
-        "<RekeyReport scanned=1 written=0 merged=0 retired=0 dry-run>")
+        "RekeyReport(scanned=1, written=0, merged=0, retired=0, dry_run=True)")
     assert repr(backfill_entities(rec, "acme", dry_run=False)) == (
-        "<RekeyReport scanned=1 written=1 merged=0 retired=0>")
+        "RekeyReport(scanned=1, written=1, merged=0, retired=0, dry_run=False)")
 
 
 def test_backfill_dry_run_changes_nothing(rec, store):
@@ -967,8 +967,8 @@ def test_a_dry_run_reports_and_changes_nothing():
         # The repr says so too. An operator reads this at a REPL to decide whether to run
         # it for real, and a report that looked identical either way would be the one
         # thing this default cannot afford.
-        assert "(dry run)" in str(report)
-        assert "moved=1 reopened=1" in str(report)
+        assert "dry_run=True" in str(report)
+        assert "moved=1, reopened=1" in str(report)
 
 
 def test_the_moved_claim_stays_addressable_and_says_why_it_moved():

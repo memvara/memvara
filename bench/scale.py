@@ -98,9 +98,7 @@ def timed(calls: list[Callable[[], Any]]) -> tuple[float, float]:
         t0 = time.perf_counter()
         call()
         samples.append((time.perf_counter() - t0) * 1000)
-    samples.sort()
-    return statistics.median(samples), samples[min(len(samples) - 1,
-                                                   int(len(samples) * 0.95))]
+    return statistics.median(samples), ek.upper_percentile(samples, 0.95)
 
 
 def main() -> int:

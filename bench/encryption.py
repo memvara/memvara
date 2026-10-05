@@ -58,11 +58,6 @@ def _peak_rss_mb() -> float:
     return peak / (1024 * 1024) if sys.platform == "darwin" else peak / 1024
 
 
-def _pct(values: list[float], q: float) -> float:
-    ordered = sorted(values)
-    return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
-
-
 def child(mode: str, n: int, reps: int, directory: str, key_hex: str) -> dict:
     key = bytes.fromhex(key_hex) if mode == "encrypted" else None
     path = os.path.join(directory, f"{mode}-{n}.db")
@@ -97,15 +92,18 @@ def child(mode: str, n: int, reps: int, directory: str, key_hex: str) -> dict:
         writes.append(time.perf_counter() - t0)
     rss = _peak_rss_mb()
     mem.close()
+    # Imported after the peak memory reading, so the benchmark's own helpers do not
+    # count toward it.
+    from evalkit import upper_percentile
     size = os.path.getsize(path) + (os.path.getsize(path + ".vecs")
                                     if os.path.exists(path + ".vecs") else 0)
     return {
         "open_ms": opened * 1000, "first_search_ms": first * 1000,
-        "search_p50_ms": _pct(searches, 0.5) * 1000,
-        "search_p95_ms": _pct(searches, 0.95) * 1000,
+        "search_p50_ms": upper_percentile(searches, 0.5) * 1000,
+        "search_p95_ms": upper_percentile(searches, 0.95) * 1000,
         "search_mean_ms": statistics.fmean(searches) * 1000,
-        "write_p50_ms": _pct(writes, 0.5) * 1000,
-        "write_p95_ms": _pct(writes, 0.95) * 1000,
+        "write_p50_ms": upper_percentile(writes, 0.5) * 1000,
+        "write_p95_ms": upper_percentile(writes, 0.95) * 1000,
         "write_mean_ms": statistics.fmean(writes) * 1000,
         "peak_rss_mb": rss, "files_mb": size / (1024 * 1024),
     }
