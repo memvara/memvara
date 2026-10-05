@@ -73,14 +73,16 @@ from io import BufferedRandom
 from itertools import repeat
 from operator import itemgetter
 from typing import (TYPE_CHECKING, Any, Callable, Collection, Iterable, Iterator,
-                    Mapping, Sequence, cast)
+                    Mapping, Sequence, TypeVar, cast)
 
 import numpy as np
 
 from ..filters import SearchFilter, meta_matches
+from ..retrieve.analyze import tokenize
 from ..types import (
     ObjectKind,
     OBJECT_ENTITY,
+    OWNER_SEP,
     SUBJECT_ENTITY,
     Claim,
     Derivation,
@@ -92,6 +94,8 @@ from ..types import (
     Scope,
     TimeWindow,
     as_utc,
+    content_hash,
+    entity_type_of,
     resolved_entity,
     stored_scope,
     utcnow,
@@ -671,6 +675,9 @@ _EPISODE_UPSERT = (
 # SQLite's parameter limit is 999 on older builds; chunk bulk lookups below it.
 _MAX_SQL_PARAMS = 900
 
+#: What `SQLiteStore._by_ids` turns each row into: a `Claim` or an `Episode`.
+_Row = TypeVar("_Row")
+
 _VEC_TABLE_NAMES = ("embeddings", "episode_embeddings")
 
 # The next row of the matrix to hand out. Both vector tables address one matrix, so the
@@ -952,8 +959,7 @@ def _ts(dt: datetime | None) -> float | None:
     """
     if dt is None:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+    dt = as_utc(dt)
     # Both ends, because both are real. On POSIX the floor is year 1 and clamps nothing;
     # on Windows it is the epoch, and without it an ordinary decay test dating a claim
     # 600 years back writes a row the store cannot read.
@@ -997,8 +1003,6 @@ def _fact_key_of(tenant: str, usr: str | None, project: str | None,
     what has to change, and loading every claim to re-save it would turn a single UPDATE
     into a scan with a Python round trip per row.
     """
-    from ..types import OWNER_SEP, content_hash
-
     subject_key, _, predicate = packed.partition(OWNER_SEP)
     return content_hash(f"{tenant}{OWNER_SEP}{usr or ''}", project or "",
                         subject_key, predicate)
@@ -1012,18 +1016,9 @@ def _value_key_of(tenant: str, usr: str | None, packed: str) -> str:
     being recognised as a re-observation, so the next assertion of a fact already on
     record is stored as a rival value instead of reinforcing the one there.
     """
-    from ..types import OWNER_SEP, content_hash
-
     subject_key, predicate, object_key, polarity = packed.split(OWNER_SEP)
     return content_hash(f"{tenant}{OWNER_SEP}{usr or ''}", subject_key, predicate,
                         object_key, polarity)
-
-
-def _entity_type_of(key: str) -> str:
-    """The namespace half of an entity identity. See `types.entity_type_of`."""
-    from ..types import entity_type_of
-
-    return entity_type_of(key)
 
 
 def _subject_key_of(meta: str, surface: str) -> str:
@@ -1034,16 +1029,11 @@ def _object_key_of(meta: str, surface: str) -> str:
     return resolved_entity(json.loads(meta), OBJECT_ENTITY, surface)
 
 
-#: `GraphTraverser._edges`' three rules, as SQL, for the one counter that has to agree
-#: with them. A negation is adjacency and not a link; an empty end is what a retraction
-#: stores and not a node; a self-loop leads back to where the walk is standing. Written
-#: once because a join rate that counts edges the traverser refuses to follow promises
-#: hops that will not happen — the same failure as a benchmark scoring its own answer key.
 #: `GraphTraverser._edges`' four rules as SQL, and the two have to say the same thing:
 #: this is what `connectivity()` counts, so a rule in one and not the other makes the
-#: reported join rate promise hops the walk will not take. The `IS NULL` is the third
-#: state of `object_kind` and not an oversight — a claim written before the
-#: classification rule keeps its edges rather than losing them to an upgrade.
+#: reported join rate promise hops the walk will not take. The `IS NULL` admits the third
+#: state of `object_kind`: a claim written before the classification rule existed keeps
+#: its edges instead of losing them in an upgrade.
 _WALKABLE = ("{a}.polarity > 0 AND {a}.subject_key != '' AND {a}.object_key != '' "
              "AND {a}.subject_key != {a}.object_key "
              "AND ({a}.object_kind IS NULL OR {a}.object_kind = 'entity')")
@@ -1139,17 +1129,7 @@ def _fts_query(raw: str) -> str:
     query is both a crash and an injection surface. Reduce to bare alphanumeric tokens
     and OR them; ranking, not filtering, is what BM25 is here for.
     """
-    toks = []
-    cur = []
-    for ch in raw.lower():
-        if ch.isalnum():
-            cur.append(ch)
-        elif cur:
-            toks.append("".join(cur))
-            cur = []
-    if cur:
-        toks.append("".join(cur))
-    toks = [t for t in toks if len(t) > 1]
+    toks = tokenize(raw)
     if not toks:
         return ""
     return " OR ".join(f'"{t}"' for t in toks)
@@ -1170,9 +1150,10 @@ class _VecIndex:
       `np.vstack` transiently holds four times the old matrix and stalls whichever user
       write happens to cross the boundary — measured at 562 ms here.
 
-    Slots are assigned by whoever owns durability. The store allocates them inside its
-    write transaction (so two processes cannot claim one row) and calls `put`/`map`;
-    a bare index, with no store behind it, allocates its own via `add`.
+    Slots are assigned by whoever owns durability, never by the index. The store
+    allocates them inside its write transaction, so two processes cannot claim one row,
+    and then calls `put` or `map`. When it erases, the store records the freed slot in
+    its `vec_free` table, and `forget` only blanks the row.
 
     The keys are opaque strings, and the index does not care what kind of thing they
     name. Claims and episodes share it: their ids are disjoint by construction, they
@@ -1205,7 +1186,6 @@ class _VecIndex:
         # different claim from "not looked at".
         self._count = count
         self._row: dict[str, int] = {}
-        self._free: list[int] = []
         self._mat: np.ndarray | None = None
         # Annotated because it is initialised to None and only ever assigned a real
         # handle later: without it every use below reads as an attribute on `None`, and
@@ -1402,29 +1382,13 @@ class _VecIndex:
             self._row[item_id] = slot
             self._high = max(self._high, slot + 1)
 
-    def add(self, item_id: str, vec: np.ndarray) -> None:
-        """Store a vector, allocating its slot. For an index with no store behind it."""
-        v = _unit(vec)
-        with self._lock:
-            if self.dim is None:
-                self.attach(int(v.shape[0]), self._INITIAL_ROWS)
-            if v.shape[0] != self.dim:
-                raise ValueError(
-                    f"embedding dim {v.shape[0]} != index dim {self.dim}; "
-                    "the store was built with a different embedder"
-                )
-            slot = self._row.get(item_id)
-            if slot is None:
-                slot = self._free.pop() if self._free else self._high
-            self.put(item_id, slot, v)
-
     def forget(self, item_id: str, slot: int | None = None) -> int | None:
         """Unmap an item and blank its row, returning the slot it held.
 
         Zeroing matters for erasure: purged text stays reconstructible from
         its embedding, and the file outlives the process. The slot is handed back to
-        the caller rather than reused here, because when a store is present the free
-        list has to be durable and shared.
+        the caller rather than reused here, because the list of free slots has to be
+        durable and shared between processes, so the store keeps it in the database.
 
         `slot` is the row the database says the item holds. The store passes it when it
         erases, because the name-to-row map is loaded lazily: a process that erases
@@ -1469,7 +1433,6 @@ class _VecIndex:
         with self._lock:
             self.dim = None
             self._row.clear()
-            self._free.clear()
             self._rows = 0
             self._high = 0
             # Unmap before truncating. A mapping that outlives the pages behind it
@@ -1479,19 +1442,6 @@ class _VecIndex:
                 os.ftruncate(self._fh.fileno(), 0)
                 self._fh.close()
                 self._fh = None
-
-    def remove(self, item_id: str) -> bool:
-        """Drop a vector and keep its slot for reuse. Required for erasure — without
-        it, purged text stays reconstructible from the embedding.
-
-        Search resolves through the name-to-row map, so an unmapped id is unreachable
-        even before the row is blanked.
-        """
-        slot = self.forget(item_id)
-        if slot is None:
-            return False
-        self._free.append(slot)
-        return True
 
     # -- query ---------------------------------------------------------------
 
@@ -1710,12 +1660,6 @@ def _where_clause(where: SearchFilter | None, row: str, documents: str,
         parts.append(f"EXISTS ({documents.format(row=row, test=test)})")
         params += test_params
     return "(" + " AND ".join(parts) + ")", params
-
-
-#: Fact keys per `occupied_slots` statement, under SQLite's oldest bound-parameter limit
-#: of 999 with room for the tenant, the liveness clause's own parameters and the five
-#: parameters of each of the at most seven scopes in a read's chain.
-_SLOT_CHUNK = 900
 
 
 class SQLiteStore:
@@ -2503,7 +2447,7 @@ class SQLiteStore:
         # before this, so they are always present by the time this line runs.
         self._db.create_function("mv_fact_key", 4, _fact_key_of, deterministic=True)
         self._db.create_function("mv_value_key", 3, _value_key_of, deterministic=True)
-        self._db.create_function("mv_entity_type", 1, _entity_type_of, deterministic=True)
+        self._db.create_function("mv_entity_type", 1, entity_type_of, deterministic=True)
         self._db.execute(
             "UPDATE claims SET subject_key = mv_subject_key(meta, subject), "
             "object_key = mv_object_key(meta, object)"
@@ -3417,16 +3361,25 @@ class SQLiteStore:
     def get_episodes(self, episode_ids: Sequence[str]) -> dict[str, Episode]:
         """Bulk fetch, for the same reason `get_claims` exists: hydrating a result set
         one row at a time makes a search cost O(results) queries."""
-        out: dict[str, Episode] = {}
-        if not episode_ids:
+        return self._by_ids("episodes", episode_ids, self._row_to_episode)
+
+    def _by_ids(self, table: str, ids: Sequence[str],
+                convert: Callable[[sqlite3.Row], _Row]) -> dict[str, _Row]:
+        """The rows of `table` whose `id` is in `ids`, converted and keyed by id.
+
+        The ids are looked up in chunks, because SQLite limits how many parameters one
+        statement can bind. Duplicate ids are looked up once.
+        """
+        out: dict[str, _Row] = {}
+        if not ids:
             return out
-        ids = list(dict.fromkeys(episode_ids))
+        unique = list(dict.fromkeys(ids))
         with self._read() as conn:
-            for i in range(0, len(ids), _MAX_SQL_PARAMS):
-                chunk = ids[i:i + _MAX_SQL_PARAMS]
-                q = f"SELECT * FROM episodes WHERE id IN ({','.join('?' * len(chunk))})"
+            for i in range(0, len(unique), _MAX_SQL_PARAMS):
+                chunk = unique[i:i + _MAX_SQL_PARAMS]
+                q = f"SELECT * FROM {table} WHERE id IN ({','.join('?' * len(chunk))})"
                 for r in conn.execute(q, chunk):
-                    out[r["id"]] = self._row_to_episode(r)
+                    out[r["id"]] = convert(r)
         return out
 
     def iter_episodes(self, tenant: str | None = None) -> Iterable[Episode]:
@@ -3735,17 +3688,7 @@ class SQLiteStore:
         the number of results rather than with the query. Returns a mapping so callers
         keep their own ordering — the DB's row order is not the ranking.
         """
-        out: dict[str, Claim] = {}
-        if not claim_ids:
-            return out
-        ids = list(dict.fromkeys(claim_ids))
-        with self._read() as conn:
-            for i in range(0, len(ids), _MAX_SQL_PARAMS):
-                chunk = ids[i:i + _MAX_SQL_PARAMS]
-                q = f"SELECT * FROM claims WHERE id IN ({','.join('?' * len(chunk))})"
-                for r in conn.execute(q, chunk):
-                    out[r["id"]] = self._row_to_claim(r)
-        return out
+        return self._by_ids("claims", claim_ids, self._row_to_claim)
 
     def competing_claims(self, tenant: str, fact_key: str, *,
                          valid_at: datetime | None = None,
@@ -3782,8 +3725,8 @@ class SQLiteStore:
         where, wp = ("1=1", []) if scopes is None else self._scope_clause(scopes)
         found: set[str] = set()
         with self._read() as conn:
-            for start in range(0, len(keys), _SLOT_CHUNK):
-                chunk = keys[start:start + _SLOT_CHUNK]
+            for start in range(0, len(keys), _MAX_SQL_PARAMS):
+                chunk = keys[start:start + _MAX_SQL_PARAMS]
                 marks = ", ".join("?" * len(chunk))
                 rows = conn.execute(
                     f"SELECT DISTINCT fact_key FROM claims WHERE tenant=? AND "

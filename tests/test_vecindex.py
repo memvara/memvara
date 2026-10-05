@@ -16,7 +16,7 @@ import pytest
 from memvara.embed import HashingEmbedder
 from memvara.schema import Cardinality, PredicateSpec, Volatility
 from memvara.store import SQLiteStore
-from memvara.store.sqlite import SCHEMA_VERSION, _VecIndex, _vec_path
+from memvara.store.sqlite import SCHEMA_VERSION, _VecIndex, _unit, _vec_path
 from memvara.types import Claim, Episode, MemoryType, Scope
 
 SCOPE = Scope("acme", "alice")
@@ -243,7 +243,7 @@ def test_a_bare_index_grows_on_the_heap_and_keeps_every_row():
     """`_VecIndex` with nowhere to map still works — it is what an in-memory store uses."""
     idx = _VecIndex()
     for i in range(700):
-        idx.add(f"c{i}", onehot(4, i))
+        idx.put(f"c{i}", i, onehot(4, i))
     assert len(idx) == 700
     assert np.allclose(idx.get("c257"), onehot(4, 257))
     idx.close()
@@ -259,7 +259,7 @@ def test_dense_and_chunked_scoring_agree(share):
     rng = np.random.default_rng(3)
     idx = _VecIndex()
     for i in range(400):
-        idx.add(f"c{i}", rng.standard_normal(32).astype(np.float32))
+        idx.put(f"c{i}", i, _unit(rng.standard_normal(32).astype(np.float32)))
     allowed = [f"c{i}" for i in range(int(400 * share))]
     q = rng.standard_normal(32).astype(np.float32)
 
@@ -288,7 +288,7 @@ def test_a_sparse_candidate_set_does_not_touch_the_rest_of_the_matrix(tmp_path):
 def test_search_below_the_dense_threshold_still_finds_the_best_row():
     idx = _VecIndex()
     for i in range(300):
-        idx.add(f"c{i}", onehot(8, i))
+        idx.put(f"c{i}", i, onehot(8, i))
     hits = idx.search(onehot(8, 3), ["c3", "c11"], 2)
     assert hits[0][0] in ("c3", "c11")
     assert hits[0][1] == pytest.approx(1.0)
@@ -303,7 +303,7 @@ def test_a_candidate_with_no_vector_is_skipped_without_moving_the_others():
     rng = np.random.default_rng(5)
     idx = _VecIndex()
     for i in range(0, 60, 2):
-        idx.add(f"c{i}", rng.standard_normal(16).astype(np.float32))
+        idx.put(f"c{i}", i // 2, _unit(rng.standard_normal(16).astype(np.float32)))
     allowed = [f"c{i}" for i in range(60)]           # the odd ones have no vector
     q = rng.standard_normal(16).astype(np.float32)
     unit = q / np.linalg.norm(q)
@@ -383,10 +383,10 @@ def test_a_store_backed_index_counts_the_store_not_its_own_cache(tmp_path):
 def test_a_bare_index_counts_what_it_holds():
     idx = _VecIndex()
     assert len(idx) == 0
-    idx.add("a", onehot(4, 0))
+    idx.put("a", 0, onehot(4, 0))
     assert len(idx) == 1
-    idx.remove("a")
-    assert len(idx) == 0, "a removed row is still allocated but no longer held"
+    idx.forget("a")
+    assert len(idx) == 0, "a forgotten row is still allocated but no longer held"
     idx.close()
 
 
@@ -635,13 +635,18 @@ def test_an_erasure_blanks_a_row_another_store_wrote_after_this_one_mapped_the_f
     assert raw not in open(path + ".vecs", "rb").read(), "the erased vector is on disk"
 
 
-def test_a_bare_index_reuses_the_slot_it_removed():
+def test_a_slot_handed_back_by_forget_can_be_given_to_another_item():
+    """The store reuses a freed slot for the next vector. The index must then serve the
+    new item from that row, and the old item must not come back with it."""
     idx = _VecIndex()
-    idx.add("a", onehot(4, 0))
-    idx.add("b", onehot(4, 1))
-    assert idx.remove("a") is True
-    idx.add("c", onehot(4, 2))
+    idx.put("a", 0, onehot(4, 0))
+    idx.put("b", 1, onehot(4, 1))
+    slot = idx.forget("a")
+    assert slot == 0
+    idx.put("c", slot, onehot(4, 2))
     assert idx._row["c"] == 0
+    assert np.allclose(idx.get("c"), onehot(4, 2))
+    assert idx.get("a") is None
     assert len(idx) == 2
     idx.close()
 
