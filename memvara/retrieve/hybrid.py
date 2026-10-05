@@ -67,11 +67,10 @@ from ..schema import PredicateRegistry
 from ..select.base import (
     Candidate, Rewrite, Selection, Selector, SelectorBusy, SelectorRefused,
 )
-from ..select.stages import MAX_QUERIES, run_stage
+from ..select.stages import MAX_QUERIES, _count, run_stage
 from ..store.base import Store, bulk_claims, resolve_states
 from ..telemetry import (
     RETRIEVAL_LATENCY_MS,
-    RETRIEVAL_MODEL_FALLBACK,
     RETRIEVAL_MODEL_QUERY,
     RETRIEVAL_MODEL_REFUSED,
     RETRIEVAL_OBSERVATION_RANK_CORR,
@@ -307,6 +306,25 @@ def known_memory_types(
 #: switch, which must spend nothing on the cross-encoder. Every other outcome serves the
 #: plain read, including its reranker pass.
 _NO_RERANK = frozenset({"applied", "disabled"})
+
+
+def _failed_selection(exc: Exception, candidates: int) -> Selection:
+    """The ranked-stage outcome for an exception `Selector.select()` raised.
+
+    `SelectorRefused` means the provider answered 401 or 403. `TimeoutError` means the
+    call ended after its deadline, and `ValueError` means the reply could not be read.
+    Any other exception is a `provider` fallback when it carries an HTTP `status_code`,
+    and an `error` fallback when it does not.
+    """
+    if isinstance(exc, SelectorRefused):
+        return Selection(outcome="key_rejected", status=exc.status, candidates=candidates)
+    if isinstance(exc, TimeoutError):
+        return Selection(outcome="fallback", reason="timeout", candidates=candidates)
+    if isinstance(exc, ValueError):
+        return Selection(outcome="fallback", reason="malformed", candidates=candidates)
+    status = getattr(exc, "status_code", None)
+    return Selection(outcome="fallback", reason="provider" if status is not None else "error",
+                     status=status, candidates=candidates)
 
 
 class HybridRetriever:
@@ -1413,41 +1431,14 @@ class HybridRetriever:
                 usage = Usage()
                 try:
                     chosen = selector.select(query, candidates, asked_on=now, usage=usage)
-                except SelectorRefused as exc:
-                    # The provider answered 401 or 403.
-                    self._select_ms(rec, t0)
-                    if rec is not None:
-                        rec.counter(RETRIEVAL_MODEL_REFUSED, reason="key_rejected")
-                    return (Selection(outcome="key_rejected", status=exc.status,
-                                      candidates=len(candidates)),
-                            [], turn_order)
-                except TimeoutError:
-                    self._select_ms(rec, t0)
-                    if rec is not None:
-                        rec.counter(RETRIEVAL_MODEL_FALLBACK, reason="timeout")
-                    return (Selection(outcome="fallback", reason="timeout",
-                                      candidates=len(candidates)),
-                            [], turn_order)
-                except ValueError:
-                    self._select_ms(rec, t0)
-                    if rec is not None:
-                        rec.counter(RETRIEVAL_MODEL_FALLBACK, reason="malformed")
-                    return (Selection(outcome="fallback", reason="malformed",
-                                      candidates=len(candidates)),
-                            [], turn_order)
                 except Exception as exc:                      # noqa: BLE001 - deliberate
+                    # `Selector.select()` reports a failure by raising, so each kind of
+                    # exception is turned back into the outcome it stands for.
                     self._select_ms(rec, t0)
-                    status = getattr(exc, "status_code", None)
-                    reason = "provider" if status is not None else "error"
+                    selection = _failed_selection(exc, len(candidates))
                     if rec is not None:
-                        if status is not None:
-                            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=reason,
-                                       status=str(status))
-                        else:
-                            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=reason)
-                    return (Selection(outcome="fallback", reason=reason, status=status,
-                                      candidates=len(candidates)),
-                            [], turn_order)
+                        _count(rec, selection)
+                    return selection, [], turn_order
 
                 # With no candidates `select()` makes no model call, so neither the
                 # query counter nor the latency is emitted, though the outcome is still
