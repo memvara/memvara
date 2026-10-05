@@ -3605,6 +3605,12 @@ Hard API requirements — these are current and getting them wrong is a 400:
   snake_case. The engine drops what is malformed too (`WritePipeline._admissible`), but a
   backend that validates keeps its own rules, such as the confidence it gives a value it
   cannot read, instead of the engine's defaults.
+- Both shipped backends get `extract`, `resolve_predicate`, `classify_predicate` and
+  `judge_replacement` from one class, `memvara.llm._shape.StructuredCalls`, which builds
+  each prompt and validates each answer as above. A backend that inherits it defines
+  `_ask(system, prompt, schema, usage, name)`, which sends one structured request and
+  returns the parsed JSON object. It sets `_extract_system` or `_claim_schema` to use an
+  extraction prompt or claim schema other than the shipped ones, as `OpenAILLM` does.
 
 ### The `Multimodal` protocol
 

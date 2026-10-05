@@ -13,29 +13,19 @@ import os
 from typing import Any, Sequence
 
 from ..ingest.errors import MediaUnsupported
-from ..types import Episode
 from . import _shape, _tools
 from ._shape import attr_or_key
-from .guidance import Guidance, with_guidance
 from .base import (
     TOOL_STEP_MAX_TOKENS,
     MalformedToolOutput,
     Message,
     ToolRun,
     ToolSpec,
-    CLAIM_SCHEMA,
-    EXTRACT_SYSTEM,
-    JUDGE_SCHEMA,
-    JUDGE_SYSTEM,
-    PREDICATE_SCHEMA,
-    PREDICATE_SYSTEM,
     COMPOSE_SCHEMA,
     COMPOSE_SYSTEM,
     DESCRIBE_IMAGE_MAX_TOKENS,
     DESCRIBE_IMAGE_PROMPT,
     DESCRIBE_IMAGE_SYSTEM,
-    RESOLVE_SCHEMA,
-    RESOLVE_SYSTEM,
     Usage,
 )
 
@@ -58,7 +48,7 @@ def _first_text(response: Any) -> str:
     return ""
 
 
-class AnthropicLLM:
+class AnthropicLLM(_shape.StructuredCalls):
     """Structured extraction and predicate resolution via the Messages API."""
 
     #: A real backend, so every call it makes is billed to `WriteReceipt.llm_calls`.
@@ -146,6 +136,15 @@ class AnthropicLLM:
             attr_or_key(response, "stop_reason"), "max_tokens", model=self.model,
             budget=self.max_tokens)
         return response
+
+    def _ask(self, system: str, prompt: str, schema: dict[str, Any],
+             usage: Usage | None, name: str) -> dict[str, Any]:
+        """One structured request, parsed.
+
+        `name` is not sent, because the Messages API does not take a name for a schema.
+        """
+        return _shape.parse_json_object(
+            _first_text(self._call(system, prompt, schema, usage)))
 
     # -- Chat protocol --------------------------------------------------------
 
@@ -250,32 +249,7 @@ class AnthropicLLM:
             f"AnthropicLLM cannot transcribe {mime}, because the Anthropic API does not "
             "accept audio or video; configure OpenAILLM to transcribe it")
 
-    # -- LLM protocol -------------------------------------------------------
-
-    def extract(
-        self, episodes: Sequence[Episode], known_predicates: Sequence[str],
-        *, usage: Usage | None = None, guidance: Guidance | None = None,
-    ) -> list[dict[str, Any]]:
-        if not episodes:
-            return []  # nothing to extract from, and a call we should not pay for
-        response = self._call(
-            with_guidance(EXTRACT_SYSTEM, guidance),
-            _shape.extract_prompt(episodes, known_predicates),
-            CLAIM_SCHEMA,
-            usage,
-        )
-        return _shape.shape_claims(
-            _shape.parse_json_object(_first_text(response)), len(episodes))
-
-    def resolve_predicate(self, surface: str, candidates: Sequence[str],
-                          *, usage: Usage | None = None) -> dict[str, Any]:
-        """Merge a novel surface form onto an existing predicate, or declare it new."""
-        offered = _shape.bounded(candidates, _shape.MAX_CANDIDATES)
-        response = self._call(
-            RESOLVE_SYSTEM, _shape.resolve_prompt(surface, offered), RESOLVE_SCHEMA,
-            usage)
-        return _shape.shape_resolution(
-            _shape.parse_json_object(_first_text(response)), offered)
+    # -- Derived relation terms ---------------------------------------------
 
     def compose_relations(self, predicates: Sequence[str]) -> dict[str, int]:
         """Relation terms that are a composition of two or more of these predicates.
@@ -289,19 +263,3 @@ class AnthropicLLM:
             COMPOSE_SYSTEM, _shape.compose_prompt(offered), COMPOSE_SCHEMA, None)
         return _shape.shape_composition(
             _shape.parse_json_object(_first_text(response)))
-
-    def classify_predicate(self, predicate: str, example: str,
-                           *, usage: Usage | None = None) -> dict[str, str]:
-        """Legacy acquisition call, kept for backends and callers that still use it."""
-        prompt = f"predicate: {_shape.snake_case(predicate)}\nexample usage: {example}"
-        response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA, usage)
-        return _shape.spec_fields(_shape.parse_json_object(_first_text(response)))
-
-    # -- ReplacementJudge protocol -------------------------------------------
-
-    def judge_replacement(self, new_text: str, old_text: str,
-                          *, usage: Usage | None = None) -> dict[str, bool]:
-        """Is `new_text` a newer version of `old_text`? See `JUDGE_SYSTEM`."""
-        response = self._call(
-            JUDGE_SYSTEM, _shape.judge_prompt(new_text, old_text), JUDGE_SCHEMA, usage)
-        return _shape.shape_verdict(_shape.parse_json_object(_first_text(response)))

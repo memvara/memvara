@@ -29,10 +29,8 @@ import json
 from typing import Any, Mapping, Sequence
 
 from ..ingest.errors import MediaUnsupported
-from ..types import Episode
 from . import _shape, _tools
 from ._shape import attr_or_key
-from .guidance import Guidance, with_guidance
 from .base import (
     TOOL_STEP_MAX_TOKENS,
     MalformedToolOutput,
@@ -44,13 +42,7 @@ from .base import (
     DESCRIBE_IMAGE_PROMPT,
     DESCRIBE_IMAGE_SYSTEM,
     EXTRACT_SYSTEM,
-    JUDGE_SCHEMA,
-    JUDGE_SYSTEM,
     MAX_CLAIMS,
-    PREDICATE_SCHEMA,
-    PREDICATE_SYSTEM,
-    RESOLVE_SCHEMA,
-    RESOLVE_SYSTEM,
     Usage,
     bounded_claim_schema,
     self_hosted_claim_schema,
@@ -125,7 +117,7 @@ def _arguments(raw: Any) -> Any:
         return raw
 
 
-class OpenAILLM:
+class OpenAILLM(_shape.StructuredCalls):
     """Structured extraction and predicate resolution via Chat Completions."""
 
     #: A real backend, so every call it makes is billed to `WriteReceipt.llm_calls`.
@@ -248,6 +240,12 @@ class OpenAILLM:
         _shape.refuse_if_truncated(
             _finish_reason(response), "length", model=self.model, budget=self.max_tokens)
         return response
+
+    def _ask(self, system: str, prompt: str, schema: dict[str, Any],
+             usage: Usage | None, name: str) -> dict[str, Any]:
+        """One structured request, parsed."""
+        return _shape.parse_json_object(
+            _first_text(self._call(system, prompt, schema, usage, name=name)))
 
     # -- Chat protocol --------------------------------------------------------
 
@@ -403,55 +401,6 @@ class OpenAILLM:
         # string, and a test double may return a dict.
         text = response if isinstance(response, str) else attr_or_key(response, "text")
         return str(text or "").strip()
-
-    # -- LLM protocol -------------------------------------------------------
-
-    def extract(
-        self, episodes: Sequence[Episode], known_predicates: Sequence[str],
-        *, usage: Usage | None = None, guidance: Guidance | None = None,
-    ) -> list[dict[str, Any]]:
-        if not episodes:
-            return []  # nothing to extract from, and a call we should not pay for
-        response = self._call(
-            # Appended to whichever prompt is in use, the shipped one or the replacement
-            # `extract_system` names: guidance adds a project's rules and never decides
-            # which base prompt a deployment runs.
-            with_guidance(self._extract_system, guidance),
-            _shape.extract_prompt(episodes, known_predicates),
-            self._claim_schema,
-            usage,
-            name="claims",
-        )
-        return _shape.shape_claims(
-            _shape.parse_json_object(_first_text(response)), len(episodes))
-
-    def resolve_predicate(self, surface: str, candidates: Sequence[str],
-                          *, usage: Usage | None = None) -> dict[str, Any]:
-        """Merge a novel surface form onto an existing predicate, or declare it new."""
-        offered = _shape.bounded(candidates, _shape.MAX_CANDIDATES)
-        response = self._call(
-            RESOLVE_SYSTEM, _shape.resolve_prompt(surface, offered), RESOLVE_SCHEMA,
-            usage, name="predicate_resolution")
-        return _shape.shape_resolution(
-            _shape.parse_json_object(_first_text(response)), offered)
-
-    def classify_predicate(self, predicate: str, example: str,
-                           *, usage: Usage | None = None) -> dict[str, str]:
-        """Legacy acquisition call, kept for backends and callers that still use it."""
-        prompt = f"predicate: {_shape.snake_case(predicate)}\nexample usage: {example}"
-        response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA, usage,
-                              name="predicate_spec")
-        return _shape.spec_fields(_shape.parse_json_object(_first_text(response)))
-
-    # -- ReplacementJudge protocol -------------------------------------------
-
-    def judge_replacement(self, new_text: str, old_text: str,
-                          *, usage: Usage | None = None) -> dict[str, bool]:
-        """Is `new_text` a newer version of `old_text`? See `JUDGE_SYSTEM`."""
-        response = self._call(
-            JUDGE_SYSTEM, _shape.judge_prompt(new_text, old_text), JUDGE_SCHEMA, usage,
-            name="replacement_verdict")
-        return _shape.shape_verdict(_shape.parse_json_object(_first_text(response)))
 
     def __repr__(self) -> str:
         return f"<OpenAILLM {self.model}>"
