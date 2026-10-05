@@ -1180,14 +1180,15 @@ suggestion must not turn it into an exception the caller retries.
   fails open, keeping the claim and warning once. Under the default `HashingEmbedder`
   nothing is ever rescued (n-gram cosines on zero-overlap pairs measure 0.0–0.11,
   far under the floor), so `"auto"` degrades to the strict check there.
-- **The order the model's items are checked in.** `_admissible` runs first, on the raw
-  reply: it drops a reply that is not a list, an item that is not an object, an item with
-  no `source_index` naming one of the batch's turns, an item whose predicate is not text,
-  and an item whose subject or object is not text or a finite number. With
-  `extraction_chunks`, `_mapped` maps each piece's reply back to the batch first, and it
-  drops a reply that is not a list and an item that is not an object itself. A backend that
-  validates its own output never sends these, but one that does not may, and everything
-  after this reads the items as well formed (#303, #306). Then the pollution guard, the
+- **The order the model's items are checked in.** `_mapped` reads every extraction reply
+  first, whether the batch went out as one call or in pieces. It drops a reply that is not
+  a list and an item that is not an object, and it maps each item's `source_index` back to
+  the batch. `_admissible` runs next, on a list of objects: it drops an item with no
+  `source_index` naming one of the batch's turns, an item whose predicate is not text, and
+  an item whose subject or object is not text or a finite number. The agentic writer's
+  proposals reach `_admissible` directly, and they are always objects. A backend that
+  validates its own output never sends a malformed item, but one that does not may, and
+  everything after this reads the items as well formed (#303, #306). Then the pollution guard, the
   closed vocabulary, `_grounded` (the check above), predicate acquisition, and last
   `_claim_from_dict`, which builds each claim and repairs a polarity, confidence or memory
   type it cannot read to its default. Grounding is checked before acquisition, so a claim

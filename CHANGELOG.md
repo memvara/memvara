@@ -60,6 +60,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   full-text query builder share one regular expression, which keeps exactly the
   characters they kept before. The ranked read stage counts its failures through the same
   counter as the other stages, with the same counter names and values.
+- **Two internal names changed.** `memvara.aio.NOT_WRAPPED`, an empty set, is removed, and
+  `memvara.retrieve.temporal.rank()` no longer takes `half_life_days` or `floor`, which no
+  caller passed. Neither is exported from the package.
 - **`telemetry.rank_correlation` uses `statistics.correlation`.** Every documented and
   tested value is the same. On arbitrary input, a result can differ from before in the
   last bit of the floating-point value.
