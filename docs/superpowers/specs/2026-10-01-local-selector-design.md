@@ -877,3 +877,10 @@ published.
 
 **Prediction:** agreement 0.60, with a range of 0.45 to 0.75. The local model was trained on
 LongMemEval, whose questions look little like an agent's recall queries.
+
+**Amended before any agreement was computed (2026-10-05).** The first run stopped after 34
+calls because the model selector failed on 33 of them: gpt-oss-120b reasons before it
+answers, and the selector's 400-token cap left no room for the JSON on 40 real candidates.
+No model-selector result existed, so no agreement had been computed. The bench adapter now
+raises that cap to 4,000 tokens and asks Bedrock for low reasoning effort; everything else
+in this section is unchanged, and the run starts again from the first call.
