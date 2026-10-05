@@ -479,9 +479,36 @@ and worse on 17, against a pass line of +1.0 with the interval above zero. The p
 was +1.5 (−1 to +4). The model was trained only on LongMemEval, so the ordering it learned
 carries over to conversations between two people it has never seen.
 
-**Gate G4,** the judged LongMemEval run, is staged as MemoryBench run `memvara-local-e199`
-(the parity run's saved search results, reordered as the local selector ships them) and
-has not run yet: the reader-and-judge gateway account has no credit.
+**Gate G4: judged answers.** The gpt-5.4 gateway had no credit, so the reader and judge ran
+on `openai.gpt-oss-120b` through Amazon Bedrock (us-east-1, the Responses API on
+`bedrock-mantle`). The paid selector's 177 was judged by gpt-5.4 and cannot be compared
+with that, so the paid arm was re-answered and re-judged on the same model (spec §16, amended
+before the run). Both arms use the parity run's saved search results and a 720-token budget:
+`memvara-local-e199` reorders them as `select_ordered()` ships, `memvara-paid-oss199` keeps
+the paid selector's order.
+
+| Arm | Correct of 199 |
+|---|---|
+| paid selector, gpt-5.4 reader and judge (`memvara-ranked-parity2`, reference) | 177 |
+| paid selector, gpt-oss-120b reader and judge | 171 |
+| **local selector, gpt-oss-120b reader and judge** | **165** |
+
+| Type | Questions | Local | Paid |
+|---|---|---|---|
+| knowledge-update | 31 | 26 | 27 |
+| multi-session | 53 | 42 | 43 |
+| single-session-assistant | 22 | 18 | 21 |
+| single-session-preference | 12 | 7 | 7 |
+| single-session-user | 28 | 26 | 28 |
+| temporal-reasoning | 53 | 46 | 45 |
+
+**G4 fails.** Against the paid arm the local arm wins 10 questions and loses 16, a net of
+−6 against a line of −3. The prediction was −2 (−8 to +4). The largest loss is on
+questions about what the assistant said (18 against 21), the type whose whole-turn coverage
+was lowest. Two cautions: the SDK drops the temperature setting for a reasoning model, so
+both arms' answers are sampled rather than fixed, and 26 discordant questions is a small
+sample, which is why section 6 calls G4 a screen. The result agrees with the offline gap,
+0.928 against 0.958 coverage. The Bedrock spend for both arms was well under a dollar.
 
 The spec's §10 records what has to be decided before this work goes on.
 

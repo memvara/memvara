@@ -756,3 +756,13 @@ now run on the same saved search results with the same reader, judge and 720-tok
 
 **Pass:** local's paired net against paid of at least −3 questions out of 199, section 6's
 relative line. **Prediction:** −2, with a range of −8 to +4.
+
+**G4 result (2026-10-05): fail.** With gpt-oss-120b reading and judging both arms, the local
+arm answers 165 of 199 and the paid arm 171: 10 wins and 16 losses, a net of −6 against the
+line of −3. The largest loss is questions about what the assistant said (18 against 21).
+Answers are sampled, because the SDK drops temperature for a reasoning model. Under section
+6's rules the fine-tuned model does not replace the paid selector and Step 2, making it the
+default, does not ship. G3 passed, so the model's gain over the stock model holds on data it
+never saw. Whether the local selector improves on the read a user without a key gets today
+(the routed order, 171 of 199 under gpt-5.4) was not part of this gate and is unmeasured
+under gpt-oss-120b.
