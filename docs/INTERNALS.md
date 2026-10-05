@@ -3250,8 +3250,12 @@ tear it.
 claim and turn writes, tier 0's near-duplicate check, the grounding rescue, the agentic
 extractor's search, both vector legs of a read and the rewrite path's query encoding, the
 merge step of `consolidate()`, and `_advise_replacements`. `NoEmbedder.encode` raises, so a
-place that skipped the question fails where it happens instead of storing or comparing
-vectors nobody asked for. `_check_embedder` refuses such an open when the store holds
+place that skipped the question raises there, or warns where the call is wrapped to keep a
+write going when embedding fails. With nothing to vouch for a paraphrase, the grounding
+rescue rescues nothing, so `reject_ungrounded="auto"` is the lexical check alone; keeping
+the claim instead would switch off the default guard against invented facts. The CrewAI
+backend, which is handed a query vector and never its text, refuses such a store when it
+is built. `_check_embedder` refuses such an open when the store holds
 vectors, and `_refuse_before_upgrade` refuses it before an older file is upgraded. It also
 refuses an embedder on a store whose record says `none` while the store holds a claim or a
 turn, because only what is written from then on would get a vector, and nothing could say

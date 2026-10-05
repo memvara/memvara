@@ -15,10 +15,13 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   builds or loads an embedder, writes no vector for any claim or turn, and finds things by
   text alone: `search()` and `recall()` run their keyword leg and skip the vector leg.
   It is for a caller that reads its store by subject and predicate and never searches by
-  meaning, such as memvara-code, where vectors were about half of every store. Three
-  things that compare vectors are off in this mode: `add()`'s near-duplicate check (a
-  restated fact is still collapsed when it is reconciled), the merge step of
-  `consolidate()`, and `advise_replacements=True`, which is refused. A store that already
+  meaning, such as memvara-code, where vectors were about half of every store. What
+  compares vectors works differently in this mode. `add()` skips its near-duplicate check,
+  so a restated turn reaches extraction, which costs a model call when one is configured;
+  the fact is still collapsed when it is reconciled. `reject_ungrounded="auto"` has no
+  embedder to vouch for a paraphrase, so it is the lexical check alone. The merge step of
+  `consolidate()` merges nothing, `advise_replacements=True` is refused, and the CrewAI
+  backend refuses such a store. A store that already
   holds vectors is refused until they are dropped with
   `Memvara(path, embeddings=False, reembed=True)`, and a store written without vectors is
   refused by an embedder until it embeds everything with `reembed=True`. The store's

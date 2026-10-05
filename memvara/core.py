@@ -905,6 +905,10 @@ class Memvara:
                 "was opened before this call, so whether it is encrypted, and with which "
                 "key, is already decided. Pass SQLiteStore(path, encryption=True) as the "
                 "store, or Memvara(path, encryption=True).")
+        if not isinstance(embeddings, bool):
+            # `None` would read as false and quietly switch vectors off for a wrapper
+            # that forwards an optional argument.
+            raise TypeError(f"embeddings= takes True or False, not {embeddings!r}")
         if not embeddings:
             # A store that keeps no vectors has no embedder to choose, so one passed here
             # would be ignored. Saying so is better than writing a store the caller
@@ -5006,7 +5010,13 @@ class Memvara:
         # object as it was: rebound first, it held the new embedder beside the old
         # vectors, and with one of the same width every search then compared two
         # unrelated vector spaces with nothing raised.
-        _drop_vectors(self.store)
+        #
+        # Skipped when the store keeps no vectors and none are about to be written,
+        # because there is nothing to drop and the drop needs the store to itself: a
+        # second handle opening with `embeddings=False, reembed=True` out of habit would
+        # otherwise be refused while the first is open.
+        if embeds(embedder or self.embedder) or stored_dim(self.store) is not None:
+            _drop_vectors(self.store)
 
         if embedder is not None:
             self.embedder = embedder

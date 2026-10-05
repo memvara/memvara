@@ -380,12 +380,17 @@ store memvara-code measured.
 
 In this mode no embedder is built or loaded, no vector is written, and `search()` and
 `recall()` rank by text alone, through the keyword leg; the vector leg is skipped and the
-query is never embedded. Three things that work by comparing vectors are off:
+query is never embedded. What works by comparing vectors behaves differently:
 
-- `add()` does not look for a near-duplicate of each turn before extracting it. A fact
-  stated twice is still collapsed into one claim when it is reconciled.
+- `add()` does not look for a near-duplicate of each turn before extracting it, so a
+  restated turn reaches extraction, which costs a model call when one is configured. A
+  fact stated twice is still collapsed into one claim when it is reconciled.
+- `reject_ungrounded="auto"` has no embedder to vouch for a paraphrase, so a claim that
+  shares no words with its turn is rejected, as under `reject_ungrounded=True`.
 - `consolidate()` merges nothing; it still decays and promotes.
-- `advise_replacements=True` is refused with a `TypeError`, and so is `embedder=`.
+- `advise_replacements=True` is refused with a `TypeError`, and so is `embedder=`. The
+  CrewAI backend refuses such a store too, because CrewAI searches by vector.
+- `embeddings=` takes `True` or `False` only; `None` is a `TypeError`.
 
 The choice is recorded beside the store, in `<db>.embedder.json`, as the embedder
 `"none"`, and both directions of a change are refused until you migrate:

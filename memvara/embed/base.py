@@ -65,8 +65,8 @@ class NoEmbedder:
 
     `encode` refuses rather than returning zeros. Every place in this package that would
     embed asks `embeds()` first, so a call that reaches `encode` is a place that question
-    was missed, and it fails there instead of storing or comparing vectors nobody asked
-    for.
+    was missed. It raises there, or, inside one of the few calls wrapped to keep a write
+    going when embedding fails, it warns; either way no vector is stored or compared.
 
     >>> embeds(NoEmbedder()), embeds(HashingEmbedder(dim=8))
     (False, True)

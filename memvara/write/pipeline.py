@@ -1573,9 +1573,12 @@ class WritePipeline:
         mode promises cannot be obtained.
         """
         if not embeds(self.embedder):
-            # `embeddings=False`: there is no second opinion to ask, and the lexical
-            # trigger alone is not grounds for rejection, as when embedding fails below.
-            return True
+            # `embeddings=False`: there is no embedder to vouch for a paraphrase, so
+            # nothing is rescued and `"auto"` is the lexical check alone. Keeping the
+            # claim instead would switch off the default guard against invented facts
+            # for good, which is not what the fail-open below is for: that covers an
+            # embedder that failed once, and warns.
+            return False
         try:
             chunks = [source[i:i + _GROUNDING_CHUNK_CHARS]
                       for i in range(0, max(len(source), 1), _GROUNDING_CHUNK_CHARS)]

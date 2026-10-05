@@ -143,7 +143,9 @@ def merge_pass(sweep: Sweep, embedder: Embedder, registry: PredicateRegistry, *,
     """
     if not embeds(embedder):
         # `embeddings=False`: near-identical claims are found by comparing vectors, and
-        # the store keeps none, so nothing is merged.
+        # the store keeps none, so nothing is merged. Still counted, at zero, as below.
+        if sweep.telemetry is not None:
+            sweep.telemetry.counter(CONSOLIDATE_MERGED, 0)
         return 0
     if threshold is None:
         threshold = calibration_of(embedder).merge

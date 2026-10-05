@@ -354,6 +354,15 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         # reason, because the alternative under stdio is a traceback in a log the user
         # has to go looking for. The message already carries the store's width and the
         # name of whatever wrote it; all this adds is where to type them.
+        if "embeddings=False" in str(exc):
+            # A store written by the library with `embeddings=False`. The server always
+            # embeds, so no value of MEMVARA_EMBEDDER opens it; the store has to be given
+            # vectors once, from the library.
+            print(f"memvara-mcp: {exc}\nThis server always keeps vectors, so it cannot "
+                  "open this store as it is. Give the store vectors once from Python, with "
+                  "Memvara(path, embedder=..., reembed=True), and start the server again. "
+                  "See docs/API.md, \"A store without vectors\".", file=err)
+            return 2
         print(f"memvara-mcp: {exc}\nFrom this server, set MEMVARA_EMBEDDER to match the "
               "store — 'hashing:<dim>' or 'local:<model>', spelled as above — rather "
               "than editing code. See docs/DEPLOY.md.", file=err)

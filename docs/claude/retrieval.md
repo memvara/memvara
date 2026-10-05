@@ -175,7 +175,7 @@ JSON, under a header that names the text as data rather than instruction.
 - **A store can keep no vectors at all.** `Memvara(path, embeddings=False)` holds a
   `NoEmbedder`, records `none` as its embedder, and skips every vector leg, so reads rank by
   text alone. Every place that would embed asks `embeds()` first, and `NoEmbedder.encode`
-  raises so that a missed place fails loudly. A store with vectors is refused in this mode
+  raises, so a missed place raises or, inside a call wrapped to keep a write going, warns. A store with vectors is refused in this mode
   until `reembed=True` drops them, and an embedder is refused on a store written this way
   until `reembed=True` embeds it. `tests/test_store_without_vectors.py` holds both.
 - **A store whose record is lost says so, and records the embedder again.** When

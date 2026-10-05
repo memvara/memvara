@@ -74,6 +74,7 @@ import numpy as np
 
 from ..compat import NOTE_PREDICATE, note_subject
 from ..compat import ensure_note_predicate
+from ..embed.base import embeds
 from ..types import Claim, Result, as_utc
 from ._common import IntegrationError, bind, require, scope_kw
 
@@ -188,6 +189,13 @@ class MemvaraStorage:
             )
         self.memory, self.scope = bind(memory, tenant=tenant, user=user, agent=agent,
                                        session=session)
+        if not embeds(getattr(self.memory, "embedder", None)):
+            # CrewAI hands this backend a query vector and never the query text, so a
+            # store that keeps no vectors has nothing to compare it with.
+            raise TypeError(
+                "CrewAI searches by vector, and this memory was opened with "
+                "embeddings=False, which keeps none. Give it a Memvara opened with an "
+                "embedder.")
         self.on_delete = on_delete
         #: How many ranked results to pull per requested one when `scope_prefix` or
         #: `categories` will thin them afterwards. Post-ranking filters can under-fill a

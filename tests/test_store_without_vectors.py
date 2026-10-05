@@ -7,8 +7,9 @@ write or read, the store finds things by text alone, a store that already holds 
 is refused until they are dropped, and a store written without vectors is refused by an
 embedder until it embeds everything.
 
-`NoEmbedder.encode` raises, so a test passing here also shows that no code path it
-exercises tried to embed.
+`NoEmbedder.encode` raises, so a path these tests exercise that tried to embed would
+fail, or, where a call is wrapped to keep a write going, warn; the tests that cover those
+paths turn warnings into errors.
 """
 
 from __future__ import annotations
@@ -193,19 +194,88 @@ def test_turns_and_rewritten_phrasings_are_searched_by_text_alone(tmp_path):
     assert "bicycle" in turns
 
 
-def test_the_grounding_rescue_keeps_the_claim_when_there_is_no_vector_to_ask():
-    """Kept as when embedding fails, but without the warning that says it failed: a
-    store that keeps no vectors has nothing wrong with it."""
-    mem = Memvara(embeddings=False, llm=NullLLM())
+def test_an_invented_fact_is_still_rejected_without_an_embedder_to_vouch_for_it():
+    """`reject_ungrounded="auto"` keeps a claim that shares no words with its turn only
+    when the embedder says it is a paraphrase. With no embedder, nothing vouches for it,
+    so the default guard against invented facts still rejects it. A first version kept
+    every such claim, which switched that guard off for good."""
+    from test_pipeline import CountingLLM
+
+    llm = CountingLLM(claims=[
+        {"subject": "user", "predicate": "likes", "object": "tea", "polarity": 1,
+         "memory_type": "semantic", "confidence": 0.9, "source_index": 0}])
+    mem = Memvara(embeddings=False, llm=llm)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert mem.writer._grounding_rescued("Porto", "We moved somewhere warmer.") is True
+        receipt = mem.add("The quarterly review is next Tuesday.")
+    assert receipt.added == [] and receipt.ungrounded == 1
 
 
-def test_replacement_advice_stops_when_the_vectors_are_dropped_later():
-    """`reembed(NoEmbedder())` can drop the vectors from an instance built with them."""
-    mem = Memvara(embeddings=False, llm=NullLLM())
-    assert mem._advise_replacements(None, None, None) is None  # type: ignore[arg-type]
+def test_replacement_advice_stops_when_the_vectors_are_dropped_later(tmp_path):
+    """`reembed(NoEmbedder())` drops the vectors from an instance built to advise. Its
+    next write asks no judge and warns of no failure."""
+    from test_advisory import Judge
+
+    judge = Judge(replaces=lambda new, old: True)
+    with Memvara(str(tmp_path / "s.db"), embedder=HashingEmbedder(dim=64), llm=judge,
+                 advise_replacements=True) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+        mem.reembed(NoEmbedder())
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            receipt = mem.remember("user", "works_at", "Acme")
+    # It closed nothing, so it is a write the advisor is asked about.
+    assert receipt.added and not receipt.closed
+    assert receipt.may_replace == [] and judge.pairs == []
+
+
+def test_reembed_on_a_store_with_no_vectors_does_not_need_it_to_itself(tmp_path):
+    """There is nothing to drop, so a second handle opening with `reembed=True` out of
+    habit is not refused while the first is open."""
+    db = str(tmp_path / "s.db")
+    with Memvara(db, embeddings=False, llm=NullLLM()) as first:
+        first.remember("user", "lives_in", "Lisbon")
+        with Memvara(db, embeddings=False, llm=NullLLM(), reembed=True) as second:
+            assert second.stats()["claims"] == 1
+
+
+def test_embeddings_takes_only_true_or_false():
+    with pytest.raises(TypeError, match="takes True or False"):
+        Memvara(embeddings=None, llm=NullLLM())  # type: ignore[arg-type]
+
+
+def test_the_merge_step_is_still_counted_at_zero():
+    from memvara.telemetry import CONSOLIDATE_MERGED, MemoryRecorder
+
+    recorder = MemoryRecorder()
+    mem = Memvara(embeddings=False, llm=NullLLM(), telemetry=recorder)
+    mem.remember("user", "likes", "green tea")
+    mem.remember("user", "likes", "black coffee")
+    mem.consolidate()
+    assert any(name == CONSOLIDATE_MERGED for name, *_ in recorder.counters)
+    assert recorder.total(CONSOLIDATE_MERGED) == 0
+
+
+def test_the_crewai_backend_refuses_a_store_without_vectors():
+    from memvara.integrations.crewai import MemvaraStorage
+
+    with pytest.raises(TypeError, match="CrewAI searches by vector"):
+        MemvaraStorage(Memvara(embeddings=False, llm=NullLLM()))
+
+
+def test_the_server_says_how_to_open_a_store_written_without_vectors(tmp_path):
+    import io
+
+    from memvara.server.cli import main
+
+    path = str(tmp_path / "memory.db")
+    with Memvara(path, embeddings=False, llm=NullLLM()) as mem:
+        mem.remember("user", "lives_in", "Lisbon")
+    err = io.StringIO()
+    assert main([], env={"MEMVARA_DB": path, "MEMVARA_EMBEDDER": "hashing"},
+                stdout=io.StringIO(), stderr=err) == 2
+    assert "reembed=True" in err.getvalue()
+    assert "set MEMVARA_EMBEDDER" not in err.getvalue()
 
 
 def test_the_agentic_search_tool_answers_by_text_alone():
