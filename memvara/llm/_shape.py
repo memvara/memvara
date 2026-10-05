@@ -323,6 +323,18 @@ def shape_resolution(parsed: dict[str, Any], offered: Sequence[str]) -> dict[str
     return {"canonical": canonical, **spec_fields(parsed)}
 
 
+def attr_or_key(obj: Any, name: str) -> Any:
+    """`obj.name`, or `obj[name]` when `obj` is a dict, or `None` when it has neither.
+
+    Provider SDKs return objects, and the test doubles return plain dicts, so every
+    backend reads a response field through this rather than assuming one form.
+
+        >>> attr_or_key({"text": "hi"}, "text"), attr_or_key(object(), "text")
+        ('hi', None)
+    """
+    return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+
+
 def record_usage(response: Any, usage: "Usage | None",
                  input_field: str, output_field: str) -> None:
     """Add one provider response's token counts to `usage`, if both are present.
@@ -343,11 +355,11 @@ def record_usage(response: Any, usage: "Usage | None",
     """
     if usage is None:
         return
-    block = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+    block = attr_or_key(response, "usage")
     if block is None:
         return
     def _field(name: str) -> int | None:
-        raw = block.get(name) if isinstance(block, dict) else getattr(block, name, None)
+        raw = attr_or_key(block, name)
         return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else None
     got_in, got_out = _field(input_field), _field(output_field)
     if got_in is None or got_out is None:

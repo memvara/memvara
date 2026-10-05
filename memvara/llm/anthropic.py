@@ -15,6 +15,7 @@ from typing import Any, Sequence
 from ..ingest.errors import MediaUnsupported
 from ..types import Episode
 from . import _shape, _tools
+from ._shape import attr_or_key
 from .guidance import Guidance, with_guidance
 from .base import (
     TOOL_STEP_MAX_TOKENS,
@@ -45,18 +46,6 @@ IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 
-def _stop_reason(response: Any) -> Any:
-    """Why generation stopped, or `None` if the response does not say."""
-    if isinstance(response, dict):
-        return response.get("stop_reason")
-    return getattr(response, "stop_reason", None)
-
-
-def _field(block: Any, name: str) -> Any:
-    """A content block's field, from an SDK object or a plain dict."""
-    return block.get(name) if isinstance(block, dict) else getattr(block, name, None)
-
-
 def _first_text(response: Any) -> str:
     """The first text block of a Messages response.
 
@@ -64,11 +53,8 @@ def _first_text(response: Any) -> str:
     reimplement the SDK's block types.
     """
     for block in getattr(response, "content", None) or []:
-        if isinstance(block, dict):
-            if block.get("type") == "text":
-                return str(block.get("text") or "")
-        elif getattr(block, "type", None) == "text":
-            return str(getattr(block, "text", "") or "")
+        if attr_or_key(block, "type") == "text":
+            return str(attr_or_key(block, "text") or "")
     return ""
 
 
@@ -157,7 +143,7 @@ class AnthropicLLM:
         # it, and why `chat()` does not need it. Anthropic reports the same event on the
         # response itself rather than per choice, and names it `"max_tokens"`.
         _shape.refuse_if_truncated(
-            _stop_reason(response), "max_tokens", model=self.model,
+            attr_or_key(response, "stop_reason"), "max_tokens", model=self.model,
             budget=self.max_tokens)
         return response
 
@@ -213,13 +199,13 @@ class AnthropicLLM:
                 output_config={"effort": self.effort},
             )
             _shape.record_usage(response, usage, "input_tokens", "output_tokens")
-            stop = _stop_reason(response)
+            stop = attr_or_key(response, "stop_reason")
             if stop in ("max_tokens", "refusal"):
                 raise MalformedToolOutput(f"{self.model} stopped with {stop!r}")
             blocks = list(getattr(response, "content", None) or [])
-            calls = [_tools.Call(str(_field(b, "id")), str(_field(b, "name")),
-                                 _field(b, "input"))
-                     for b in blocks if _field(b, "type") == "tool_use"]
+            calls = [_tools.Call(str(attr_or_key(b, "id")), str(attr_or_key(b, "name")),
+                                 attr_or_key(b, "input"))
+                     for b in blocks if attr_or_key(b, "type") == "tool_use"]
             return _tools.Step(_first_text(response), calls, blocks)
 
         def append(step: _tools.Step, results: list[tuple[str, str]]) -> None:
