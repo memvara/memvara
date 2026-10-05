@@ -2725,9 +2725,11 @@ class Memvara:
     # the source tree, and not cosmetic since `py.typed` started shipping: this is now
     # the first thing a typed caller meets.
     #
-    # Three variants rather than two, because the third is the one that keeps a
-    # *forwarding* caller working — `recall()` below, and any wrapper holding a runtime
-    # bool. Dropping it would turn "pass the flag through" into a type error.
+    # Two variants. Without the flag, or with `include_episodes=False`, the result is
+    # `list[Result]`. With a `bool`, which includes `True`, it is `list[Retrieved]`. The
+    # `bool` variant is also what keeps a *forwarding* caller working — `recall()` below,
+    # and any wrapper holding a runtime bool. Without it, passing the flag through would
+    # be a type error.
     @overload
     def search(self, query: str, *, k: int = ..., min_score: float = ..., tenant=...,
                anchored: bool = ..., ranked: bool = ..., query_rewrite: bool = ...,
@@ -2840,7 +2842,7 @@ class Memvara:
 
         The return type follows that flag: `list[Result]` without it, `list[Retrieved]`
         with it. `list[Any]` here is the implementation signature, which an overloaded
-        function cannot make narrower than every variant it serves; the three overloads
+        function cannot make narrower than every variant it serves; the two overloads
         above are the surface.
 
         `ranked=True` runs a configured `read_selector` over the reranked turns and
@@ -3546,10 +3548,11 @@ class Memvara:
         return cls.RECALL_UNRANKED.format(outcome=outcome)
 
     # `with_ids` decides what kind of thing comes back, so it decides the return type,
-    # exactly as `include_episodes` does on `search()` — and the three variants are the
-    # three there, for the third's reason as well: a wrapper holding a runtime bool
-    # (`ScopedMemvara.recall`, `AsyncMemvara.recall`, an MCP handler reading its own
-    # arguments dict) has to be able to pass the flag through without a type error.
+    # exactly as `include_episodes` does on `search()`. There are three variants here,
+    # and the third has the same reason as the `bool` variant of `search()`: a wrapper
+    # holding a runtime bool (`ScopedMemvara.recall`, `AsyncMemvara.recall`, an MCP
+    # handler reading its own arguments dict) has to be able to pass the flag through
+    # without a type error.
     @overload
     def recall(self, query: str, *, k: int = ..., min_score: float = ...,
                anchored: bool = ..., ranked: bool = ...,
@@ -5293,7 +5296,7 @@ class ScopedMemvara:
 
     # -- reading -------------------------------------------------------------
 
-    # Same three variants as `Memvara.search`, for the same reason. A view that widened
+    # The same variants as `Memvara.search`, for the same reason. A view that widened
     # the type back to the union would be the more-convenient object that types worse,
     # and this is the one the MCP server and every integration holds.
     @overload

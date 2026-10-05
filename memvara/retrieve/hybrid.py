@@ -614,8 +614,9 @@ class HybridRetriever:
         `valid_at` when that end is in the past. A caller's own `valid_at`, `as_of` or
         `valid_during` always wins, and a range starting after today is ignored.
         `.rewrite` reports the outcome, with the same five values as `ranked`; every
-        outcome except `applied` serves the plain read. It defaults to `False` here and to `True` on `Memvara.search`. A plain
-        read with `k <= 0` returns nothing, makes no call and reports no rewrite.
+        outcome except `applied` serves the plain read. It defaults to `False` here and to
+        `True` on `Memvara.search`. A plain read with `k <= 0` returns nothing, makes no call
+        and reports no rewrite.
 
         `where` is the caller's metadata and file-path filter (`memvara.filters`), or
         `None`. It is passed to every store method that limits rows, so a filtered search

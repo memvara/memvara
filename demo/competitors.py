@@ -58,9 +58,9 @@ def stored_notes(arm: str, notes: Sequence[str], *, seen: Sequence[Turn],
     """One arm's retrieved notes as the context a reader sees.
 
     An arm here returns a list of stored sentences and has to turn it into the shape the
-    memvara arms produce: `recall()`'s own header, one bullet per note, the shared character cap, and the
-    entry count taken from the rendered text after the cap rather than from the list that
-    went in. Written once because the three parts are each load-bearing and each easy to
+    memvara arms produce: `recall()`'s own header, one bullet per note, the shared character
+    cap, and the entry count taken from the rendered text after the cap rather than from the
+    list that went in. Written once because the three parts are each load-bearing and each easy to
     get subtly differently. The header carries the framing that tells a model the lines
     below are reference data and not instructions, and it is `recall()`'s so that a block
     of stored notes looks the same whichever system produced it — the harness blinds the
@@ -77,8 +77,9 @@ class CompetitorUnavailable(SystemExit):
     """An optional arm was asked for without what it needs. Raised with the fix in it.
 
     A `SystemExit`, like every other refusal a `demo/` entry point makes — see
-    `demo/hosted.py`'s credential checks. A missing package is something the person running the command has to go and fix, so the useful output is
-    the sentence saying what to do, not a traceback through the arm that noticed.
+    `demo/hosted.py`'s credential checks. A missing package is something the person running
+    the command has to go and fix, so the useful output is the sentence saying what to do,
+    not a traceback through the arm that noticed.
     """
 
 

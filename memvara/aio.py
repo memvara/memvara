@@ -869,7 +869,7 @@ class AsyncScopedMemvara:
 
     # -- reading -------------------------------------------------------------
 
-    # The same three variants as `ScopedMemvara.search`, for the reason given there and
+    # The same variants as `ScopedMemvara.search`, for the reason given there and
     # again on `AsyncMemvara.search`: this is the object a server layer holds, and it is
     # the one that must not be the more-convenient facade that types worse.
     @overload

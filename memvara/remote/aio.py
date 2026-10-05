@@ -154,7 +154,7 @@ class AsyncRemoteMemvara(_RemoteClient):
 
     # -- reading -------------------------------------------------------------
 
-    # The same three variants as `RemoteMemvara.search`, and they carry the same weight:
+    # The same variants as `RemoteMemvara.search`, and they carry the same weight:
     # they are what makes "calling code cannot tell which it holds" true of the *type* as
     # well as of the value. Without them `await mem.search(q)` types as `list[Retrieved]`
     # here and `list[Result]` on `AsyncMemvara`, so the same expression reading `.claim`
@@ -661,8 +661,7 @@ class AsyncScopedRemoteMemvara:
 
     # -- reading -------------------------------------------------------------
 
-    # The same three variants as `ScopedRemoteMemvara.search`, and they carry the same
-    # weight:
+    # The same variants as `ScopedRemoteMemvara.search`, and they carry the same weight:
     # they are what makes "calling code cannot tell which it holds" true of the *type* as
     # well as of the value. Without them `await mem.search(q)` types as `list[Retrieved]`
     # here and `list[Result]` on `AsyncMemvara`, so the same expression reading `.claim`

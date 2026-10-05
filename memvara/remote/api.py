@@ -516,7 +516,7 @@ class RemoteMemvara(_RemoteClient):
 
     # -- reading -------------------------------------------------------------
 
-    # The same three variants as `Memvara.search`, and they are what makes "calling code
+    # The same variants as `Memvara.search`, and they are what makes "calling code
     # cannot tell which it holds" true of the type as well as of the value. Without them
     # `mem.search(q)` types as `list[Retrieved]` here and `list[Result]` locally, so the
     # same expression reading `.claim` off a row checks against one engine and not the
@@ -1328,7 +1328,7 @@ class ScopedRemoteMemvara:
 
     # -- reading -------------------------------------------------------------
 
-    # The same three variants as `Memvara.search`, and they are what makes "calling code
+    # The same variants as `Memvara.search`, and they are what makes "calling code
     # cannot tell which it holds" true of the type as well as of the value. Without them
     # `mem.search(q)` types as `list[Retrieved]` here and `list[Result]` locally, so the
     # same expression reading `.claim` off a row checks against one engine and not the

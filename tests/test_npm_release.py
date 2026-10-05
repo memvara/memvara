@@ -100,6 +100,16 @@ def test_the_package_ships_a_binary_and_the_file_it_names_exists():
     )
 
 
+def test_the_package_is_a_command_and_has_no_module_to_require():
+    """The package has a `bin` and nothing else to import. `require("memvara")` fails
+    with Node's own `MODULE_NOT_FOUND`, which is the intended answer: the placeholder
+    `index.js` that used to return an explanation was removed on purpose."""
+    meta = _manifest()
+    assert "main" not in meta and "types" not in meta and "exports" not in meta, meta
+    assert not (PKG / "index.js").exists()
+    assert not (PKG / "index.d.ts").exists()
+
+
 def test_the_package_has_no_runtime_dependencies():
     """This process holds a bearer token. A dependency here is a dependency in
     everyone's install of it, and 'we will review what we add' is a policy, not a

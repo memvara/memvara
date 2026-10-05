@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from time import perf_counter
-from typing import Any, Callable
+from typing import Callable
 
 from ..embed.base import Embedder
 from ..schema import PredicateRegistry
@@ -54,15 +54,15 @@ class Consolidator:
         #: that has silently stopped running looks exactly like a settled store.
         self.telemetry = telemetry
 
-    def _one(self, pass_fn: Callable[..., int], tenant: str | None,
-             now: datetime | None = None, **kw: Any) -> int:
-        """Run one stage on its own: read a snapshot, run `pass_fn` over it, write it back.
+    def _one(self, stage: Callable[[Sweep], int], tenant: str | None,
+             now: datetime | None = None) -> int:
+        """Run one stage on its own: read a snapshot, run `stage` over it, write it back.
 
         `run()` builds the snapshot itself instead, so that all three stages share it.
         """
         sweep = Sweep(self.store, tenant, now=now, window=self.window,
                       telemetry=self.telemetry)
-        count = pass_fn(sweep, **kw)
+        count = stage(sweep)
         sweep.flush()
         return count
 
@@ -72,7 +72,7 @@ class Consolidator:
         A second call at the same `now` returns 0, because the new value depends only on
         stored state and `now`.
         """
-        return self._one(decay_pass, tenant, now, registry=self.registry)
+        return self._one(lambda sweep: decay_pass(sweep, self.registry), tenant, now)
 
     def merge_duplicates(self, tenant: str | None = None, threshold: float | None = None,
                          *, neighbourhood: int = NEIGHBOURHOOD) -> int:
@@ -81,9 +81,9 @@ class Consolidator:
         Only claims that share a `fact_key` are compared, because two claims that answer
         different questions are not duplicates however similar their text is.
         """
-        return self._one(merge_pass, tenant, embedder=self.embedder,
-                         registry=self.registry, threshold=threshold,
-                         neighbourhood=neighbourhood)
+        return self._one(lambda sweep: merge_pass(sweep, self.embedder, self.registry,
+                                                  threshold=threshold,
+                                                  neighbourhood=neighbourhood), tenant)
 
     def promote(self, tenant: str | None = None, min_observations: int = 3) -> int:
         """Reclassify EPISODIC claims seen `min_observations` times as SEMANTIC.
@@ -93,7 +93,7 @@ class Consolidator:
         pattern. That can only be known in hindsight, which is why it happens here and
         not on the write path. The claim keeps its id; only its `memory_type` changes.
         """
-        return self._one(promote_pass, tenant, min_observations=min_observations)
+        return self._one(lambda sweep: promote_pass(sweep, min_observations), tenant)
 
     def run(self, tenant: str | None = None,
             now: datetime | None = None) -> dict[str, int]:

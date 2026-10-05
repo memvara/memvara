@@ -15,8 +15,8 @@ space that fits, or at the limit when it has no space at all.
 Documents are cut into chunks for retrieval by a different splitter,
 `memvara/documents/chunk.py`. The two have different jobs: a retrieval chunk is small, about
 1,000 characters, and repeats the end of the chunk before it, so a search can land on the
-passage a question is about. An extraction piece is as large as the limit allows, with no overlap, because an overlap would
-make the model state the facts in it twice.
+passage a question is about. An extraction piece is as large as the limit allows, with no
+overlap, because an overlap would make the model state the facts in it twice.
 """
 
 from __future__ import annotations
