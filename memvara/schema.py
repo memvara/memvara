@@ -688,9 +688,6 @@ class PredicateRegistry:
     def half_life_days(self, predicate: str) -> float:
         return self.spec(predicate).half_life_days
 
-    def superseded_by(self, predicate: str) -> tuple[str, ...]:
-        return self.spec(predicate).supersedes
-
     def all_specs(self) -> list[PredicateSpec]:
         return sorted(self._specs.values(), key=lambda s: s.name)
 
