@@ -538,6 +538,35 @@ prediction was +3. It is a narrow result: 23 discordant questions, with sampled 
 The gain comes from multi-session (+2) and temporal-reasoning (+4); questions about the
 assistant go the other way (18 against 20), as they did against the paid selector.
 
+**Gate G6: speed and memory on 4 CPU threads.** Step 2a's model B, timed through
+`select_ordered()` with both models loaded straight onto the CPU (Apple M-series, 4 threads)
+and the stock reranker loaded and used once before the baseline:
+
+```bash
+OMP_NUM_THREADS=4 PYTHONPATH=. python3 bench/selector_latency.py --model local/selector/models/step2a-B
+OMP_NUM_THREADS=4 PYTHONPATH=. python3 bench/selector_latency.py --model local/selector/models/step2a-B --pools local/selector/pools/lme.jsonl --reads 100
+```
+
+| Candidates | p50 | p95 | 4,000-character question | Memory added (peak) |
+|---|---|---|---|---|
+| 40 synthetic 400-token turns, 51 reads | 314 ms | 345 ms | 373 ms | 308 MB |
+| real LongMemEval candidates, 101 reads | 280 ms | 327 ms | 339 ms | 354 MB |
+
+**G6 fails, on memory.** Speed passes with room to spare (p95 about a third of the 1.0 s
+limit), but the peak resident memory grows by 308 to 354 MB against a limit of 300 MB. The
+first run, which let the model load onto the GPU and then moved it, measured 312 to 335 MB;
+loading straight onto the CPU did not change the outcome.
+
+A diagnostic added after the result: a ranked read reranks up to 200 turns before the
+selector runs, so a production process has already reached that working-memory peak. With
+the reranker first run on 200 assistant-length turns, the selector added 54 to 68 MB to the
+peak. The weights alone are 91 MB, so a peak-based measure cannot say exactly what the
+selector costs; what it does show is that most of the 300-plus MB is torch's working memory
+for a first large batch, which a process that reranks has already paid. Settling this needs
+a measure of the process's memory after many reads rather than its peak, fixed before it is
+run. All timings here are on an M-series laptop, which is faster per core than the 4-core
+production host.
+
 The spec's §10 records what has to be decided before this work goes on.
 
 ## LOCOMO and LongMemEval — retrieval, measured

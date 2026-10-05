@@ -795,3 +795,13 @@ opt-in with `select_ordered()`. The margin is exactly the line and rests on 23 d
 questions with sampled answers, so the evidence is that local is at least as good as routed
 and probably a little better, not that it is clearly better. Questions about the assistant
 are where it loses ground (18 against routed's 20 and paid's 21).
+
+**G6 result (2026-10-05): fail, on memory.** On 4 CPU threads, `select_ordered()` with step
+2a's model takes p95 345 ms on 40 synthetic 400-token turns and 327 ms on real candidates;
+the 4,000-character question takes 373 ms. Speed passes. Peak resident memory grows by 308
+and 354 MB against the 300 MB line, so G6 fails as written. A diagnostic run after the
+result, with the reranker first scoring 200 assistant-length turns as a ranked read does,
+put the selector's addition at 54 to 68 MB of peak. The gate's peak measure mostly counts
+torch's first-batch working memory, which a reranking process has already paid. If G6 is to
+be re-run, the memory measure should be fixed first: resident memory after a set number of
+production-shaped reads, with and without the selector, rather than the peak.
