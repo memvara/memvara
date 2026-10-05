@@ -43,6 +43,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Sequence, TextIO
 
+from ..cli import _Usage, _options
 
 __all__ = ["AGENTS", "INIT_USAGE", "MARKER", "client_entry", "cloud_client_entry", "init",
            "skill_text"]
@@ -142,10 +143,6 @@ _FLAGS = ("--force", "--skill-only")
 #: a default into somebody's settings file freezes it there, the same reasoning
 #: `client_entry` already applies to MEMVARA_DB's default.
 _DEFAULT_SERVER_URL = "https://app.memvara.dev"
-
-
-class _Usage(Exception):
-    """The command line was wrong, and the message says which part."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,32 +266,6 @@ def _absolute(raw: str) -> Path:
     directory they named.
     """
     return Path(os.path.abspath(os.path.expanduser(raw)))
-
-
-def _parse(argv: Sequence[str]) -> tuple[dict[str, str], dict[str, bool]]:
-    """`--name value` and `--name=value`, and a hand-written parser for the options.
-
-    The same reasoning as the server's argument handling: a parser library here would be
-    a dependency-shaped answer to a question with six options in it, and `argparse` in
-    particular exits the process on error, which would take the injected streams that make
-    this testable out of the picture.
-    """
-    options: dict[str, str] = {}
-    flags = {name: False for name in _FLAGS}
-    rest = list(argv)
-    while rest:
-        argument = rest.pop(0)
-        name, joined, inline = argument.partition("=")
-        if name in flags and not joined:
-            flags[name] = True
-            continue
-        if name not in _OPTIONS:
-            raise _Usage(f"unexpected argument {argument!r}")
-        value = inline if joined else (rest.pop(0) if rest else "")
-        if not value.strip():
-            raise _Usage(f"{name} needs a value")
-        options[name] = value.strip()
-    return options, flags
 
 
 def _first(env: Mapping[str, str], *names: str) -> str | None:
@@ -455,9 +426,9 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         return 0
 
     try:
-        options, flags = _parse(argv)
-        force = flags["--force"]
-        skill_only = flags["--skill-only"]
+        options = _options(argv, _OPTIONS, _FLAGS)
+        force = "--force" in options
+        skill_only = "--skill-only" in options
         agent = options.get("--agent")
         if agent is None:
             raise _Usage("init needs --agent, naming the client to configure: "

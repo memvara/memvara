@@ -53,6 +53,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Sequence, TextIO
 
+from ..cli import _Usage, _options
 from .init import private_directory
 
 __all__ = ["LOGIN_USAGE", "login"]
@@ -131,10 +132,6 @@ def _project_id(value: str) -> str | None:
         return None
 
 
-class _Usage(Exception):
-    """The command line was wrong, and the message says which part."""
-
-
 class _LoginFailed(Exception):
     """The flow reached the server and the server said no — not a usage error."""
 
@@ -149,22 +146,6 @@ class _Authorization:
     verification_uri_complete: str
     expires_in: int
     interval: int
-
-
-def _parse(argv: Sequence[str]) -> dict[str, str]:
-    """`--name value` and `--name=value`, matching `init.py`'s hand-written parser."""
-    options: dict[str, str] = {}
-    rest = list(argv)
-    while rest:
-        argument = rest.pop(0)
-        name, joined, inline = argument.partition("=")
-        if name not in _OPTIONS:
-            raise _Usage(f"unexpected argument {argument!r}")
-        value = inline if joined else (rest.pop(0) if rest else "")
-        if not value.strip():
-            raise _Usage(f"{name} needs a value")
-        options[name] = value.strip()
-    return options
 
 
 def _bind_loopback_listener() -> HTTPServer | None:
@@ -308,7 +289,7 @@ def login(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
         return 0
 
     try:
-        options = _parse(argv)
+        options = _options(argv, _OPTIONS)
         project = options.get("--project")
         if project is not None and _project_id(project) is None:
             raise _Usage(

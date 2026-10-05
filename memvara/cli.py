@@ -85,21 +85,33 @@ class _Usage(Exception):
     """The command line was wrong, and the message says which part."""
 
 
-def _options(argv: Sequence[str], allowed: Sequence[str]) -> dict[str, str]:
-    """`--name value` and `--name=value`, matching `login.py`'s parser exactly.
+def _options(argv: Sequence[str], allowed: Sequence[str],
+             flags: Sequence[str] = ()) -> dict[str, str]:
+    """Parse `--name value` and `--name=value` options, and bare `--flag` switches.
 
-    Hand-written rather than `argparse` for the reason `init.py` and `login.py` are:
-    these commands take two or three options between them, and `argparse` would print
-    its own usage over the top of the one above, in a different voice.
+    This is the one parser for `memvara login`, `logout` and `whoami` and for
+    `memvara-mcp init`: `server/login.py` and `server/init.py` import it from here. A flag
+    that was given appears in the result with an empty value. Anything not named in
+    `allowed` or `flags` raises `_Usage`, and so does an option given no value.
+
+    It is hand-written rather than `argparse` on purpose. `argparse` prints its own usage
+    text over each command's usage, and it exits the process on an error, which would
+    bypass the output streams the tests inject.
+
+    >>> _options(["--server", "x", "--force"], ("--server",), ("--force",))
+    {'--server': 'x', '--force': ''}
     """
     found: dict[str, str] = {}
     rest = list(argv)
     while rest:
         argument = rest.pop(0)
         name, joined, inline = argument.partition("=")
+        if name in flags and not joined:
+            found[name] = ""
+            continue
         if name not in allowed:
             raise _Usage(f"unexpected argument {argument!r}. This command takes "
-                         f"{', '.join(allowed)}.")
+                         f"{', '.join((*allowed, *flags))}.")
         value = inline if joined else (rest.pop(0) if rest else "")
         if not value.strip():
             raise _Usage(f"{name} needs a value")
