@@ -285,7 +285,7 @@ If it is still unclear after those four, it is genuinely unclear, and the issue 
 the right place — not the PR.
 
 **One deliberate exception, made by the maintainer, so you do not file it as a policy
-violation:** `memvara/store/remote.py` and the `memvara-mcp login` device-code flow are a
+violation:** `memvara/remote/` and the `memvara-mcp login` device-code flow are a
 thin HTTP *client* for the hosted console, living in this repo behind the optional `cloud`
 extra with a lazy `httpx` import — no import in the core install, no runtime dependency
 added to it. By question 1 above that is a "yes": it only makes sense when there is more

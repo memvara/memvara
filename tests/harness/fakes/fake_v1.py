@@ -17,7 +17,6 @@ clients, as the next paragraph says.
 **The routes** are the 34 that the two clients call, read from `memvara/remote/api.py` and
 `memvara/remote/aio.py`. A self-test reads those two files and fails when a client calls a
 route this fake does not serve, or when this fake serves one that no client calls.
-`RemoteStore` (`memvara/store/remote.py`) calls three of the same routes.
 
 **The credential** is one API key, `API_KEY` unless a test names another. It is bound to
 the whole tenant with the `admin` privilege, so a request may narrow to any user, agent or

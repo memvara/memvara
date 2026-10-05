@@ -176,10 +176,10 @@ def _create_an_encrypted_store() -> None:
         SQLiteStore(f"{where}/m.db", key=bytes(32))
 
 
-def _construct_remote_store() -> None:
-    from memvara.store.remote import RemoteStore
+def _construct_remote_client() -> None:
+    from memvara import Memvara
 
-    RemoteStore(base_url="https://app.memvara.dev", api_key="k")
+    Memvara(api_key="k", base_url="https://app.memvara.dev").close()
 
 
 # The adapters are lazy attributes on their own modules, so naming the class is the
@@ -227,7 +227,7 @@ ADAPTERS = {
     # `store/` in it at all. Exactly the distribution-name-is-not-import-name trap this
     # mapping exists for.
     "langgraph": ("langgraph", _resolve_langgraph_store),
-    "cloud": ("httpx", _construct_remote_store),
+    "cloud": ("httpx", _construct_remote_client),
     "ingest": ("pypdf", _read_a_pdf),
     # SQLCipher is the first thing an encrypted store needs, so blocking it is what the
     # missing-extra test below exercises. The extra installs two more SDKs, listed in
@@ -370,7 +370,7 @@ def _import_time_imports(body: list[ast.stmt]) -> set[str]:
     optional backends are hiding behind. The one `if` this does not descend into is
     `if TYPE_CHECKING:`: that branch is `False` at runtime by construction (that is the
     entire point of `TYPE_CHECKING`), so an SDK imported there only for annotations —
-    `RemoteStore` importing `httpx` under it, exactly like `mypy` needs — never actually
+    `memvara/remote/client.py` importing `httpx` under it, as `mypy` needs — never actually
     executes on import and must not be flagged as though it did.
     """
     names = _absolute_imports(body)

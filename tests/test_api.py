@@ -838,6 +838,16 @@ def test_stored_dim_gives_up_on_a_store_that_cannot_answer():
     assert stored_dim(types.SimpleNamespace()) is None
 
 
+def test_stored_dim_gives_up_on_a_store_whose_methods_raise():
+    """A store can have `iter_claims` and `get_embedding` as stubs that raise, which a
+    `getattr` check cannot see. The width is then unknown, rather than an error that
+    would make a `Memvara` over that store impossible to construct."""
+    def cannot(*args, **kwargs):
+        raise NotImplementedError("no way to answer")
+
+    assert stored_dim(types.SimpleNamespace(iter_claims=cannot, get_embedding=cannot)) is None
+
+
 def test_stored_dim_is_none_when_nothing_was_ever_embedded():
     store = SQLiteStore(":memory:")
     mem = Memvara(store=store, embedder=HashingEmbedder(dim=32), llm=NullLLM())
@@ -1539,6 +1549,18 @@ def test_a_store_predating_tenant_scoped_specs_still_loads():
 
     store = OldStore(":memory:")
     Memvara(store=store, embedder=HashingEmbedder(dim=32), llm=NullLLM()).close()
+
+
+def test_a_store_whose_spec_listing_raises_still_constructs():
+    """`all_specs` present and raising `NotImplementedError` is read as "no specs to
+    rehydrate", because no `Memvara` could be constructed over that store otherwise."""
+    class StubSpecStore(SQLiteStore):
+        def all_specs(self, tenant=None):
+            raise NotImplementedError("no way to answer")
+
+    store = StubSpecStore(":memory:")
+    with Memvara(store=store, embedder=HashingEmbedder(dim=32), llm=NullLLM()) as mem:
+        assert mem.store is store
 
 
 def test_a_store_with_no_predicate_persistence_at_all_still_constructs():

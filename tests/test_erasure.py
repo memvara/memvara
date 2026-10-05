@@ -101,8 +101,7 @@ class _Deaf(SQLiteStore):
     """A store that can erase and cannot be asked whether it did.
 
     Two shapes in one, and the second is the one a `getattr` guard misses:
-    `residue` is absent, `erasure_record` is present and raises — which is
-    `RemoteStore`.
+    `residue` is absent, and `erasure_record` is present and raises.
     """
 
     residue = None  # type: ignore[assignment]
@@ -139,7 +138,8 @@ def test_erase_refuses_to_report_success_it_cannot_support():
 
 
 def test_a_store_whose_residue_raises_fails_closed_too():
-    """`RemoteStore.residue` is present on the object and raises. Caught, not guarded."""
+    """A store whose `residue` is present on the object and raises. The exception is
+    caught, because a `getattr` guard cannot see this case."""
     class _Raises(SQLiteStore):
         def residue(self, claim_id: str) -> dict[str, int]:
             raise NotImplementedError("no endpoint")

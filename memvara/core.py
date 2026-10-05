@@ -1147,11 +1147,10 @@ class Memvara:
             # had before scoping existed, not a new leak.
             return all_specs()
         except NotImplementedError:
-            # A Store whose method exists (so the `getattr` check above passes) but
-            # whose backing surface has no way to answer — `RemoteStore.all_specs`, in
-            # particular: the cloud facade has no read route for learned predicate
-            # specs at all (see its docstring). Treated the same as "no specs to
-            # rehydrate" rather than left to propagate, because propagating would mean
+            # A Store whose method exists, so the `getattr` check above passes, but
+            # which has no way to answer, so it raises `NotImplementedError`. Treated
+            # the same as "no specs to rehydrate" rather than left to propagate,
+            # because propagating would mean
             # no `Memvara` can ever be constructed over that store — this is the one
             # caller that has to tolerate "this store cannot do this" rather than
             # surface it, since every other caller of `all_specs` reaches it through a
@@ -1679,9 +1678,9 @@ class Memvara:
         one reading and whatever the write ends stops exactly where it starts; with
         `valid_to` given it is instead the instant of this call, the one `valid_to` is
         checked against below. A `recorded_at` that is given is stored as it is. The
-        write lock is taken by the store's `batch()`, as `SQLiteStore.batch()` takes it;
-        `RemoteStore.batch()` takes none, and only yields the store, so there the instant
-        is simply the one at which the write's transaction begins. See `Store.batch`.
+        write lock is taken by the store's `batch()`, as `SQLiteStore.batch()` takes it.
+        On a store whose `batch()` takes no lock, the instant is simply the one at which
+        the write's transaction begins. See `Store.batch`.
 
         A `recorded_at` in the past sets when this claim is believed from, and nothing
         else. When the write closes claims already on record, as a retraction
@@ -2292,9 +2291,8 @@ class Memvara:
         retired or erased while this call waited is refused as above rather than closed
         again from a copy read before that write. That holds on a store whose `batch()`
         takes the write lock when it begins, as `SQLiteStore.batch()` does.
-        `RemoteStore.batch()` takes no lock and only yields the store, and on a store
-        like that another writer can commit between the read and the write; see
-        `Store.batch`.
+        On a store whose `batch()` takes no lock, another writer can commit between the
+        read and the write; see `Store.batch`.
         """
         return self._supersede(old_claim_id, new_claim, at=at, sources=sources,
                                close=close, reason=reason, stamp=(), refuse_expired=False,
@@ -2459,9 +2457,8 @@ class Memvara:
         another writer added or ended while this call waited for the lock is seen as that
         writer left it, and nothing is closed at an instant before it was recorded.
         That holds on a store whose `batch()` takes the write lock when it begins, as
-        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
-        the store, and on a store like that another writer can commit between the read
-        and the write; see `Store.batch`.
+        `SQLiteStore.batch()` does. On a store whose `batch()` takes no lock, another
+        writer can commit between the read and the write; see `Store.batch`.
         """
         scope = self._scope(tenant, user, agent, session)
         how = closure(close)
@@ -2957,9 +2954,8 @@ class Memvara:
         removed would be written back. Under the lock, an erasure either happens before
         the read, and this returns `False` and writes nothing, or after the write.
         That holds on a store whose `batch()` takes the write lock when it begins, as
-        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
-        the store, and on a store like that another writer can commit between the read
-        and the write; see `Store.batch`.
+        `SQLiteStore.batch()` does. On a store whose `batch()` takes no lock, another
+        writer can commit between the read and the write; see `Store.batch`.
         """
         how, why = closure(close), closure_reason(reason)
         with transaction(self.store, self._scope(tenant, user, agent, session).tenant):
@@ -3018,9 +3014,8 @@ class Memvara:
         claim another writer closed or erased while this call waited is refused, as
         above, rather than closed again from a copy read before that write. That holds
         on a store whose `batch()` takes the write lock when it begins, as
-        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
-        the store, and on a store like that another writer can commit between the read
-        and the write; see `Store.batch`.
+        `SQLiteStore.batch()` does. On a store whose `batch()` takes no lock, another
+        writer can commit between the read and the write; see `Store.batch`.
 
         >>> mem = Memvara(llm=NullLLM(), user="alice")
         >>> _ = mem.remember("user", "works_at", "Acme")
@@ -3093,9 +3088,8 @@ class Memvara:
         link run in one transaction that holds the database's write lock, so a claim
         erased while this call waited is refused rather than named by a link that
         outlives it. That holds on a store whose `batch()` takes the write lock when it
-        begins, as `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and
-        only yields the store, and on a store like that another writer can commit
-        between the read and the write; see `Store.batch`.
+        begins, as `SQLiteStore.batch()` does. On a store whose `batch()` takes no lock,
+        another writer can commit between the read and the write; see `Store.batch`.
         """
         rel = link_relation(relation)
         refuse_self_link(from_id, to_id)
@@ -3189,9 +3183,8 @@ class Memvara:
         write lock from before the claim is read, so a second erasure of the same claim,
         in this process or another, finds nothing, returns `False` and records nothing.
         That holds on a store whose `batch()` takes the write lock when it begins, as
-        `SQLiteStore.batch()` does. `RemoteStore.batch()` takes no lock and only yields
-        the store, and on a store like that another writer can commit between the read
-        and the write; see `Store.batch`.
+        `SQLiteStore.batch()` does. On a store whose `batch()` takes no lock, another
+        writer can commit between the read and the write; see `Store.batch`.
         """
         scope = self._scope(tenant, user, agent, session)
         done = self._erase_proved(claim_id, sources=sources, tenant=scope.tenant,
@@ -3234,8 +3227,8 @@ class Memvara:
                 )
             if not erase(claim_id, sources=sources)["claims"]:
                 # Another erasure got there first. Under the write lock that cannot
-                # happen, but a store whose `batch()` takes no lock, such as
-                # `RemoteStore`, can still race one between the read and here. Nothing
+                # happen, but a store whose `batch()` takes no lock can still race one
+                # between the read and here. Nothing
                 # was deleted, so there is nothing to prove and nothing to refuse.
                 return None
         proof = self.prove_erased(claim_id)
@@ -3291,8 +3284,8 @@ class Memvara:
 
     def _erase_expired(self, at: datetime, *, at_open: bool = False) -> list[ErasedClaim]:
         """`erase_expired` at `at`. When the store opens, a listing the store has only as
-        a stub that raises `NotImplementedError` is skipped: `RemoteStore` has one, and
-        the deployment behind it runs its own sweep."""
+        a stub that raises `NotImplementedError` is skipped, because such a store says
+        that something other than this process erases its expired claims."""
         try:
             listed = self.store.expired_claims(at)
         except NotImplementedError:
@@ -3354,7 +3347,7 @@ class Memvara:
         except Exception as exc:
             # Deliberately every exception, not just `NotImplementedError`. This method's
             # whole job is to answer "is it really gone", and a store that raised while
-            # being asked has not answered — `RemoteStore` raises `NotImplementedError`,
+            # being asked has not answered — a stub raises `NotImplementedError`,
             # a locked database raises `OperationalError`, and a third-party store can
             # raise anything at all. Narrowing this to the one type we happened to think
             # of is how a check that did not run gets reported as a check that passed.

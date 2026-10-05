@@ -28,14 +28,15 @@ gated behind a lazy `httpx` import so the core install stays as small as it alwa
 - Errors: `memvara/remote/errors.py` — `RemoteError` and its subclasses `AuthError`,
   `ScopeError`, `NotFound`, `Conflict`, `QuotaExhausted`, `RateLimited`, `LegalHold`,
   `ReadOnly`, `InvalidRequest`, `ServerError`, plus `error_from_response()`.
-- The other remote seam: `memvara/store/remote.py` — `RemoteStore`, a `Store` implementation
-  over the same facade. It is never constructed by `MEMVARA_MODE=cloud`, and a test keeps it
-  that way.
+- There is no `Store` implementation over the facade. `RemoteStore`, which was one, was
+  removed because nothing constructed it and most of its methods raised. A test,
+  `tests/test_config_cloud.py::test_no_cloud_path_anywhere_constructs_an_engine_over_a_remote_store`,
+  keeps cloud mode from running the engine over a remote store.
 - Tests: `tests/test_remote_client.py`, `tests/test_remote_reads.py`,
   `tests/test_remote_writes.py`, `tests/test_remote_scope.py`, `tests/test_remote_errors.py`,
   `tests/test_remote_hydrate.py`, `tests/test_remote_creds.py`,
   `tests/test_remote_constructor.py`, `tests/test_remote_cloud_mode.py`,
-  `tests/test_remote_aio.py`, `tests/test_store_remote.py`.
+  `tests/test_remote_aio.py`.
 - Documentation: [OPEN-CORE.md](../OPEN-CORE.md) draws the line seam by seam.
 
 ## How the pieces fit
@@ -90,10 +91,11 @@ per-table counts as evidence.
 - **Redaction runs client-side.** The `redactor` argument rewrites text on its way out,
   deliberately in this process: redaction that happens after the text has left is not
   redaction.
-- **An unmapped operation raises rather than approximating.** `RemoteStore` maps what the
-  facade exposes and raises for the rest. A `put_claim` that quietly wrote through
-  `POST /v1/facts` would reinterpret every field the caller set, and a `competing_claims`
-  returning an empty list would make every write believe the slot was empty.
+- **The engine is not run over the facade.** The facade has no endpoint for most of what
+  the engine calls. A `put_claim` that quietly wrote through `POST /v1/facts` would
+  reinterpret every field the caller set, and a `competing_claims` returning an empty list
+  would make every write believe the slot was empty. So cloud mode is a client of the
+  facade, `RemoteMemvara`, and the engine runs only on the server.
 - **This repository does not implement the server.** That is a commercial boundary, not a
   backlog item, and it holds even with the `cloud` extra installed.
 

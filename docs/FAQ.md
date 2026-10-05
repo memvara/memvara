@@ -129,8 +129,8 @@ open-core-with-holes arrangement inside it: nothing here is crippled to sell an 
 
 The REST API and the hosted control plane are the commercial half and are not in this
 repository. [Open core](OPEN-CORE.md) says exactly where the line is and why it does not
-move — including why `memvara/store/remote.py` raises `NotImplementedError` in the places
-it does rather than quietly writing through a facade that would reinterpret every field.
+move — including why the library does not run its engine against a hosted deployment's
+storage, and offers a client of the hosted API instead.
 
 ## What are the honest limitations?
 
