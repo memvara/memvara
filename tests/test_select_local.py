@@ -470,3 +470,11 @@ def test_an_incomplete_calibration_file_names_what_is_wrong(tmp_path, fields, me
                                              encoding="utf-8")
     with pytest.raises(ValueError, match=message):
         Calibration.read(tmp_path)
+
+
+def test_the_package_names_the_local_selector_lazily() -> None:
+    import memvara.select as select_package
+    from memvara.select import local
+
+    assert select_package.LocalSelector is local.LocalSelector
+    assert select_package.Calibration is local.Calibration
