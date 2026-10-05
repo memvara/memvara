@@ -55,15 +55,6 @@ from .base import (
     self_hosted_claim_schema,
 )
 
-#: `json_schema` requires a name. It is echoed back in nothing we read, but the API
-#: rejects the request without one.
-_SCHEMA_NAMES = {
-    id(CLAIM_SCHEMA): "claims",
-    id(RESOLVE_SCHEMA): "predicate_resolution",
-    id(PREDICATE_SCHEMA): "predicate_spec",
-    id(JUDGE_SCHEMA): "replacement_verdict",
-}
-
 #: The image types Chat Completions accepts as image input.
 IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 
@@ -222,7 +213,12 @@ class OpenAILLM:
     # -- request ------------------------------------------------------------
 
     def _call(self, system: str, prompt: str, schema: dict[str, Any],
-              usage: Usage | None = None, *, name: str | None = None) -> Any:
+              usage: Usage | None = None, *, name: str) -> Any:
+        """One Chat Completions request with strict structured output.
+
+        `name` is the schema's name. The API rejects a `json_schema` without one, although
+        nothing in the response repeats it.
+        """
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_completion_tokens": self.max_tokens,
@@ -234,7 +230,7 @@ class OpenAILLM:
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": name or _SCHEMA_NAMES.get(id(schema), "result"),
+                    "name": name,
                     "strict": True,
                     "schema": schema,
                 },
@@ -439,7 +435,7 @@ class OpenAILLM:
         offered = _shape.bounded(candidates, _shape.MAX_CANDIDATES)
         response = self._call(
             RESOLVE_SYSTEM, _shape.resolve_prompt(surface, offered), RESOLVE_SCHEMA,
-            usage)
+            usage, name="predicate_resolution")
         return _shape.shape_resolution(
             _shape.parse_json_object(_first_text(response)), offered)
 
@@ -447,7 +443,8 @@ class OpenAILLM:
                            *, usage: Usage | None = None) -> dict[str, str]:
         """Legacy acquisition call, kept for backends and callers that still use it."""
         prompt = f"predicate: {_shape.snake_case(predicate)}\nexample usage: {example}"
-        response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA, usage)
+        response = self._call(PREDICATE_SYSTEM, prompt, PREDICATE_SCHEMA, usage,
+                              name="predicate_spec")
         return _shape.spec_fields(_shape.parse_json_object(_first_text(response)))
 
     # -- ReplacementJudge protocol -------------------------------------------
@@ -456,7 +453,8 @@ class OpenAILLM:
                           *, usage: Usage | None = None) -> dict[str, bool]:
         """Is `new_text` a newer version of `old_text`? See `JUDGE_SYSTEM`."""
         response = self._call(
-            JUDGE_SYSTEM, _shape.judge_prompt(new_text, old_text), JUDGE_SCHEMA, usage)
+            JUDGE_SYSTEM, _shape.judge_prompt(new_text, old_text), JUDGE_SCHEMA, usage,
+            name="replacement_verdict")
         return _shape.shape_verdict(_shape.parse_json_object(_first_text(response)))
 
     def __repr__(self) -> str:

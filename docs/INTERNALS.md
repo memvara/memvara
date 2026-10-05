@@ -3597,9 +3597,9 @@ Hard API requirements — these are current and getting them wrong is a 400:
   `WritePipeline` publishes the usage of a call that raised. A reason your backend cannot
   read must not count as a truncation; guessing turns a working extraction into a failed
   write.
-- `_SCHEMA_NAMES` is keyed on the identity of the module-level schema dicts, so pass
-  `_call(..., name=...)` explicitly for any schema you build at runtime. A copy falls
-  through to `"result"`, which the API accepts, so there is nothing to notice.
+- `OpenAILLM._call` requires `name=`, the schema's name, because the API rejects a
+  `json_schema` without one. Each call site passes its own name, so a schema built at
+  runtime, such as a capped claim schema, needs no extra step.
 - Validate and coerce the model's output before returning: drop claims with a missing or
   out-of-range `source_index`, clamp `confidence` to `[0, 1]`, and normalize predicates to
   snake_case. The engine drops what is malformed too (`WritePipeline._admissible`), but a
