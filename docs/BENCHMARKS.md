@@ -219,6 +219,405 @@ different measurement, made without a reader, and the next section is exactly th
 
 ---
 
+## The local selector
+
+`memvara.select.LocalSelector` ranks a read's candidate turns with a cross-encoder in the
+Memvara process (design: `docs/superpowers/specs/2026-10-01-local-selector-design.md`).
+Gate G0 asked whether the stock reranker model, with a calibrated keep rule, could ship as
+an opt-in selector. **It failed, and the stock-model step did not ship.**
+
+**What was measured.** Coverage is the share of answer-bearing turns rendered whole inside a
+720-token block, on the 199 LongMemEval-S questions of MemoryBench run
+`memvara-ranked-parity2` (191 have a gold turn in their pool). `bench/selector_metrics.py`
+replays the ranked stage as the server renders it: the kept turns first, in candidate order,
+then every other turn of both roles in reranked order. The pools come from run
+`memvara-ranked-500`; the calibration was fitted on its other 301 questions.
+
+```bash
+PYTHONPATH=. python3 bench/selector_pools.py memorybench --run-dir $MB/data/runs/memvara-ranked-500 --data $LME --out local/selector/pools/lme.jsonl
+PYTHONPATH=. python3 bench/selector_pools.py splits --pools local/selector/pools/lme.jsonl --test-ids local/selector/lme_test_ids.txt --out local/selector/splits_lme.json
+PYTHONPATH=. python3 bench/selector_score.py --pools local/selector/pools/lme.jsonl --model cross-encoder/ms-marco-MiniLM-L-6-v2 --revision 233902d25c440f23af6f7d6e94d2946bac0bee0a --device mps --out local/selector/scores/stock_lme.jsonl
+PYTHONPATH=. python3 bench/selector_calibrate.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --split train --split validation --rerank local/selector/scores/stock_lme.jsonl --select local/selector/scores/stock_lme.jsonl --out-dir local/selector/cal/stock
+PYTHONPATH=. python3 bench/selector_metrics.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --split test --rerank local/selector/scores/stock_lme.jsonl --local stock=local/selector/scores/stock_lme.jsonl,local/selector/cal/stock --paid --baseline routed --by-type
+```
+
+The stock calibration, fitted on 12,040 candidates (524 gold), is
+`Calibration(scale=0.3766, shift=-0.4322, threshold=0.05, max_keep=8)`. Scoring took 4.2 ms
+a pair on Apple MPS.
+
+| Ordering | Coverage | Kept recall | Mean kept | Against `routed` |
+|---|---|---|---|---|
+| `plain` (the plain read) | 0.674 | — | — | −0.228 [−0.284, −0.177] |
+| `routed` (reranked, routed, all 40 candidates first) | 0.903 | 1.000 | 40 | — |
+| `paid` (gpt-5.4-mini, the shipped ranked read) | 0.958 | 0.935 | 4.3 | +0.056 [+0.029, +0.083] |
+| `stock` (the local selector, stock model) | **0.833** | **0.761** | 3.4 | −0.070 [−0.111, −0.032] |
+
+G0 needed coverage of at least 0.89 and kept recall of at least 0.80. The first three rows
+reproduce the 2026-09-27 measurements exactly, so the replay is sound.
+
+**Why it failed.** A ranked read renders what the selector kept, then the rest of the
+reranked list *across both roles*. The stock model's calibrated probability falls below even
+the lowest threshold tried (0.05) after about three or four turns, so it keeps few. The long
+assistant turns that follow then fill the 720 tokens before the unkept user turns that hold
+the answer. Raising `max_keep` to 40 changes nothing (0.833), because the threshold, not the
+cap, is what stops it.
+
+**The same replay also corrects an earlier reading.** The fine-tuned model from 2026-09-27
+(trained on the model selector's decisions) was reported at 0.947 to 0.950. Those figures
+came from orderings that put *all* routed candidates first, which the server never renders.
+Calibrated on the 45 validation questions and replayed faithfully, the same model reaches
+**0.889** (kept recall 0.852, 3.3 kept), 0.070 below the model selector
+[−0.102, −0.039]. These two rows are diagnostics added after G0 failed, not gates.
+
+**Step 2a: training on gold labels to keep more turns.** After G0 the selector was trained
+on LongMemEval's own gold labels, with the plan, arms and gate fixed in the spec's §12
+before any model was trained. The training set has 256 questions (1,816 pairs, 454 gold),
+the calibration and keep rule were chosen on 45 validation questions, and the test set is
+the same 191 questions. `bench/selector_train.py` trains and calibrates in one command:
+
+```bash
+PYTHONPATH=. python3 bench/selector_train.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --rerank local/selector/scores/stock_lme.jsonl --out local/selector/models/step2a-B --pos-weight 3 --device mps
+PYTHONPATH=. python3 bench/selector_score.py --pools local/selector/pools/lme.jsonl --model local/selector/models/step2a-B --max-length 256 --device mps --scope-of local/selector/scores/stock_lme.jsonl --out local/selector/scores/step2a-B_lme.jsonl
+```
+
+Arm A used an unweighted loss and arm B weighted a gold turn's loss by 3. Both covered 67 of
+72 gold turns on validation, so the tie-break recorded before testing chose B, which kept
+fewer turns (4.9 against 5.0). Both chose `threshold=0.01, max_keep=6`.
+
+| Ordering | Coverage | Kept recall | Mean kept | Against `routed` | Against `paid` |
+|---|---|---|---|---|---|
+| `routed` | 0.903 | 1.000 | 40 | — | −0.056 [−0.083, −0.029] |
+| `paid` | 0.958 | 0.935 | 4.3 | +0.056 [+0.029, +0.083] | — |
+| **B (chosen)** | **0.905** | 0.886 | 5.1 | +0.003 [−0.019, +0.025] | −0.053 [−0.082, −0.026] |
+| A | 0.908 | 0.889 | 5.2 | +0.006 [−0.017, +0.029] | −0.050 [−0.079, −0.023] |
+
+The pre-registered gate was pass at 0.93 or more, partial between 0.903 and 0.93, and fail
+below 0.903, with a prediction of 0.91. **The result is partial, at the bottom of the band:**
+0.905 cannot be told apart from keeping every routed candidate, and it is 5.3 points below
+the paid selector. The 0.931 seen on validation did not carry over to the test set, because
+45 questions are too few to choose a keep rule reliably.
+
+By question type, B matches or beats the paid selector only on single-session-user (1.000)
+and comes close on knowledge-update (0.982 against 1.000). Its largest gaps are
+temporal-reasoning (0.857 against 0.959), single-session-preference (0.812 against 1.000)
+and single-session-assistant (0.864 against 0.909).
+
+**Keeping more turns does not help by itself.** On validation, with B's calibration and
+threshold 0.01, coverage by `max_keep` was 0.889 at 4, 0.931 at 6, 0.917 at 8 and 0.903 at
+12 or more (up to 9.7 turns kept). A kept turn is rendered whole before anything else, so
+every wrong turn kept spends budget that an unkept gold turn needed. What limits the
+selector is how well it orders the candidates, not how many it keeps. With 256 training
+questions it orders them barely better than the stock reranker does.
+
+**Step 2b: about 100,000 public questions first.** Step 2a's model was limited by its
+ordering, so step 2b (spec §13, fixed before training) first trained on public datasets
+whose labels mark the sentence or paragraph holding the answer. Their licences all allow
+commercial use. `bench/selector_public.py` turned 99,938 questions into 842,161 pairs:
+
+| Dataset | Questions | Pairs |
+|---|---|---|
+| HotpotQA (distractor, train) | 30,000 | 285,893 |
+| 2WikiMultihopQA (train) | 30,000 | 289,816 |
+| MuSiQue (answerable, train) | 19,938 | 186,452 |
+| QuAC (train, answerable) | 20,000 | 80,000 |
+
+```bash
+PYTHONPATH=. python3 bench/selector_public.py --hotpot H0.parquet H1.parquet --twowiki W0.parquet W1.parquet --musique musique_ans_v1.0_train.jsonl --quac train_v0.2.json --out local/selector/public/pairs-step2b.jsonl
+PYTHONPATH=. python3 bench/selector_train.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --rerank local/selector/scores/stock_lme.jsonl --out local/selector/models/step2b-C --pairs local/selector/public/pairs-step2b.jsonl --no-pool-pairs --calibrate-on train --calibrate-on validation --device mps
+PYTHONPATH=. python3 bench/selector_train.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --rerank local/selector/scores/stock_lme.jsonl --out local/selector/models/step2b-D --base local/selector/models/step2b-C --pos-weight 3 --device mps
+```
+
+Arm C trained on the public pairs alone, in 3 hours 12 minutes on Apple MPS. Arm D
+continued from C with one epoch on the LongMemEval train split, using step 2a's recipe. D
+covered 0.931 on validation against C's 0.917, so D is the result.
+
+| Ordering | Coverage | Kept recall | Mean kept | Against `routed` | Against step 2a's B |
+|---|---|---|---|---|---|
+| `routed` | 0.903 | 1.000 | 40 | — | −0.003 [−0.025, +0.019] |
+| `paid` | 0.958 | 0.935 | 4.3 | +0.056 [+0.029, +0.083] | +0.053 [+0.026, +0.082] |
+| step 2a's B | 0.905 | 0.886 | 5.1 | +0.003 [−0.019, +0.025] | — |
+| **D (chosen)** | **0.894** | 0.852 | 4.3 | −0.008 [−0.040, +0.023] | −0.011 [−0.035, +0.010] |
+| C | 0.883 | 0.866 | 9.5 | −0.019 [−0.052, +0.011] | −0.022 [−0.049, +0.005] |
+
+**The gate failed:** 0.894 is below 0.903, and below the predicted range of 0.90 to 0.94.
+Against the paid selector D is −0.064 [−0.099, −0.031].
+
+**Why the public data did not help.** A diagnostic added after the result orders the 40
+routed candidates of each test question by each model's score, and counts the gold turns
+in the first k:
+
+| Model | @1 | @3 | @5 | @10 | MRR |
+|---|---|---|---|---|---|
+| stock | 0.366 | 0.710 | 0.812 | 0.909 | 0.806 |
+| step 2a's B (LongMemEval only) | 0.398 | 0.753 | 0.858 | 0.946 | 0.847 |
+| C (public only) | 0.352 | 0.668 | 0.770 | 0.875 | 0.786 |
+| D (public, then LongMemEval) | 0.386 | 0.759 | 0.852 | 0.952 | 0.838 |
+
+Training on Wikipedia question answering alone made the ordering of conversation turns
+*worse* than the stock model's, and D only recovers what LongMemEval training gives on its
+own. Finding a sentence that states a fact is a different task from finding the turn of a
+chat where somebody mentioned it, and 100,000 questions of the first do not teach the
+second.
+
+The same table shows a second limit. Step 2a's model already orders the candidates better
+than the stock model (0.858 against 0.812 in the first five), yet its coverage is only
+0.002 higher. The ranked read uses the selector's order only for the turns it keeps; every
+other turn follows the stock reranker's order across both roles. So a better ordering
+reaches the reader only through the few turns kept, which is decision 6 in the spec's §10.
+
+**Decision 6: rendering a local selection differently.** After steps 2a and 2b, the spec's
+§14 (fixed before any number below was computed) replayed two new renderings. Each applies
+only to a local selection; the paid selector's reads are unchanged.
+
+- **server:** today's rendering. The kept turns, then every other turn in reranked order
+  across both roles.
+- **(a) routed first:** the kept turns, then the unkept candidates, then everything else.
+- **(e) selector order:** all 40 candidates in the local model's own score order, then
+  everything else.
+
+```bash
+PYTHONPATH=. python3 bench/selector_calibrate.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --split validation --rerank local/selector/scores/stock_lme.jsonl --select local/selector/scores/step2a-B_lme.jsonl --max-length 256 --render selector-order --out-dir local/selector/cal/d6-B2a-selector-order
+PYTHONPATH=. python3 bench/selector_metrics.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --split test --rerank local/selector/scores/stock_lme.jsonl --local B2a=local/selector/scores/step2a-B_lme.jsonl,local/selector/cal/d6-B2a-selector-order --paid --render selector-order --by-type
+```
+
+Each keep rule was fitted again under each rendering, on the same questions as before.
+Test coverage on the same 191 questions (routed 0.903, paid 0.958):
+
+| Model | server | (a) routed first | (e) selector order |
+|---|---|---|---|
+| stock | 0.900 | 0.903 | 0.903 |
+| **step 2a's B (primary)** | 0.905 | 0.908 | **0.928** |
+| step 2b's C | 0.883 | 0.911 | 0.869 |
+| step 2b's D | 0.894 | 0.908 | 0.930 |
+
+The primary result, step 2a's model under (e), is **0.928: partial**, just under the 0.93
+pass line and inside the predicted range of 0.92 to 0.95. Against keeping every routed
+candidate it is +0.025 [+0.008, +0.045], better on 7 questions and worse on none. Against
+the paid selector it is −0.031 [−0.057, −0.006]. It beats rendering (a) for the same model
+(0.908), which is the condition the spec set for building (e) after a partial result. Step
+2b's D reaches 0.930 under (e), but D was not the pre-registered primary model and is
+reported only.
+
+By question type, under (e), step 2a's model is level with the paid selector on
+knowledge-update (1.000) and multi-session (0.936). It trails on temporal-reasoning (0.908
+against 0.959), single-session-preference (0.938 against 1.000), single-session-user (0.926
+against 1.000) and single-session-assistant (0.773 against 0.909). The last is the one type
+where routing hides the answer, because the gold turn is the assistant's.
+
+**The keep rule under (e).** Under (e) every candidate is rendered before the rest, so the
+keep rule does not change coverage, and the grid's tie-break chose to keep nothing. That
+matters outside this benchmark: `memory_recall`'s text block shows kept turns whole and
+cuts every other turn to 280 characters (`Memvara.RECALL_EPISODE_CHARS`), while MemoryBench
+reads whole turns. With the keep rule fitted under the server rendering (about five turns
+kept), (e) still covers 0.928 for step 2a's model and 0.930 for D. So a shipped (e) keeps
+that rule, and the highest-scoring turns are still shown whole.
+
+**Answer windows, for the weakest question type.** Under (e), questions about what the
+assistant said had the lowest whole-turn coverage (0.773 against the paid selector's
+0.909). On the train and validation questions the cause was turn length, so the spec's §15
+(fixed before this was run) tested showing a long turn as the 280-character part that
+answers the question, chosen by the local model, against whole turns and against the
+lexical window `recall()` already uses. Whole-turn coverage cannot credit a window, so the
+measure is whether at least 60% of the gold answer's content words reach the 720-token
+block, the rule `bench/recall_window.py` uses. It is a proxy, not a judged answer.
+
+```bash
+PYTHONPATH=. python3 bench/selector_windows.py --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json --split test --rerank local/selector/scores/stock_lme.jsonl --select local/selector/scores/step2a-B_lme.jsonl --model local/selector/models/step2a-B --data ~/.cache/memvara-bench/longmemeval_s_cleaned.json --device mps
+```
+
+On the 188 non-abstention test questions, with step 2a's model under (e):
+
+| Rendering | Answer shown | Against `whole` | About the assistant (22) |
+|---|---|---|---|
+| whole turns | 0.628 | — | 0.955 |
+| lexical window (`recall()` today) | 0.601 | −0.027 [−0.053, +0.000] | 0.727 |
+| model's answer window | 0.585 | −0.043 [−0.074, −0.011] | 0.591 |
+| paid selector, whole turns | 0.612 | −0.016 [−0.053, +0.021] | 0.955 |
+
+**It failed.** The model's windows show the answer less often than whole turns, and much
+less often on the very questions they were built for. Assistant answers are often an item
+in a list or a step in a recipe, and a 280-character window loses the context that makes the
+answer findable. Scoring the windows also cost about 1,570 extra model pairs per read.
+
+The measurement also showed that the weak link was smaller than whole-turn coverage made it
+look. With whole turns under (e), the answer to a question about the assistant reaches the
+block 21 times in 22, the same as with the paid selector, and overall (e) is level with the
+paid selector on this proxy (0.628 against 0.612). These comparisons were not the gate, and
+the proxy cannot see answers that are not stated word for word, which rules out most
+multi-session and preference questions. A judged run is the measure that can settle it.
+
+**Gate G3: LoCoMo, which the model never saw.** The spec's §16 (fixed before the pools were
+built) applies section 6's G3 to the shipped rendering: step 2a's model B against the stock
+model, both rendered as `LocalSelector.select_ordered()` ships them. All ten LoCoMo
+conversations, categories 1 to 4. A LoCoMo turn's role is its speaker's name, so routing
+finds no `user` turn and both people's turns are candidates.
+
+```bash
+PYTHONPATH=. python3 bench/selector_pools.py locomo --data locomo10.json --out local/selector/pools/locomo.jsonl
+PYTHONPATH=. python3 bench/selector_score.py --pools local/selector/pools/locomo.jsonl --model cross-encoder/ms-marco-MiniLM-L-6-v2 --revision 233902d25c440f23af6f7d6e94d2946bac0bee0a --device mps --out local/selector/scores/stock_locomo.jsonl
+PYTHONPATH=. python3 bench/selector_score.py --pools local/selector/pools/locomo.jsonl --model local/selector/models/step2a-B --max-length 256 --device mps --scope-of local/selector/scores/stock_locomo.jsonl --out local/selector/scores/step2a-B_locomo.jsonl
+```
+
+Coverage at 720 tokens on the 1,496 questions that have a gold turn in their pool (39 of
+1,535 have none):
+
+| Ordering | Coverage |
+|---|---|
+| plain read | 0.679 |
+| stock model | 0.758 |
+| **fine-tuned (step 2a's B)** | **0.777** |
+
+| Category | Questions | Stock | Fine-tuned |
+|---|---|---|---|
+| multi-hop | 279 | 0.619 | 0.653 |
+| open-domain | 82 | 0.481 | 0.525 |
+| single-hop | 824 | 0.896 | 0.899 |
+| temporal | 311 | 0.848 | 0.864 |
+
+**G3 passes.** Fine-tuned minus stock is +2.0 points [+1.2, +2.7], better on 59 questions
+and worse on 17, against a pass line of +1.0 with the interval above zero. The prediction
+was +1.5 (−1 to +4). The model was trained only on LongMemEval, so the ordering it learned
+carries over to conversations between two people it has never seen.
+
+**Gate G4: judged answers.** The gpt-5.4 gateway had no credit, so the reader and judge ran
+on `openai.gpt-oss-120b` through Amazon Bedrock (us-east-1, the Responses API on
+`bedrock-mantle`). The paid selector's 177 was judged by gpt-5.4 and cannot be compared
+with that, so the paid arm was re-answered and re-judged on the same model (spec §16, amended
+before the run). Both arms use the parity run's saved search results and a 720-token budget:
+`memvara-local-e199` reorders them as `select_ordered()` ships, `memvara-paid-oss199` keeps
+the paid selector's order.
+
+| Arm | Correct of 199 |
+|---|---|
+| paid selector, gpt-5.4 reader and judge (`memvara-ranked-parity2`, reference) | 177 |
+| paid selector, gpt-oss-120b reader and judge | 171 |
+| **local selector, gpt-oss-120b reader and judge** | **165** |
+
+| Type | Questions | Local | Paid |
+|---|---|---|---|
+| knowledge-update | 31 | 26 | 27 |
+| multi-session | 53 | 42 | 43 |
+| single-session-assistant | 22 | 18 | 21 |
+| single-session-preference | 12 | 7 | 7 |
+| single-session-user | 28 | 26 | 28 |
+| temporal-reasoning | 53 | 46 | 45 |
+
+**G4 fails.** Against the paid arm the local arm wins 10 questions and loses 16, a net of
+−6 against a line of −3. The prediction was −2 (−8 to +4). The largest loss is on
+questions about what the assistant said (18 against 21), the type whose whole-turn coverage
+was lowest. Two cautions: the SDK drops the temperature setting for a reasoning model, so
+both arms' answers are sampled rather than fixed, and 26 discordant questions is a small
+sample, which is why section 6 calls G4 a screen. The result agrees with the offline gap,
+0.928 against 0.958 coverage. The Bedrock spend for both arms was well under a dollar.
+
+**The local selector against the routed read, judged.** The spec's §17 (fixed before the
+routed arm ran) asked whether the local selector beats option (c), the routed order with no
+model, which needs no fine-tuned weights. `memvara-routed-oss199` reorders the same saved
+search results as the routed replay (0.903 coverage) and was answered and judged on
+gpt-oss-120b exactly as the G4 arms were.
+
+| Arm (gpt-oss-120b reader and judge) | Correct of 199 |
+|---|---|
+| paid selector | 171 |
+| **local selector** | **165** |
+| routed read, no model | 162 |
+
+| Type | Questions | Local | Paid | Routed |
+|---|---|---|---|---|
+| knowledge-update | 31 | 26 | 27 | 26 |
+| multi-session | 53 | 42 | 43 | 40 |
+| single-session-assistant | 22 | 18 | 21 | 20 |
+| single-session-preference | 12 | 7 | 7 | 7 |
+| single-session-user | 28 | 26 | 28 | 27 |
+| temporal-reasoning | 53 | 46 | 45 | 42 |
+
+Against routed, the local selector wins 13 questions and loses 10, a net of **+3**. The rule
+written before the run was: +3 or more ships the local selector as an opt-in; −2 to +2 is a
+wash and the simpler option (c) is preferred. So the result meets the line exactly, and the
+prediction was +3. It is a narrow result: 23 discordant questions, with sampled answers.
+The gain comes from multi-session (+2) and temporal-reasoning (+4); questions about the
+assistant go the other way (18 against 20), as they did against the paid selector.
+
+**Gate G6: speed and memory on 4 CPU threads.** Step 2a's model B, timed through
+`select_ordered()` with both models loaded straight onto the CPU (Apple M-series, 4 threads)
+and the stock reranker loaded and used once before the baseline:
+
+```bash
+OMP_NUM_THREADS=4 PYTHONPATH=. python3 bench/selector_latency.py --model local/selector/models/step2a-B
+OMP_NUM_THREADS=4 PYTHONPATH=. python3 bench/selector_latency.py --model local/selector/models/step2a-B --pools local/selector/pools/lme.jsonl --reads 100
+```
+
+| Candidates | p50 | p95 | 4,000-character question | Memory added (peak) |
+|---|---|---|---|---|
+| 40 synthetic 400-token turns, 51 reads | 314 ms | 345 ms | 373 ms | 308 MB |
+| real LongMemEval candidates, 101 reads | 280 ms | 327 ms | 339 ms | 354 MB |
+
+**G6 fails, on memory.** Speed passes with room to spare (p95 about a third of the 1.0 s
+limit), but the peak resident memory grows by 308 to 354 MB against a limit of 300 MB. The
+first run, which let the model load onto the GPU and then moved it, measured 312 to 335 MB;
+loading straight onto the CPU did not change the outcome.
+
+A diagnostic added after the result: a ranked read reranks up to 200 turns before the
+selector runs, so a production process has already reached that working-memory peak. With
+the reranker first run on 200 assistant-length turns, the selector added 54 to 68 MB to the
+peak. The weights alone are 91 MB, so a peak-based measure cannot say exactly what the
+selector costs; what it does show is that most of the 300-plus MB is torch's working memory
+for a first large batch, which a process that reranks has already paid. All timings here are on
+an M-series laptop, which is faster per core than the 4-core production host.
+
+**G6's memory half, re-measured at steady state (spec §18, fixed before the run).** Fresh
+processes on 4 CPU threads served 50 ranked reads each, every read reranking one LongMemEval
+test pool's turns (up to 200); the *with* processes also ran `select_ordered()` on each
+read's 40 routed candidates. A process's figure is its median current resident memory over
+the last 10 reads.
+
+```bash
+OMP_NUM_THREADS=4 PYTHONPATH=. python3 bench/selector_latency.py --steady without --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json
+OMP_NUM_THREADS=4 PYTHONPATH=. python3 bench/selector_latency.py --steady with --model local/selector/models/step2a-B --pools local/selector/pools/lme.jsonl --splits local/selector/splits_lme.json
+```
+
+| Run | Without the selector | With the selector |
+|---|---|---|
+| 1 | 738 MB | 867 MB |
+| 2 | 737 MB | 869 MB |
+| 3 | 742 MB | 857 MB |
+| median | 738 MB | 867 MB |
+
+**The selector adds 129 MB at steady state, so G6's memory half passes** against the 300 MB
+line; the prediction was about 120 MB (80 to 200). With the speed half, G6 passes under the
+re-measure. The peak-based figures above stay on record as the gate as first written.
+
+**Published.** Step 2a's model B is published as
+[`memvara/selector-minilm-l6`](https://huggingface.co/memvara/selector-minilm-l6) at commit
+`fb240a9c282889ec8e95391e93fa0a86f52ac7a9`, under Apache-2.0, with the measurements above on
+its model card. `LocalSelector()` loads it at that commit by default; an anonymous download
+of that commit matches the weights' recorded SHA-256.
+
+**Gate G5: real recall calls.** The spec's §19 (fixed before the run, and amended twice
+before any agreement was computed) replayed the 92 `memory_recall` calls (61 distinct
+queries) found in this machine's Claude Code transcripts. Each project's conversation text
+became a store; each call's 40 routed candidates, cut to 4,000 characters, went to the local
+selector and to `ModelSelector` running on gpt-oss-120b on Bedrock. Agreement is the share
+of the model selector's kept turns that the local selector also kept.
+
+| Measure | Result |
+|---|---|
+| calls answered by both | 92 of 92 |
+| agreement | 105 of 261 = **0.402** |
+| turns kept per call | local 4.6, model 2.8 |
+| turns only the local selector kept | 314 |
+| hand review of 20 disagreements | local right 8, model right 7, unclear 5 |
+
+**G5 fails:** agreement is 0.402 against a pass line of 0.75, below the predicted range of
+0.45 to 0.75. The hand review does not show either selector to be the better one where they
+disagree. Many candidates in these stores are not conversation at all (task-completion
+notices, pasted system prompts, session summaries), which neither model was trained on. Two
+cautions: the model selector here is a stand-in, not the gpt-5.4-mini the hosted service
+uses, and the review saw only the first 420 characters of each turn. The review itself stays
+under `local/`, because it quotes private transcripts.
+
+The spec's §10 records what has to be decided before this work goes on.
+
 ## LOCOMO and LongMemEval — retrieval, measured
 
 Not answer accuracy — that number is judged, separately, [above](#answer-accuracy-judged-in-the-memorybench-harness)

@@ -27,6 +27,32 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   refused by an embedder until it embeds everything with `reembed=True`. The store's
   `.embedder.json` records `"none"`, and `embeddings=False` with `api_key=` is a
   `TypeError`. `memvara.embed.NoEmbedder` is the embedder such a store holds.
+- **A ranked read can run without a model provider.** `memvara.select.LocalSelector` is
+  a second `Selector`: it scores the ranked stage's candidate turns with a cross-encoder
+  in this process, turns each score into a probability with a calibration measured on
+  labelled data, and keeps the turns that reach a threshold. It needs the `rerank` extra,
+  sends nothing anywhere, and gives the same answer every time for the same input.
+  `Memvara(read_selector=LocalSelector())` uses it. With no arguments it loads
+  `memvara/selector-minilm-l6`, a model memvara publishes on Hugging Face: the stock
+  reranker fine-tuned on LongMemEval's gold labels, pinned to a commit, with its
+  calibration built in. Design:
+  `docs/superpowers/specs/2026-10-01-local-selector-design.md`. Its reads are counted as
+  `retrieval.local_query`, `retrieval.local_select_ms` and `retrieval.local_fallback`,
+  never as the model series a quota sums. After the turns it keeps, a local selection
+  shows the other candidates in its own model's order, through the optional
+  `select_ordered()` method; a model selection's order is unchanged. On 191 LongMemEval-S
+  questions, a model fine-tuned on gold labels put 0.928 of the answer-bearing turns in a
+  720-token block this way, against 0.905 with the reranker's order and 0.958 for the
+  model selector.
+- **`memvara-mcp` can rank reads locally.** `MEMVARA_SELECTOR=local` builds a
+  `LocalSelector` and the cross-encoder reranker in front of it, for ranked reads only, so
+  `memory_recall`'s `ranked` argument works with no key. It loads
+  `memvara/selector-minilm-l6` from Hugging Face on first start, unless
+  `MEMVARA_SELECTOR_MODEL` names a trained model directory. It is an opt-in, not a
+  replacement for a model selector: judged on 199 LongMemEval questions it answered 165,
+  against 162 with no selector and 171 with the model selector. Both settings are refused
+  under `MEMVARA_MODE=cloud`. The `ranked` description and the server instructions now say
+  a server may rank without a model call.
 
 ### Removed
 

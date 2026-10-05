@@ -6,7 +6,9 @@ themselves — recency for the predicate, confidence, salience. Two further legs
 and off by default: a graph leg that walks entity relationships, and a temporal leg over raw
 turns. The deterministic stages on this path never call a generative model. A model is
 called only through three named stages, each with a recorded outcome and a fallback that
-serves the plain read: `ranked`, `query_rewrite` and `synthesis`. Query rewrite is on by
+serves the plain read: `ranked`, `query_rewrite` and `synthesis`. The
+`ranked` stage's selector is either a chat model (`ModelSelector`) or a cross-encoder in
+this process (`LocalSelector`), which makes no call. Query rewrite is on by
 default whenever the configured `llm=` can chat, and with the default `NullLLM` no stage has
 a model to call.
 
@@ -46,7 +48,15 @@ JSON, under a header that names the text as data rather than instruction.
   `calibration_of()`, the cosine thresholds measured for each embedding space, and
   `bench/embedder_calibration.py`, the measurement.
 - Optional model-ranked reads: `memvara/select/base.py` — the `Selector` protocol,
-  `Candidate`, `Selection`, `SelectorRefused`; `memvara/select/model.py` — `ModelSelector`.
+  `Candidate`, `Selection`, `SelectorRefused`; `memvara/select/model.py` — `ModelSelector`;
+  `memvara/select/local.py` — `LocalSelector`, which ranks with a cross-encoder in this
+  process; by default `memvara/selector-minilm-l6` on Hugging Face, pinned by
+  `SELECTOR_REVISION`, with its calibration in `_BUILT_IN`. A new model or commit needs a
+  new `_BUILT_IN` entry, copied from the `memvara_selector.json` published beside it.
+  A selector that also has `select_ordered()`, as `LocalSelector` does, hands the ranked
+  stage its order of every candidate, and the candidates it did not keep are shown
+  in that order ahead of the rest of the reranked list (`HybridRetriever._run_ranked_stage`).
+  `ModelSelector` has no such method, so a model selection's order is unchanged.
 - Query rewrite and synthesis: `memvara/select/stages.py` — `QueryRewriter` and
   `Synthesizer`; `memvara/select/base.py` — the `Rewrite` and `Synthesis` records;
   `HybridRetriever.search(query_rewrite=)` and `Memvara.recall(synthesize=)`.

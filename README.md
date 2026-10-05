@@ -602,11 +602,14 @@ reporting on the result whether it ran, so a failure serves the ordinary read in
   turn it off.
 - **Synthesis**, when you call `recall(synthesize=True)`. One call writes a short summary
   of the recalled notes and puts it above them; every note is still returned.
-- **Model ranking**, when you call `search(ranked=True)` against a retriever configured
-  with a `read_selector`. One call names which of the reranked turns actually bear on the
-  question. That call sees the user's turns unless the question asks what the assistant
-  said; a store whose two roles are two people sets `read_route_roles=False` so neither
-  person's turns are cut before the model sees them.
+- **Ranking**, when you call `search(ranked=True)` against a retriever configured with a
+  `read_selector`. A `ModelSelector` makes one call to a chat model, on your key, to name
+  which of the reranked turns actually bear on the question. A `LocalSelector` does the
+  same job with a small cross-encoder in your own process: no key, no call, and nothing
+  sent anywhere (`pip install 'memvara[rerank]'`; `MEMVARA_SELECTOR=local` on the MCP
+  server). Either one sees the user's turns unless the question asks what the assistant
+  said; a store whose two roles are two people sets `read_route_roles=False`, so neither
+  person's turns are cut before the selector sees them.
 
 See `memvara.select`. History and provenance are
 not a separate subsystem: they fall out of the store keeping intervals and supersession

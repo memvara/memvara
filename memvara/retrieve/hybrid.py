@@ -71,6 +71,9 @@ from ..select.stages import MAX_QUERIES, _count, run_stage
 from ..store.base import Store, bulk_claims, resolve_states
 from ..telemetry import (
     RETRIEVAL_LATENCY_MS,
+    RETRIEVAL_LOCAL_FALLBACK,
+    RETRIEVAL_LOCAL_QUERY,
+    RETRIEVAL_LOCAL_SELECT_MS,
     RETRIEVAL_MODEL_QUERY,
     RETRIEVAL_MODEL_REFUSED,
     RETRIEVAL_OBSERVATION_RANK_CORR,
@@ -1372,14 +1375,15 @@ class HybridRetriever:
         return self._above_floor(out)[:(self.max_episodes if cap is None else cap)]
 
     @staticmethod
-    def _select_ms(rec: "Recorder | None", t0: float) -> None:
-        """`RETRIEVAL_SELECT_MS`, on every call the ranked stage actually makes.
+    def _select_ms(rec: "Recorder | None", t0: float, name: str = RETRIEVAL_SELECT_MS) -> None:
+        """`RETRIEVAL_SELECT_MS`, or a local selector's `RETRIEVAL_LOCAL_SELECT_MS`, on
+        every call the ranked stage actually makes.
 
         Every branch emits it, including failures, because a provider timeout is latency
         the caller waited through.
         """
         if rec is not None:
-            rec.timing(RETRIEVAL_SELECT_MS, (perf_counter() - t0) * 1000.0)
+            rec.timing(name, (perf_counter() - t0) * 1000.0)
 
     def _run_ranked_stage(
         self, rec: "Recorder | None", selector: Selector, query: str,
@@ -1391,13 +1395,20 @@ class HybridRetriever:
         Returns `(selection, kept_turns, tail)`. `kept_turns` has `explain.selected` and
         `.span` set and is empty unless the outcome is `applied`. `tail` is the reranked
         turns minus those kept, or `episodes` unchanged for `disabled`, where the reranker
-        never ran. The caller uses `tail` only on `applied`.
+        never ran. On `applied`, when the selector has `select_ordered`, the unkept candidates
+        come first in `tail`, in the selector's own order. The caller uses `tail` only on
+        `applied`.
 
         Admission covers the reranker call as well as the model call, because the cap
         bounds how long a ranked read holds a thread, and that includes the cross-encoder.
         `SelectorBusy` is counted here and then propagates; nothing else about the read is
         counted.
         """
+        # A local selector's reads are counted on series of their own: the model series
+        # count calls a provider answered, and a quota sums them by name (telemetry.py).
+        local = getattr(selector, "kind", None) == "local"
+        answered = RETRIEVAL_LOCAL_QUERY if local else RETRIEVAL_MODEL_QUERY
+        timed = RETRIEVAL_LOCAL_SELECT_MS if local else RETRIEVAL_SELECT_MS
         try:
             with selector.admit():
                 turn_order = episodes
@@ -1416,24 +1427,40 @@ class HybridRetriever:
                     for e in scope]
                 t0 = perf_counter()
                 usage = Usage()
+                # A selector with `select_ordered` (`LocalSelector`) also hands back its
+                # order of every candidate, and the unkept candidates are shown in it.
+                # `ModelSelector` has none, so a model selection's tail is unchanged.
+                ordered = getattr(selector, "select_ordered", None)
+                order: list[str] | None = None
                 try:
-                    chosen = selector.select(query, candidates, asked_on=now, usage=usage)
+                    if ordered is not None:
+                        chosen, order = ordered(query, candidates, asked_on=now, usage=usage)
+                    else:
+                        chosen = selector.select(query, candidates, asked_on=now,
+                                                 usage=usage)
                 except Exception as exc:                      # noqa: BLE001 - deliberate
                     # `Selector.select()` reports a failure by raising, so each kind of
                     # exception is turned back into the outcome it stands for.
-                    self._select_ms(rec, t0)
+                    self._select_ms(rec, t0, timed)
                     selection = _failed_selection(exc, len(candidates))
                     if rec is not None:
-                        _count(rec, selection)
+                        if local and selection.outcome == "fallback":
+                            # Never the model series, which a quota sums by name.
+                            tags = {"reason": str(selection.reason)}
+                            if selection.status is not None:
+                                tags["status"] = str(selection.status)
+                            rec.counter(RETRIEVAL_LOCAL_FALLBACK, **tags)
+                        else:
+                            _count(rec, selection)
                     return selection, [], turn_order
 
                 # With no candidates `select()` makes no model call, so neither the
                 # query counter nor the latency is emitted, though the outcome is still
                 # `applied`.
                 if candidates:
-                    self._select_ms(rec, t0)
+                    self._select_ms(rec, t0, timed)
                     if rec is not None:
-                        rec.counter(RETRIEVAL_MODEL_QUERY)
+                        rec.counter(answered)
                         if usage.reported > 0:
                             rec.counter(RETRIEVAL_TOKENS_IN, usage.input_tokens)
                             rec.counter(RETRIEVAL_TOKENS_OUT, usage.output_tokens)
@@ -1447,6 +1474,15 @@ class HybridRetriever:
                     else:
                         e.explain.selected = False
                 tail = [e for e in turn_order if e.episode.id not in spans]
+                if order is not None:
+                    # The unkept candidates in the selector's order, then everything the
+                    # selector was not shown. A candidate missing from `order` goes after
+                    # the ones it names, in candidate order, rather than being dropped.
+                    rank = {cid: n for n, cid in enumerate(order)}
+                    shown = {e.episode.id for e in scope}
+                    unkept = sorted((e for e in scope if e.episode.id not in spans),
+                                    key=lambda e: rank.get(e.episode.id, len(rank)))
+                    tail = unkept + [e for e in turn_order if e.episode.id not in shown]
                 return (Selection(outcome="applied", candidates=len(candidates),
                                   kept=len(kept)),
                         kept, tail)

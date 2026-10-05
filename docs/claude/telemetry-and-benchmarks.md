@@ -114,6 +114,11 @@ contributor guide and a CLI rather than a script per corpus.
   series tagged `stage=rewrite` or `stage=synthesis`, with their own timers
   `retrieval.rewrite_ms` and `retrieval.synthesis_ms` (`memvara.select.stages.run_stage`).
   A quota that sums `retrieval.model_query` by name therefore meters every answered call.
+- **A local selection is not a model call, and is counted apart.** A ranked read that a
+  `LocalSelector` answered emits `retrieval.local_query` and `retrieval.local_select_ms`,
+  and a failed one emits `retrieval.local_fallback` (`reason=malformed` or `error`), never
+  the three model series above. The ranked stage reads `kind = "local"` off the selector
+  to choose; a selector without that attribute keeps the model series.
 - **Benchmark reads are plain.** Every `search()` and `recall()` in `bench/` and `demo/`
   passes `**PLAIN_READ` or an explicit `query_rewrite=`, so an extraction model that can
   chat does not also rewrite the questions a benchmark asks. The scan in
