@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import re
 
+from ..documents.chunk import cut_long
+
 #: A turn longer than this many characters is extracted in pieces when
 #: `extraction_chunks` is on, and no piece is longer than this. The design names 6,000
 #: characters for the threshold (`docs/superpowers/specs/
@@ -84,14 +86,9 @@ def split_for_extraction(text: str, limit: int | None = None) -> list[str]:
         if current:
             pieces.append(current)
             current = ""
-        while len(unit) > size:
-            # A space inside the first `size + 1` characters ends a word that fits,
-            # because the space itself is dropped rather than carried into either piece.
-            cut = unit.rfind(" ", 1, size + 1)
-            cut = size if cut <= 0 else cut
-            pieces.append(unit[:cut])
-            unit = unit[cut:].lstrip()
-        current = unit
+        *head, (start, end) = cut_long(unit, 0, len(unit), size)
+        pieces.extend(unit[s:e] for s, e in head)
+        current = unit[start:end]
     if current:
         pieces.append(current)
     return [p.strip() for p in pieces if p.strip()]
