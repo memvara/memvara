@@ -67,11 +67,10 @@ from ..schema import PredicateRegistry
 from ..select.base import (
     Candidate, Rewrite, Selection, Selector, SelectorBusy, SelectorRefused,
 )
-from ..select.stages import MAX_QUERIES, run_stage
+from ..select.stages import MAX_QUERIES, _count, run_stage
 from ..store.base import Store, bulk_claims, resolve_states
 from ..telemetry import (
     RETRIEVAL_LATENCY_MS,
-    RETRIEVAL_MODEL_FALLBACK,
     RETRIEVAL_MODEL_QUERY,
     RETRIEVAL_MODEL_REFUSED,
     RETRIEVAL_OBSERVATION_RANK_CORR,
@@ -96,6 +95,9 @@ from ..types import (
     Scope,
     SearchResults,
     TimeWindow,
+    _as_memory_type,
+    _short,
+    as_utc,
     owner_key,
     time_axes,
     time_window,
@@ -136,10 +138,6 @@ GRAPH = "graph"
 # There is deliberately no default relevance floor. The right floor moves with corpus
 # size; `calibrate.py` has the measurement and `calibrate_min_score`, which derives one
 # from a deployment's own probes.
-
-
-def _as_utc(dt: datetime) -> datetime:
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 class DegradedRetrievalWarning(UserWarning):
@@ -203,12 +201,6 @@ def kind_of(item: Retrieved) -> str:
     prompt, a JSON payload or an MCP tool result, where the class does not.
     """
     return item.kind
-
-
-def _short(text: str, limit: int = 48) -> str:
-    """One-line, length-capped rendering, for reprs over arbitrary turn text."""
-    flat = " ".join(str(text).split())
-    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 class _Weights(NamedTuple):
@@ -281,7 +273,7 @@ def known_memory_types(
 
     Without the refusal, a misspelled name would match no claim and the search would
     return nothing, which looks the same as a store with nothing relevant. The error
-    message uses the same words as `remember()` (`core._as_memory_type`).
+    message uses the same words as `remember()`, because both call `types._as_memory_type`.
 
         >>> known_memory_types(["semantic"])
         [<MemoryType.SEMANTIC: 'semantic'>]
@@ -292,21 +284,32 @@ def known_memory_types(
     """
     if memory_types is None:
         return None
-    known = []
-    for value in memory_types:
-        try:
-            known.append(MemoryType(value))
-        except ValueError:
-            raise ValueError(
-                "memory_type must be one of "
-                + ", ".join(t.value for t in MemoryType) + f", not {value!r}") from None
-    return known
+    return [_as_memory_type(value) for value in memory_types]
 
 #: Ranked-read outcomes that skip the final reranker pass. `applied` already reranked
 #: its turns inside the ranked stage, and `disabled` is the operator's load-shedding
 #: switch, which must spend nothing on the cross-encoder. Every other outcome serves the
 #: plain read, including its reranker pass.
 _NO_RERANK = frozenset({"applied", "disabled"})
+
+
+def _failed_selection(exc: Exception, candidates: int) -> Selection:
+    """The ranked-stage outcome for an exception `Selector.select()` raised.
+
+    `SelectorRefused` means the provider answered 401 or 403. `TimeoutError` means the
+    call ended after its deadline, and `ValueError` means the reply could not be read.
+    Any other exception is a `provider` fallback when it carries an HTTP `status_code`,
+    and an `error` fallback when it does not.
+    """
+    if isinstance(exc, SelectorRefused):
+        return Selection(outcome="key_rejected", status=exc.status, candidates=candidates)
+    if isinstance(exc, TimeoutError):
+        return Selection(outcome="fallback", reason="timeout", candidates=candidates)
+    if isinstance(exc, ValueError):
+        return Selection(outcome="fallback", reason="malformed", candidates=candidates)
+    status = getattr(exc, "status_code", None)
+    return Selection(outcome="fallback", reason="provider" if status is not None else "error",
+                     status=status, candidates=candidates)
 
 
 class HybridRetriever:
@@ -650,7 +653,7 @@ class HybridRetriever:
         t0 = perf_counter() if rec is not None else 0.0
         # One instant for the whole read: the model's "today", the decay clock, and the
         # cut-off a date range must end before.
-        asked = _as_utc(now) if now is not None else utcnow()
+        asked = as_utc(now) if now is not None else utcnow()
         rewrite = self._rewrite(query, asked)
         alternatives: tuple[str, ...] = ()
         if rewrite.outcome == "applied":
@@ -851,8 +854,8 @@ class HybridRetriever:
         # "how long ago had we last heard this, as of the question". `now` only replaces
         # the wall-clock read when `known_at` is unset, so two identical searches score
         # identically. See docs/BENCHMARKS.md, "LOCOMO and LongMemEval".
-        now = _as_utc(known_at) if known_at is not None else (
-            _as_utc(now) if now is not None else utcnow())
+        now = as_utc(known_at) if known_at is not None else (
+            as_utc(now) if now is not None else utcnow())
 
         # `selector_ranked` is a ranked call that can actually run. A ranked call with no
         # selector is served exactly like a plain read, so the reranker gate reads
@@ -1414,41 +1417,14 @@ class HybridRetriever:
                 usage = Usage()
                 try:
                     chosen = selector.select(query, candidates, asked_on=now, usage=usage)
-                except SelectorRefused as exc:
-                    # The provider answered 401 or 403.
-                    self._select_ms(rec, t0)
-                    if rec is not None:
-                        rec.counter(RETRIEVAL_MODEL_REFUSED, reason="key_rejected")
-                    return (Selection(outcome="key_rejected", status=exc.status,
-                                      candidates=len(candidates)),
-                            [], turn_order)
-                except TimeoutError:
-                    self._select_ms(rec, t0)
-                    if rec is not None:
-                        rec.counter(RETRIEVAL_MODEL_FALLBACK, reason="timeout")
-                    return (Selection(outcome="fallback", reason="timeout",
-                                      candidates=len(candidates)),
-                            [], turn_order)
-                except ValueError:
-                    self._select_ms(rec, t0)
-                    if rec is not None:
-                        rec.counter(RETRIEVAL_MODEL_FALLBACK, reason="malformed")
-                    return (Selection(outcome="fallback", reason="malformed",
-                                      candidates=len(candidates)),
-                            [], turn_order)
                 except Exception as exc:                      # noqa: BLE001 - deliberate
+                    # `Selector.select()` reports a failure by raising, so each kind of
+                    # exception is turned back into the outcome it stands for.
                     self._select_ms(rec, t0)
-                    status = getattr(exc, "status_code", None)
-                    reason = "provider" if status is not None else "error"
+                    selection = _failed_selection(exc, len(candidates))
                     if rec is not None:
-                        if status is not None:
-                            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=reason,
-                                       status=str(status))
-                        else:
-                            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=reason)
-                    return (Selection(outcome="fallback", reason=reason, status=status,
-                                      candidates=len(candidates)),
-                            [], turn_order)
+                        _count(rec, selection)
+                    return selection, [], turn_order
 
                 # With no candidates `select()` makes no model call, so neither the
                 # query counter nor the latency is emitted, though the outcome is still
@@ -1677,7 +1653,7 @@ class HybridRetriever:
         """
         if known_at is None:
             return True
-        return _as_utc(claim.recorded_at) <= _as_utc(known_at)
+        return as_utc(claim.recorded_at) <= as_utc(known_at)
 
     def _explain(self, claim: Claim, fusion: float, legs: _Legs, now: datetime,
                  weights: _Weights, anchor: str | None = None) -> Result:

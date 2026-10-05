@@ -241,19 +241,23 @@ def run_stage(name: str, stage: S | None, enabled: bool, record: type[O],
         except SelectorRefused as refused:
             outcome = record(outcome=refused.reason, status=refused.status)
     if rec is not None:
-        _count(rec, name, outcome)
+        _count(rec, outcome, stage=name)
     return outcome
 
 
-def _count(rec: Recorder, name: str, outcome: StageOutcome) -> None:
-    """The outcome counter the ranked stage would emit, tagged with this stage's name."""
+def _count(rec: Recorder, outcome: StageOutcome, **tags: str) -> None:
+    """Count one stage outcome, with `tags` added to the series.
+
+    The ranked stage in `hybrid.py` passes no tags. The rewrite and synthesis stages pass
+    `stage=` with their own name.
+    """
     if outcome.outcome == "applied":
-        rec.counter(RETRIEVAL_MODEL_QUERY, stage=name)
+        rec.counter(RETRIEVAL_MODEL_QUERY, **tags)
     elif outcome.outcome == "fallback":
         if outcome.status is not None:
             rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=str(outcome.reason),
-                        status=str(outcome.status), stage=name)
+                        status=str(outcome.status), **tags)
         else:
-            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=str(outcome.reason), stage=name)
+            rec.counter(RETRIEVAL_MODEL_FALLBACK, reason=str(outcome.reason), **tags)
     else:
-        rec.counter(RETRIEVAL_MODEL_REFUSED, reason=outcome.outcome, stage=name)
+        rec.counter(RETRIEVAL_MODEL_REFUSED, reason=outcome.outcome, **tags)

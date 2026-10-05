@@ -653,6 +653,21 @@ class MemoryType(str, Enum):
     PROCEDURAL = "procedural"
 
 
+def _as_memory_type(value: MemoryType | str) -> MemoryType:
+    """A `MemoryType` from itself or from its value as a string (#270).
+
+    Anything else, `None` included, raises `ValueError` listing the valid names.
+    `remember()` and the `memory_types` search filter both call this, so a misspelling
+    is refused with the same words in both places.
+    """
+    try:
+        return MemoryType(value)
+    except ValueError:
+        raise ValueError(
+            "memory_type must be one of "
+            + ", ".join(t.value for t in MemoryType) + f", not {value!r}") from None
+
+
 class Derivation(str, Enum):
     """How a claim came to exist. Kept for provenance and for eval slicing."""
 

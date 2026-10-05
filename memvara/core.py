@@ -103,6 +103,7 @@ from .types import (
     Scope,
     SearchResults,
     WriteReceipt,
+    _as_memory_type,
     as_utc,
     close_out,
     closure,
@@ -716,18 +717,6 @@ def _pack_predicates(pack: str) -> tuple[str, ...]:
 #: 58% of the time on one production store and in the top ten only 71%, and each one
 #: past the third is a model call that mostly says "no".
 ADVISORY_CANDIDATES = 3
-
-
-def _as_memory_type(value: MemoryType | str | None) -> MemoryType | None:
-    """A `MemoryType` from itself or from its value as a string (#270)."""
-    if value is None:
-        return None
-    try:
-        return MemoryType(value)
-    except ValueError:
-        raise ValueError(
-            "memory_type must be one of "
-            + ", ".join(t.value for t in MemoryType) + f", not {value!r}") from None
 
 
 def _refuse_expired(expires_at: datetime, now: datetime) -> None:
@@ -1816,7 +1805,7 @@ class Memvara:
         string is a `ValueError` that names the argument, raised before anything is
         written.
         """
-        memory_type = _as_memory_type(memory_type)
+        memory_type = None if memory_type is None else _as_memory_type(memory_type)
         if PROJECT_META in meta:
             raise TypeError(PROJECT_META_REFUSAL.format(method="remember()"))
         if reserved := RESERVED_META & set(meta):
