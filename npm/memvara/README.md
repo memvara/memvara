@@ -114,8 +114,9 @@ stay visible to `memory_history`.
 
 ## What this package is not
 
-- **Not a JavaScript library.** `require("memvara")` returns a signpost, not an API. The
-  engine is Python: `pip install memvara`.
+- **Not a JavaScript library.** The package installs a command and exports nothing, so
+  `require("memvara")` fails with Node's own `MODULE_NOT_FOUND` error. The engine is
+  Python: `pip install memvara`.
 - **Not a local store.** This bridges to the hosted service. For an offline store that
   needs no account and no network, use the Python server directly:
   `MEMVARA_DB=~/memory.db memvara-mcp`.

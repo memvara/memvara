@@ -31,8 +31,8 @@ landing beside them unnoticed.
 - Storage: `memvara/store/base.py` — the `Store` protocol, `resolve_states()`,
   `state_predicate()`, `stored_state_predicate()`, `live_predicate()`, and
   `unended_predicate()`, which selects what `forget()` closes.
-- Storage backends: `memvara/store/sqlite.py` — `SQLiteStore`, the default;
-  `memvara/store/remote.py` — `RemoteStore`, the same protocol against a hosted deployment.
+- Storage backend: `memvara/store/sqlite.py` — `SQLiteStore`, the only `Store` in this
+  repository. A hosted deployment is reached through `memvara/remote/`, not through a store.
 - Encryption at rest for `SQLiteStore`: `memvara/store/encryption.py` — `resolve_key()`,
   `VectorSealer` (the encrypted vector file), `encrypt_store()` (behind
   `memvara encrypt`), `EncryptionError`, `EncryptionWarning`. Tests:

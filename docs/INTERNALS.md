@@ -443,8 +443,8 @@ recorded before schema 17, whose row nobody recorded. `residue` runs in one `bat
 no other writer is between taking a freed row for a new vector and committing that, and
 the row read belongs to the owner the database names.
 
-`prove_erased` fails closed. A store with no `residue`, or one whose `residue` raises —
-`RemoteStore`, which a `getattr` guard cannot see — yields `proven=False` with a reason,
+`prove_erased` fails closed. A store with no `residue`, or one whose `residue` exists and
+raises, which a `getattr` guard cannot see, yields `proven=False` with a reason,
 and `erase()` raises `ErasureIncomplete` rather than returning `True`. Unproven and
 proven-gone are different answers and only one of them is an erasure certificate.
 
@@ -498,8 +498,9 @@ this process or another; that claim is left alone. A failed proof raises
 server's `serve()` loop runs (`server.mcp.ExpirySweeper`, on a daemon thread, which warns
 and carries on when a sweep fails). A read-only server runs neither, because erasing is a
 write. A store with no `expired_claims` is skipped at open, and so is one whose
-`expired_claims` raises `NotImplementedError`, as `RemoteStore`'s does: the hosted
-deployment runs its own sweep. Called by name, `erase_expired` raises in both cases.
+`expired_claims` raises `NotImplementedError`, which is how a store says that something
+else, such as a hosted deployment, erases its expired claims. Called by name,
+`erase_expired` raises in both cases.
 
 **Reads do not wait for the sweep.** From the instant a claim's `expires_at` passes, no
 read returns it. `SQLiteStore._state_clause`, the clause every limited claim query runs,
@@ -873,6 +874,43 @@ class ReconcileResult:
 `WritePipeline._absorb` puts `claim` and every `add` in `also` in `receipt.added`, and
 every `reinforce` in `also` in `receipt.reinforced`, so a receipt lists the pieces of a
 write and the stored claims it reinforced, each in the order of their periods.
+
+**When a write is reported as an accumulation.** `Reconciler._accumulation` fills
+`ReconcileResult.accumulated` when all four of these hold:
+
+1. The action is `add`, so the write is not a reinforcement, a retraction or a
+   supersession.
+2. The registry has no spec for the predicate, so its `MANY` cardinality is a default that
+   nobody chose.
+3. The slot already holds at least one live claim for the same owner.
+4. None of those live claims has this value. This follows from (1), because a matching
+   value would have been reinforced instead.
+
+The slot now gives two different answers to a present-tense question. Condition (2) is the
+whole of the noise control. A registered `MANY` predicate accumulates on purpose and is
+never reported. A predicate the extractor met is registered before its claim is
+reconciled, so on the `add()` path with a model configured the report almost never fires.
+It fires where cardinality can never be learned: `remember()`, which does not acquire
+predicates, and deployments with no extraction model.
+
+The report cannot tell a slot like `status` from one like `tagged_with`. A predicate that
+really is multi-valued but was never declared trips it on every write after the first, and
+nothing in the row shows intent. That is acceptable because the report does not say the
+write was wrong; it says the predicate was never declared. Declaring the predicate ends the
+report either way: `ONE` makes the next write supersede, and `MANY` silences it for good.
+A write into a slot whose earlier values have all ended is not reported, because values
+written a year apart are history, not competing answers.
+
+The cost is small. A registered predicate pays one memoized `normalize` and a dict lookup,
+measured at 0.13 µs against a write of about 125 µs. A single-valued write that displaced
+something pays nothing, because the caller skips the check when `superseded` is set. An
+unregistered predicate pays one indexed count, `Store.count_competing`. It is a count
+rather than `len(competing_claims(...))` because the number of occupants in a multi-valued
+slot has no upper bound, and loading a `Claim` for each one made every write cost more as
+the slot grew: 20 µs with one occupant, 1.8 ms with 200, and 29 ms with 3,000. A store
+without `count_competing` falls back to counting loaded claims. The count needs no owner
+filter, because `fact_key` hashes the tenant and user, so the slot already belongs to one
+person; the fallback keeps the owner check anyway, since it is reading claims.
 
 **Re-filing a claim's `memory_type`.** An identical triple is the same fact, so a
 re-assertion reinforces the record rather than forking it — and until `Retype` existed the
@@ -1307,6 +1345,118 @@ is refused as `not_applied`. Writing them anyway used to leave claims citing tur
 longer existed, holding facts read from text that the purge or the delete had just
 reported removing.
 
+### Redaction runs before anything else touches a turn
+
+`memvara/redact.py` defines the `Redactor` hook. When one is configured, it sees every
+string on its way into the store and returns the text to store instead. This section
+records where it runs, why the order matters, and what the order costs. The module
+docstring has the short version.
+
+**Where it runs.** `WritePipeline.add` calls `redact_episode` on each turn before it does
+anything else with it. After redaction, the turn's text goes to these steps, in order:
+
+| step | what it does with the text |
+|---|---|
+| `Episode.hash` | content-hash dedupe; `episodes.hash` is a stored column |
+| `store.add_episode` | the `episodes` row and its FTS5 index entry |
+| `embedder.encode` | a vector; with a hosted embedder, also an HTTP request |
+| `llm.extract` | the extraction model; another HTTP request |
+
+Two of the four send the text out of the process. A hosted embedder and a hosted
+extraction model are third parties, so text that reached either one before redaction was
+never really redacted. Embeddings can also be inverted well enough to recover their input,
+which is why `erase()` deletes them. `remember(sources=[Episode(...)])` stores turns
+without going through `WritePipeline`, so `Memvara` calls `redact_episode` on those turns
+itself, before they are stored or embedded. Documents are redacted before they are chunked
+and hashed; see "Documents" under `memvara/store/`.
+
+**Claims are redacted at every door.** Because a turn is redacted first, the extractor
+never sees the raw text, so a claim extracted from a turn is already clean. But
+`remember()`, `supersede()` and the mem0 importer write claims that never came from a turn.
+So `redact_claim` runs on every claim on every write path, including extracted claims that
+should already be clean, and it runs before `Reconciler.apply`, because `apply` derives
+`fact_key`, `value_key` and the entity stamps from those strings. Every claim in the store
+has therefore passed the redactor exactly once.
+
+**The hash is taken after redaction, and that has a price.** Hashing first would keep the
+dedupe key stable when the redaction policy changes. But it would store, in a column nobody
+thinks of as content, a blake2b digest of exactly the text that was removed. For a
+low-entropy secret such as a phone number, a national ID or a card number, anyone holding
+the file can test a guess against that digest in a microsecond, which undoes the
+redaction. So the hash is taken after redaction. The cost is that two turns which differ
+only inside a redacted span now hash the same. The second one is recorded as an exact
+repeat, unless every claim from the first has ended by then: its claims are reinforced
+rather than extracted again, and its own text is never stored. Losing that turn is a real
+loss, but it is recoverable, and a digest that confirms the secret is not.
+
+The exact-repeat path also costs time. It calls `WritePipeline._reinforcements_from_source`,
+which scans every claim in the tenant, because the `Store` protocol has no reverse
+provenance index. That is affordable while repeats are rare, and an aggressive redaction
+policy makes them common. Measured on an in-memory store with `HashingEmbedder`, a workload
+whose only per-turn variation sat inside a redacted span cost 1.50, 1.99 and 3.02 ms per
+round at 100, 200 and 400 rounds. The same workload with distinct turns cost 1.33, 1.45
+and 1.69 ms. The per-round cost grows with the size of the store, so the total cost grows
+quadratically. A deployment that redacts aggressively should make sure its turns also vary
+outside the redacted spans, or expect this cost.
+
+**Which fields are offered.** `FIELDS` lists four: a turn's `content`, and a claim's
+`subject`, `object` and `text`. Together they are every string the library writes to a text
+column, indexes for BM25 or sends to an embedder. Two things are left out.
+
+- The predicate is left out by design. A predicate is schema rather than content:
+  `PredicateRegistry` folds it to a canonical form shared by the whole tenant, and it is
+  hashed into `fact_key`. Rewriting it would split one slot into two and silently turn off
+  contradiction detection, and no extraction path lets a user write a predicate freely.
+- `meta` is left out, and this is a gap rather than a decision. It is a JSON column, so it
+  reaches disk, although it is neither indexed nor embedded. It holds whatever the caller
+  passed, which may be personal, alongside machine fields such as `salience_base`,
+  `last_observed_at` and `subject_entity`, where a rewrite would corrupt ranking or keying.
+  A hook cannot tell the two kinds apart, so callers should keep personal data out of the
+  metadata they pass.
+
+**What this means for a deployment.**
+
+- Provenance still resolves. The turn is changed before it is stored, so only one version
+  of each turn exists, and `why()` returns it, for example `"call me at [redacted:phone]"`.
+  Redacting on read, or erasing the source turn instead, would leave provenance pointing at
+  nothing.
+- Redaction changes keys. `value_key` hashes the object and `fact_key` hashes the subject,
+  so a redacted value is a different value. Two different phone numbers that redact to the
+  same token become one value, and the second write reinforces the first instead of
+  superseding it. A redactor that collapses subjects collapses slots, so two people
+  redacted to one token contradict each other. The shipped `PatternRedactor` matches
+  nothing that normally appears as a subject. Test a redactor of your own against
+  `history()`, not only against a string.
+- Nothing is retroactive. The hook applies to writes made after it is configured. Use
+  `erase()` and `purge()` for text already on disk.
+- The default is destructive, but the seam does not require that. memvara never needs to
+  invert the output, so a tokenizing redactor that returns `"[phone:7f3a]"` and keeps the
+  mapping in a vault the deployment controls works with no change here. memvara will not
+  hold that mapping itself: storing the key next to the redacted text would put the
+  plaintext back inside the process and back inside `why()`.
+
+**Telemetry.** A redaction policy that stops matching fails silently: it raises nothing,
+logs nothing, and makes the write path faster. The built-in rules match punctuated
+Latin-script phone numbers and a fixed email shape, so a new number format or locale is
+enough to break them. `redact_episode` and `redact_claim` therefore take a `Recorder` and
+report `redact.inspected` and `redact.changed`, tagged by field and by script. The seam
+does the measuring rather than the redactor, because a redactor can only report the misses
+it knows about, and this way a deployment's own `Redactor` is measured on the same terms as
+the default with nothing to implement. `memvara.telemetry.REDACT_INSPECTED` explains why the
+ratio of the two counts is the signal, why the changed count is emitted even when it is
+zero, and why the absence of both series means the redactor was dropped.
+
+**Cost when unset.** The default redactor is `None`, not a redactor that does nothing. Unset,
+it costs one `is not None` test per `add()` and per `assert_claim()`, and no string is
+touched. With a redactor but no recorder, the telemetry work (the script classification and
+the before-and-after comparison) does not run.
+`tests/test_redact.py::test_nothing_on_the_redaction_path_runs_when_it_is_unset` and
+`tests/test_redact.py::test_no_telemetry_work_happens_while_redacting_without_a_recorder`
+hold both.
+
+**A redactor that raises is not caught.** The exception reaches the caller, as it does for
+`Recorder`. A redaction pass that failed open would write the raw text and report success.
+
 ---
 
 ## `memvara/retrieve/`
@@ -1460,7 +1610,7 @@ The leg must:
 - **abstain, not vote zero, when it did not run.** `_Legs.graph_active` is the same
   distinction the other two legs carry, and it is what keeps a two-leg query from being
   scored as though a third leg had rejected everything;
-- **degrade rather than raise.** `RemoteStore.adjacent` exists and raises, so a `getattr`
+- **degrade rather than raise.** A store's `adjacent` can exist and raise, so a `getattr`
   guard cannot see it: the `NotImplementedError` is caught, `DegradedRetrievalWarning`
   fires once per retriever, and the leg stays off for that retriever's life.
 
@@ -1921,8 +2071,8 @@ scopes=...)`, which counts only a claim stored at exactly one of `scopes`. A can
 the reader's own level, or with no narrower level of its owner, costs nothing, so a read at
 user level pays nothing. `occupied_slots` is optional on the store protocol, and a store
 that has it must accept `scopes`. A store without it is asked `competing_claims` once per
-slot, and a store that raises `NotImplementedError`, as `RemoteStore` does, returns the
-read unshadowed rather than failing it. `count_competing` answers how many claims a slot
+slot, and a store that raises `NotImplementedError` from that too returns the read
+unshadowed rather than failing it. `count_competing` answers how many claims a slot
 holds and not where, so shadowing no longer asks it.
 
 It applies to `get_all()` (and so to `standing()`, `profile()` and the MCP tools built on
@@ -2589,9 +2739,9 @@ The nine store methods (`put_document`, `get_document`, `find_document`,
 `list_documents`, `document_chunks`, `put_document_chunks`, `delete_document`,
 `claims_citing_any`, `erase_episodes`) are optional as a group, and a store that has them
 says so with `holds_documents = True`, which is what `Memvara` asks; see `OMITTABLE`.
-`RemoteStore` has each as a stub that raises and names the `RemoteMemvara` method to use,
-because the facade chunks, scope-checks and extracts server-side; it sets the marker to
-false, so `Memvara(store=RemoteStore(...)).add_document()` is refused with that advice.
+`Memvara` asks the marker rather than whether the methods exist, because a store can have
+them as stubs that raise. A store without the marker is refused with a message that names
+it and points to `SQLiteStore` or `RemoteMemvara.add_document()`.
 
 ### Metadata and file-path filters
 
@@ -2666,8 +2816,7 @@ time.
 **A store without `where`.** The retriever passes `where` only when the caller filtered,
 so a third-party store written before the parameter serves every unfiltered read as
 before, and a filtered read against it raises `TypeError` naming the argument rather than
-returning rows the filter would have excluded. `RemoteStore` accepts the argument on its
-stubs, which still raise.
+returning rows the filter would have excluded.
 
 **The switch.** `Memvara(metadata_filters=False)`, `RemoteMemvara(metadata_filters=False)`
 or `MEMVARA_FEATURE_METADATA_FILTERS=0` refuses a call that passes either argument with a
@@ -2953,8 +3102,8 @@ thread outside a batch reads through its own connection, which sees the last com
 another writer holds the lock.
 
 **A batch can say which tenant it is for.** `Store.batch(*, tenant=None)` takes an optional
-keyword. `SQLiteStore` and `RemoteStore` accept it and ignore it, because SQLite's write lock
-covers the whole file and the hosted client holds no lock. It exists for a store that can lock
+keyword. `SQLiteStore` accepts it and ignores it, because SQLite's write lock covers the
+whole file. It exists for a store that can lock
 one tenant, such as memvara-cloud's Postgres store, so that two customers' writes do not wait
 for each other. That store has to take its lock as the batch begins, before the batch's first
 read, so it cannot learn the tenant from the reads: the library has to say.
@@ -3252,6 +3401,10 @@ one-directional: a store that gains joins stays gated for at most that many sear
 which degrades to `w_graph=0.0`, the shipped default. It cannot fail the other way,
 because claims do not un-join except by retirement and the liveness predicate already
 excludes those.
+
+The interval is 256 searches. Taking the connectivity reading was measured at 0.4 ms on a
+store with 1,000 live claims and 2.6 ms on one with 10,000, so re-measuring every 256
+searches adds less than 10 microseconds to the average search.
 
 `{}` keeps the leg. A backend without `connectivity`, or a hosted facade too old to report
 the counts, has not measured anything — and reading that as "no joins" would switch a

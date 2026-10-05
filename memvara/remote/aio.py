@@ -21,7 +21,6 @@ docstring, which this one does not repeat. The only difference method-by-method 
 from __future__ import annotations
 
 from contextlib import nullcontext
-from copy import copy
 from datetime import datetime
 from typing import Any, Collection, Literal, Mapping, Sequence, overload
 
@@ -37,7 +36,7 @@ from ..types import (
     one_source, refuse_self_link,
 )
 from . import hydrate
-from .api import (PROJECT_HEADER, _as_local_refusal, _document_body,
+from .api import (PROJECT_HEADER, _RemoteClient, _as_local_refusal, _document_body,
                   _document_path, _expire_reason, _filter_fields, _hit,
                   _iso, _refuse_project_meta, _sent, _states, _type, _types, _window)
 from .client import DEFAULT_TIMEOUT, AsyncHttpClient
@@ -45,7 +44,7 @@ from .creds import resolve
 from .errors import Conflict, InvalidRequest, NotFound, refuse_project_purge
 
 
-class AsyncRemoteMemvara:
+class AsyncRemoteMemvara(_RemoteClient):
     """`RemoteMemvara` against a hosted deployment, on `httpx.AsyncClient`.
 
     Constructing one performs no network call, for the same reason `RemoteMemvara`'s
@@ -98,13 +97,6 @@ class AsyncRemoteMemvara:
         )
         return AsyncScopedRemoteMemvara(self, narrowed)
 
-    def _at(self, scope: Scope) -> "AsyncRemoteMemvara":
-        """See `RemoteMemvara._at`. No `await` in here: copying an attribute does not
-        touch the transport, so there is nothing to make async."""
-        twin = copy(self)
-        twin.default_scope = scope
-        return twin
-
     async def _request(self, method: str, path: str, **kw: Any) -> Any:
         """See `RemoteMemvara._request`."""
         project = self.default_scope.project
@@ -129,36 +121,6 @@ class AsyncRemoteMemvara:
                 raise
             body = {k: v for k, v in body.items() if k != "query_rewrite"}
             return await self._request("POST", path, params=self._params(), json=body)
-
-    def _params(self, **extra: Any) -> dict[str, Any]:
-        scope = self.default_scope
-        return {"user": scope.user, "agent": scope.agent, "session": scope.session,
-                **extra}
-
-    def _redact(self, text: str | None, field: str) -> str | None:
-        if self.redactor is None or text is None:
-            return text
-        return self.redactor.redact(text, field=field, scope=self.default_scope)
-
-    def _turn(self, message: Episode | Mapping[str, Any] | str) -> dict[str, Any]:
-        if isinstance(message, str):
-            return _sent({"content": self._redact(message, EPISODE)})
-        if isinstance(message, Episode):
-            return _sent({"role": message.role,
-                          "content": self._redact(message.content, EPISODE),
-                          "ts": _iso(message.ts), "metadata": dict(message.meta)})
-        known = {"role", "content", "ts", "metadata"}
-        meta = dict(message.get("metadata") or {})
-        meta.update({k: v for k, v in message.items() if k not in known})
-        return _sent({"role": message.get("role"),
-                      "content": self._redact(message["content"], EPISODE),
-                      "ts": _iso(message.get("ts")), "metadata": meta})
-
-    def _cite(self, sources: Sequence[Episode | Mapping[str, Any] | str] | None,
-              ) -> tuple[list[str], list[dict[str, Any]]]:
-        ids = [s for s in sources or [] if isinstance(s, str)]
-        turns = [self._turn(s) for s in sources or [] if not isinstance(s, str)]
-        return ids, turns
 
     async def _end(self, body: dict[str, Any]) -> list[Claim]:
         out = await self._request("POST", "/v1/end", params=self._params(),
@@ -192,7 +154,7 @@ class AsyncRemoteMemvara:
 
     # -- reading -------------------------------------------------------------
 
-    # The same three variants as `RemoteMemvara.search`, and they carry the same weight:
+    # The same variants as `RemoteMemvara.search`, and they carry the same weight:
     # they are what makes "calling code cannot tell which it holds" true of the *type* as
     # well as of the value. Without them `await mem.search(q)` types as `list[Retrieved]`
     # here and `list[Result]` on `AsyncMemvara`, so the same expression reading `.claim`
@@ -211,20 +173,6 @@ class AsyncRemoteMemvara:
                      filters: Mapping[str, FilterValue] | None = ...,
                      filepath_prefix: str | None = ...,
                      include_episodes: Literal[False] = ...) -> list[Result]: ...
-
-    @overload
-    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ..., ranked: bool = ...,
-                     query_rewrite: bool = ...,
-                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
-                     known_at: datetime | None = ...,
-                     states: Collection[str] | None = ...,
-                     valid_during: Sequence[datetime] | None = ...,
-                     include_invalidated: bool | None = ...,
-                     memory_types: Sequence[MemoryType | str] | None = ...,
-                     filters: Mapping[str, FilterValue] | None = ...,
-                     filepath_prefix: str | None = ...,
-                     include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,
@@ -713,8 +661,7 @@ class AsyncScopedRemoteMemvara:
 
     # -- reading -------------------------------------------------------------
 
-    # The same three variants as `ScopedRemoteMemvara.search`, and they carry the same
-    # weight:
+    # The same variants as `ScopedRemoteMemvara.search`, and they carry the same weight:
     # they are what makes "calling code cannot tell which it holds" true of the *type* as
     # well as of the value. Without them `await mem.search(q)` types as `list[Retrieved]`
     # here and `list[Result]` on `AsyncMemvara`, so the same expression reading `.claim`
@@ -733,20 +680,6 @@ class AsyncScopedRemoteMemvara:
                      filters: Mapping[str, FilterValue] | None = ...,
                      filepath_prefix: str | None = ...,
                      include_episodes: Literal[False] = ...) -> list[Result]: ...
-
-    @overload
-    async def search(self, query: str, *, k: int = ..., min_score: float = ...,
-                     anchored: bool = ..., ranked: bool = ...,
-                     query_rewrite: bool = ...,
-                     as_of: datetime | None = ..., valid_at: datetime | None = ...,
-                     known_at: datetime | None = ...,
-                     states: Collection[str] | None = ...,
-                     valid_during: Sequence[datetime] | None = ...,
-                     include_invalidated: bool | None = ...,
-                     memory_types: Sequence[MemoryType | str] | None = ...,
-                     filters: Mapping[str, FilterValue] | None = ...,
-                     filepath_prefix: str | None = ...,
-                     include_episodes: Literal[True]) -> list[Retrieved]: ...
 
     @overload
     async def search(self, query: str, *, k: int = ..., min_score: float = ...,

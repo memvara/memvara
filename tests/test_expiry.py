@@ -336,7 +336,8 @@ def test_a_store_that_cannot_list_expired_claims_is_skipped_at_open_and_refused_
 
 
 class _StubbedExpiry(_NoExpiry):
-    """A store with the listing as a stub that raises, as `RemoteStore` has it."""
+    """A store with the listing as a stub that raises, as a store does when something
+    else, such as a hosted deployment, erases its expired claims."""
 
     def expired_claims(self, now: datetime) -> list[Any]:
         raise NotImplementedError("the deployment sweeps")
@@ -347,13 +348,6 @@ def test_a_store_with_a_stubbed_listing_opens_and_refuses_a_sweep_asked_for_by_n
     with Memvara(store=store, llm=NullLLM(), embedder=HashingEmbedder(dim=64)) as m:
         with pytest.raises(NotImplementedError, match="the deployment sweeps"):
             m.erase_expired()
-
-
-def test_the_remote_store_says_the_deployment_sweeps():
-    from memvara.store.remote import RemoteStore
-
-    with pytest.raises(NotImplementedError, match="erases expired claims itself"):
-        RemoteStore(api_key="k", base_url="https://example.test").expired_claims(utcnow())
 
 
 def test_async_erase_expired_is_the_same_sweep(m):

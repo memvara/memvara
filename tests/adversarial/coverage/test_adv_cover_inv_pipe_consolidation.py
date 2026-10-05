@@ -87,10 +87,9 @@ def test_consolidation_asks_the_model_nothing_and_a_second_pass_changes_nothing(
     stage, and the second changes nothing and leaves every row as the first left it.
     """
     for stage in (Consolidator.__init__, Consolidator.run, Consolidator.decay,
-                  Consolidator.merge_duplicates, Consolidator.promote, Sweep.__init__,
-                  decay_module.decay, decay_module.decay_pass, merge_module.merge_pass,
-                  merge_module.promote_pass, merge_module.merge_duplicates,
-                  merge_module.promote):
+                  Consolidator.merge_duplicates, Consolidator.promote, Consolidator._one,
+                  Sweep.__init__, decay_module.decay_pass, merge_module.merge_pass,
+                  merge_module.promote_pass):
         assert "llm" not in inspect.signature(stage).parameters, stage.__qualname__
 
     model = ScriptedModel()

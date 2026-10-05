@@ -9,6 +9,36 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Removed
+
+- **`memvara.store.remote.RemoteStore` is removed.** It was a `Store` that sent its calls to
+  a hosted deployment. Nothing in the library constructed it, and most of its methods raised
+  `NotImplementedError`, because the hosted API has no endpoint for them. Cloud mode does
+  not change: it builds `RemoteMemvara`. Code that imported the module should use
+  `Memvara(api_key=...)` or `Memvara.connect()`. `docs/UPGRADING.md` has the details.
+- **The module functions `decay()`, `merge_duplicates()` and `promote()` in
+  `memvara.consolidate` are removed.** They were internal and not exported. The
+  `Consolidator` methods with the same names are the public API and do not change.
+- **The npm package `memvara` no longer has a `main` module.** It shipped an `index.js`
+  and `index.d.ts` whose only job was to return an object saying the package is a command,
+  not a library. They are removed, with the `main`, `types` and `sideEffects` fields, so
+  `require("memvara")` now fails with Node's own `MODULE_NOT_FOUND` error. The `memvara`
+  command does not change.
+- **The demo harness no longer has a Supermemory arm.** `--arm-supermemory` and the
+  `--supermemory-*` flags are gone. The arm had never been run, because it needed an
+  account nobody here has. The Supermemory importer, `memvara.compat.supermemory_import`,
+  does not change.
+
+### Changed
+
+- **Smaller internal cleanups, with no change in behaviour.** The `search()` overload for
+  `include_episodes=True` is gone, because the overload for `include_episodes: bool`
+  already gives the same type. `RemoteMemvara` and `AsyncRemoteMemvara` share their request
+  helpers through one base class. Long docstrings and comments in `memvara/redact.py`,
+  `memvara/retrieve/hybrid.py`, `memvara/llm/` and `memvara/write/reconcile.py` are
+  shorter, and the measurements they held are now in `docs/BENCHMARKS.md`,
+  `docs/INTERNALS.md` and `docs/DEPLOY.md`.
+
 ## [0.19.0] — 2026-10-01
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so

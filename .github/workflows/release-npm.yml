@@ -131,7 +131,7 @@ jobs:
           # `test/` deliberately is not: the suite is run by the job above, from the
           # repository, and shipping it to every installer is weight with no reader.
           expected="$(printf '%s\n' \
-            LICENSE README.md index.d.ts index.js package.json \
+            LICENSE README.md package.json \
             bin/memvara.js lib/bridge.js lib/creds.js lib/oauth.js lib/transport.js \
             | sort)"
           if [ "$listed" != "$expected" ]; then

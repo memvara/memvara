@@ -496,11 +496,11 @@ def init(argv: Sequence[str], *, env: Mapping[str, str] | None = None,
             # line of output connecting the two. The reason arrives while there is still
             # something to do about it.
             #
-            # This replaces the check that compared the engine's needs against
-            # `RemoteStore.WIRED`. That gap is gone as a reason to refuse, because cloud
-            # mode no longer runs the engine over a remote store — it builds a client of
-            # the facade. What is left is the one thing that still stops the server
-            # starting, and `httpx` is exactly it.
+            # This replaces the check that compared the engine's needs against the
+            # methods a remote store implemented. That gap is gone as a reason to
+            # refuse, because cloud mode no longer runs the engine over a remote store —
+            # it builds a client of the facade. What is left is the one thing that still
+            # stops the server starting, and `httpx` is exactly it.
             from ..remote.client import install_hint
 
             raise _Usage(f"MEMVARA_MODE=cloud cannot start a server here. "

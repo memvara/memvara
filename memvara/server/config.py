@@ -1079,7 +1079,7 @@ def build_memvara(config: ServerConfig) -> "Memvara | RemoteMemvara":
     In "cloud" mode there is no local file and no local engine. This returns a
     `RemoteMemvara`: a client of the `/v1` facade that turns each library call into one
     request and hydrates the reply into the same dataclasses, which is why one MCP tool
-    table can serve either. It is **not** a `Memvara` over a `RemoteStore`, and that
+    table can serve either. It does **not** run the engine over a remote store, and that
     distinction is the whole decision — the engine calls `put_claim`, `lexical_search`
     and `competing_claims` on every turn and the facade has an endpoint for none of them,
     so a server built that way would start, list twenty-two tools and fail on the first one

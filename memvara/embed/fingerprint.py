@@ -233,13 +233,11 @@ def stored_dim(store: Any) -> int | None:
             if scanned + 1 >= _PROBE_LIMIT:
                 break
     except NotImplementedError:
-        # A `Store` whose `iter_claims`/`get_embedding` exist as methods (so the
-        # `getattr` checks above pass) but whose backing surface has no way to answer —
-        # `RemoteStore`, whose vectors and claim listing are both server-internal, in
-        # particular. The probe exists to protect a store this process can actually
-        # read from a silent width mismatch; a store that flatly cannot be probed is
-        # not that case, so this falls back to "unknown" exactly like a store with no
-        # vectors yet, rather than making every `Memvara(store=RemoteStore(...))`
-        # unconstructible.
+        # A `Store` whose `iter_claims` and `get_embedding` exist as methods, so the
+        # `getattr` checks above pass, but which has no way to answer. The probe exists
+        # to protect a store this process can actually read from a silent width
+        # mismatch. A store that cannot be probed at all is not that case, so this
+        # falls back to "unknown", exactly like a store with no vectors yet, rather
+        # than making a `Memvara` over that store impossible to construct.
         return None
     return None

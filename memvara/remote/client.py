@@ -10,8 +10,7 @@ this file, even without constructing a client.
 explicit key, an environment variable, and a credentials file into one `(key, url)` pair,
 but that happens once, in `RemoteMemvara.__init__` (later in this plan) — a transport
 that resolved its own credentials could not be constructed with an explicit key for a
-test, and `memvara/store/remote.py` builds one from a key it already holds. `HttpClient`
-only ever takes an already-resolved key and base url.
+test. `HttpClient` only ever takes an already-resolved key and base url.
 
 **Why writes are retried at all.** A write that fails *after* the request was sent may
 have committed, so repeating it can write the fact twice. The facade accepts an
@@ -51,7 +50,7 @@ from .errors import RemoteError, error_from_response
 #: Attempts, total, per call. Three is two retries — enough for a redeploy or a deadlock,
 #: short enough that a caller does not wait a minute to be told something is down.
 DEFAULT_ATTEMPTS = 3
-#: Seconds. Matches `store/remote.py`, so the two clients time out alike.
+#: Seconds.
 DEFAULT_TIMEOUT = 30.0
 #: Base for exponential backoff, in seconds, before jitter.
 _BACKOFF = 0.25

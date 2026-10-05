@@ -217,9 +217,9 @@ def test_a_store_without_either_optional_lookup_still_shadows():
 
 
 def test_a_store_that_declares_the_lookups_but_cannot_answer_reads_unshadowed(monkeypatch):
-    """`RemoteStore` has the methods and raises `NotImplementedError` from each, because
-    the hosted API has no slot lookup. Without an answer, a read cannot tell whether the
-    project has its own value, so it returns what is stored rather than failing."""
+    """A store can have the slot lookups as methods that raise `NotImplementedError`.
+    Without an answer, a read cannot tell whether the project has its own value, so it
+    returns what is stored rather than failing."""
     mem = make()
 
     def cannot(*a, **k):

@@ -7,6 +7,30 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## `memvara.store.remote.RemoteStore` is removed
+
+### What changed
+
+The module `memvara/store/remote.py` and its class `RemoteStore` are gone. `RemoteStore` was
+a `Store` implementation that sent its calls to a hosted deployment. Nothing in the library
+constructed it, and most of its methods raised `NotImplementedError`, because the hosted
+API has no endpoint for them. So a `Memvara(store=RemoteStore(...))` could be built but
+failed on its first write or search.
+
+Cloud mode does not change. `MEMVARA_MODE=cloud` has built a `RemoteMemvara`, a client of
+the hosted API, for several releases, and it still does.
+
+### Who this changes
+
+**If you import `memvara.store.remote`**, the import now raises `ModuleNotFoundError`. Use
+the hosted client instead: `Memvara(api_key="mv_…", user="alice")`, or `Memvara.connect()`
+to use the key that `memvara login` saved. Both return a client with the same methods as a
+local `Memvara`. Running the engine over a remote store is not offered.
+
+**How to find it:** search your code for `RemoteStore` and for `memvara.store.remote`.
+
+---
+
 ## `Store.batch()` takes an optional `tenant`
 
 ### What changed
