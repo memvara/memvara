@@ -805,3 +805,24 @@ put the selector's addition at 54 to 68 MB of peak. The gate's peak measure most
 torch's first-batch working memory, which a reranking process has already paid. If G6 is to
 be re-run, the memory measure should be fixed first: resident memory after a set number of
 production-shaped reads, with and without the selector, rather than the peak.
+
+## 18. G6's memory half, re-measured at steady state (pre-registered 2026-10-05)
+
+Written before the run. Section 6's line is unchanged: the selector may add at most 300 MB
+of resident memory to a process that already holds the reranker. What changes is the
+measure, because a peak cannot separate the selector's cost from torch's first-batch working
+memory, which a process that reranks has already paid (section 16's G6 diagnostic).
+
+**Measure.** Two kinds of process, each started fresh, on 4 CPU threads, with every model
+loaded straight onto the CPU:
+- **without:** the stock reranker, which then serves 50 ranked reads. A read reranks every
+  turn of one LongMemEval test pool (up to 200 real turns).
+- **with:** the same, plus step 2a's model B, which after each rerank runs
+  `select_ordered()` on that read's 40 routed candidates.
+
+A process's memory is its current resident set size (`psutil`), taken after each of the last
+10 reads; the process's figure is the median of those 10. Each kind runs three times, and
+the selector's cost is the median of *with* minus the median of *without*.
+
+**Pass:** at most 300 MB. **Prediction:** about 120 MB (the weights are 91 MB), with a
+range of 80 to 200 MB.
