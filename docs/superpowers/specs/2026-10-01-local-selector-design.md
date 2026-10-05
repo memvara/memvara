@@ -837,3 +837,43 @@ passes under this measure. The peak-based fail stays on record beside it.
 model was trained on MS MARCO, whose terms describe it as for non-commercial research. Step
 2a's model B is `memvara/selector-minilm-l6` at commit `fb240a9c`. `LocalSelector()` now
 loads it by default, pinned to that commit, with its calibration in `_BUILT_IN`.
+
+## 19. Gate G5 on real transcripts (pre-registered 2026-10-05)
+
+Written before any store was built or any selector run. Section 6 fixed G5 as "100 recall
+prompts from your real transcripts, local against the model selector on the same
+candidates". This section says how that is done with what this machine has.
+
+**Prompts.** Every `memory_recall` call an agent made in the Claude Code transcripts on this
+machine (`~/.claude/projects/*/*.jsonl`): 92 calls, 61 distinct queries, from 41 sessions in
+several projects. That is fewer than the 100 section 6 asked for; all of them are used, and
+none is added or dropped after the run.
+
+**Candidates.** For each project, a local memvara store holds the text of every user message
+and every assistant text reply in that project's transcripts. Tool calls and tool output are
+left out, because a memory store records what was said. The store uses the bench's `local`
+embedder. Each call's query gets a plain read of 200 turns, the stock reranker's order, the
+routed role and the first 40 candidates, exactly as the ranked stage builds them. Both
+selectors see the same 40.
+
+**Selectors.**
+- **local:** `LocalSelector()`, the published model at commit `fb240a9c`.
+- **model:** `ModelSelector` with `openai.gpt-oss-120b` on Amazon Bedrock (us-east-1) in place
+  of the gpt-5.4-mini the hosted service uses, because that gateway has no credit. Bedrock
+  returns malformed text in JSON-object mode for this model, so the bench wraps the backend to
+  send the same request without that flag; the selector's prompt already asks for JSON. The
+  library is unchanged. The candidates' text is sent to the user's own AWS account; the
+  results stay under `local/`.
+
+**Measure.** Agreement: of the turns the model selector keeps, the share the local selector
+also keeps, pooled over every call where the model kept at least one turn. Also reported:
+how many each keeps, and how many the local selector keeps that the model did not.
+
+**Pass:** agreement of at least 0.75, and a hand review of 20 disagreements written down.
+The 20 are drawn at random (seed 0) from all disagreeing turns; each is read beside its query
+and classed as "the local selector was right", "the model selector was right" or "unclear".
+The review stays under `local/`, because it quotes private transcripts; only its counts are
+published.
+
+**Prediction:** agreement 0.60, with a range of 0.45 to 0.75. The local model was trained on
+LongMemEval, whose questions look little like an agent's recall queries.
