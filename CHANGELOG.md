@@ -20,8 +20,9 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
   `memvara.consolidate` are removed.** They were internal and not exported. The
   `Consolidator` methods with the same names are the public API and do not change.
 - **The npm package `memvara` no longer has a `main` module.** It shipped an `index.js`
-  whose only job was to throw an error saying the package is a command, not a library.
-  `require("memvara")` now fails with Node's own "module not found" error. The `memvara`
+  and `index.d.ts` whose only job was to return an object saying the package is a command,
+  not a library. They are removed, with the `main`, `types` and `sideEffects` fields, so
+  `require("memvara")` now fails with Node's own `MODULE_NOT_FOUND` error. The `memvara`
   command does not change.
 - **The demo harness no longer has a Supermemory arm.** `--arm-supermemory` and the
   `--supermemory-*` flags are gone. The arm had never been run, because it needed an
