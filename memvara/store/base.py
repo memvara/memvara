@@ -988,8 +988,8 @@ class Store(Protocol):
     def compact(self) -> None:
         """Give the space freed inside the store back to the disk.
 
-        `Memvara.reembed()` calls it after dropping the vectors of a store that will keep
-        none, because deleting them frees space the store would otherwise keep. A store
+        `Memvara.reembed()` calls it after every drop of stored vectors, because deleting
+        them frees space the store would otherwise keep. A store
         that cannot compact should warn and return rather than raise: the drop has
         already succeeded, and only the store's size is at stake. `SQLiteStore` runs
         SQLite's `VACUUM`.

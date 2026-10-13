@@ -11,18 +11,27 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ### What changed
 
-`Memvara(path, embeddings=False, reembed=True)`, and `reembed()` with a `NoEmbedder`, now
-run SQLite's `VACUUM` after they drop a store's vectors, so the database file gets smaller.
-`VACUUM` writes a compacted copy of the whole database first. On a large store that drop
-now takes longer, and it needs about as much free disk as the database takes. On an
-encrypted store the copy is held in memory instead, so it needs about that much memory.
+Every `reembed()` that drops stored vectors now runs SQLite's `VACUUM` at the end, so the
+database file gets smaller. That covers `Memvara(path, embeddings=False, reembed=True)`,
+`reembed()` with a `NoEmbedder`, and a re-embed with another model. `VACUUM` builds a
+compacted copy of the whole database and writes it through the write-ahead log. On a large
+store the drop now takes longer, and it needs free disk of up to about twice the compacted
+database's size. On an encrypted store the first copy is held in memory instead. While it
+runs, a writer in another process waits up to five seconds and then fails with "database
+is locked".
+
+`Store` gains an optional member, `compact()`. A backend without it keeps working and
+keeps its old size after a drop, but `isinstance(your_store, Store)` turns `False` if it
+implemented every other member, for the reason the `connectivity` entry below explains.
 
 ### What to do
 
-Nothing, if the disk has room. If it does not, the drop still completes and the store works
-as before, with a `UserWarning` saying the file kept its size; free some disk and call
-`mem.store.compact()`. Find the calls with a search for `embeddings=False, reembed=True`
-and `reembed(NoEmbedder())`.
+Nothing, if the disk has room and nothing else writes to the store during the drop. If the
+disk is short, the drop still completes and the store works as before, with a `UserWarning`
+saying the file kept its size; free some disk and call `mem.store.compact()`. Find the
+calls with a search for `reembed=True` and `reembed(`. For a third-party backend, search
+for `isinstance(.*, Store)` and check for the capability you need with `getattr` instead,
+or implement `compact()`.
 
 ---
 

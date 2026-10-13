@@ -13,17 +13,20 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 - **Dropping a store's vectors now shrinks the database file.** Opening a store with
   `Memvara(path, embeddings=False, reembed=True)` deleted its vectors but left the file its
-  old size, because SQLite reuses freed pages and never gives them back by itself. The drop
-  now runs SQLite's `VACUUM` through a new method, `SQLiteStore.compact()`. A store written
-  by memvara-code went from 60.5 MB to 13.2 MB, with all 7,174 claims still there. `VACUUM`
-  needs about as much free disk as the database takes, or as much memory on an encrypted
-  store.
-  When SQLite refuses, the drop still completes and a `UserWarning` says the file kept its
-  size. Re-embedding with a real embedder does not compact, because its new vectors refill
-  the freed pages. `docs/UPGRADING.md` has what to check.
+  old size, because SQLite reuses freed pages and never gives them back by itself. Every
+  `reembed()` that drops stored vectors, to keep none or to re-embed with another model,
+  now ends by running SQLite's `VACUUM` through a new method, `SQLiteStore.compact()`. A
+  store written by memvara-code went from 60.5 MB to 13.2 MB, with all 7,174 claims still
+  there. `VACUUM` needs free disk of up to about twice the compacted database's size, and
+  a writer in another process fails with "database is locked" if it waits on it for more
+  than five seconds. When SQLite refuses, or another connection keeps the file from
+  shrinking, the drop still completes and a `UserWarning` says the file kept its size.
+  `docs/UPGRADING.md` has what to check.
 - **The `Store` protocol gains one optional member, `compact()`.** It is listed in
-  `memvara.store.base.OMITTABLE`, so a third-party store without it keeps working; dropping
-  its vectors then leaves it its old size.
+  `memvara.store.base.OMITTABLE`, so a third-party store without it keeps working, and
+  dropping its vectors then leaves it its old size. `isinstance(your_store, Store)` turns
+  `False` for a backend that implemented every other member; `docs/UPGRADING.md` says what
+  to check instead.
 
 ## [0.20.0] — 2026-10-05
 

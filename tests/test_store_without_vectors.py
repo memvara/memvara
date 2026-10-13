@@ -107,40 +107,70 @@ def _pages(db: pathlib.Path) -> tuple[int, int]:
                 conn.execute("PRAGMA freelist_count").fetchone()[0])
 
 
-def test_dropping_the_vectors_shrinks_the_database_file(tmp_path):
-    """Deleting the vectors frees their pages inside the file, which SQLite never gives
-    back on its own; the drop runs `VACUUM` so the file itself gets smaller."""
-    db = tmp_path / "s.db"
+def _many_vectors(db: pathlib.Path) -> None:
     with Memvara(str(db), embedder=HashingEmbedder(dim=256), llm=NullLLM()) as mem:
         for n in range(200):
             mem.remember(f"user{n}", "lives_in", f"City {n}")
-    pages_before, _ = _pages(db)
+
+
+def test_dropping_the_vectors_shrinks_the_database_file(tmp_path):
+    """Deleting the vectors frees their pages inside the file, which SQLite never gives
+    back on its own. The drop runs `VACUUM` and a truncating checkpoint, so the file
+    is smaller while the store is still open, not only once it closes."""
+    db = tmp_path / "s.db"
+    _many_vectors(db)
+    size_before = db.stat().st_size
 
     with Memvara(str(db), embeddings=False, llm=NullLLM(), reembed=True) as mem:
+        assert db.stat().st_size < size_before
         assert mem.stats()["claims"] == 200
-
-    pages_after, free_after = _pages(db)
-    assert free_after == 0
-    assert pages_after < pages_before
+    assert _pages(db)[1] == 0
 
 
-def test_only_a_drop_that_keeps_no_vectors_compacts(tmp_path, monkeypatch):
-    """Re-embedding refills the freed pages, and a store with nothing to drop has none
-    freed, so neither pays for a `VACUUM`."""
+def test_a_reader_that_blocks_the_checkpoint_is_reported(tmp_path, monkeypatch):
+    """SQLite reports a checkpoint it could not finish in its result, not by raising, so
+    `compact()` has to read the result to know the file kept its size."""
+    monkeypatch.setattr("memvara.store.sqlite._BUSY_TIMEOUT", 0.1)
+    db = tmp_path / "s.db"
+    _many_vectors(db)
+    with closing(sqlite3.connect(db)) as reader:
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM claims").fetchone()
+        with pytest.warns(UserWarning, match="another connection was still reading"):
+            with Memvara(str(db), embeddings=False, llm=NullLLM(), reembed=True) as mem:
+                assert mem.stats()["embeddings"] == 0
+        reader.execute("COMMIT")
+    assert _pages(db)[1] == 0, "the compacted database reached the file once it closed"
+
+
+def test_every_drop_of_stored_vectors_compacts(tmp_path, monkeypatch):
+    """A new embedder's vectors refill the freed pages only when they take as much room,
+    so a re-embed compacts too. A store that held no vectors has nothing to give back."""
     calls = []
     monkeypatch.setattr(SQLiteStore, "compact", lambda self: calls.append(self.path))
     db = tmp_path / "s.db"
     _vectored(db)
 
     with Memvara(str(db), embedder=HashingEmbedder(dim=16), llm=NullLLM()) as mem:
-        mem.reembed(HashingEmbedder(dim=8))
-    assert calls == []
+        assert mem.reembed(HashingEmbedder(dim=8)) == 1
+    assert calls == [str(db)]
     with Memvara(str(db), embedder=HashingEmbedder(dim=8), llm=NullLLM()) as mem:
         mem.reembed(NoEmbedder())
-    assert calls == [str(db)]
+    assert calls == [str(db)] * 2
     with Memvara(str(db), embeddings=False, llm=NullLLM(), reembed=True):
         pass
-    assert calls == [str(db)], "nothing left to drop, so nothing to compact"
+    assert calls == [str(db)] * 2, "nothing left to drop, so nothing to compact"
+
+
+def test_a_store_without_compact_still_drops_its_vectors(tmp_path, monkeypatch):
+    """`compact` is optional: a backend without it keeps its old size and nothing else."""
+    monkeypatch.delattr(SQLiteStore, "compact")
+    db = tmp_path / "s.db"
+    _vectored(db)
+
+    with Memvara(str(db), embeddings=False, llm=NullLLM(), reembed=True) as mem:
+        assert mem.stats()["embeddings"] == 0
+    assert _record(db) == {"embedder": "none", "dim": 0}
 
 
 def test_a_compaction_sqlite_refuses_warns_and_changes_nothing(tmp_path):

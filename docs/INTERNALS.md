@@ -3265,15 +3265,17 @@ turn, because only what is written from then on would get a vector, and nothing 
 which. A store that holds neither is not refused: the record may have been left behind by
 a deleted store. `reembed()` with a `NoEmbedder` drops every vector, embeds nothing,
 records `none` and returns 0, which is how `embeddings=False, reembed=True` migrates. It
-then calls the store's `compact()` when it has one. SQLite reuses a freed page for later
-writes but never shrinks the file by itself, so without this a store that dropped its
-vectors kept its old size on disk. `SQLiteStore.compact()` runs `VACUUM` and then a
-truncating checkpoint, because in write-ahead-log mode `VACUUM` writes the compacted
-database into the log and only the checkpoint copies it back and shrinks the file. A
-re-embed with a real embedder does not compact, because its new vectors refill the freed
-pages, and neither does a drop on a store that held no vectors. If SQLite refuses, the
-call warns instead of raising: the vectors are already gone, so the store is correct and
-only larger than it needs to be.
+then calls the store's `compact()` when it has one, after every `reembed()` that dropped
+stored vectors. SQLite reuses a freed page for later writes but never shrinks the file by
+itself, so without this a store that dropped its vectors kept its old size on disk. A
+re-embed compacts too, because a narrower model's vectors refill only part of the freed
+pages; a store that held no vectors has nothing to give back and does not compact.
+`SQLiteStore.compact()` runs `VACUUM` and then a truncating checkpoint, because in
+write-ahead-log mode `VACUUM` writes the compacted database into the log and only the
+checkpoint copies it back and shrinks the file. SQLite reports a checkpoint that another
+connection's open read blocked in the checkpoint's result row, not by raising, so
+`compact()` reads that row. In both failure cases it warns instead of raising: the vectors
+are already gone, so the store is correct and only larger than it needs to be.
 
 ### Encryption at rest
 

@@ -4895,33 +4895,47 @@ class SQLiteStore:
 
         SQLite reuses a freed page for later writes but never makes the file smaller on
         its own. So a store that drops most of what it holds at once, as one does when it
-        stops keeping vectors, stays its old size until this runs. `Memvara.reembed()`
-        calls it right after it drops the vectors of a store that will keep none.
+        drops its vectors, stays its old size until this runs. `Memvara.reembed()` calls
+        it after it drops a store's vectors.
 
-        `VACUUM` writes a compacted copy of the whole database before it replaces the
-        original, so it needs about as much free disk as the database takes. An
-        encrypted store keeps temporary data in memory, so that nothing unencrypted
-        reaches the disk, and there the copy needs about that much memory instead.
-        Readers in other processes carry on while it runs; writers wait for it.
+        `VACUUM` builds a compacted copy of the database, and in write-ahead-log mode it
+        then writes that copy into the log before a checkpoint copies it back. So it
+        needs free disk of up to about twice the compacted database's size. An encrypted
+        store keeps temporary data in memory, so that nothing unencrypted reaches the
+        disk, and there the first copy takes memory instead. Readers in other processes
+        carry on while it runs. A writer in another process waits up to the store's
+        five-second busy timeout and then fails with "database is locked", so run it
+        while nothing else writes to the store.
 
-        When SQLite refuses, it warns and returns: the store is unchanged and works as
-        before, and only the file keeps its size. It refuses when the disk is full, when
-        another process holds the write lock for longer than the busy timeout, and inside
-        `batch()`, because SQLite cannot vacuum inside a transaction.
+        It warns and returns rather than raising in two cases, and in both the store's
+        contents are unchanged and it works as before. When SQLite refuses `VACUUM`,
+        because the disk is full, another process holds the write lock past the busy
+        timeout, or this runs inside `batch()`, the file keeps its size. When another
+        connection is still reading, the checkpoint cannot finish, and the file keeps
+        its size until SQLite next checkpoints, at the latest when the last connection
+        to the store closes.
         """
         with self._lock:
             try:
                 self._db.execute("VACUUM")
                 # The store runs in write-ahead-log mode, so `VACUUM` writes the compacted
                 # database into the log. This checkpoint copies it back into the file and
-                # empties the log, which is the step that makes the file smaller.
-                self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                # empties the log, which is the step that makes the file smaller. SQLite
+                # reports a checkpoint it could not finish in the row, not by raising.
+                busy = self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
             except self._sql.Error as exc:
                 warnings.warn(
                     f"{self.path} was not compacted ({exc}), so the file keeps its size. "
                     "The store is unchanged and works as before. Free some disk, or stop "
                     "the other processes using the store, and call compact() again.",
                     stacklevel=2)
+                return
+        if busy:
+            warnings.warn(
+                f"{self.path} was compacted, but another connection was still reading it, "
+                "so the file keeps its size until SQLite next checkpoints, at the latest "
+                "when the last connection to the store closes.",
+                stacklevel=2)
 
     def _get_vector(self, t: _VecTable, item_id: str) -> np.ndarray | None:
         with self._read() as conn:
