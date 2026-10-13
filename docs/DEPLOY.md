@@ -835,10 +835,11 @@ entry (which stores the tokens directly) and the embedding (which leaks content 
 inversion). Both return per-table counts as evidence. Neither is reachable from the MCP
 server, deliberately.
 
-Note that erasure removes rows; it does not shrink the file. Run `VACUUM` if the on-disk
-**footprint** of deleted data matters to you — its **readability** is handled by the store
-itself, which sets `PRAGMA secure_delete=ON` and FTS5's `secure-delete` so the bytes are
-overwritten rather than merely freed.
+Note that erasure removes rows; it does not shrink the file. Run `VACUUM`, or
+`mem.store.compact()`, which runs it, if the on-disk **footprint** of deleted data matters
+to you — its **readability** is handled by the store itself, which sets
+`PRAGMA secure_delete=ON` and FTS5's `secure-delete` so the bytes are overwritten rather
+than merely freed.
 
 That was not always true. Before schema 7 this paragraph offered `VACUUM` as the lever for
 readability too, and for the text index it did not work: a deleted FTS5 row leaves its

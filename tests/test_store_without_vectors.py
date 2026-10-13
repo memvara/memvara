@@ -17,13 +17,15 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import sqlite3
 import warnings
+from contextlib import closing
 
 import pytest
 
 from memvara import EmbedderMismatchError, Memvara, NullLLM
 from memvara.embed import CachedEmbedder, HashingEmbedder, NoEmbedder, embeds
-from memvara.store.sqlite import SCHEMA_VERSION
+from memvara.store.sqlite import SCHEMA_VERSION, SQLiteStore
 from memvara.types import Episode, Scope
 
 from test_open_before_upgrade import stamp, version_of
@@ -96,6 +98,60 @@ def test_a_store_that_holds_vectors_is_refused_until_they_are_dropped(tmp_path):
     assert _record(db) == {"embedder": "none", "dim": 0}
     with Memvara(str(db), embeddings=False, llm=NullLLM()) as mem:
         assert mem.stats()["embeddings"] == 0
+
+
+def _pages(db: pathlib.Path) -> tuple[int, int]:
+    """The database file's page count and how many of those pages are free."""
+    with closing(sqlite3.connect(db)) as conn:
+        return (conn.execute("PRAGMA page_count").fetchone()[0],
+                conn.execute("PRAGMA freelist_count").fetchone()[0])
+
+
+def test_dropping_the_vectors_shrinks_the_database_file(tmp_path):
+    """Deleting the vectors frees their pages inside the file, which SQLite never gives
+    back on its own; the drop runs `VACUUM` so the file itself gets smaller."""
+    db = tmp_path / "s.db"
+    with Memvara(str(db), embedder=HashingEmbedder(dim=256), llm=NullLLM()) as mem:
+        for n in range(200):
+            mem.remember(f"user{n}", "lives_in", f"City {n}")
+    pages_before, _ = _pages(db)
+
+    with Memvara(str(db), embeddings=False, llm=NullLLM(), reembed=True) as mem:
+        assert mem.stats()["claims"] == 200
+
+    pages_after, free_after = _pages(db)
+    assert free_after == 0
+    assert pages_after < pages_before
+
+
+def test_only_a_drop_that_keeps_no_vectors_compacts(tmp_path, monkeypatch):
+    """Re-embedding refills the freed pages, and a store with nothing to drop has none
+    freed, so neither pays for a `VACUUM`."""
+    calls = []
+    monkeypatch.setattr(SQLiteStore, "compact", lambda self: calls.append(self.path))
+    db = tmp_path / "s.db"
+    _vectored(db)
+
+    with Memvara(str(db), embedder=HashingEmbedder(dim=16), llm=NullLLM()) as mem:
+        mem.reembed(HashingEmbedder(dim=8))
+    assert calls == []
+    with Memvara(str(db), embedder=HashingEmbedder(dim=8), llm=NullLLM()) as mem:
+        mem.reembed(NoEmbedder())
+    assert calls == [str(db)]
+    with Memvara(str(db), embeddings=False, llm=NullLLM(), reembed=True):
+        pass
+    assert calls == [str(db)], "nothing left to drop, so nothing to compact"
+
+
+def test_a_compaction_sqlite_refuses_warns_and_changes_nothing(tmp_path):
+    """SQLite cannot vacuum inside a transaction, so inside `batch()` it refuses. The
+    write the batch made still commits, and the store goes on working."""
+    with Memvara(str(tmp_path / "s.db"), embeddings=False, llm=NullLLM()) as mem:
+        with mem.store.batch():
+            mem.remember("user", "lives_in", "Lisbon")
+            with pytest.warns(UserWarning, match="was not compacted.*transaction"):
+                mem.store.compact()
+        assert [c.object for c in mem.history("user", "lives_in")] == ["Lisbon"]
 
 
 def test_an_older_store_that_holds_vectors_is_refused_before_it_is_upgraded(tmp_path):

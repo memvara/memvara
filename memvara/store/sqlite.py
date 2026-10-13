@@ -4889,6 +4889,40 @@ class SQLiteStore:
                     self._share_again()
         return dropped
 
+    def compact(self) -> None:
+        """Give the free pages inside the database file back to the disk, with SQLite's
+        `VACUUM`.
+
+        SQLite reuses a freed page for later writes but never makes the file smaller on
+        its own. So a store that drops most of what it holds at once, as one does when it
+        stops keeping vectors, stays its old size until this runs. `Memvara.reembed()`
+        calls it right after it drops the vectors of a store that will keep none.
+
+        `VACUUM` writes a compacted copy of the whole database before it replaces the
+        original, so it needs about as much free disk as the database takes. An
+        encrypted store keeps temporary data in memory, so that nothing unencrypted
+        reaches the disk, and there the copy needs about that much memory instead.
+        Readers in other processes carry on while it runs; writers wait for it.
+
+        When SQLite refuses, it warns and returns: the store is unchanged and works as
+        before, and only the file keeps its size. It refuses when the disk is full, when
+        another process holds the write lock for longer than the busy timeout, and inside
+        `batch()`, because SQLite cannot vacuum inside a transaction.
+        """
+        with self._lock:
+            try:
+                self._db.execute("VACUUM")
+                # The store runs in write-ahead-log mode, so `VACUUM` writes the compacted
+                # database into the log. This checkpoint copies it back into the file and
+                # empties the log, which is the step that makes the file smaller.
+                self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except self._sql.Error as exc:
+                warnings.warn(
+                    f"{self.path} was not compacted ({exc}), so the file keeps its size. "
+                    "The store is unchanged and works as before. Free some disk, or stop "
+                    "the other processes using the store, and call compact() again.",
+                    stacklevel=2)
+
     def _get_vector(self, t: _VecTable, item_id: str) -> np.ndarray | None:
         with self._read() as conn:
             r = conn.execute(

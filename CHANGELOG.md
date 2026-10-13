@@ -9,6 +9,22 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Changed
+
+- **Dropping a store's vectors now shrinks the database file.** Opening a store with
+  `Memvara(path, embeddings=False, reembed=True)` deleted its vectors but left the file its
+  old size, because SQLite reuses freed pages and never gives them back by itself. The drop
+  now runs SQLite's `VACUUM` through a new method, `SQLiteStore.compact()`. A store written
+  by memvara-code went from 60.5 MB to 13.2 MB, with all 7,174 claims still there. `VACUUM`
+  needs about as much free disk as the database takes, or as much memory on an encrypted
+  store.
+  When SQLite refuses, the drop still completes and a `UserWarning` says the file kept its
+  size. Re-embedding with a real embedder does not compact, because its new vectors refill
+  the freed pages. `docs/UPGRADING.md` has what to check.
+- **The `Store` protocol gains one optional member, `compact()`.** It is listed in
+  `memvara.store.base.OMITTABLE`, so a third-party store without it keeps working; dropping
+  its vectors then leaves it its old size.
+
 ## [0.20.0] — 2026-10-05
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so

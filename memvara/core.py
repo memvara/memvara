@@ -4985,8 +4985,11 @@ class Memvara:
         drops every stored vector, embeds nothing and returns 0. That is how a store that
         already holds vectors becomes one that keeps none: `Memvara(path,
         embeddings=False, reembed=True)` does it as the store opens. The vectors' rows are
-        deleted and the `.vecs` file is emptied; the database file keeps its size until
-        SQLite's `VACUUM` gives the free pages back.
+        deleted, the `.vecs` file is emptied, and then, on a store that has `compact()`
+        as `SQLiteStore` does, SQLite's `VACUUM` gives the pages they took back to the
+        disk, so the database file shrinks too. That needs about as much free disk as the
+        database takes; without it the store still works and keeps its old size, with a
+        warning.
 
         Episodes are re-encoded in the same pass and deliberately not counted: they are
         not optional extra work. `clear_embeddings()` empties one shared matrix, so a
@@ -5015,7 +5018,8 @@ class Memvara:
         # because there is nothing to drop and the drop needs the store to itself: a
         # second handle opening with `embeddings=False, reembed=True` out of habit would
         # otherwise be refused while the first is open.
-        if embeds(embedder or self.embedder) or stored_dim(self.store) is not None:
+        dropping = embeds(embedder or self.embedder) or stored_dim(self.store) is not None
+        if dropping:
             _drop_vectors(self.store)
 
         if embedder is not None:
@@ -5029,6 +5033,11 @@ class Memvara:
         if not embeds(self.embedder):
             # A store that keeps no vectors: dropping them was the whole migration.
             write_fingerprint(self.store, fingerprint_of(self.embedder))
+            # Deleting the vectors freed their pages inside the file without making the
+            # file any smaller. Not when re-embedding, whose new vectors refill them.
+            compact = getattr(self.store, "compact", None)
+            if dropping and compact is not None:
+                compact()
             return 0
 
         # No tenant: this walks every claim and every turn in the store.

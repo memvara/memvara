@@ -7,6 +7,25 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Dropping a store's vectors now shrinks the file, and needs free disk to do it
+
+### What changed
+
+`Memvara(path, embeddings=False, reembed=True)`, and `reembed()` with a `NoEmbedder`, now
+run SQLite's `VACUUM` after they drop a store's vectors, so the database file gets smaller.
+`VACUUM` writes a compacted copy of the whole database first. On a large store that drop
+now takes longer, and it needs about as much free disk as the database takes. On an
+encrypted store the copy is held in memory instead, so it needs about that much memory.
+
+### What to do
+
+Nothing, if the disk has room. If it does not, the drop still completes and the store works
+as before, with a `UserWarning` saying the file kept its size; free some disk and call
+`mem.store.compact()`. Find the calls with a search for `embeddings=False, reembed=True`
+and `reembed(NoEmbedder())`.
+
+---
+
 ## Ranked reads can run without a model provider
 
 ### What changed
@@ -3558,7 +3577,7 @@ freed before the upgrade — for those, one `VACUUM` after the first open finish
 ```python
 from memvara import Memvara
 mem = Memvara("memory.db")      # migrates and scrubs the text index
-mem.store._db.execute("VACUUM") # reclaims pages freed by pre-upgrade deletes
+mem.store.compact()             # VACUUM: reclaims pages freed by pre-upgrade deletes
 mem.close()
 ```
 
