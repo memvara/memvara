@@ -162,6 +162,20 @@ def test_every_drop_of_stored_vectors_compacts(tmp_path, monkeypatch):
     assert calls == [str(db)] * 2, "nothing left to drop, so nothing to compact"
 
 
+def test_compaction_follows_what_the_drop_removed_not_the_probe(tmp_path, monkeypatch):
+    """Whether the store held vectors is first guessed from a sample of its claims; the
+    drop then reports how many it removed, and that count decides the compaction."""
+    calls = []
+    monkeypatch.setattr(SQLiteStore, "compact", lambda self: calls.append(self.path))
+    monkeypatch.setattr(SQLiteStore, "clear_embeddings", lambda self: 0)
+    db = tmp_path / "s.db"
+    _vectored(db)
+
+    with Memvara(str(db), embeddings=False, llm=NullLLM(), reembed=True):
+        pass
+    assert calls == []
+
+
 def test_a_store_without_compact_still_drops_its_vectors(tmp_path, monkeypatch):
     """`compact` is optional: a backend without it keeps its old size and nothing else."""
     monkeypatch.delattr(SQLiteStore, "compact")

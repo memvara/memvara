@@ -279,7 +279,7 @@ def _unnamed_local(embedder: object) -> bool:
     return not embedder.chosen
 
 
-def _drop_vectors(store: Store) -> None:
+def _drop_vectors(store: Store) -> int:
     """Discard every stored vector so a new embedder can own the space.
 
     There is no protocol call for this: `Store` can add and read embeddings but not
@@ -300,7 +300,10 @@ def _drop_vectors(store: Store) -> None:
             "re-embedded. Implement clear_embeddings(): delete every stored vector and "
             "reset the index dimension."
         )
-    clear()
+    # The protocol returns a count; a backend that returns nothing dropped no vector
+    # it can report.
+    dropped: int = clear() or 0
+    return dropped
 
 
 # --- audit-view time filters -------------------------------------------------------
@@ -5021,9 +5024,9 @@ class Memvara:
         # because there is nothing to drop and the drop needs the store to itself: a
         # second handle opening with `embeddings=False, reembed=True` out of habit would
         # otherwise be refused while the first is open.
-        held_vectors = stored_dim(self.store) is not None
-        if embeds(embedder or self.embedder) or held_vectors:
-            _drop_vectors(self.store)
+        dropped = 0
+        if embeds(embedder or self.embedder) or stored_dim(self.store) is not None:
+            dropped = _drop_vectors(self.store)
 
         if embedder is not None:
             self.embedder = embedder
@@ -5049,8 +5052,10 @@ class Memvara:
 
         # Deleting the old vectors freed their pages inside the file without making the
         # file any smaller, and new vectors refill them only when they take as much room.
+        # Asked of the drop's own count, not of the probe above, which reads only a
+        # sample of the claims.
         compact = getattr(self.store, "compact", None)
-        if held_vectors and compact is not None:
+        if dropped and compact is not None:
             compact()
         return embedded
 
