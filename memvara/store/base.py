@@ -554,6 +554,9 @@ OMITTABLE: dict[str, str] = {
     "occupied_slots": "read-side shadowing falls back to one competing_claims per slot. "
                       "A store that raises NotImplementedError from that too "
                       "returns a broader value beside a narrower level's own.",
+    "compact": "dropping a store's vectors frees their space inside the store without "
+               "giving it back to the disk, so the store keeps its old size. Nothing "
+               "else calls it.",
     "unended_claims": "forget() reads the slot's whole history with slot_history and "
                       "picks the values to close with Claim.is_unended, so its cost grows "
                       "with every value the slot has held rather than with the few it "
@@ -979,6 +982,17 @@ class Store(Protocol):
         `PermissionError`, naming `<db>.lock` and having changed nothing, when this
         process may not write that file, because it then cannot tell whether another
         process has the store open.
+        """
+        ...
+
+    def compact(self) -> None:
+        """Give the space freed inside the store back to the disk.
+
+        `Memvara.reembed()` calls it after every drop of stored vectors, because deleting
+        them frees space the store would otherwise keep. A store
+        that cannot compact should warn and return rather than raise: the drop has
+        already succeeded, and only the store's size is at stake. `SQLiteStore` runs
+        SQLite's `VACUUM`.
         """
         ...
 

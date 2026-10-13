@@ -4985,8 +4985,14 @@ class Memvara:
         drops every stored vector, embeds nothing and returns 0. That is how a store that
         already holds vectors becomes one that keeps none: `Memvara(path,
         embeddings=False, reembed=True)` does it as the store opens. The vectors' rows are
-        deleted and the `.vecs` file is emptied; the database file keeps its size until
-        SQLite's `VACUUM` gives the free pages back.
+        deleted and the `.vecs` file is emptied.
+
+        Whenever it dropped vectors, it then calls the store's `compact()`, if the store
+        has one, because deleting rows frees pages inside the database file without
+        making the file smaller. On `SQLiteStore` that runs SQLite's `VACUUM`, which needs
+        free disk of up to about twice the compacted database's size; when it cannot
+        finish, the store still works and keeps its old size, with a warning. See
+        `SQLiteStore.compact()`.
 
         Episodes are re-encoded in the same pass and deliberately not counted: they are
         not optional extra work. `clear_embeddings()` empties one shared matrix, so a
@@ -5015,7 +5021,8 @@ class Memvara:
         # because there is nothing to drop and the drop needs the store to itself: a
         # second handle opening with `embeddings=False, reembed=True` out of habit would
         # otherwise be refused while the first is open.
-        if embeds(embedder or self.embedder) or stored_dim(self.store) is not None:
+        held_vectors = stored_dim(self.store) is not None
+        if embeds(embedder or self.embedder) or held_vectors:
             _drop_vectors(self.store)
 
         if embedder is not None:
@@ -5026,21 +5033,25 @@ class Memvara:
             self.reader.embedder = embedder
             self.consolidator.embedder = embedder
 
-        if not embeds(self.embedder):
-            # A store that keeps no vectors: dropping them was the whole migration.
-            write_fingerprint(self.store, fingerprint_of(self.embedder))
-            return 0
-
-        # No tenant: this walks every claim and every turn in the store.
-        with transaction(self.store):
-            embedded = self._reencode(
-                self.store.iter_claims(include_invalidated=True),
-                lambda c: c.text, self.store.set_embedding, batch_size)
-            iter_episodes = getattr(self.store, "iter_episodes", None)
-            if iter_episodes is not None:
-                self._reencode(iter_episodes(), lambda e: e.content,
-                               self.store.set_episode_embedding, batch_size)
+        # A store that keeps no vectors: dropping them was the whole migration.
+        embedded = 0
+        if embeds(self.embedder):
+            # No tenant: this walks every claim and every turn in the store.
+            with transaction(self.store):
+                embedded = self._reencode(
+                    self.store.iter_claims(include_invalidated=True),
+                    lambda c: c.text, self.store.set_embedding, batch_size)
+                iter_episodes = getattr(self.store, "iter_episodes", None)
+                if iter_episodes is not None:
+                    self._reencode(iter_episodes(), lambda e: e.content,
+                                   self.store.set_episode_embedding, batch_size)
         write_fingerprint(self.store, fingerprint_of(self.embedder))
+
+        # Deleting the old vectors freed their pages inside the file without making the
+        # file any smaller, and new vectors refill them only when they take as much room.
+        compact = getattr(self.store, "compact", None)
+        if held_vectors and compact is not None:
+            compact()
         return embedded
 
     def _reencode(self, items: Iterable[Any], text: Callable[[Any], str],

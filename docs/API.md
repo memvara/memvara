@@ -412,8 +412,17 @@ Memvara(path, embedder=HashingEmbedder())        # store written without vectors
 Memvara(path, embedder=HashingEmbedder(), reembed=True)  # embeds everything it holds
 ```
 
-Dropping vectors deletes their rows and empties the `.vecs` file. The database file keeps
-its size until SQLite's `VACUUM` gives the free pages back.
+Dropping vectors deletes their rows, empties the `.vecs` file, and then runs SQLite's
+`VACUUM` through `SQLiteStore.compact()`, so the database file shrinks too. On a store
+memvara-code wrote, the database and its vector file went from 60.5 MB to 13.2 MB, in 0.4
+seconds, with all 7,174 claims still there. `VACUUM` builds a compacted copy of the
+database and then writes it through the write-ahead log, so the drop needs free disk of up
+to about twice the compacted database's size. While it runs, a writer in another process
+waits up to five seconds and then fails with "database is locked". If SQLite refuses,
+because the disk is full or another process holds the write lock, the drop still completes
+and the store works as before; a warning says the file kept its size, and
+`mem.store.compact()` can be called again later. If another connection is still reading,
+the file shrinks only when SQLite next checkpoints, and a warning says so.
 
 ### Encryption at rest
 
