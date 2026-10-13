@@ -4900,9 +4900,11 @@ class SQLiteStore:
 
         `VACUUM` builds a compacted copy of the database, and in write-ahead-log mode it
         then writes that copy into the log before a checkpoint copies it back. So it
-        needs free disk of up to about twice the compacted database's size. An encrypted
-        store keeps temporary data in memory, so that nothing unencrypted reaches the
-        disk, and there the first copy takes memory instead. Readers in other processes
+        needs free disk of up to about twice the compacted database's size: the first
+        copy in the system's temporary directory, or wherever `SQLITE_TMPDIR` points,
+        and the second in the log beside the database. An encrypted store keeps
+        temporary data in memory, so that nothing unencrypted reaches the disk, and there
+        the first copy takes memory instead. Readers in other processes
         carry on while it runs. A writer in another process waits up to the store's
         five-second busy timeout and then fails with "database is locked", so run it
         while nothing else writes to the store.
