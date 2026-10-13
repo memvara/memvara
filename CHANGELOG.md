@@ -9,6 +9,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-10-13
+
+Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so
+opening an existing store needs no migration. This release makes a store that drops its
+vectors give the space back to the disk: every `reembed()` that drops stored vectors now
+ends with SQLite's `VACUUM`. To do that, the `Store` protocol gains one optional member,
+`compact()`, so `isinstance(x, Store)` turns `False` for a third-party backend that
+implemented every other member. Under the version policy in `docs/RELEASING.md`, a
+protocol method added before 1.0 is a minor release. No MCP tool is added or renamed.
+
 ### Changed
 
 - **Dropping a store's vectors now shrinks the database file.** Opening a store with
