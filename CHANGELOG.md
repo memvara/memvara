@@ -9,6 +9,16 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **A person can switch recall off for one prompt.** The recall hook fetches nothing when
+  the prompt asks for an answer without the assistant's memory, for example "without using
+  memory, ...", "don't use memvara for this" or "ignore your memory". The status line says
+  "recall skipped for this prompt, as asked", and `recall.log` says
+  `skipped=asked for no memory`. A bare "memory" never matches, so a prompt about RAM such
+  as "run the tests without memory limits" is still answered with what is stored. The turn
+  is still captured.
+
 ## [0.21.0] — 2026-10-13
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so

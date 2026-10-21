@@ -3953,6 +3953,16 @@ allowance is used up — resets in 3 h 30 min" (or "resets at 00:00 UTC" when th
 `Retry-After`), and "retrieval quota spent — resets 1 Oct". Every other failure, including
 a plain rate limit, is "recall failed".
 
+**The recall hook stands down when the person asks for no memory.** A prompt that names
+the assistant's memory and asks to go without it ("without using memory, ...", "don't use
+memvara for this", "ignore your memory") gets nothing fetched: no recall and no standing
+refresh. The status line says "recall skipped for this prompt, as asked" and `recall.log`
+says `skipped=asked for no memory`, so a phrase matched by mistake is visible at once. The
+check is `recall.OPT_OUT`, a phrase list rather than a model, so it costs nothing on the
+per-prompt path. It never matches a bare "memory", because coding prompts use the word for
+RAM: "run the tests without memory limits" is still answered. The turn is still captured;
+the phrase governs what is read, not what is kept.
+
 **A hook may never fail a turn.** Every path out of `run.py` returns 0, including the ones
 it does not know about — the `__main__` block catches `BaseException`. That is the rule
 that outranks reporting a problem: a hook that fails a prompt is worse than a hook that

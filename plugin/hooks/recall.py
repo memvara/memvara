@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import os.path
+import re
 import time
 import sys
 
@@ -250,6 +251,32 @@ SKIP_PREFIXES = HOST.skip_prefixes
 #: The tags themselves belong to the client, so they live in its `Host` record and this
 #: name is what the body reads them by.
 MACHINE_PREFIXES = HOST.machine_prompt_prefixes
+
+#: Phrases with which a person asks for an answer without their stored memory: "without
+#: using memory, what is ...", "don't use memvara for this", "ignore your memory". On a
+#: match the hook fetches nothing for that prompt and says so on the status line, so a
+#: phrase matched by mistake is seen at once. The turn is still captured as usual; this
+#: governs what is read, not what is kept.
+#:
+#: The memory has to be named as the assistant's memory -- memvara, memories, your memory,
+#: stored or saved memory, using memory -- and never as a bare "memory", because a coding
+#: prompt says "memory" about RAM all the time: "run the tests without memory limits" and
+#: "don't use memory-mapped files" must still be answered with what is stored. A phrase list
+#: rather than a model: it costs nothing on the per-prompt path, and its misses are visible
+#: and fixable by adding a phrase. Supermemory reached the same feature with a decision
+#: model in its hook.
+_MEMORY = (r"(?:memvara|memories|your\s+memor(?:y|ies)|(?:stored|saved)\s+memor(?:y|ies)"
+           r"|using\s+(?:your\s+)?memor(?:y|ies))\b(?!-)")
+OPT_OUT = re.compile(
+    rf"\b(?:without|ignore|ignoring|skip|skipping)\s+(?:the\s+)?{_MEMORY}"
+    rf"|\b(?:don['\u2019]?t|do\s+not)\s+(?:use|check|search|consult)\s+(?:the\s+)?{_MEMORY}",
+    re.IGNORECASE)
+
+
+def _opted_out(prompt: str) -> bool:
+    """True when the person asked for this prompt to be answered without their memory."""
+    return OPT_OUT.search(prompt) is not None
+
 
 #: Where the per-session record of what has already been injected lives. Beside the store,
 #: not in the plugin, which is replaced wholesale on update.
@@ -869,6 +896,13 @@ def _main() -> int:
             reply = reply._replace(context=(
                 f"{reply.context}\n\n{alert_notice}" if reply.context else alert_notice))
         write(HOST, reply)
+
+    if _opted_out(prompt):
+        # After `_emit` rather than with the other skips above, so that a capture failure
+        # waiting to be told still reaches the person on this prompt.
+        log_line("recall", "skipped=asked for no memory")
+        _emit(Reply("recall", status=status("recall skipped for this prompt, as asked")))
+        return 0
 
     seen, carried = _read_state(session)
     if time.monotonic() - start < OVERALL_BUDGET_SEC:
