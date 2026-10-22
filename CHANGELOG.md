@@ -11,13 +11,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ### Added
 
-- **A person can switch recall off for one prompt.** The recall hook fetches nothing when
-  the prompt asks for an answer without the assistant's memory, for example "without using
-  memory, ...", "don't use memvara for this" or "ignore your memory". The status line says
-  "recall skipped for this prompt, as asked", and `recall.log` says
-  `skipped=asked for no memory`. A bare "memory" never matches, so a prompt about RAM such
-  as "run the tests without memory limits" is still answered with what is stored. The turn
-  is still captured.
+- **A person can switch recall off for one prompt.** A prompt that opens by asking for an
+  answer without the assistant's memory, for example "Without using memory, ...", "Don't
+  use memvara for this" or "Ignore your memory and start fresh", gets nothing fetched. Claude
+  Code's status line says "recall skipped for this prompt, as asked", and `recall.log` says
+  `skipped=asked for no memory` on every host. The phrase has to open the prompt, and the
+  memory word has to end it (followed by the end of the prompt, punctuation, or a word such
+  as "and", "please", "for this" or "this time"). So pasted text, questions such as "why did
+  you ignore your memory?", and RAM phrases such as "without memory limits" are still
+  answered with what is stored. The turn is still captured.
 
 ## [0.21.0] — 2026-10-13
 

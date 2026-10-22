@@ -139,6 +139,11 @@ only. The logs there quote your prompts and the model's replies, so every
 directory is 0700 and every file 0600, and a hook takes any wider
 permission off a file or directory an earlier version created.
 
+A person can switch recall off for one prompt by opening it with a request
+such as "Without using memory, ..." or "Don't use memvara for this". The hook
+then fetches nothing for that prompt and says so. The turn is still captured.
+Text quoted or pasted further down never switches it off.
+
 ## Your own agent
 
 A plugin does not install into LangChain, CrewAI, or a loop you wrote.

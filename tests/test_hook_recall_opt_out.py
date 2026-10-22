@@ -30,28 +30,54 @@ import recall  # noqa: E402
 @pytest.mark.parametrize("prompt", [
     "without using memory, what is the capital of France?",
     "Without using your memory, summarise this file",
-    "answer without memvara",
-    "answer this without your memories",
-    "don't use memvara for this one",
-    "Don’t use your memory here",
-    "do not use memories: explain recursion",
-    "ignore your memory and start fresh",
-    "skip memvara this time",
-    "without stored memories, how would you set this up?",
+    "Without memvara: what is a monad?",
+    "Without your memories, how would you set this up?",
+    "Don't use memvara for this one",
+    "Don\u2019t use your memory here",
+    "Do not use memories. Explain recursion",
+    "Ignore your memory and start fresh",
+    "Skip memvara this time",
+    "Don't use my memory for this",
+    "do not use any memories, explain recursion",
+    "Ignoring your stored memories, what would you do?",
+    "  without memory \u2014 what is 2+2?",
 ])
-def test_a_prompt_that_asks_for_no_memory_is_opted_out(prompt: str) -> None:
+def test_a_prompt_that_opens_by_asking_for_no_memory_is_opted_out(prompt: str) -> None:
     assert recall._opted_out(prompt)
 
 
 @pytest.mark.parametrize("prompt", [
-    "run the tests without memory limits",
-    "why is there a memory leak in the daemon",
+    # RAM, at the start of a prompt, where the phrase would otherwise be read.
+    "without memory limits, run the tests",
+    "Without using memory allocation, rewrite this loop",
+    "Don't use memory for caching here",
+    "don't use your memory allocator in this module",
+    "Ignore your memory model assumptions and check the atomics",
+    "Don't check your memory usage, it is fine",
     "don't use memory-mapped files here",
-    "without using memory-mapped IO, how would you read it?",
+    "Without using memory-mapped IO, how would you read it?",
     "ignore memory warnings from the profiler",
+    # The memvara repository's own vocabulary: a table, a setup step, a package.
+    "skip the memories table in the migration",
+    "ignore memories older than 30 days",
+    "Skip memvara setup and run the tests",
+    "Without memvara installed, what happens?",
+    # Asking for memory, or asking about it, in words that contain an opt-out phrase.
+    "don't ignore your memory of the deploy, check it first",
+    "why did you ignore your memory about the billing database?",
+    "stop ignoring your memories and tell me what we decided",
+    "never skip memvara on a prompt about deploys",
+    "what happens if you ignore your memory?",
+    # The phrase has to open the prompt, so text quoted or pasted below never switches
+    # recall off, and neither does an instruction left at the end.
+    "here is the code:\n// allocate this buffer without using memory from the pool",
+    "what is a monad? answer without using memory",
+    # Nothing to do with the opt-out.
+    "why is there a memory leak in the daemon",
     "what do you remember about my deploy",
     "add a without_memory flag to the bench",
     "",
 ])
-def test_a_prompt_about_ram_or_about_memory_itself_is_not_opted_out(prompt: str) -> None:
+def test_a_prompt_that_does_not_open_by_asking_for_no_memory_is_not_opted_out(
+        prompt: str) -> None:
     assert not recall._opted_out(prompt)

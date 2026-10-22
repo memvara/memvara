@@ -3953,15 +3953,21 @@ allowance is used up — resets in 3 h 30 min" (or "resets at 00:00 UTC" when th
 `Retry-After`), and "retrieval quota spent — resets 1 Oct". Every other failure, including
 a plain rate limit, is "recall failed".
 
-**The recall hook stands down when the person asks for no memory.** A prompt that names
-the assistant's memory and asks to go without it ("without using memory, ...", "don't use
-memvara for this", "ignore your memory") gets nothing fetched: no recall and no standing
-refresh. The status line says "recall skipped for this prompt, as asked" and `recall.log`
-says `skipped=asked for no memory`, so a phrase matched by mistake is visible at once. The
-check is `recall.OPT_OUT`, a phrase list rather than a model, so it costs nothing on the
-per-prompt path. It never matches a bare "memory", because coding prompts use the word for
-RAM: "run the tests without memory limits" is still answered. The turn is still captured;
-the phrase governs what is read, not what is kept.
+**The recall hook stands down when a prompt opens by asking for no memory.** "Without
+using memory, ...", "Don't use memvara for this", "Ignore your memory and start fresh": a
+prompt that opens with such a phrase gets nothing fetched, neither recall nor the standing
+refresh. Claude Code's status line says "recall skipped for this prompt, as asked", and
+`recall.log` says `skipped=asked for no memory` on every host; on Codex, Copilot and
+OpenCode, which show no status line, the log is the only account. A capture failure that
+is waiting to be reported is still reported on that prompt. The check is
+`recall._opted_out`, a phrase list rather than a model, so it costs nothing on the
+per-prompt path. Two rules keep it from firing on prompts that only contain the words. The
+phrase has to open the prompt, so pasted text and questions such as "why did you ignore
+your memory?" never match. And the memory word has to end the phrase, followed by the end
+of the prompt, a punctuation mark or a word that continues the instruction ("and",
+"please", "for this", "this time"), so RAM phrases such as "without memory limits" and the
+repository's own names such as "skip the memories table" are still answered. The turn is
+still captured; the phrase governs what is read, not what is kept.
 
 **A hook may never fail a turn.** Every path out of `run.py` returns 0, including the ones
 it does not know about — the `__main__` block catches `BaseException`. That is the rule
