@@ -209,9 +209,28 @@ customer's key, and the provider bills the customer.
 exists. Ingesting the 199-question sample into it was quoted at roughly $160, and their
 open-source engine could not take the bulk ingest this comparison needed, so the run was
 never completed — this is not a result being withheld, it is a result that does not
-exist. Supermemory's published 95% is also not a like-for-like number to reach for: it is
-Recall@15, a retrieval metric, and this section's numbers are judged answer accuracy.
-The two measure different things and are not comparable.
+exist.
+
+Supermemory's published figure is the same kind of number as this section's, but it still
+cannot be set beside 88.9%. Its research page (supermemory.ai/research/longmembench, read on
+22 October 2026) gives 97% on LongMemEval-S under the heading "Recall@20 with aggregation".
+The page's method section explains that heading: "The retrieval configuration is Recall@20
+with aggregation, and gpt-4o judges the answers." The numbers agree with that reading. The
+97% table has rows for Supermemory, for Zep and for a full-context baseline, which has no
+retrieval step at all, and each of its figures matches the gpt-4o row of the page's
+LLM-as-judge table. So the 97% is judged answer accuracy, measured with that retrieval
+setting, and not a retrieval score.
+
+Three differences keep it apart from this section's numbers:
+
+- Supermemory ran all 500 questions. This section ran a 199-question sample of them.
+- gpt-4o is Supermemory's reader and judge. `gpt-5.4` is this section's reader and judge.
+- The page does not define "aggregation". MemoryBench's Supermemory provider has an
+  optional search setting called `aggregate`, which is off by default, and the page does
+  not say whether that is the setting it used.
+
+Changing the reader moves Supermemory's result a long way. On the same page, with gpt-5 as
+the reader, Supermemory reports 84.6%, and the method section names only gpt-4o as judge.
 
 The retrieval-only figures in the rest of this page — R@12 70.4 on the LongMemEval oracle
 split and the rest — are unaffected by any of the above and remain true. They are a
