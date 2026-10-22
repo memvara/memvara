@@ -209,9 +209,21 @@ customer's key, and the provider bills the customer.
 exists. Ingesting the 199-question sample into it was quoted at roughly $160, and their
 open-source engine could not take the bulk ingest this comparison needed, so the run was
 never completed — this is not a result being withheld, it is a result that does not
-exist. Supermemory's published 95% is also not a like-for-like number to reach for: it is
-Recall@15, a retrieval metric, and this section's numbers are judged answer accuracy.
-The two measure different things and are not comparable.
+exist.
+
+Supermemory's published figure is not a like-for-like number either. Its research page
+(supermemory.ai/research/longmembench, read on 22 October 2026) gives its LongMemEval-S
+score as 97% and labels it "Recall@20 with aggregation". Every figure in that table,
+including the full-context baseline, which has no retrieval step to score, matches the
+gpt-4o rows of the page's LLM-as-judge table, where gpt-4o both writes and judges the
+answers. So the 97% is most likely judged answer accuracy, the same kind of number as this
+section's, and not a retrieval score. (Until at least 2 September 2026 the page showed 95%
+labelled Recall@15, and this paragraph called it a retrieval metric.) It still cannot be
+set beside 88.9%: Supermemory ran all 500 questions with gpt-4o writing and judging, this
+section ran a 199-question sample with `gpt-5.4` doing both, and "aggregation" is a search
+setting the page does not define and MemoryBench does not use by default. The model that
+writes the answers also moves the result: on the same page, Supermemory reports 84.6% when
+gpt-5 writes them.
 
 The retrieval-only figures in the rest of this page — R@12 70.4 on the LongMemEval oracle
 split and the rest — are unaffected by any of the above and remain true. They are a
