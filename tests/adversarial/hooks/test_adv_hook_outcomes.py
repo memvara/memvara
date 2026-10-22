@@ -8,6 +8,11 @@ logs, must be able to tell these apart, because "nobody investigates an empty st
 (plugin/hooks/recall.py). The design's "One more rule" says the same of a store that
 cannot open.
 
+Recall can also end a sixth way, which depends on the prompt rather than the store: the
+person opened the prompt by asking for no memory, and nothing is fetched. That outcome
+says "recall skipped" on the status line and `skipped=asked for no memory` in
+`recall.log`; `tests/test_hook_recall_requests.py` checks both.
+
 A test compares two outcomes by `support.observed`: the reply, and the lines the run
 added to each log, without their timestamps. The fast tier checks Claude Code, which
 shows a status line, and Copilot, which shows none; the nightly tier checks all five

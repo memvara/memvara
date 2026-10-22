@@ -65,6 +65,8 @@ class Fake:
         #: When true, `tools/list` answers HTTP 500, so the client cannot learn the schema.
         self.probe_fails = probe_fails
         self.recalls: list[dict] = []
+        #: The name of every tool called, recall or not.
+        self.calls: list[str] = []
         self.lock = threading.Lock()
 
     def tools(self) -> list:
@@ -98,6 +100,8 @@ class Fake:
         params = message.get("params") or {}
         name = params.get("name")
         arguments = dict(params.get("arguments") or {})
+        with self.lock:
+            self.calls.append(name)
         if name != "memory_recall":
             return 200, _result(ident, ""), {}
         with self.lock:
@@ -145,12 +149,13 @@ def _serve(fake: Fake) -> ThreadingHTTPServer:
     return server
 
 
-def _run_hook(fake: Fake, tmp_path: pathlib.Path) -> dict:
+def _run_hook(fake: Fake, tmp_path: pathlib.Path,
+              prompt: str = "which database does billing use") -> dict:
     """Run the recall hook once, as a harness would, and return what it printed."""
     server = _serve(fake)
     try:
         home = tmp_path / "home"
-        home.mkdir()
+        home.mkdir(exist_ok=True)
         work = tmp_path / "work"
         work.mkdir()
         # The parent's environment, not a minimal one: on Windows a child without
@@ -170,7 +175,7 @@ def _run_hook(fake: Fake, tmp_path: pathlib.Path) -> dict:
             # warm-up recall of its own.
             "MEMVARA_DAEMON": "1",
         })
-        event = {"session_id": "sess-requests", "prompt": "which database does billing use",
+        event = {"session_id": "sess-requests", "prompt": prompt,
                  "cwd": str(work), "hook_event_name": "UserPromptSubmit"}
         done = subprocess.run([sys.executable, str(RECALL)], input=json.dumps(event),
                               capture_output=True, text=True, env=env, cwd=str(work),
@@ -209,6 +214,36 @@ def test_a_server_like_todays_gets_one_request_per_recall(tmp_path):
     # `query_rewrite` is not in this server's schema, so it is never sent.
     assert all("query_rewrite" not in call for call in fake.recalls)
     assert "1 memory recalled" in reply["systemMessage"]
+
+
+def test_a_prompt_that_asks_for_no_memory_sends_no_request_and_says_so(tmp_path):
+    """No recall and no standing refresh, and the status line says why.
+
+    The person asked for an answer without their memory, so nothing is fetched. They are
+    told it was skipped, so a phrase matched by mistake is visible at once rather than
+    looking like a store that found nothing.
+    """
+    fake = Fake()
+    reply = _run_hook(fake, tmp_path, prompt="without using memory, which database does billing use")
+    assert fake.calls == []
+    assert "recall skipped" in reply["systemMessage"]
+    assert "additionalContext" not in json.dumps(reply)
+    # Codex, Copilot and OpenCode show no status line, so there the log is the only account.
+    log = tmp_path / "home" / ".memvara" / ".hooks" / "recall.log"
+    assert "skipped=asked for no memory" in log.read_text(encoding="utf-8")
+
+
+def test_a_prompt_that_asks_for_no_memory_still_hears_that_capture_is_failing(tmp_path):
+    """The opt-out skips the reads, not the news: a failing capture is still reported."""
+    hooks = tmp_path / "home" / ".memvara" / ".hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "capture-alert.json").write_text(json.dumps({"reason": "store unreachable"}),
+                                              encoding="utf-8")
+    fake = Fake()
+    reply = _run_hook(fake, tmp_path, prompt="without using memory, which database does billing use")
+    assert fake.calls == []
+    assert "recall skipped" in reply["systemMessage"]
+    assert "capture failing: store unreachable" in reply["systemMessage"]
 
 
 def test_a_server_without_include_episodes_gets_one_request_for_the_wider_recall(tmp_path):

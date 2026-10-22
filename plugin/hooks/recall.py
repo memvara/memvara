@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import os.path
+import re
 import time
 import sys
 
@@ -250,6 +251,44 @@ SKIP_PREFIXES = HOST.skip_prefixes
 #: The tags themselves belong to the client, so they live in its `Host` record and this
 #: name is what the body reads them by.
 MACHINE_PREFIXES = HOST.machine_prompt_prefixes
+
+#: How a person asks for one answer without their stored memory: by opening the prompt with
+#: it. "Without using memory, what is ...", "Don't use memvara for this", "Ignore your
+#: memory and start fresh". On a match the hook fetches nothing for that prompt and says so,
+#: on the status line where the host has one and in `recall.log` on every host. The turn is
+#: still captured; this governs what is read, not what is kept.
+#:
+#: Two rules keep it from firing on prompts that merely contain the words, and a review
+#: found real prompts for each:
+#:
+#: * **It has to open the prompt.** Otherwise a pasted comment ("allocate this buffer
+#:   without using memory from the pool") or a question about memory ("why did you ignore
+#:   your memory?", "never skip memvara on a prompt about deploys") switches recall off,
+#:   which is the opposite of what the person wants.
+#: * **The memory word has to end the phrase**: the end of the prompt, a punctuation mark,
+#:   or a word that continues the instruction ("and", "please", "for this", "this time").
+#:   Coding prompts use "memory" about RAM and the memvara repository uses "memories" and
+#:   "memvara" as names, so "without memory limits", "ignore your memory model", "skip the
+#:   memories table" and "skip memvara setup" are all still answered.
+#:
+#: A phrase list rather than a model: it costs nothing on the per-prompt path, and a miss
+#: is fixed by adding a phrase. Supermemory reached the same feature with a decision model
+#: in its hook.
+_OPT_OUT = re.compile(
+    r"\s*(?:(?:without|ignore|ignoring|skip|skipping)(?:\s+using)?"
+    r"|(?:don['\u2019]?t|do\s+not)\s+(?:use|check|search|consult))"
+    r"\s+(?:(?:your|my|any|the|all|stored|saved)\s+)*(?:memvara|memories|memory)"
+    r"(?=\s*(?:$|[,.;:!?)\u2013\u2014]"
+    r"|(?:and|but|then|please|here|now|just)\b"
+    r"|this\s+(?:time|once|one|prompt|question)\b"
+    r"|for\s+(?:this|that|now|once)\b))",
+    re.IGNORECASE)
+
+
+def _opted_out(prompt: str) -> bool:
+    """True when the prompt opens by asking to be answered without the person's memory."""
+    return _OPT_OUT.match(prompt) is not None
+
 
 #: Where the per-session record of what has already been injected lives. Beside the store,
 #: not in the plugin, which is replaced wholesale on update.
@@ -869,6 +908,13 @@ def _main() -> int:
             reply = reply._replace(context=(
                 f"{reply.context}\n\n{alert_notice}" if reply.context else alert_notice))
         write(HOST, reply)
+
+    if _opted_out(prompt):
+        # After `_emit` rather than with the other skips above, so that a capture failure
+        # waiting to be told still reaches the person on this prompt.
+        log_line("recall", "skipped=asked for no memory")
+        _emit(Reply("recall", status=status("recall skipped for this prompt, as asked")))
+        return 0
 
     seen, carried = _read_state(session)
     if time.monotonic() - start < OVERALL_BUDGET_SEC:
