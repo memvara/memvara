@@ -211,19 +211,26 @@ open-source engine could not take the bulk ingest this comparison needed, so the
 never completed — this is not a result being withheld, it is a result that does not
 exist.
 
-Supermemory's published figure is not a like-for-like number either. Its research page
-(supermemory.ai/research/longmembench, read on 22 October 2026) gives its LongMemEval-S
-score as 97% and labels it "Recall@20 with aggregation". Every figure in that table,
-including the full-context baseline, which has no retrieval step to score, matches the
-gpt-4o rows of the page's LLM-as-judge table, where gpt-4o both writes and judges the
-answers. So the 97% is most likely judged answer accuracy, the same kind of number as this
-section's, and not a retrieval score. (Until at least 2 September 2026 the page showed 95%
-labelled Recall@15, and this paragraph called it a retrieval metric.) It still cannot be
-set beside 88.9%: Supermemory ran all 500 questions with gpt-4o writing and judging, this
-section ran a 199-question sample with `gpt-5.4` doing both, and "aggregation" is a search
-setting the page does not define and MemoryBench does not use by default. The model that
-writes the answers also moves the result: on the same page, Supermemory reports 84.6% when
-gpt-5 writes them.
+Supermemory's published figure is the same kind of number as this section's, but it still
+cannot be set beside 88.9%. Its research page (supermemory.ai/research/longmembench, read on
+22 October 2026) gives 97% on LongMemEval-S under the heading "Recall@20 with aggregation".
+The page's method section explains that heading: "The retrieval configuration is Recall@20
+with aggregation, and gpt-4o judges the answers." The numbers agree with that reading. The
+97% table has rows for Supermemory, for Zep and for a full-context baseline, which has no
+retrieval step at all, and each of its figures matches the gpt-4o row of the page's
+LLM-as-judge table. So the 97% is judged answer accuracy, measured with that retrieval
+setting, and not a retrieval score.
+
+Three differences keep it apart from this section's numbers:
+
+- Supermemory ran all 500 questions. This section ran a 199-question sample of them.
+- gpt-4o is Supermemory's reader and judge. `gpt-5.4` is this section's reader and judge.
+- The page does not define "aggregation". MemoryBench's Supermemory provider has an
+  optional search setting called `aggregate`, which is off by default, and the page does
+  not say whether that is the setting it used.
+
+Changing the reader moves Supermemory's result a long way. On the same page, with gpt-5 as
+the reader, Supermemory reports 84.6%, and the method section names only gpt-4o as judge.
 
 The retrieval-only figures in the rest of this page — R@12 70.4 on the LongMemEval oracle
 split and the rest — are unaffected by any of the above and remain true. They are a
