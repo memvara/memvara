@@ -145,7 +145,8 @@ def _serve(fake: Fake) -> ThreadingHTTPServer:
     return server
 
 
-def _run_hook(fake: Fake, tmp_path: pathlib.Path) -> dict:
+def _run_hook(fake: Fake, tmp_path: pathlib.Path,
+              prompt: str = "which database does billing use") -> dict:
     """Run the recall hook once, as a harness would, and return what it printed."""
     server = _serve(fake)
     try:
@@ -170,7 +171,7 @@ def _run_hook(fake: Fake, tmp_path: pathlib.Path) -> dict:
             # warm-up recall of its own.
             "MEMVARA_DAEMON": "1",
         })
-        event = {"session_id": "sess-requests", "prompt": "which database does billing use",
+        event = {"session_id": "sess-requests", "prompt": prompt,
                  "cwd": str(work), "hook_event_name": "UserPromptSubmit"}
         done = subprocess.run([sys.executable, str(RECALL)], input=json.dumps(event),
                               capture_output=True, text=True, env=env, cwd=str(work),

@@ -24,6 +24,7 @@ from typing import Any
 from core.host import active
 
 from .mark import BULLET, MARK, is_memory, unmarked
+from .private_tag import scrub, strip_entry
 
 #: The client whose transcript this module reads. Resolved once, at import: `run.py`
 #: binds the host before importing any hook body, and a body is what pulls this in.
@@ -478,8 +479,17 @@ def last_turn_with_context(raw: bytes,
         # that were already handled when they happened.
         return "", [], ""
 
+    # A person's `<private>` spans come out of every string of every entry here, before
+    # anything is formatted, cut short or joined: a cut cannot then separate a span from
+    # its opening tag, and an unclosed tag in a prompt cannot reach into the reply after
+    # it. The values removed are then scrubbed from what is assembled, because the model
+    # read them and may repeat them untagged (`lib.private_tag`). The boundary above is
+    # found on the entries as written, so a prompt that was wholly private still ends the
+    # previous turn rather than being merged into it.
+    hidden: list[str] = []
+    clean = [strip_entry(entry, hidden) for entry in entries]
     out: list[str] = []
-    for entry in entries[start:]:
+    for entry in clean[start:]:
         out.extend(format_entry(entry))
 
     # Injections are gathered from the whole window rather than from the turn boundary,
@@ -493,10 +503,10 @@ def last_turn_with_context(raw: bytes,
     context = ""
     if context_chars > 0:
         earlier: list[str] = []
-        for entry in entries[:start]:
+        for entry in clean[:start]:
             earlier.extend(format_entry(entry))
-        context = "\n".join(earlier)[-context_chars:]
-    return "\n".join(out), injected, context
+        context = scrub("\n".join(earlier), hidden)[-context_chars:]
+    return scrub("\n".join(out), hidden), injected, context
 
 
 def last_turn(raw: bytes) -> str:

@@ -3953,6 +3953,32 @@ allowance is used up — resets in 3 h 30 min" (or "resets at 00:00 UTC" when th
 `Retry-After`), and "retrieval quota spent — resets 1 Oct". Every other failure, including
 a plain rate limit, is "recall failed".
 
+**Text inside `<private>...</private>` never reaches memvara through the hooks.**
+`lib/private_tag` removes each span, tags included, at the two places a person's text enters
+the hooks. `transcript.last_turn_with_context` strips every string of every transcript entry
+before anything is formatted, cut short or joined, on every host, so neither the turn
+capture mines nor the earlier turns agentic capture is shown as context carries it, and an
+unclosed tag in a prompt cannot reach into the reply after it. The top of `recall.py`
+strips the prompt before it is bounded, logged or sent as a query. The rules:
+
+- Nothing is put in a span's place, because the fast extractor believes sentence forms and
+  "my name is [private]" could be stored as a name.
+- Tags nest, may carry attributes and spacing, and match in any case.
+- An opening tag with no closing tag hides the rest of that string, which fails closed. A
+  closing tag with no opening tag is dropped and hides nothing.
+- A tag in backticks, `` `<private>` ``, is a mention and not a tag, so a person can write
+  about it.
+- The model reads the span and may repeat it, so every value of three characters or more
+  that a span hid is also removed wherever it appears untagged in the same prompt or in
+  the transcript window capture reads. A value given in an earlier session, or further
+  back than that window, is not known and is not hunted.
+
+The tag binds the hooks only. The model still sees the text, and a memory tool the model
+calls itself, such as `memory_remember`, is not filtered. OpenCode's capture reads a copy of
+the conversation that the plugin writes to `~/.memvara/.hooks/opencode/<session>.jsonl`
+(0600, deleted after capture); that local copy holds the tagged text until capture strips
+it on reading.
+
 **A hook may never fail a turn.** Every path out of `run.py` returns 0, including the ones
 it does not know about — the `__main__` block catches `BaseException`. That is the rule
 that outranks reporting a problem: a hook that fails a prompt is worse than a hook that

@@ -9,6 +9,18 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **Text inside `<private>...</private>` tags never reaches memvara through the hooks.**
+  Capture removes each span from every transcript entry before the turn is assembled, on
+  every host, and recall removes it from the prompt before searching, so the text is
+  neither stored, sent as a query nor written to a hook log. A value a span hid is also
+  removed where the model repeats it untagged in the same turn or the earlier turns
+  capture reads, if it is three characters or longer. Tags nest; an opening tag with no
+  closing tag hides the rest of that text; a tag in backticks, `` `<private>` ``, is a
+  mention and is left alone. The model still sees the text, and a memory tool the model
+  calls itself is not filtered.
+
 ## [0.21.0] — 2026-10-13
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so
