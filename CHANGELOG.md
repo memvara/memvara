@@ -12,11 +12,14 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 ### Added
 
 - **Text inside `<private>...</private>` tags never reaches memvara through the hooks.**
-  Capture removes each span from the turn it mines and from the earlier turns it shows as
-  context, and recall removes it from the prompt before searching, so the text is neither
-  stored, sent as a query nor written to a hook log. A span is removed whole, with nothing
-  in its place. An opening tag with no closing tag hides everything after it. The model the
-  person is talking to still sees the text.
+  Capture removes each span from every transcript entry before the turn is assembled, on
+  every host, and recall removes it from the prompt before searching, so the text is
+  neither stored, sent as a query nor written to a hook log. A value a span hid is also
+  removed where the model repeats it untagged in the same turn or the earlier turns
+  capture reads, if it is three characters or longer. Tags nest; an opening tag with no
+  closing tag hides the rest of that text; a tag in backticks, `` `<private>` ``, is a
+  mention and is left alone. The model still sees the text, and a memory tool the model
+  calls itself is not filtered.
 
 ## [0.21.0] — 2026-10-13
 

@@ -7,6 +7,23 @@ Entries are newest first, and each one says how you find your own instances of i
 
 ---
 
+## Text inside `<private>` tags is no longer captured or searched
+
+### What changed
+
+The plugin hooks now remove `<private>...</private>` spans from every turn they capture and
+every prompt they search with. An opening tag with no closing tag hides the rest of that
+text. Anyone who typed the literal tag before, for example to ask about HTML or XML, now
+loses the rest of that prompt from capture and from the recall query, without a message.
+
+### What to do
+
+Nothing, unless you write the tag as text. Put it in backticks, `` `<private>` ``, and it
+is left alone. To find earlier prompts that used it, search your client's transcripts for
+`<private`.
+
+---
+
 ## Dropping a store's vectors now shrinks the file, and needs free disk to do it
 
 ### What changed
