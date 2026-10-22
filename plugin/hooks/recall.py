@@ -81,6 +81,7 @@ from lib.ipc import (  # noqa: E402
 from lib.mark import count as count_memories  # noqa: E402
 from lib.mark import marked  # noqa: E402
 from lib.mark import on as mark_on  # noqa: E402
+from lib.private_tag import strip as strip_private  # noqa: E402
 from lib.project import bind as bind_project  # noqa: E402
 from lib.read_model import allowed as rewrite_allowed  # noqa: E402
 from lib.standing import digest as standing_digest  # noqa: E402
@@ -819,7 +820,12 @@ def _main() -> int:
     # a string that cannot be encoded. The store hashes each query with `text.encode()`,
     # so the whole recall failed on it although the store was healthy (#347). Half a
     # character carries nothing a search can use.
-    prompt = _bounded(event.prompt.encode("utf-8", "ignore").decode("utf-8").strip())
+    #
+    # `<private>` spans go before anything else reads the prompt, the bound included: cut
+    # first, a span's opening tag could be cut away while its text and closing tag were
+    # kept, and the text would become the query (`lib.private_tag`).
+    prompt = _bounded(strip_private(
+        event.prompt.encode("utf-8", "ignore").decode("utf-8")).strip())
     session = event.session
 
     if not prompt or prompt.startswith(SKIP_PREFIXES):

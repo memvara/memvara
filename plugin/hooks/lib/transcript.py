@@ -24,6 +24,7 @@ from typing import Any
 from core.host import active
 
 from .mark import BULLET, MARK, is_memory, unmarked
+from .private_tag import strip as strip_private
 
 #: The client whose transcript this module reads. Resolved once, at import: `run.py`
 #: binds the host before importing any hook body, and a body is what pulls this in.
@@ -495,8 +496,11 @@ def last_turn_with_context(raw: bytes,
         earlier: list[str] = []
         for entry in entries[:start]:
             earlier.extend(format_entry(entry))
-        context = "\n".join(earlier)[-context_chars:]
-    return "\n".join(out), injected, context
+        # Stripped before the cut, so a cut cannot leave a closing tag without its opening.
+        context = strip_private("\n".join(earlier))[-context_chars:]
+    # A person's `<private>` spans are removed here, the one place every host's turn is
+    # assembled, so no extractor, log or store downstream ever receives them.
+    return strip_private("\n".join(out)), injected, context
 
 
 def last_turn(raw: bytes) -> str:

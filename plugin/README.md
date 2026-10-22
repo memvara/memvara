@@ -134,6 +134,10 @@ the MCP server. `extraction_chunks` and `agentic_extraction` are the two that
 are off by default. No hook reads those; the MCP server reads them from
 `MEMVARA_FEATURE_<NAME>`.
 
+Text a person wraps in `<private>...</private>` tags never reaches memvara
+through the hooks: capture removes it from the turn it mines, and recall
+removes it from the prompt before searching. The model still sees it.
+
 Everything the hooks keep under `~/.memvara` is readable by your account
 only. The logs there quote your prompts and the model's replies, so every
 directory is 0700 and every file 0600, and a hook takes any wider

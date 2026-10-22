@@ -9,6 +9,15 @@ then, the `Store`, `Embedder` and `LLM` protocols may change in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **Text inside `<private>...</private>` tags never reaches memvara through the hooks.**
+  Capture removes each span from the turn it mines and from the earlier turns it shows as
+  context, and recall removes it from the prompt before searching, so the text is neither
+  stored, sent as a query nor written to a hook log. A span is removed whole, with nothing
+  in its place. An opening tag with no closing tag hides everything after it. The model the
+  person is talking to still sees the text.
+
 ## [0.21.0] — 2026-10-13
 
 Upgrading notes are in `docs/UPGRADING.md`. The local SQLite store stays on schema 17, so

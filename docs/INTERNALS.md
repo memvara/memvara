@@ -3953,6 +3953,16 @@ allowance is used up — resets in 3 h 30 min" (or "resets at 00:00 UTC" when th
 `Retry-After`), and "retrieval quota spent — resets 1 Oct". Every other failure, including
 a plain rate limit, is "recall failed".
 
+**Text inside `<private>...</private>` never reaches memvara through the hooks.**
+`lib/private_tag.strip` removes each span, tags included, at the two places a person's text
+enters the hooks: `transcript.last_turn_with_context`, which assembles the turn capture
+mines on every host and the earlier turns agentic capture is shown as context, and the top
+of `recall.py`, before the prompt is bounded, logged or sent as a query. Nothing is put in
+the span's place, because the fast extractor believes sentence forms and "my name is
+[private]" could be stored as a name. An opening tag with no closing tag hides everything
+after it, so a close cut off by truncation fails closed. The model the person is talking
+to still sees the text; only the hooks are bound by the tag.
+
 **A hook may never fail a turn.** Every path out of `run.py` returns 0, including the ones
 it does not know about — the `__main__` block catches `BaseException`. That is the rule
 that outranks reporting a problem: a hook that fails a prompt is worse than a hook that
